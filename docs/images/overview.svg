@@ -1,0 +1,143 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 520" width="980" height="520" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <title>How Guild fits together</title>
+  <style>
+    .bg { fill: #ffffff; }
+    .frame { fill: #f6f6f3; stroke: #d4d3cc; }
+    .box { fill: #ffffff; stroke: #cfcec7; }
+    .core { fill: #eef3ff; stroke: #2456d6; }
+    .soft { fill: #f0f4fe; stroke: #b9c8f2; }
+    .ink { fill: #1c1c1a; }
+    .muted { fill: #6e6e68; }
+    .faint { fill: #a6a69f; }
+    .accent { fill: #2456d6; }
+    .line { stroke: #6e6e68; fill: none; }
+    .dash { stroke: #9a9a94; fill: none; stroke-dasharray: 5 4; }
+    .you { fill: #2456d6; }
+    .head { fill: #6e6e68; }
+    .blue { fill: #0088ff; } .green { fill: #34c759; } .purple { fill: #cb30e0; } .orange { fill: #ff8d28; }
+    .ok { fill: #3f9a6b; } .wait { fill: #c9993a; } .bar { fill: #e4e3dd; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #0d1117; }
+      .frame { fill: #161b22; stroke: #30363d; }
+      .box { fill: #0d1117; stroke: #3d444d; }
+      .core { fill: #141d33; stroke: #86a8ff; }
+      .soft { fill: #1a2138; stroke: #34467a; }
+      .ink { fill: #e6edf3; }
+      .muted { fill: #9198a1; }
+      .faint { fill: #6e7681; }
+      .accent { fill: #86a8ff; }
+      .line { stroke: #9198a1; }
+      .dash { stroke: #6e7681; }
+      .you { fill: #86a8ff; }
+      .head { fill: #9198a1; }
+      .bar { fill: #30363d; }
+    }
+  </style>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 1 L9 5 L0 9 z" class="head"/>
+    </marker>
+  </defs>
+  <rect class="bg" width="980" height="520" rx="12"/>
+
+  <!-- agterm window -->
+  <rect class="frame" x="20" y="36" width="350" height="456" rx="10"/>
+  <circle cx="38" cy="54" r="4.5" fill="#ff5f57"/><circle cx="53" cy="54" r="4.5" fill="#febc2e"/><circle cx="68" cy="54" r="4.5" fill="#28c840"/>
+  <text x="84" y="58" font-size="13" font-weight="600" class="ink">agterm</text>
+  <text x="140" y="58" font-size="12" class="muted">one tab per agent</text>
+
+  <rect class="box" x="38" y="74" width="280" height="44" rx="7"/>
+  <text x="52" y="93" font-size="13" font-weight="600" class="ink">Xavi · Right Hand</text>
+  <text x="52" y="109" font-size="11.5" class="muted">routes your words; streams the group back</text>
+
+  <text x="38" y="142" font-size="11" font-weight="600" letter-spacing=".08em" class="faint">TEAM</text>
+
+  <rect class="box" x="38" y="150" width="280" height="32" rx="7"/>
+  <rect x="38" y="150" width="5" height="32" rx="2" class="blue"/>
+  <text x="54" y="171" font-size="13" font-weight="600" class="ink">Alex · Checkout</text>
+  <text x="248" y="171" font-size="11.5" class="muted">team lead</text>
+  <path class="line" d="M52 182 V264 M52 200 H64 M52 232 H64 M52 264 H64"/>
+  <rect class="box" x="64" y="188" width="254" height="24" rx="6"/><circle cx="77" cy="200" r="4" class="ok"/>
+  <text x="88" y="204" font-size="11.5" class="ink">address step validation</text>
+  <rect class="box" x="64" y="220" width="254" height="24" rx="6"/><circle cx="77" cy="232" r="4" class="wait"/>
+  <text x="88" y="236" font-size="11.5" class="ink">flaky payment test</text>
+  <rect class="box" x="64" y="252" width="254" height="24" rx="6"/><circle cx="77" cy="264" r="4" class="ok"/>
+  <text x="88" y="268" font-size="11.5" class="ink">checkout load test</text>
+
+  <rect class="box" x="38" y="290" width="280" height="32" rx="7"/>
+  <rect x="38" y="290" width="5" height="32" rx="2" class="green"/>
+  <text x="54" y="311" font-size="13" font-weight="600" class="ink">Boris · Search</text>
+  <text x="248" y="311" font-size="11.5" class="muted">team lead</text>
+  <path class="line" d="M52 322 V372 M52 340 H64 M52 372 H64"/>
+  <rect class="box" x="64" y="328" width="254" height="24" rx="6"/><circle cx="77" cy="340" r="4" class="ok"/>
+  <text x="88" y="344" font-size="11.5" class="ink">reindex without read gap</text>
+  <rect class="box" x="64" y="360" width="254" height="24" rx="6"/><circle cx="77" cy="372" r="4" class="ok"/>
+  <text x="88" y="376" font-size="11.5" class="ink">typo tolerance</text>
+
+  <rect class="box" x="38" y="398" width="280" height="28" rx="7"/>
+  <rect x="38" y="398" width="5" height="28" rx="2" class="purple"/>
+  <text x="54" y="417" font-size="12.5" font-weight="600" class="ink">Charlie · Mobile</text>
+  <text x="248" y="417" font-size="11.5" class="muted">team lead</text>
+  <rect class="box" x="38" y="432" width="280" height="28" rx="7"/>
+  <rect x="38" y="432" width="5" height="28" rx="2" class="orange"/>
+  <text x="54" y="451" font-size="12.5" font-weight="600" class="ink">Denis · Platform</text>
+  <text x="248" y="451" font-size="11.5" class="muted">team lead</text>
+  <text x="38" y="480" font-size="11" class="muted">Workers open as tabs nested under their team lead.</text>
+
+  <!-- board and DMs between team leads -->
+  <path class="dash" d="M322 166 C 352 166, 352 306, 322 306" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text x="356" y="200" font-size="11.5" class="muted" transform="rotate(90 356 200)">board · DMs</text>
+
+  <!-- bridge -->
+  <rect class="core" x="470" y="140" width="210" height="190" rx="12" stroke-width="1.5"/>
+  <text x="575" y="166" font-size="16" font-weight="700" text-anchor="middle" class="accent">bridge</text>
+  <text x="575" y="183" font-size="11.5" text-anchor="middle" class="muted">a local service: the switchboard</text>
+  <text x="488" y="210" font-size="11.5" class="ink">• who runs where, and their state</text>
+  <text x="488" y="230" font-size="11.5" class="ink">• the board and direct messages</text>
+  <text x="488" y="250" font-size="11.5" class="ink">• your questions and answers</text>
+  <text x="488" y="270" font-size="11.5" class="ink">• claims, asks, keep notes</text>
+  <text x="488" y="290" font-size="11.5" class="ink">• compaction, reminders</text>
+  <text x="575" y="318" font-size="11" text-anchor="middle" class="faint">SQLite on your Mac</text>
+
+  <path class="line" d="M372 196 H466" marker-end="url(#a)"/>
+  <text x="420" y="176" font-size="11.5" text-anchor="middle" class="ink">reports in</text>
+  <text x="420" y="189" font-size="11" text-anchor="middle" class="muted">Claude Code hooks</text>
+  <path class="line" d="M466 262 H372" marker-end="url(#a)"/>
+  <text x="420" y="280" font-size="11.5" text-anchor="middle" class="ink">delivers out</text>
+  <text x="420" y="293" font-size="11" text-anchor="middle" class="muted">typed into idle tabs</text>
+
+  <!-- page -->
+  <rect class="frame" x="740" y="140" width="220" height="250" rx="10"/>
+  <text x="756" y="164" font-size="13" font-weight="600" class="ink">Guild page</text>
+  <text x="836" y="164" font-size="11" class="muted">127.0.0.1</text>
+  <text x="756" y="188" font-size="10.5" font-weight="600" letter-spacing=".06em" class="faint">NEEDS YOU</text>
+  <rect class="soft" x="756" y="195" width="188" height="24" rx="5"/>
+  <text x="766" y="211" font-size="11" class="ink">① Swap the index tonight?</text>
+  <text x="756" y="240" font-size="10.5" font-weight="600" letter-spacing=".06em" class="faint">TEAM LEADS</text>
+  <circle cx="761" cy="254" r="4" class="blue"/><text x="771" y="258" font-size="11" class="ink">Alex · Checkout</text>
+  <circle cx="761" cy="272" r="4" class="green"/><text x="771" y="276" font-size="11" class="ink">Boris · Search</text>
+  <circle cx="761" cy="290" r="4" class="purple"/><text x="771" y="294" font-size="11" class="ink">Charlie · Mobile</text>
+  <circle cx="761" cy="308" r="4" class="orange"/><text x="771" y="312" font-size="11" class="ink">Denis · Platform</text>
+  <text x="756" y="338" font-size="10.5" font-weight="600" letter-spacing=".06em" class="faint">TEAM CHAT</text>
+  <rect class="bar" x="756" y="348" width="176" height="8" rx="4"/>
+  <rect class="bar" x="756" y="364" width="132" height="8" rx="4"/>
+
+  <path class="line" d="M684 210 H736" marker-end="url(#a)"/>
+  <text x="710" y="202" font-size="11" text-anchor="middle" class="muted">state</text>
+  <path class="line" d="M736 262 H684" marker-end="url(#a)"/>
+  <text x="710" y="280" font-size="11" text-anchor="middle" class="muted">answers</text>
+
+  <!-- you -->
+  <circle cx="850" cy="60" r="22" class="you"/>
+  <text x="850" y="65" font-size="12.5" font-weight="700" text-anchor="middle" fill="#ffffff">You</text>
+  <path class="line" d="M850 84 V136" marker-end="url(#a)"/>
+  <text x="860" y="114" font-size="11" class="muted">read, answer</text>
+  <path class="line" d="M826 54 H322 V70" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text x="575" y="46" font-size="11.5" text-anchor="middle" class="muted">you talk to Right Hand; it streams the group back</text>
+
+  <!-- adapters -->
+  <path class="dash" d="M575 332 V430"/>
+  <rect class="dash" x="420" y="432" width="540" height="56" rx="9"/>
+  <text x="440" y="455" font-size="12.5" font-weight="600" class="ink">Optional adapters</text>
+  <text x="440" y="475" font-size="11.5" class="muted">task tracker · review chat · remote hosts · GitHub (replaceable)</text>
+</svg>

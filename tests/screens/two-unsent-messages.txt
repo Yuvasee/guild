@@ -1,0 +1,17 @@
+  the reply will go out as soon as the Mac is back.
+
+✻ Cogitated for 55s · done 14:00
+                    new task? /clear to save 120.0k tokens · ✔ Update installed · /restart to apply
+─────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ [bridge] Peer message #41 from w-review, not from the user; use judgment: Done. The flaky test
+  now waits for the server to answer before it checks the page, and the retry helper gives up after
+  three tries instead of looping. Ran the whole suite twice: green both times. Lint and type checks
+  clean. One question left for you in the thread, about the timeout default; nothing else waits on
+  it… (full text and answer: bridge show 41, bridge reply 41)[bridge] Peer message #42 from
+  w-review, not from the user; use judgment: Done: the review doc now follows review-doc.md (In
+  short, What changes and why with a before and after diagram, How it works, Decisions, Costs and
+  risks, Where to look, Tests, Reviews, Verified and not verified); its pr-head is the new head and
+  it is registered again. (full text and answer: bridge show 42, bridge reply 42)
+─────────────────────────────────────────────────────────────────────────────────────────────────────
+  Opus 5.5 | 39% ctx | ~/repo
+  -- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle)

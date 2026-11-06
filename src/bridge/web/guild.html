@@ -1,0 +1,1912 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Guild</title>
+<link id="favicon" rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='%23888'/%3E%3C/svg%3E">
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #fbfbf9; --raise: #ffffff; --ink: #1c1c1a; --soft: #6e6e68; --faint: #a6a69f; --line: #ecebe6;
+  --row: #f3f2ed; --you: #2456d6; --you-wash: #f0f4fe;
+  --working: #3f9a6b; --waiting: #c9993a; --stuck: #d92d20; --unknown: #a6a69f;
+  /* agterm's sidebar tints are AppKit's dynamic system colors; these are NSColor.system* resolved in sRGB for aqua. */
+  --tint-red: #ff383c; --tint-orange: #ff8d28; --tint-yellow: #ffcc00; --tint-green: #34c759;
+  --tint-blue: #0088ff; --tint-purple: #cb30e0; --tint-gray: #8e8e93;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #141413; --raise: #1b1b1a; --ink: #ecece8; --soft: #9d9d97; --faint: #65655f; --line: #282826;
+    --row: #1e1e1c; --you: #86a8ff; --you-wash: #1a2138;
+    --working: #55b482; --waiting: #d7ae56; --stuck: #ff5a4d; --unknown: #65655f;
+    --tint-red: #ff4245; --tint-orange: #ff9230; --tint-yellow: #ffd600; --tint-green: #30d158;
+    --tint-blue: #0091ff; --tint-purple: #db34f2; --tint-gray: #98989d;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+main { max-width: 1680px; margin: 0 auto; padding: 28px clamp(32px, 4vw, 72px) 64px; }
+a { color: inherit; text-decoration-color: var(--faint); text-underline-offset: 2px; }
+a:hover { text-decoration-color: currentColor; }
+button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+[hidden] { display: none !important; }
+
+/* The page's only heading: its name, a dot that says what the tab icon says, and when it last heard from bridge. */
+#top { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 14px; margin-bottom: 30px; }
+#brand { display: flex; align-items: center; gap: 9px; margin: 0; font-size: 21px; font-weight: 700; letter-spacing: .01em; color: var(--ink); }
+#brand .pulse { width: 9px; height: 9px; border-radius: 50%; background: #9a9a94; }
+#top .warn { font-size: 13px; font-weight: 600; color: var(--stuck); }
+#top .end { margin-left: auto; display: flex; align-items: center; gap: 10px; min-width: 0; }
+#fresh { font-size: 12px; color: var(--faint); }
+#fresh.bad { color: var(--ink); font-weight: 600; }
+/* A still sign of life: its color says how old the data is, its tooltip says when; nothing ticks on screen. */
+.alive { flex: none; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--faint); cursor: help; }
+.alive.fresh { background: var(--working); }
+.alive.late { background: var(--waiting); }
+.alive.stale { background: var(--stuck); }
+/* Background jobs that report through a status file: one steady pill each, under the name; words change by the minute. */
+#watchers { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 6px 8px; margin-top: 8px; }
+.watch { display: inline-flex; align-items: flex-start; gap: 7px; max-width: 100%; padding: 3px 12px 3px 9px; border-radius: 12px; background: var(--row); font-size: 12px; color: var(--soft); cursor: help; }
+.watch .label { min-width: 0; overflow-wrap: anywhere; }
+.watch .dot { margin-top: 5.5px; }
+.watch b { font-weight: 600; color: var(--ink); }
+.watch.bad { background: color-mix(in srgb, var(--stuck) 9%, transparent); color: var(--ink); }
+
+.section { margin-bottom: 44px; }
+#needs, #chat { max-width: 90ch; margin-left: auto; margin-right: auto; }
+.section > header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; margin-bottom: 12px; }
+h2 { font-size: 19px; font-weight: 650; letter-spacing: .005em; margin: 0; color: var(--ink); }
+.note { font-size: 12px; color: var(--faint); }
+header .note.end { margin-left: auto; }
+
+.dot { display: inline-block; flex: none; width: 10px; height: 10px; border-radius: 50%; vertical-align: middle; }
+.dot.tiny { width: 7px; height: 7px; }
+.dot.working { background: var(--working); }
+.dot.waiting { background: var(--waiting); }
+.dot.stuck { background: var(--stuck); }
+.dot.unknown { border: 1.5px dashed var(--unknown); }
+.dot.rest { border: 1.5px solid var(--line); }
+.tint-red { --tint: var(--tint-red); } .tint-orange { --tint: var(--tint-orange); } .tint-yellow { --tint: var(--tint-yellow); }
+.tint-green { --tint: var(--tint-green); } .tint-blue { --tint: var(--tint-blue); } .tint-purple { --tint: var(--tint-purple); }
+.tint-gray { --tint: var(--tint-gray); }
+.lead .name.tinted { color: var(--tint); }
+/* The lead's color is who it is, so its dot says the state by its fill alone; the word beside it says the rest. */
+.dot.tinted.working, .dot.tinted.stuck { background: var(--tint); }
+.dot.tinted.waiting { background: color-mix(in srgb, var(--tint) 40%, transparent); border: 1.5px solid var(--tint); }
+.dot.tinted.rest { border: 1.5px solid var(--tint); }
+.dot.tinted.unknown { border: 1.5px dashed var(--tint); }
+
+.card { background: var(--you-wash); border-radius: 12px; padding: 14px 16px; margin-bottom: 10px; }
+.card.stuck { background: color-mix(in srgb, var(--stuck) 9%, transparent); }
+.card.delivering { background: none; box-shadow: inset 0 0 0 1px var(--line); }
+.card.delivering .title { font-size: 14px; font-weight: 500; color: var(--soft); }
+.card .delivery { font-size: 12px; color: var(--faint); margin-top: 6px; }
+.card .urgent { color: var(--stuck); font-weight: 700; font-size: 12px; letter-spacing: .04em; margin-right: 8px; }
+.attention-mark { display: inline-block; min-width: 16px; font-size: 12px; font-weight: 600; line-height: 16px; text-align: center; color: var(--you); border: 1px solid var(--you); border-radius: 50%; cursor: help; font-variant-numeric: tabular-nums; }
+.card .attention-mark { margin-right: 8px; vertical-align: 1px; }
+.card .title { font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
+.card .meta { font-size: 12px; color: var(--soft); }
+.card .body { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 6px; }
+.card .part { margin-top: 6px; }
+.card .part .label { font-size: 12px; color: var(--soft); margin-right: 7px; }
+.card .part .text { display: inline; white-space: pre-wrap; overflow-wrap: anywhere; }
+.card .links { font-size: 13px; margin-top: 4px; overflow-wrap: anywhere; }
+.card .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; align-items: center; }
+.card .actions button { border: 1px solid var(--you); color: var(--you); border-radius: 8px; padding: 3px 12px; }
+.card .actions button:hover { background: var(--you); color: var(--raise); }
+.card .actions button.dismiss { border-color: transparent; color: var(--soft); }
+.card .actions button.dismiss:hover { background: none; color: var(--ink); }
+.card input { flex: 1 1 200px; min-width: 0; font: inherit; color: inherit; background: var(--raise); border: 1px solid var(--line); border-radius: 8px; padding: 3px 10px; }
+
+/* Asks: quiet rows under what needs you; red only when one has waited past its limit. */
+.ask { border-radius: 10px; padding: 5px 12px; margin-bottom: 4px; background: var(--row); cursor: pointer; }
+.ask .words { font-weight: 500; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ask .meta { font-size: 12px; color: var(--soft); margin-top: 2px; }
+/* Closed, an ask is one line: its words cut short and its state beside them; a click opens the claim and evidence. */
+.ask:not(.open) { display: flex; gap: 10px; align-items: baseline; }
+.askgroup { cursor: pointer; user-select: none; }
+.ask:not(.open) .words { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 400; }
+.ask:not(.open) .meta { margin-top: 0; white-space: nowrap; }
+.ask:not(.open) .part, .ask:not(.open) .actions { display: none; }
+.ask .meta.late { color: var(--stuck); }
+.ask .part { font-size: 13px; color: var(--soft); margin-top: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ask .part .label { font-size: 12px; color: var(--faint); margin-right: 6px; }
+.ask .part .text { display: inline; }
+.ask .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; align-items: center; }
+.ask .actions button { border: 1px solid var(--line); color: var(--soft); border-radius: 8px; padding: 2px 12px; font-size: 13px; }
+.ask .actions button:hover { border-color: var(--soft); color: var(--ink); }
+.ask .actions input { flex: 1 1 160px; min-width: 0; font: inherit; font-size: 13px; color: inherit; background: var(--raise); border: 1px solid var(--line); border-radius: 8px; padding: 2px 10px; }
+#asks { max-width: 90ch; margin-left: auto; margin-right: auto; }
+#asks h3 { font-size: 13px; font-weight: 600; color: var(--soft); margin: 14px 0 8px; }
+#asks h3:first-child { margin-top: 0; }
+.lead .asks { font-size: 12px; color: var(--soft); white-space: nowrap; cursor: help; }
+.lead .asks.late { color: var(--stuck); font-weight: 600; }
+
+/* A lead: its name line, then one row per work chunk, with its issues and PRs in columns of their own. */
+.lead + .lead { margin-top: 22px; }
+.lead .head, .chunk { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 26%) minmax(0, 32%); gap: 0 18px; padding: 0 12px; }
+.lead .head { align-items: baseline; margin-bottom: 4px; }
+/* Wraps, so a narrow first column pushes asks and the worker count to a second line, not over the column labels. */
+.lead .who { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 9px; min-width: 0; }
+.lead .colhead { font-size: 12px; color: var(--faint); }
+.lead .name { font-size: 15px; font-weight: 600; white-space: nowrap; }
+.lead button.name:hover { text-decoration: underline; text-underline-offset: 2px; text-decoration-color: var(--faint); }
+.lead .word { font-size: 12px; color: var(--soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.lead .word.you { color: var(--you); font-weight: 600; }
+.lead .word.stuck { color: var(--stuck); font-weight: 600; }
+.lead .word.unknown { color: var(--faint); }
+.lead .dots { display: flex; gap: 4px; align-items: center; margin-left: 4px; }
+.lead .dots button { display: flex; padding: 2px 1px; border-radius: 50%; }
+.lead .cap { font-size: 12px; color: var(--faint); white-space: nowrap; }
+.lead .cap.full { color: var(--stuck); font-weight: 600; }
+.lead .quiet { font-size: 13px; color: var(--faint); padding: 6px 12px; }
+
+/* The PR pipeline breaks out of the text column: its stages read left to right. */
+.tablewrap { overflow-x: auto; }
+table.pipeline { width: 100%; min-width: 1120px; table-layout: fixed; border-collapse: separate; border-spacing: 0; font-size: 12px; color: var(--soft); }
+.pipeline col.place { width: 26px; }
+.pipeline col.who { width: 150px; }
+.pipeline col.lines { width: 52px; }
+.pipeline col.ci { width: 34px; }
+.pipeline col.review { width: 200px; }
+.pipeline .threads { color: var(--faint); }
+.pipeline col.approved { width: 96px; }
+.pipeline col.merge { width: 112px; }
+.pipeline col.folder { width: 88px; }
+.pipeline col.action { width: 150px; }
+.pipeline th.num { text-align: right; padding-right: 14px; }
+.pipeline th.ci, .pipeline td.ci { text-align: center; padding-left: 0; padding-right: 0; overflow: visible; }
+.pipeline th.group { padding: 18px 0 6px 10px; font-size: 13px; font-weight: 600; color: var(--soft); }
+.pipeline tbody:first-of-type th.group { padding-top: 8px; }
+.pipeline th.group .note { font-weight: 400; margin-left: 6px; }
+.pipeline th { text-align: left; font-weight: 500; color: var(--faint); padding: 0 10px 5px 0; white-space: nowrap; }
+.pipeline td { padding: 6px 10px 6px 0; overflow-wrap: break-word; vertical-align: top; }
+/* Rows part by a soft tint on every other PR, never a rule; a PR's follow-up rows share its tint. */
+.pipeline tr.tint td { background: var(--row); }
+.pipeline td:first-child { border-radius: 9px 0 0 9px; }
+.pipeline td:last-child { border-radius: 0 9px 9px 0; }
+.pipeline td:only-child { border-radius: 9px; }
+.pipeline tr.followed td { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+.pipeline tr.follows td { border-top-left-radius: 0; border-top-right-radius: 0; }
+.pipeline td.pr, .pipeline td.who { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* One line per PR: longer state lives in each cell's tooltip. */
+.pipeline tr.prrow td, .pipeline tr.resolve td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pipeline a { color: inherit; text-decoration: underline; text-decoration-color: var(--faint); text-underline-offset: 2px; }
+.pipeline td.pr { color: var(--ink); }
+.pipeline td.pr .ref { font-weight: 600; color: var(--ink); }
+.pipeline td.pr .title { color: var(--soft); }
+.pipeline td.pr .mark { margin-left: 6px; color: var(--faint); }
+.pipeline td.num { text-align: right; font-variant-numeric: tabular-nums; padding-right: 14px; }
+.pipeline td.none { color: var(--faint); }
+.pipeline td.stuck { color: var(--stuck); font-weight: 600; }
+.pipeline td.action { text-align: right; padding-right: 8px; }
+.pipeline tr.publishform td { text-align: right; padding: 4px 8px 10px; }
+.pipeline tr.publishform .pick { margin-left: 14px; white-space: nowrap; }
+.pipeline tr.publishform .preview { color: var(--faint); margin: 6px 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.pipeline tr.publishform textarea { display: block; width: 100%; box-sizing: border-box; margin-top: 6px; font: inherit; color: inherit; background: var(--raise); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; resize: vertical; }
+.pipeline tr.publishform textarea:focus { outline: none; border-color: var(--soft); }
+.pipeline td.yours { color: var(--you); font-weight: 600; }
+.pipeline tr.resolve td { padding: 0 8px 8px 0; color: var(--soft); }
+.pipeline tr.resolve .thread { display: block; overflow-wrap: anywhere; }
+.pipeline tr.resolve .thread .label { color: var(--you); font-weight: 600; }
+.pipeline button.plain { color: inherit; font: inherit; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.pipeline button.plain:hover { color: var(--ink); text-decoration: underline; text-underline-offset: 2px; }
+.pipeline button.act { font: inherit; color: var(--soft); background: var(--raise); border: 1px solid var(--line); border-radius: 7px; padding: 0 8px; white-space: nowrap; }
+.pipeline button.act:hover { color: var(--ink); border-color: var(--soft); }
+.pipeline tr.drafts td, .pipeline tr.drafts td.pr .ref, .pipeline tr.drafts td.pr .title { color: var(--faint); }
+.pipeline td.place, .pipeline th.place { padding: 6px 0 0 5px; overflow: visible; vertical-align: top; }
+.pipeline th.place { padding-top: 0; }
+.pipeline th button.sort { font-weight: 500; white-space: nowrap; }
+.pipeline th button.sort:hover, .pipeline th[aria-sort] button.sort { color: var(--ink); }
+.pipeline th button.sort .arrow { display: inline-block; width: 1ch; margin-left: 2px; }
+.pipeline th.group button.unsort { float: right; font-weight: 400; color: var(--faint); text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 2px; }
+.pipeline th.group button.unsort:hover { color: var(--ink); }
+.queuerest { margin-top: 8px; }
+.queuerest summary { cursor: pointer; font-size: 12px; color: var(--faint); }
+#queue-fresh { display: inline-flex; align-items: center; gap: 8px; align-self: center; }
+#queue-fresh .stale { color: var(--stuck); }
+.queuerest .quiet { font-size: 12px; color: var(--faint); margin-top: 3px; }
+
+.chunk { align-items: start; padding-top: 6px; padding-bottom: 6px; border-radius: 9px; }
+.chunk:nth-child(odd of .chunk) { background: var(--row); }
+.chunk .what { min-width: 0; overflow-wrap: anywhere; }
+.chunk .refs { min-width: 0; display: flex; flex-wrap: wrap; gap: 0 12px; font-size: 12px; line-height: 21px; color: var(--soft); overflow-wrap: anywhere; }
+.chunk .ref a { font-weight: 500; }
+.chunk .state { color: var(--faint); margin-left: 4px; }
+.chunk .ref.finished, .chunk .ref.finished .state { color: var(--faint); }
+
+.chips { display: flex; flex-wrap: wrap; gap: 2px; }
+.chips button { font-size: 12px; color: var(--faint); padding: 0 7px; border-radius: 10px; }
+.chips button:hover { color: var(--ink); }
+.chips button.on { color: var(--ink); background: var(--line); }
+
+.compose { display: flex; gap: 8px; margin-bottom: 12px; align-items: flex-start; }
+.compose textarea { flex: 1; min-width: 0; font: inherit; color: inherit; background: var(--raise); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; resize: vertical; min-height: 34px; }
+.compose textarea:focus { outline: none; border-color: var(--soft); }
+.compose button { color: var(--soft); background: var(--raise); border: 1px solid var(--line); border-radius: 8px; padding: 6px 14px; }
+.compose button:hover { color: var(--ink); border-color: var(--soft); }
+#replying { font-size: 12px; color: var(--soft); margin: -6px 0 10px; }
+#replying button { text-decoration: underline; }
+
+.day { margin-bottom: 4px; }
+.dayhead { display: flex; align-items: baseline; gap: 8px; width: 100%; text-align: left; padding: 10px 0 4px; font-size: 13px; font-weight: 600; color: var(--soft); border-radius: 6px; }
+.dayhead .note { font-weight: 400; }
+.msg { padding: 7px 0; }
+.msg .meta { display: flex; gap: 7px; align-items: baseline; font-size: 12px; color: var(--faint); }
+.msg .who { font-size: 13px; font-weight: 600; color: var(--ink); max-width: 60%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.msg .kind { color: var(--soft); }
+.msg .reply { margin-left: auto; color: var(--soft); opacity: 0; }
+.msg:hover > .meta .reply, .msg .reply:focus { opacity: 1; }
+@media (hover: none) { .msg .reply { opacity: 1; } }
+.msg .text a { color: var(--soft); }
+.msg .text { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 1px; }
+.msg .link { font-size: 12px; color: var(--soft); overflow-wrap: anywhere; }
+.seen { font-size: 11px; color: var(--faint); }
+.ack { font-size: 12px; color: var(--faint); overflow-wrap: anywhere; }
+.status .count { flex: none; font-size: 11px; }
+.status.open { flex-wrap: wrap; }
+.status .more-lines { flex-basis: 100%; }
+.msg .paused { font-size: 12px; color: var(--soft); font-style: italic; }
+.msg .more { font-size: 12px; color: var(--faint); text-decoration: underline; text-underline-offset: 2px; }
+.msg .replies { margin: 6px 0 0; padding: 2px 12px; background: var(--row); border-radius: 10px; }
+.status { display: flex; gap: 7px; width: 100%; text-align: left; font-size: 12px; line-height: 1.7; color: var(--faint); }
+.status:hover { color: var(--soft); }
+.status .when { flex: none; }
+.status .line { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.status.open .line { white-space: pre-wrap; overflow-wrap: anywhere; }
+.status-run { display: block; font-size: 12px; color: var(--faint); line-height: 1.7; }
+.status-run:hover { color: var(--soft); }
+
+table { border-collapse: collapse; width: 100%; font-size: 12px; color: var(--soft); table-layout: fixed; }
+th { text-align: left; font-weight: 400; color: var(--faint); padding: 0 12px 2px 0; }
+td { padding: 2px 12px 2px 0; vertical-align: top; overflow-wrap: anywhere; }
+td.what { color: var(--ink); font-weight: 500; }
+th.what { width: 32%; } th.who { width: 22%; } th.since { width: 44px; padding-right: 0; } td.since { padding-right: 0; color: var(--faint); }
+#resources table { border-collapse: separate; border-spacing: 0; }
+#resources td { padding-top: 5px; padding-bottom: 5px; }
+#resources td:first-child, #resources th:first-child { padding-left: 10px; }
+#resources tr:nth-child(even) td { background: var(--row); }
+#resources td:first-child { border-radius: 8px 0 0 8px; }
+#resources td:last-child { border-radius: 0 8px 8px 0; padding-right: 10px; }
+details { margin-top: 6px; font-size: 12px; color: var(--faint); }
+details summary { cursor: pointer; }
+details summary:hover { color: var(--soft); }
+details table { margin-top: 4px; color: var(--faint); }
+details td.what { color: var(--faint); font-weight: 400; }
+
+@media (max-width: 560px) {
+  main { padding: 18px 16px 64px; }
+  .lead .head, .chunk { grid-template-columns: minmax(0, 1fr); }
+  .lead .colhead { display: none; }
+  th.what { width: 40%; } th.why, td.why { display: none; }
+  /* Each PR is a card: number and title; who, size, CI, review and merge; then review checkout (with the doc) and the review post. */
+  .tablewrap { overflow: visible; }
+  table.pipeline, .pipeline tbody { display: block; min-width: 0; width: 100%; }
+  .pipeline colgroup, .pipeline thead { display: none; }
+  .pipeline tr { display: block; }
+  .pipeline th.group { display: block; padding: 14px 0 6px 4px; }
+  .pipeline th.group button.unsort { float: none; margin-left: 10px; }
+  .pipeline tr.prrow, .pipeline tr.resolve, .pipeline tr.publishform { background: var(--row); border-radius: 12px; margin-bottom: 6px; padding: 9px 12px; }
+  .pipeline tr.prrow { display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 0; }
+  .pipeline tr.followed { border-bottom-left-radius: 0; border-bottom-right-radius: 0; margin-bottom: 0; padding-bottom: 4px; }
+  .pipeline tr.follows { border-top-left-radius: 0; border-top-right-radius: 0; padding-top: 0; }
+  .pipeline tr.prrow td, .pipeline tr.resolve td, .pipeline tr.publishform td { display: block; padding: 0; background: none; border-radius: 0; text-align: left; white-space: normal; }
+  .pipeline tr.prrow td.blank, .pipeline tr.resolve td:first-child { display: none; }
+  .pipeline tr.prrow::before, .pipeline tr.prrow::after { content: ""; flex-basis: 100%; height: 0; }
+  .pipeline tr.prrow::before { order: 1; }
+  .pipeline tr.prrow::after { order: 3; }
+  .pipeline td.c-place { order: 0; flex: none; margin-right: 7px; align-self: center; }
+  .pipeline td.c-pr { order: 0; flex: 1 1 60%; min-width: 0; font-size: 13px; }
+  .pipeline td.c-who, .pipeline td.c-lines, .pipeline td.c-ci, .pipeline td.c-review, .pipeline td.c-approved, .pipeline td.c-merge { order: 2; }
+  .pipeline td.c-who { max-width: 45%; color: var(--ink); }
+  .pipeline td.c-lines::after { content: " lines"; }
+  .pipeline td.c-lines::before, .pipeline td.c-ci::before, .pipeline td.c-review::before, .pipeline td.c-approved::before, .pipeline td.c-merge::before { content: "·"; margin: 0 6px; color: var(--faint); }
+  .pipeline td.c-ci .dot { vertical-align: 0; }
+  .pipeline td.c-folder, .pipeline td.c-action { order: 4; margin-top: 3px; }
+  .pipeline td.c-folder { margin-right: 14px; }
+  .pipeline td.c-folder::before { content: "Review "; color: var(--faint); }
+  .pipeline td.c-action { margin-left: auto; }
+}
+</style>
+</head>
+<body>
+<main>
+  <div id="top"><h1 id="brand"><span class="pulse"></span>Guild</h1><span id="warn" class="warn">Connecting…</span><span class="end"><span id="fresh"></span><span id="alive" class="alive"></span></span><div id="watchers" hidden></div></div>
+
+  <!--
+    A section: <section id=X class=section hidden><header><h2>…</h2></header><div class=body></div></section>,
+    filled by a render function added to RENDERERS. showSection() unhides it.
+  -->
+  <section id="needs" class="section" hidden><header><h2>Needs you</h2></header><div class="body"></div></section>
+  <section id="queue" class="section" hidden><header><h2>PRs</h2><span class="note" id="priority"></span><span class="note end" id="queue-fresh"></span></header><div class="body"></div></section>
+  <section id="leads" class="section"><header>
+    <h2>Team Leads</h2>
+  </header><div class="body"></div></section>
+  <section id="resources" class="section" hidden><header><h2>Resources in use</h2></header><div class="body"></div></section>
+  <section id="chat" class="section"><header>
+    <h2>Team chat</h2>
+    <span class="note">newest first</span>
+    <span class="chips end" id="chips" style="margin-left:auto"></span>
+  </header>
+    <form class="compose" id="compose">
+      <textarea id="text" rows="1" placeholder="Write to the team; @name reaches a lead now"></textarea>
+      <button type="submit">Send</button>
+    </form>
+    <div id="replying" hidden></div>
+    <div class="body" id="room"></div>
+  </section>
+  <section id="asks" class="section" hidden><header><h2>Asks</h2><span class="note">verified ones close by themselves unless you reopen them</span></header><div class="body"></div></section>
+</main>
+<script>
+"use strict";
+const POLL_MS = 5000;
+const STATUS_RUN_COLLAPSES_AT = 3;
+const DAY_SHOWS_MESSAGES = 6;
+const expandedThreads = new Set();
+const openStatus = new Set();
+const openRuns = new Set();
+let earlierOpen = false;
+const wholeDays = new Set();
+const drafts = new Map();
+const lastRendered = new Map();
+let replyTo = null;
+let chatLead = null;
+let state = { now: 0, needs: [], leads: [], room: [], claims: [], asks: { on_you: [], waiting: [], verified: [] } };
+let lastUpdate = 0;
+let offline = false;
+let mismatch = false;
+let statusNote = "";
+
+function el(tag, cls, text) {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined && text !== null) node.textContent = text;
+  return node;
+}
+
+function linkTo(url, label, cls) {
+  if (typeof url !== "string" || !/^https?:\/\//.test(url)) return el("span", cls, label);
+  const a = el("a", cls, label);
+  a.href = url;
+  a.target = "_blank";
+  a.rel = "noreferrer";
+  return a;
+}
+
+function shortUrl(url) {
+  return String(url).replace(/^https?:\/\/(www\.)?/, "").replace(/^github\.com\//, "").replace(/\/pull\//, "#");
+}
+
+function age(ms) {
+  const minutes = Math.max(0, Math.floor(ms / 60000));
+  if (minutes < 60) return minutes + "m";
+  if (minutes < 1440) return Math.floor(minutes / 60) + "h";
+  return Math.floor(minutes / 1440) + "d";
+}
+
+function fullTime(ms) {
+  return new Date(ms).toLocaleString([], { dateStyle: "medium", timeStyle: "short", hourCycle: "h23" });
+}
+
+function clock(ms) {
+  return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+}
+
+function dayName(ms) {
+  const when = new Date(ms);
+  const today = new Date();
+  if (when.toDateString() === today.toDateString()) return "Today";
+  const yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
+  if (when.toDateString() === yesterday.toDateString()) return "Yesterday";
+  return when.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
+}
+
+async function post(path, body) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Bridge": "1" },
+    body: JSON.stringify(body || {}),
+  });
+  return response.json();
+}
+
+function jump(surface) {
+  if (surface) post("/api/sessions/" + encodeURIComponent(surface) + "/jump");
+}
+
+function plural(count, word) {
+  return count + " " + word + (count === 1 ? "" : "s");
+}
+
+// Rebuilding a section loses hover and selection, so each is rebuilt only when what it shows has changed.
+function changed(key, value) {
+  const signature = JSON.stringify(value);
+  if (lastRendered.get(key) === signature) return false;
+  lastRendered.set(key, signature);
+  return true;
+}
+
+function showSection(id, count) {
+  const section = document.getElementById(id);
+  section.hidden = count === 0;
+  return section.querySelector(".body");
+}
+
+function dot(item, tiny) {
+  const node = el("span", "dot " + item.state + (tiny ? " tiny" : ""));
+  node.title = item.why || item.state;
+  return node;
+}
+
+function renderNeedSection(section) {
+  if (!section.label) {
+    const body = renderText(section.text);
+    body.className = "body";
+    return body;
+  }
+  const part = el("div", "part");
+  part.append(el("span", "label", section.label), renderText(section.text));
+  return part;
+}
+
+function rankOf(key) {
+  const ranking = state.attention ? state.attention.ranking : [];
+  return ranking.find((item) => item.key === key) || null;
+}
+
+function rankMark(item) {
+  const mark = el("span", "attention-mark", String(item.mark));
+  const isPr = !item.key.startsWith("question:");
+  mark.title = item.why + (isPr && item.estimate ? " " + item.estimate + ". " + state.attention.estimate_rule : "");
+  return mark;
+}
+
+function sinceCell(at) {
+  const cell = el("td", "since", age(state.now - at));
+  cell.title = "held since " + fullTime(at);
+  return cell;
+}
+
+function isWaitingOnYou(need) {
+  return !need.delivering || Boolean(need.delivery_failed);
+}
+
+function renderDeliveringCard(need) {
+  const card = el("div", "card delivering");
+  card.append(el("div", "title", need.text));
+  const part = el("div", "part");
+  part.append(el("span", "label", "Your answer"), renderText(need.answer));
+  card.append(part);
+  card.append(el("div", "delivery", need.delivery_failed
+    ? "Not delivered to " + need.answer_to + " yet; its tab may hold a draft. Retrying."
+    : "Delivering to " + need.answer_to));
+  const actions = el("div", "actions");
+  if (need.delivery_failed && need.surface) {
+    const go = el("button", "", "Go to tab");
+    go.onclick = () => jump(need.surface);
+    actions.append(go);
+  }
+  const dismiss = el("button", "dismiss", "Dismiss");
+  dismiss.onclick = async () => {
+    await post("/api/items/" + need.id + "/resolve");
+    refresh();
+  };
+  actions.append(dismiss);
+  card.append(actions);
+  return card;
+}
+
+function renderNeedCard(need) {
+  if (need.type !== "post") {
+    const card = el("div", "card" + (need.type === "lead-down" ? " stuck" : ""));
+    card.append(el("div", "title", need.text));
+    if (need.body) card.append(el("div", "body", need.body));
+    const actions = el("div", "actions");
+    const go = el("button", "", "Go to tab");
+    go.onclick = () => jump(need.surface);
+    actions.append(go);
+    card.append(actions);
+    return card;
+  }
+  if (need.delivering) return renderDeliveringCard(need);
+  const card = el("div", "card" + (need.urgent ? " stuck" : ""));
+  const title = el("div", "title");
+  title.append(el("span", "attention-slot"));
+  if (need.urgent) title.append(el("span", "urgent", "URGENT"));
+  title.append(need.text);
+  card.append(title);
+  const meta = el("div", "meta", need.from + " · " + need.kind + " · " + age(state.now - need.at) + " ago");
+  meta.title = "posted " + fullTime(need.at);
+  card.append(meta);
+  for (const section of need.sections) card.append(renderNeedSection(section));
+  for (const link of need.links) {
+    const row = el("div", "links");
+    row.append(linkTo(link.url, link.label));
+    card.append(row);
+  }
+  const actions = el("div", "actions");
+  const send = async (answer) => {
+    const done = await post("/api/items/" + need.id + "/answer", { answer });
+    if (done.ok) drafts.delete(need.id); else setStatus(done.detail || "not sent");
+    refresh();
+  };
+  for (const option of need.options) {
+    const button = el("button", "", option);
+    button.onclick = () => send(option);
+    actions.append(button);
+  }
+  const input = el("input");
+  input.placeholder = "Your answer";
+  input.value = drafts.get(need.id) || "";
+  input.oninput = () => drafts.set(need.id, input.value);
+  input.onkeydown = (event) => {
+    if (event.key === "Enter" && input.value.trim()) send(input.value.trim());
+  };
+  actions.append(input);
+  const dismiss = el("button", "dismiss", "Dismiss");
+  dismiss.onclick = async () => {
+    await post("/api/items/" + need.id + "/resolve");
+    refresh();
+  };
+  actions.append(dismiss);
+  card.append(actions);
+  return card;
+}
+
+// A number moves when another question arrives, and that must not rebuild a card someone is typing in.
+function updateCardMark(card, need) {
+  const slot = card.querySelector(".attention-slot");
+  if (!slot) return;
+  const rank = rankOf("question:" + need.id);
+  const shown = rank && rank.mark ? JSON.stringify(rank) : "";
+  if (slot.dataset.shown === shown) return;
+  slot.dataset.shown = shown;
+  slot.replaceChildren(...(shown ? [rankMark(rank)] : []));
+}
+
+function renderNeeds() {
+  // A card keeps its node while it is unchanged, so an answer being typed keeps focus when another card arrives.
+  const box = showSection("needs", state.needs.length);
+  const keep = new Map([...box.children].map((node) => [node.dataset.key, node]));
+  const wanted = state.needs.map((need) => {
+    const key = JSON.stringify(need);
+    let node = keep.get(key);
+    if (!node) {
+      node = renderNeedCard(need);
+      node.dataset.key = key;
+    }
+    return node;
+  });
+  for (const node of [...box.children]) if (!wanted.includes(node)) node.remove();
+  wanted.forEach((node, i) => {
+    if (box.children[i] !== node) box.insertBefore(node, box.children[i] || null);
+    updateCardMark(node, state.needs[i]);
+  });
+}
+
+function renderRefs(links) {
+  const refs = el("span", "refs");
+  for (const link of links) {
+    const ref = el("span", "ref" + (link.finished ? " finished" : ""));
+    const anchor = linkTo(link.url, link.label);
+    anchor.title = link.title || link.url;
+    ref.append(anchor);
+    if (link.state) {
+      const state = el("span", "state", link.state);
+      state.title = link.label + ": " + link.state;
+      ref.append(state);
+    }
+    refs.append(ref);
+  }
+  return refs;
+}
+
+function renderChunk(chunk) {
+  const line = el("div", "chunk");
+  line.append(el("span", "what", chunk.name));
+  line.append(renderRefs(chunk.links.filter((link) => link.kind !== "pr")));
+  line.append(renderRefs(chunk.links.filter((link) => link.kind === "pr")));
+  return line;
+}
+
+function leadWord(lead) {
+  if (lead.asks_you) return ["waiting on you", "you"];
+  if (lead.state === "stuck") return ["stuck", "stuck"];
+  if (lead.state === "waiting") return [lead.why, ""];
+  if (lead.state === "unknown") return ["unknown", "unknown"];
+  return ["", ""];
+}
+
+function renderLeadRow(lead) {
+  const [word, wordClass] = leadWord(lead);
+  const tint = lead.tint ? "tinted tint-" + lead.tint : "";
+  const leadDot = dot(lead);
+  if (tint) leadDot.className += " " + tint;
+  const who = el("div", "who");
+  const name = el("button", "name " + tint, lead.tab_name);
+  name.title = "Go to tab";
+  name.onclick = () => jump(lead.surface);
+  who.append(leadDot, name);
+  if (word) {
+    const words = el("span", "word " + wordClass, word);
+    words.title = lead.why || word;
+    who.append(words);
+  }
+  if (lead.asks) who.append(renderLeadAsks(lead.asks));
+  if (lead.workers.length) {
+    const dots = el("span", "dots");
+    for (const worker of lead.workers) {
+      const button = el("button");
+      button.title = worker.task + ": " + (worker.why || worker.state);
+      button.setAttribute("aria-label", button.title);
+      button.append(el("span", "dot tiny " + worker.state));
+      button.onclick = () => jump(worker.surface);
+      dots.append(button);
+    }
+    who.append(dots);
+  }
+  if (lead.worker_count) {
+    const full = lead.worker_count >= lead.worker_cap;
+    const cap = el("span", full ? "cap full" : "cap", lead.worker_count + "/" + lead.worker_cap + " workers");
+    cap.title = full
+      ? "at the cap: guild worker refuses another until one is closed"
+      : "live workers under this lead, resting ones included; at most " + lead.worker_cap;
+    who.append(cap);
+  }
+  const head = el("div", "head");
+  head.append(who, el("span", "colhead", "Issues"), el("span", "colhead", "PRs"));
+  const block = el("div", "lead");
+  block.append(head);
+  if (lead.work.length) block.append(...lead.work.map(renderChunk));
+  else block.append(el("div", "quiet", "No work declared"));
+  return block;
+}
+
+function leadAsksText(open, oldestAt) {
+  return plural(open, "ask") + " open · oldest " + age(state.now - oldestAt);
+}
+
+function renderLeadAsks(asks) {
+  const word = el("span", "asks" + (asks.overdue ? " late" : ""), leadAsksText(asks.open, asks.oldest_at));
+  word.dataset.open = asks.open;
+  word.dataset.oldest = asks.oldest_at;
+  word.title = asks.items.map(leadAskLine).join("\n");
+  return word;
+}
+
+function leadAskLine(item) {
+  const wait = item.wait ? " (" + askWaitText(item.wait) + ": " + item.wait.why + ")" : "";
+  return "#" + item.id + " " + item.state.replace("_", " ") + (item.overdue ? " (late)" : "") + wait + ": " + item.words;
+}
+
+const ASK_WAIT_ON = { owner: "you", approval: "an approval", release: "a release", verifier: "a verifier" };
+
+function askWaitText(wait) {
+  return wait.until ? "paused until " + pauseDay(wait.until) : "waiting on " + (ASK_WAIT_ON[wait.on] || wait.on);
+}
+
+function pauseDay(ms) {
+  const when = new Date(ms);
+  const day = when.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" }).replace(",", "");
+  return when.getHours() || when.getMinutes() ? day + " " + clock(ms) : day;
+}
+
+function renderAskWait(wait) {
+  const text = askWaitText(wait);
+  const part = renderAskPart(text[0].toUpperCase() + text.slice(1) + ", said " + wait.by, wait.why);
+  part.title = fullTime(wait.at);
+  return part;
+}
+
+function askOwnerName(owner) {
+  const lead = state.leads.find((item) => item.name === owner);
+  return lead ? lead.display_name : owner;
+}
+
+function renderAskPart(label, text) {
+  const part = el("div", "part");
+  part.append(el("span", "label", label), renderText(text));
+  return part;
+}
+
+const askReasons = new Map();
+
+function askMeta(ask, verified) {
+  const who = "#" + ask.id + " · " + askOwnerName(ask.owner) + " · ";
+  if (ask.state && ask.state !== "done_claimed") {
+    return who + ask.state.replace("_", " ") + " · " + age(state.now - ask.at) + " old · " + askWaitText(ask.wait);
+  }
+  return verified
+    ? who + "verified " + age(state.now - ask.at) + " ago · closes by itself in " + age(ask.closes_at - state.now)
+    : who + "claimed done by " + ask.by + " " + age(state.now - ask.at) + " ago, not verified yet" + (ask.wait ? " · " + askWaitText(ask.wait) : "");
+}
+
+const askOpen = new Set();
+const askFolded = new Set(["Waiting for verification"]);
+
+function renderAskCard(ask, verified) {
+  const card = el("div", "ask" + (askOpen.has(ask.id) ? " open" : ""));
+  card.title = ask.words;
+  card.onclick = (event) => {
+    if (event.target.closest("button, input, a")) return;
+    card.classList.toggle("open");
+    if (card.classList.contains("open")) askOpen.add(ask.id); else askOpen.delete(ask.id);
+  };
+  card.append(el("div", "words", ask.words));
+  const line = el("div", "meta" + (ask.overdue ? " late" : ""));
+  line.title = fullTime(ask.at);
+  card.append(line);
+  if (ask.claim) card.append(renderAskPart("Claim", ask.claim));
+  if (ask.wait) card.append(renderAskWait(ask.wait));
+  if (!verified) return card;
+  card.append(renderAskPart("Seen by " + ask.by, ask.evidence));
+  card.append(renderAskPart("How", ask.how));
+  const actions = el("div", "actions");
+  const act = async (path, body) => {
+    const done = await post("/api/asks/" + ask.id + "/" + path, body);
+    if (done.ok) askReasons.delete(ask.id); else setStatus(done.detail || "not saved");
+    refresh();
+  };
+  const close = el("button", "", "Close");
+  close.onclick = () => act("close");
+  const reason = el("input");
+  reason.placeholder = "What is still wrong (optional)";
+  reason.value = askReasons.get(ask.id) || "";
+  reason.oninput = () => askReasons.set(ask.id, reason.value);
+  const reopen = el("button", "", "Reopen");
+  reopen.onclick = () => act("reopen", { why: reason.value.trim() });
+  reason.onkeydown = (event) => {
+    if (event.key === "Enter") reopen.onclick();
+  };
+  actions.append(close, reason, reopen);
+  card.append(actions);
+  return card;
+}
+
+function renderAsks() {
+  const asks = { on_you: [], waiting: [], verified: [], ...state.asks };
+  const box = showSection("asks", asks.on_you.length + asks.waiting.length + asks.verified.length);
+  // A card keeps its node while it is unchanged, so a reason being typed keeps focus; only its ages are rewritten.
+  const keep = new Map([...box.children].map((node) => [node.dataset.key, node]));
+  const wanted = [];
+  const group = (title, items, verified) => {
+    if (!items.length) return;
+    let head = keep.get("head:" + title);
+    if (!head) {
+      head = el("h3", "askgroup", "");
+      head.dataset.key = "head:" + title;
+      // Claims wait for a lead or the assistant to verify, not for you: that group starts folded.
+      head.onclick = () => {
+        if (askFolded.has(title)) askFolded.delete(title); else askFolded.add(title);
+        renderAsks();
+      };
+    }
+    const late = items.filter((ask) => ask.overdue).length;
+    const folded = askFolded.has(title);
+    const text = (folded ? "▸ " : "▾ ") + title + " · " + items.length + (late ? " (" + late + " late)" : "");
+    if (head.textContent !== text) head.textContent = text;
+    wanted.push(head);
+    if (folded) return;
+    for (const ask of items) {
+      const key = JSON.stringify([verified, ask]);
+      let node = keep.get(key);
+      if (!node) {
+        node = renderAskCard(ask, verified);
+        node.dataset.key = key;
+      }
+      const meta = node.querySelector(".meta");
+      const text = askMeta(ask, verified);
+      if (meta.textContent !== text) meta.textContent = text;
+      wanted.push(node);
+    }
+  };
+  // The Team Leads section is rebuilt only when it changes, so the age on its rows is kept current here.
+  for (const word of document.querySelectorAll(".lead .asks[data-oldest]")) {
+    const text = leadAsksText(Number(word.dataset.open), Number(word.dataset.oldest));
+    if (word.textContent !== text) word.textContent = text;
+  }
+  group("Waiting on you", asks.on_you, false);
+  group("Waiting for verification", asks.waiting, false);
+  group("Verified", asks.verified, true);
+  for (const node of [...box.children]) if (!wanted.includes(node)) node.remove();
+  wanted.forEach((node, i) => {
+    if (box.children[i] !== node) box.insertBefore(node, box.children[i] || null);
+  });
+}
+
+function renderLeads() {
+  const box = showSection("leads", 1);
+  if (!changed("leads", state.leads)) return;
+  box.replaceChildren();
+  if (!state.leads.length) box.append(el("div", "note", "No team leads yet."));
+  for (const lead of state.leads) box.append(renderLeadRow(lead));
+}
+
+function renderChips() {
+  const box = document.getElementById("chips");
+  const names = state.leads.map((lead) => [lead.name, lead.display_name]);
+  if (!changed("chips", [names, chatLead])) return;
+  box.replaceChildren();
+  for (const [name, label] of [[null, "All"], ...names]) {
+    const chip = el("button", name === chatLead ? "on" : "", label);
+    chip.type = "button";
+    chip.onclick = () => {
+      chatLead = name;
+      renderChips();
+      renderRoom();
+    };
+    box.append(chip);
+  }
+}
+
+function renderText(body) {
+  const text = el("div", "text");
+  for (const part of String(body).split(/(https?:\/\/[^\s<>"')\]]+[^\s<>"')\].,;:!?])/)) {
+    text.append(/^https?:\/\//.test(part) ? linkTo(part, shortUrl(part)) : part);
+  }
+  return text;
+}
+
+function renderSeenAndAcks(item, parent) {
+  if (item.seen_by && item.seen_by.length) parent.append(el("div", "seen", "seen by " + item.seen_by.join(", ")));
+  const groups = new Map();
+  for (const ack of item.acks || []) groups.set(ack.body, [...(groups.get(ack.body) || []), ack.who]);
+  for (const [body, names] of groups) parent.append(el("div", "ack", names.join(", ") + ": " + body));
+}
+
+function renderBody(item, parent) {
+  const meta = el("div", "meta");
+  const who = el("span", "who", item.who);
+  who.title = item.from;
+  const when = el("span", "", clock(item.at));
+  when.title = fullTime(item.at);
+  meta.append(who, when);
+  if (item.post_type) meta.append(el("span", "kind", item.post_type));
+  if (item.thread_key) {
+    const thread = el("span", "", item.thread_key);
+    thread.title = "thread " + item.thread_key;
+    meta.append(thread);
+  }
+  parent.append(meta);
+  parent.append(renderText(item.body));
+  if (item.link) {
+    const link = linkTo(item.link, shortUrl(item.link), "link");
+    link.title = item.link;
+    parent.append(link);
+  }
+  if (item.paused) parent.append(el("div", "paused", "Paused after too many agent hops; delivered to nobody. Post here to resume."));
+  renderSeenAndAcks(item, parent);
+  return meta;
+}
+
+function renderMessage(item) {
+  const row = el("div", "msg");
+  row.dataset.key = "post " + item.id;
+  const meta = renderBody(item, row);
+  const answer = el("button", "reply", "Reply");
+  answer.onclick = () => setReply(item);
+  meta.append(answer);
+  if (item.replies.length) {
+    const open = expandedThreads.has(item.id);
+    const more = el("button", "more", (open ? "Hide " : "Show ") + plural(item.replies.length, "reply").replace("replys", "replies"));
+    more.onclick = () => {
+      if (open) expandedThreads.delete(item.id); else expandedThreads.add(item.id);
+      renderRoom();
+    };
+    row.append(more);
+    if (open) {
+      const replies = el("div", "replies");
+      for (const reply of item.replies) {
+        const one = el("div", "msg");
+        renderBody(reply, one);
+        replies.append(one);
+      }
+      row.append(replies);
+    }
+  }
+  return row;
+}
+
+function statusKey(item) {
+  return item.kind === "claim" ? "claim " + item.resource + " " + item.at : "post " + item.id;
+}
+
+function statusText(item) {
+  if (item.kind !== "claim") return item.who + ": " + item.body;
+  return item.who + " " + item.state + " " + item.label + (item.reason ? ", " + item.reason : "");
+}
+
+function renderStatus(item) {
+  const key = statusKey(item);
+  const row = el("button", "status" + (openStatus.has(key) ? " open" : ""));
+  row.dataset.key = key;
+  const when = el("span", "when", clock(item.at));
+  when.title = fullTime(item.at);
+  const line = el("span", "line", statusText(item));
+  line.title = statusText(item);
+  row.append(when, line);
+  if (openStatus.has(key)) {
+    const more = el("div", "more-lines");
+    renderSeenAndAcks(item, more);
+    row.append(more);
+  } else if (item.seen_by && item.seen_by.length) {
+    const seen = el("span", "count", "seen " + item.seen_by.length);
+    seen.title = "seen by " + item.seen_by.join(", ");
+    row.append(seen);
+  }
+  row.onclick = () => {
+    if (openStatus.has(key)) openStatus.delete(key); else openStatus.add(key);
+    renderRoom();
+  };
+  return row;
+}
+
+function renderStatusRun(run, into) {
+  const key = statusKey(run[0]);
+  if (run.length < STATUS_RUN_COLLAPSES_AT || openRuns.has(key)) {
+    for (const item of run) into.append(renderStatus(item));
+    return;
+  }
+  const toggle = el("button", "status-run", plural(run.length, "status line"));
+  toggle.dataset.key = "run " + key;
+  toggle.onclick = () => {
+    openRuns.add(key);
+    renderRoom();
+  };
+  into.append(toggle);
+}
+
+function renderDayItems(items, into) {
+  let run = [];
+  for (const item of items) {
+    if (item.level === "line") {
+      run.push(item);
+      continue;
+    }
+    if (run.length) renderStatusRun(run, into);
+    run = [];
+    into.append(renderMessage(item));
+  }
+  if (run.length) renderStatusRun(run, into);
+}
+
+// Status lines do not count, or a busy hour of them would hide every message of the day.
+function cutAfterMessages(items, limit) {
+  let seen = 0;
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].level !== "line" && ++seen > limit) return i;
+  }
+  return items.length;
+}
+
+function renderRoom() {
+  renderChips();
+  const items = state.room.filter((item) => chatLead === null || item.leads.includes(chatLead)).slice().reverse();
+  const box = document.getElementById("room");
+  if (!changed("room", [items, chatLead, [...expandedThreads], [...openStatus], [...openRuns], earlierOpen, [...wholeDays]])) return;
+  const days = new Map();
+  for (const item of items) {
+    const name = dayName(item.at);
+    if (!days.has(name)) days.set(name, []);
+    days.get(name).push(item);
+  }
+  box.replaceChildren();
+  if (!items.length) box.append(el("div", "note", "Quiet so far."));
+  const earlier = [...days.keys()].filter((name) => name !== "Today");
+  if (days.has("Today")) box.append(renderDay("Today", days.get("Today")));
+  if (earlier.length) {
+    const count = earlier.reduce((sum, name) => sum + days.get(name).filter((item) => item.level !== "line").length, 0);
+    const fold = el("button", "dayhead");
+    fold.type = "button";
+    fold.append(earlierOpen ? "Hide earlier days" : "Earlier", el("span", "note", plural(count, "message")));
+    fold.onclick = () => {
+      earlierOpen = !earlierOpen;
+      renderRoom();
+    };
+    box.append(fold);
+    if (earlierOpen) for (const name of earlier) box.append(renderDay(name, days.get(name)));
+  }
+}
+
+function renderDay(name, items) {
+  const day = el("div", "day");
+  day.append(el("div", "dayhead", name));
+  const cut = wholeDays.has(name) ? items.length : cutAfterMessages(items, DAY_SHOWS_MESSAGES);
+  renderDayItems(items.slice(0, cut), day);
+  if (cut < items.length) {
+    const earlier = el("button", "status-run", plural(items.length - cut, "earlier item"));
+    earlier.onclick = () => {
+      wholeDays.add(name);
+      renderRoom();
+    };
+    day.append(earlier);
+  }
+  return day;
+}
+
+// What arrives above a reader moves the page, so their place is a chat item and not a pixel offset.
+function keepReaderInPlace(render) {
+  const items = () => [...document.querySelectorAll("#room [data-key]")];
+  const reading = document.getElementById("room").getBoundingClientRect().top < 0;
+  const visible = reading ? items().find((node) => node.getBoundingClientRect().bottom > 0) : null;
+  const top = visible ? visible.getBoundingClientRect().top : 0;
+  const key = visible ? visible.dataset.key : null;
+  render();
+  const again = key && items().find((node) => node.dataset.key === key);
+  if (again) window.scrollBy(0, again.getBoundingClientRect().top - top);
+}
+
+function claimTable(claims) {
+  const table = el("table");
+  const head = el("tr");
+  for (const [cls, label] of [["what", "What"], ["who", "Who"], ["why", "Why"], ["since", "Since"]]) head.append(el("th", cls, label));
+  table.append(head);
+  for (const claim of claims) {
+    const row = el("tr");
+    const what = el("td", "what");
+    what.append(linkTo(claim.url, claim.label));
+    what.title = claim.resource;
+    row.append(what, el("td", "who", claim.holder), el("td", "why", claim.reason || ""), sinceCell(claim.acquired_at));
+    table.append(row);
+  }
+  return table;
+}
+
+function renderResources() {
+  const box = showSection("resources", state.claims.length);
+  if (!changed("resources", [state.claims, Math.floor(state.now / 60000)])) return;
+  const quiet = state.claims.filter((claim) => claim.kind === "pr" || claim.kind === "branch");
+  const main = state.claims.filter((claim) => !quiet.includes(claim));
+  const open = box.querySelector("details")?.open;
+  box.replaceChildren();
+  if (main.length) box.append(claimTable(main));
+  if (quiet.length) {
+    const more = el("details");
+    more.open = Boolean(open);
+    more.append(el("summary", "", plural(quiet.length, "branch or PR").replace("branch or PRs", "branches and PRs")));
+    more.append(claimTable(quiet));
+    box.append(more);
+  }
+}
+
+function stuckList() {
+  const stuck = [];
+  for (const lead of state.leads) {
+    if (lead.state === "stuck" && !lead.workers.some((worker) => worker.state === "stuck")) stuck.push(lead.display_name);
+    for (const worker of lead.workers) if (worker.state === "stuck") stuck.push(lead.display_name + " / " + worker.task);
+  }
+  return stuck;
+}
+
+// No verdict line: what needs them and what is stuck show where they live. The top says only what the page itself
+// cannot be trusted with, and the tab icon and title keep the counts.
+function renderVerdict() {
+  const warn = document.getElementById("warn");
+  const fresh = document.getElementById("fresh");
+  const seconds = lastUpdate ? Math.floor((Date.now() - lastUpdate) / 1000) : null;
+  const tree = sourcesNote();
+  setAlive(seconds);
+  if (offline || mismatch || !lastUpdate) {
+    warn.hidden = false;
+    warn.textContent = mismatch
+      ? "Page and service differ: reload after the service restarts; do not trust what is below"
+      : lastUpdate
+        ? "Not connected: last data " + age(seconds * 1000) + " ago; do not trust what is below"
+        : "Connecting…";
+    fresh.textContent = "";
+    setFavicon("#888");
+    document.title = "Guild";
+    return;
+  }
+  warn.hidden = true;
+  const needs = state.needs.filter(isWaitingOnYou).length;
+  const stuck = stuckList();
+  const unknown = sumStates("unknown");
+  const parts = [];
+  if (statusNote) parts.push(statusNote);
+  if (tree) parts.push(tree);
+  if (unknown) parts.push(unknown + " unknown");
+  const note = parts.join(" · ");
+  if (fresh.textContent !== note) fresh.textContent = note;
+  fresh.className = tree ? "bad" : "";
+  setFavicon(needs ? getColor("--you") : stuck.length ? getColor("--stuck") : "#9a9a94");
+  const brand = document.getElementById("brand");
+  brand.title = [needs ? needs + " need" + (needs === 1 ? "s" : "") + " you" : "", stuck.length ? "stuck: " + stuck.join(", ") : ""]
+    .filter(Boolean)
+    .join("; ");
+  document.title = (needs ? "(" + needs + ") " : "") + (stuck.length ? "stuck · " : "") + "Guild";
+}
+
+const ALIVE_LATE_S = 20;
+const ALIVE_STALE_S = 60;
+
+function setAlive(seconds) {
+  const alive = document.getElementById("alive");
+  const level = offline || mismatch || seconds === null || seconds >= ALIVE_STALE_S ? "stale" : seconds >= ALIVE_LATE_S ? "late" : "fresh";
+  alive.className = "alive " + level;
+  alive.title = lastUpdate
+    ? "Read bridge's state at " + preciseTime(lastUpdate) + "; it reads every " + POLL_MS / 1000 + " s" + (level === "fresh" ? "" : ", and has not since")
+    : "Not read bridge's state yet";
+}
+
+function preciseTime(ms) {
+  return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
+}
+
+function sumStates(name) {
+  let count = 0;
+  for (const lead of state.leads) count += lead.workers.filter((worker) => worker.state === name).length;
+  return count + state.leads.filter((lead) => lead.state === name && !lead.workers.some((worker) => worker.state === name)).length;
+}
+
+function sourcesNote() {
+  if (!state.now) return "";
+  const parts = [];
+  if (!state.tabs_at || state.now - state.tabs_at > 45000) parts.push("agterm not answering");
+  if (!state.activity_at) parts.push("process list not read");
+  return parts.join(", ");
+}
+
+function getColor(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+function setFavicon(color) {
+  const pulse = document.querySelector("#brand .pulse");
+  if (pulse) pulse.style.background = color;
+  const svg = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='6' fill='" + color + "'/></svg>";
+  document.getElementById("favicon").href = "data:image/svg+xml," + encodeURIComponent(svg);
+}
+
+function setReply(item) {
+  replyTo = item ? item.id : null;
+  const note = document.getElementById("replying");
+  note.hidden = !item;
+  note.replaceChildren();
+  if (item) {
+    note.append("Replying to " + item.who + " · ");
+    const cancel = el("button", "", "cancel");
+    cancel.type = "button";
+    cancel.onclick = () => setReply(null);
+    note.append(cancel);
+    document.getElementById("text").focus();
+  }
+}
+
+function setStatus(text) {
+  statusNote = text;
+  renderVerdict();
+}
+
+const QUEUE_CHECKS = {
+  SUCCESS: { state: "working", why: "CI green" },
+  FAILURE: { state: "stuck", why: "CI failing" },
+  ERROR: { state: "stuck", why: "CI failing" },
+  PENDING: { state: "waiting", why: "CI running" },
+  EXPECTED: { state: "waiting", why: "CI running" },
+};
+const QUEUE_MERGE = {
+  CLEAN: "ready", HAS_HOOKS: "ready", UNSTABLE: "ready, CI red", BEHIND: "behind", BLOCKED: "blocked", DIRTY: "conflicts",
+  DRAFT: "draft", UNKNOWN: "checking", "in queue": "in queue",
+};
+const QUEUE_MERGE_WHY = {
+  CLEAN: "GitHub can merge it now", HAS_HOOKS: "GitHub can merge it now",
+  UNSTABLE: "mergeable, but some checks fail", BEHIND: "its branch is behind the base branch",
+  BLOCKED: "a required review or check is missing", DIRTY: "it has merge conflicts with the base branch",
+  DRAFT: "a draft cannot be merged", UNKNOWN: "GitHub is still working it out", "in queue": "in GitHub's merge queue",
+};
+const QUEUE_POSTS = {
+  "waiting-sentence": "waits for sentence",
+  "waiting-stack": "waits for stack",
+  "waiting-draft": "waits: draft again",
+  sending: "posting",
+  "dry-run": "dry run",
+  failed: "failed",
+  interrupted: "stopped",
+};
+const QUEUE_COLUMNS = [
+  ["place", ""], ["pr", "PR"], ["who", "Who"], ["lines", "Lines"], ["ci", "CI"], ["review", "Your review"],
+  ["approved", "Approved"], ["merge", "Merge"], ["folder", "Review"], ["action", "Post"],
+];
+const QUEUE_GROUPS = [
+  ["waiting", "Open"], ["ready", "Ready to merge (lead)"], ["published", "Published"], ["drafts", "Drafts in progress"],
+];
+const queueOpenFolds = new Set();
+let queueArmed = null;
+let queueForm = null;
+
+const queueStage = (order, word) => (word === "–" || word == null ? null : order.indexOf(word) + 1 || order.length + 1);
+// Each sortable column: its value for a PR; null is empty and sorts last whichever way the column runs.
+const QUEUE_SORTS = {
+  pr: (pr) => pr.label,
+  who: (pr) => pr.lead || pr.owner || null,
+  lines: (pr) => pr.loc,
+  ci: (pr) => queueStage(["FAILURE", "ERROR", "PENDING", "EXPECTED", "SUCCESS"], pr.checks),
+  review: (pr) => pr.resolve_threads.length + pr.owner_open_threads + (pr.merge_block ? 1 : 0) || null,
+  action: (pr) => queueStage(
+    ["waits for sentence", "waits for stack", "waits: draft again", "failed", "stopped", "posting", "dry run", "sent?", "published"],
+    queueSlackWord(pr),
+  ),
+  approved: (pr) => pr.approvers.length || null,
+  merge: (pr) => queueStage(["draft", "conflicts", "behind", "blocked", "checking", "ready, CI red", "ready", "in queue"], QUEUE_MERGE[pr.merge_state]),
+  folder: (pr) => queueStage(["no-checkout", "failed", "preparing", "has changes", "older", "open"], queueFolderWord(pr)),
+};
+const QUEUE_SORT_STORE = "guild.prSort";
+let queueSort = loadQueueSort();
+let queueSortFocus = null;
+
+function loadQueueSort() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(QUEUE_SORT_STORE));
+    if (saved && QUEUE_SORTS[saved.key] && (saved.dir === 1 || saved.dir === -1)) return saved;
+  } catch (error) {}
+  return null;
+}
+
+function setQueueSort(sort, focusKey) {
+  queueSort = sort;
+  queueSortFocus = focusKey;
+  try {
+    if (sort) localStorage.setItem(QUEUE_SORT_STORE, JSON.stringify(sort));
+    else localStorage.removeItem(QUEUE_SORT_STORE);
+  } catch (error) {}
+  renderQueue();
+}
+
+function clickQueueSort(key) {
+  const dir = queueSort && queueSort.key === key ? -queueSort.dir : 1;
+  setQueueSort({ key, dir }, key);
+}
+
+const queueCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+
+// Ties and the unsorted table keep the server's order, the attention ranking.
+function sortQueueGroup(prs, sort) {
+  if (!sort) return prs;
+  const value = QUEUE_SORTS[sort.key];
+  const keyed = prs.map((pr, index) => ({ pr, index, value: value(pr) }));
+  keyed.sort((a, b) => {
+    const emptyA = a.value === null || a.value === undefined || a.value === "";
+    const emptyB = b.value === null || b.value === undefined || b.value === "";
+    if (emptyA || emptyB) return emptyA === emptyB ? a.index - b.index : emptyA ? 1 : -1;
+    const order = typeof a.value === "number" && typeof b.value === "number"
+      ? a.value - b.value
+      : queueCollator.compare(String(a.value), String(b.value));
+    return order * sort.dir || a.index - b.index;
+  });
+  return keyed.map((item) => item.pr);
+}
+
+const QUEUE_HEAD_WHY = {
+  place: "the number shows where it stands in what needs you, across questions and PRs",
+  lines: "lines changed: additions plus deletions, leaving out docs, images and the excluded files (lockfiles by default)",
+  ci: "GitHub checks on the newest commit: green, red, or running",
+  review: "your comments and review on GitHub",
+  approved: "a colleague approved it on GitHub",
+  merge: "what GitHub says about merging it",
+  folder: "open a local checkout of the PR in the editor to review it",
+  action: "its post in the review channel",
+};
+
+function renderQueueHead(key, name) {
+  const cell = el("th", { lines: "num", ci: "ci", place: "place" }[key] || "");
+  if (QUEUE_HEAD_WHY[key]) cell.title = QUEUE_HEAD_WHY[key];
+  if (!QUEUE_SORTS[key]) {
+    cell.textContent = name;
+    return cell;
+  }
+  const active = queueSort && queueSort.key === key;
+  if (active) cell.setAttribute("aria-sort", queueSort.dir === 1 ? "ascending" : "descending");
+  const button = el("button", "sort", name);
+  button.type = "button";
+  button.dataset.sort = key;
+  button.title = active ? "Reverse" : "Sort by " + name;
+  button.append(el("span", "arrow", active ? (queueSort.dir === 1 ? "↑" : "↓") : ""));
+  button.onclick = () => clickQueueSort(key);
+  cell.append(button);
+  return cell;
+}
+
+function queueAction(pr, label, path, armed = "Really post?") {
+  const key = pr.ref + path;
+  const button = el("button", "act", queueArmed === key ? armed : label);
+  button.onclick = async () => {
+    if (path !== "retry" && queueArmed !== key) {
+      // A post or a done review cannot be taken back, so a stray click only arms it.
+      queueArmed = key;
+      button.textContent = armed;
+      setTimeout(() => {
+        if (queueArmed !== key) return;
+        queueArmed = null;
+        lastRendered.delete("queue");
+        renderQueue();
+      }, 4000);
+      return;
+    }
+    queueArmed = null;
+    const done = await post("/api/reviews/" + pr.repo + "/" + pr.number + "/" + path);
+    setStatus(done.ok ? pr.label + ": recorded" : done.detail || "not recorded");
+    refresh();
+  };
+  return button;
+}
+
+function queuePublishLabel() {
+  const chat = state.reviews && state.reviews.chat;
+  return chat && chat !== "none" ? "Publish to " + (chat === "slack" ? "Slack" : "chat") : "Publish";
+}
+
+// Publish opens a form under the row: whether the post says "direct", which colleagues it mentions, and a comment to them.
+function queuePublishButton(pr, label = queuePublishLabel(), path = "publish") {
+  const open = queueForm && queueForm.ref === pr.ref && queueForm.path === path;
+  const button = el("button", "act", open ? "Close" : label);
+  button.onclick = () => {
+    queueForm = open ? null : { ref: pr.ref, path, direct: false, mention: [] };
+    queueComment = emptyQueueComment();
+    rerenderQueue();
+  };
+  return button;
+}
+
+function rerenderQueue() {
+  lastRendered.delete("queue");
+  renderQueue();
+}
+
+// Kept out of queueForm, which the queue's render signature includes: typing must not rebuild the row under the caret.
+let queueComment = emptyQueueComment();
+
+function emptyQueueComment() {
+  return { text: "", focused: false, start: 0, end: 0 };
+}
+
+function queuePostPreview(pr, form) {
+  const description = pr.description || "(its owner gives the description)";
+  const comment = form.mention.length ? queueComment.text.trim() : "";
+  return pr.url + " - " + description + (form.direct ? " - direct" : "") + form.mention.map((name) => " @" + name).join("") + (comment ? " " + comment : "");
+}
+
+// Only with someone mentioned: the comment speaks to them.
+function renderPublishComment(pr, preview) {
+  const box = el("textarea");
+  box.rows = 2;
+  box.maxLength = state.reviews.comment_max_chars;
+  box.placeholder = "Comment after the mentions (optional)";
+  box.value = queueComment.text;
+  const keep = () => {
+    queueComment.text = box.value;
+    queueComment.start = box.selectionStart;
+    queueComment.end = box.selectionEnd;
+  };
+  box.oninput = () => {
+    keep();
+    preview.textContent = queuePostPreview(pr, queueForm);
+  };
+  box.onselect = box.onkeyup = box.onclick = keep;
+  box.onfocus = () => (queueComment.focused = true);
+  box.onblur = () => {
+    if (box.isConnected) queueComment.focused = false;
+  };
+  if (queueComment.focused) {
+    requestAnimationFrame(() => {
+      box.focus();
+      box.setSelectionRange(queueComment.start, queueComment.end);
+    });
+  }
+  return box;
+}
+
+// The reply quoted under the row, so they can tell from the page whether it settles their point.
+function renderResolveRow(pr) {
+  const row = el("tr", "resolve");
+  row.append(el("td"));
+  const cell = el("td");
+  cell.colSpan = QUEUE_COLUMNS.length - 1;
+  pr.resolve_threads.forEach((thread, index) => {
+    const line = el("span", "thread");
+    const label = pr.resolve_threads.length > 1 ? "Resolve your thread " + (index + 1) : "Resolve your thread";
+    line.append(queueLink(thread.url, label, "open the thread on GitHub"), ": reply “" + thread.quote + "”");
+    line.firstChild.classList.add("label");
+    cell.append(line);
+  });
+  row.append(cell);
+  return row;
+}
+
+function renderPublishForm(pr) {
+  const row = el("tr", "publishform");
+  const cell = el("td");
+  cell.colSpan = QUEUE_COLUMNS.length;
+  const pick = (label, checked, onchange) => {
+    const box = el("input");
+    box.type = "checkbox";
+    box.checked = checked;
+    box.onchange = () => {
+      if (!queueForm) return;
+      onchange(box.checked);
+      rerenderQueue();
+    };
+    const wrap = el("label", "pick");
+    wrap.append(box, " " + label);
+    return wrap;
+  };
+  cell.append(pick("direct", queueForm.direct, (on) => (queueForm.direct = on)));
+  for (const name of state.reviews.mention_people || []) {
+    cell.append(
+      pick("@" + name, queueForm.mention.includes(name), (on) => {
+        queueForm.mention = on ? [...queueForm.mention, name] : queueForm.mention.filter((n) => n !== name);
+        if (!queueForm.mention.length) queueComment = emptyQueueComment();
+      }),
+    );
+  }
+  const preview = el("div", "preview", queuePostPreview(pr, queueForm));
+  if (queueForm.mention.length) cell.append(renderPublishComment(pr, preview));
+  cell.append(preview);
+  const send = el("button", "act", "Send");
+  send.onclick = async () => {
+    const form = queueForm;
+    if (!form) return;
+    const comment = form.mention.length ? queueComment.text : "";
+    queueForm = null;
+    queueComment = emptyQueueComment();
+    for (const control of row.querySelectorAll("input, textarea, button")) control.disabled = true;
+    const done = await post("/api/reviews/" + pr.repo + "/" + pr.number + "/" + form.path, { direct: form.direct, mention: form.mention, comment });
+    setStatus(done.ok ? pr.label + ": recorded" : done.detail || "not recorded");
+    refresh();
+  };
+  const cancel = el("button", "act", "Cancel");
+  cancel.onclick = () => {
+    queueForm = null;
+    queueComment = emptyQueueComment();
+    rerenderQueue();
+  };
+  cell.append(send, " ", cancel);
+  row.append(cell);
+  return row;
+}
+
+function queueFold(key, summary) {
+  const fold = el("details", "queuerest");
+  fold.open = queueOpenFolds.has(key);
+  fold.ontoggle = () => {
+    if (fold.open) queueOpenFolds.add(key);
+    else queueOpenFolds.delete(key);
+  };
+  fold.append(el("summary", "quiet", summary));
+  return fold;
+}
+
+// Only what of the owner's is still open; the rest of their review history is in the tooltip.
+function queueReviewWord(pr) {
+  if (pr.resolve_threads.length) return "resolve " + pr.resolve_threads.length;
+  if (pr.owner_open_threads) return pr.owner_open_threads + " open";
+  return pr.merge_block ? "comment open" : "–";
+}
+
+function queueReviewWhy(pr) {
+  const history = queueReviewHistory(pr);
+  const blocked = pr.merge_block && !pr.resolve_threads.length ? "Your comments: " + pr.merge_block + ". " : "";
+  const others = pr.open_threads > pr.owner_open_threads ? "; " + plural(pr.open_threads, "unresolved review thread") + " in all" : "";
+  return blocked + history + others;
+}
+
+function queueReviewHistory(pr) {
+  if (pr.resolve_threads.length) {
+    const rest = pr.resolve_is_last ? ", and resolving them is all that keeps it from merging" : "; it waits on more than that to merge";
+    return "every review thread you started has a reply" + rest;
+  }
+  if (pr.reviewed_at && pr.commits_since) {
+    return "pushed since your review at " + fullTime(pr.reviewed_at) + ", " + (pr.reviewed_oid || "").slice(0, 9);
+  }
+  if (pr.reviewed_at) return "you pressed Publish " + fullTime(pr.reviewed_at) + " (" + pr.reviewed_by + ")";
+  if (pr.owner_last_at) {
+    const since = pr.commits_after_owner ? ", " + plural(pr.commits_after_owner, "commit") + " since" : "";
+    return "your last comment or review: " + fullTime(pr.owner_last_at) + since;
+  }
+  if (pr.state === "published") return "published without your review here";
+  return "you have not commented on it yet";
+}
+
+const QUEUE_APPROVAL_LEFT = {
+  "ready to merge (lead)": "CI green, no conflicts, nothing of yours open: its lead may merge it without your review or a post, and is told so",
+  "your comments open": "its lead settles your comments first, then it may merge",
+  "resolve your threads": "every thread you started has a reply; resolving them is yours",
+  "CI red": "it merges once its lead gets CI green",
+  "CI pending": "it merges once CI is green",
+  conflicts: "it merges once its lead resolves the conflicts",
+  "blocked on GitHub": "GitHub blocks the merge: branch protection wants more, usually a person's review or a required check",
+};
+
+const QUEUE_APPROVAL_WORD = { "ready to merge (lead)": "ready (lead)", "your comments open": "your comments", "resolve your threads": "your threads" };
+
+function queueApprovalWord(pr) {
+  return pr.approvers.length ? QUEUE_APPROVAL_WORD[pr.approval_left] || "approved" : "–";
+}
+
+function queueApprovalWhy(pr) {
+  if (!pr.approvers.length) return null;
+  const by = "approved by " + pr.approvers.join(", ") + (pr.approval_left ? " · " + pr.approval_left : "") + ": ";
+  const bot = pr.bot_approved && !pr.approved_by.length
+    ? "only the review bot approved, no person yet" + (pr.merge_state === "BLOCKED" ? ", and branch protection may not count the review bot" : "") + "; "
+    : "";
+  return by + bot + (QUEUE_APPROVAL_LEFT[pr.approval_left] || "a draft, its owner marks it ready first");
+}
+
+function queueMergeWord(pr) {
+  if (pr.merge_block) return "your comments";
+  if (pr.approvers.length && pr.merge_state === "BLOCKED") return "blocked on GitHub";
+  return pr.merge_state === "BEHIND" ? "behind " + pr.base : QUEUE_MERGE[pr.merge_state] || "–";
+}
+
+function queueMergeWhy(pr) {
+  if (pr.merge_block) return "Your comments: " + pr.merge_block + "; whatever the approvals, it is not merged until they are settled";
+  const botOnly = pr.merge_state === "BLOCKED" && pr.bot_approved && !pr.approved_by.length;
+  const why = botOnly ? "branch protection wants a person's review; the review bot's may not count" : QUEUE_MERGE_WHY[pr.merge_state] || null;
+  const asked = why && pr.conflict_asked_at ? "; its owner was asked to merge " + pr.base + " into it at " + fullTime(pr.conflict_asked_at) : "";
+  const refused = pr.merge_path === "ready" ? "" : (why ? "; " : "") + "bridge refuses its merge until it is approved, CI is green and nothing of yours is open";
+  return why || refused ? (why || "") + asked + refused : null;
+}
+
+function queueSlackWord(pr) {
+  if (pr.post_link || pr.post_state === "posted") {
+    return pr.posted_at ? "published " + age(state.now - pr.posted_at) + " ago" : "published";
+  }
+  // The send tool was called but no link came back: it probably went out, and the row must not claim it did.
+  if (pr.post_state === "posted-link-unknown") return "sent?";
+  return QUEUE_POSTS[pr.post_state] || "–";
+}
+
+function queueDocWord(pr) {
+  if (pr.doc_url) return pr.doc_stale ? (pr.doc_updating ? "updating" : "older") : "open";
+  return pr.large && pr.group !== "drafts" ? "none yet" : "–";
+}
+
+// Review detail lives in the doc link's tooltip only: rows stay one line.
+function queueReviewMarksWhy(pr) {
+  const parts = [];
+  if (pr.reviews_ran.length) parts.push("reviews: " + pr.reviews_ran.join(", "));
+  if (pr.reviews_gap) parts.push(pr.reviews_gap);
+  return parts.join("; ");
+}
+
+function queueFolderWord(pr) {
+  if (pr.worktree_url && pr.worktree_state === "ready") return pr.worktree_stale ? "older" : "open";
+  if (pr.worktree_url) return pr.worktree_state === "dirty" ? "has changes" : pr.worktree_state;
+  return pr.worktree_state || "–";
+}
+
+function queueLink(url, label, title) {
+  const a = el("a", "", label);
+  a.href = url;
+  if (!url.startsWith("vscode:")) a.target = "_blank";
+  if (title) a.title = title;
+  return a;
+}
+
+function queueCell(row, content, cls, title) {
+  const cell = el("td", cls);
+  if (title) cell.title = title;
+  cell.append(content);
+  row.append(cell);
+  return cell;
+}
+
+// One cell for the review post: the button until they publish, then where the post stands, and only a send in flight, stuck or
+// dry run says more.
+function renderQueueSlackCell(pr) {
+  const stopped = pr.post_state === "failed" || pr.post_state === "interrupted";
+  const action = el("td", stopped ? "action stuck" : "action");
+  const word = queueSlackWord(pr);
+  const posted = pr.post_link || pr.post_state === "posted";
+  if (pr.can_publish && !posted && word === "–") {
+    action.append(queuePublishButton(pr));
+    return action;
+  }
+  action.title = pr.post_detail || (word === "–" ? "not published" : pr.posted_at ? "posted " + fullTime(pr.posted_at) : word);
+  action.append(pr.post_link ? linkTo(pr.post_link, word) : word);
+  if (pr.can_publish && !posted) action.append(" ", queuePublishButton(pr));
+  if (pr.can_retry) action.append(" ", queueAction(pr, "Retry", "retry"));
+  if (pr.can_repost) action.append(" ", queuePublishButton(pr, pr.post_state === "dry-run" ? "Post for real" : "Post again", "repost"));
+  return action;
+}
+
+function renderQueueTableRow(pr) {
+  const row = el("tr", "prrow" + (pr.group === "drafts" ? " drafts" : ""));
+  const rank = rankOf(pr.ref);
+  const rankCell = el("td", "place");
+  if (rank && rank.mark) rankCell.append(rankMark(rank));
+  row.append(rankCell);
+  const name = el("td", "pr");
+  name.append(linkTo(pr.url, pr.label, "ref"));
+  // Ahead of the title, which the cell cuts; among the drafts the group's header already says it.
+  if (pr.draft && pr.group !== "drafts") {
+    const mark = el("span", "mark", "draft");
+    mark.title = "a draft on GitHub";
+    name.append(mark);
+  }
+  name.append(" ", el("span", "title", pr.title));
+  const stackedOn = pr.stack_parent && state.reviews.prs.find((other) => other.ref === pr.stack_parent);
+  name.title = pr.repo + "#" + pr.number + ": " + pr.title + " · " + pr.group_why
+    + (stackedOn ? " · stacked on " + stackedOn.label : "")
+    + (pr.depends_on_label ? " · merges after " + pr.depends_on_label : "");
+  row.append(name);
+
+  const under = pr.lead && pr.lead.toLowerCase() !== String(pr.owner).toLowerCase();
+  const who = under ? pr.lead + " · " + pr.owner : pr.lead || pr.owner || "no session";
+  const whoCell = el("td", pr.owner ? "who" : "who none");
+  if (pr.owner_surface) {
+    const go = el("button", "plain", who);
+    go.title = "Go to " + (under ? "lead " + pr.lead + ", session " + pr.owner : who);
+    go.onclick = () => jump(pr.owner_surface);
+    whoCell.append(go);
+  } else {
+    whoCell.textContent = who;
+  }
+  whoCell.title = pr.owner ? (under ? "lead " + pr.lead + ", session " + pr.owner : "session " + who) : "no live session owns it";
+  row.append(whoCell);
+
+  queueCell(row, String(pr.loc), "num", pr.loc + " lines changed" + (pr.large ? ": large, so it gets a doc and a folder" : ""));
+  const ci = QUEUE_CHECKS[pr.checks];
+  queueCell(row, ci ? dot(ci) : "–", "ci", ci ? ci.why : "no CI");
+
+  queueCell(row, queueReviewWord(pr), pr.resolve_threads.length ? "review yours" : "review", queueReviewWhy(pr));
+
+  queueCell(row, queueApprovalWord(pr), "", queueApprovalWhy(pr));
+  queueCell(row, queueMergeWord(pr), "", queueMergeWhy(pr));
+  const docBehind = pr.doc_stale
+    ? "doc at " + (pr.doc_at || "unknown") + ", PR at " + pr.pr_at + (pr.doc_updating ? "; its owner was asked to update it" : "")
+    : pr.doc_url ? "the doc matches the PR's newest commit" : pr.large ? "its owner has not registered a doc yet" : null;
+  const folder = queueFolderWord(pr);
+  const folderWhy = pr.worktree_detail || (pr.worktree_path ? pr.worktree_path + (pr.worktree_stale ? ", behind the PR" : "") : null);
+  const reviewCell = queueCell(row, pr.worktree_url ? queueLink(pr.worktree_url, folder, folderWhy) : folder, "", folderWhy);
+  if (pr.doc_url) {
+    const docWhy = [docBehind, queueReviewMarksWhy(pr)].filter(Boolean).join("; ");
+    reviewCell.prepend(queueLink(pr.doc_url, pr.doc_stale ? "doc (older)" : "doc", docWhy), " · ");
+  }
+
+  row.append(renderQueueSlackCell(pr));
+  // On a phone the row is a card that names each cell and drops the empty ones.
+  [...row.children].forEach((cell, index) => {
+    const key = QUEUE_COLUMNS[index][0];
+    cell.classList.add("c-" + key);
+    // A cut word still reads whole in the tooltip.
+    const text = cell.textContent.trim();
+    if (!["place", "pr", "action"].includes(key) && text && !String(cell.title || "").includes(text)) {
+      cell.title = text + (cell.title ? ": " + cell.title : "");
+    }
+    const blank = ["", "–"].includes(cell.textContent.trim()) && !cell.querySelector(".dot, button");
+    if (blank) cell.classList.add("blank");
+  });
+  return row;
+}
+
+function renderQueueGroup(title, prs, first) {
+  const body = el("tbody");
+  const head = el("tr");
+  const cell = el("th", "group", title);
+  cell.colSpan = QUEUE_COLUMNS.length;
+  cell.append(el("span", "note", String(prs.length)));
+  if (first && queueSort) {
+    const reset = el("button", "unsort", "reset to ranking");
+    reset.type = "button";
+    reset.onclick = () => setQueueSort(null, "pr");
+    cell.append(reset);
+  }
+  head.append(cell);
+  body.append(head);
+  prs.forEach((pr, index) => {
+    const rows = [renderQueueTableRow(pr)];
+    if (pr.resolve_threads.length) rows.push(renderResolveRow(pr));
+    if (queueForm && queueForm.ref === pr.ref && (pr.can_publish || pr.can_repost)) rows.push(renderPublishForm(pr));
+    rows.forEach((row, at) => {
+      if (index % 2 === 0) row.classList.add("tint");
+      if (at > 0) row.classList.add("follows");
+      if (at < rows.length - 1) row.classList.add("followed");
+    });
+    body.append(...rows);
+  });
+  return body;
+}
+
+function agoWords(ms) {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 60) return seconds + " s ago";
+  if (seconds < 3600) return Math.floor(seconds / 60) + " min ago";
+  return Math.floor(seconds / 3600) + " h ago";
+}
+
+const SLACK_FAILURES_SHOWN = 3;
+const SLACK_SILENCE_MS = 20 * 60_000;
+
+function mapQueueToFreshness(queue, now) {
+  const parts = [];
+  const github = queue.github;
+  if (github && github.ok_at) {
+    const stale = now - github.ok_at > github.stale_s * 1000;
+    const why = queue.error || "read every " + github.every_s + " s";
+    parts.push({ text: "GitHub read " + agoWords(now - github.ok_at) + (stale ? ", stale" : ""), stale, why, short: "GitHub stale" });
+  } else if (github) {
+    parts.push({ text: "GitHub not read yet", stale: Boolean(queue.error), pending: true, why: queue.error, short: "GitHub not read" });
+  }
+  const slack = queue.slack;
+  if (slack && slack.enabled) {
+    // One failed read is noise the next read fixes; only a run of them, or a long silence, is worth their eye.
+    const read = slack.ok_at ? agoWords(now - slack.ok_at) : null;
+    const failing = (slack.failures || 0) >= SLACK_FAILURES_SHOWN || (Boolean(slack.ok_at) && now - slack.ok_at > SLACK_SILENCE_MS);
+    const how = slack.mode === "connector" ? "read through the Slack connector every " + slack.every_s / 60 + " min, as there is no token" : "read with the token every minute";
+    let text = read ? "Slack read " + read : "Slack not read yet";
+    const pending = !read;
+    if (failing) text = "Slack reads failing" + (read ? ", last good " + read : "");
+    parts.push({ text, stale: failing, pending, short: "Slack reads failing", why: how + (failing && slack.error ? "; last error: " + slack.error : "") });
+  }
+  return parts;
+}
+
+// Only a stale source says so in words, and those words do not count seconds; the times live in the dot's tooltip.
+function renderQueueFreshness(queue) {
+  const box = document.getElementById("queue-fresh");
+  const parts = mapQueueToFreshness(queue, state.now);
+  const stale = parts.filter((part) => part.stale);
+  const level = stale.length ? "stale" : parts.length && !parts.some((part) => part.pending) ? "fresh" : "";
+  const alive = el("span", "alive " + level);
+  alive.title = parts.map((part) => part.text + (part.why ? " (" + part.why + ")" : "")).join("\n");
+  const words = stale.map((part) => part.short);
+  const signature = JSON.stringify([alive.className, words]);
+  if (box.dataset.shown === signature) {
+    box.lastChild.title = alive.title;
+    return;
+  }
+  box.dataset.shown = signature;
+  box.replaceChildren();
+  if (words.length) box.append(el("span", "stale", words.join(" · ")));
+  box.append(alive);
+}
+
+function renderQueue() {
+  const queue = state.reviews;
+  const on = Boolean(queue && queue.enabled);
+  const box = showSection("queue", on ? 1 : 0);
+  if (on) renderQueueFreshness(queue);
+  const attention = state.attention;
+  const priority = document.getElementById("priority");
+  priority.textContent = attention.priority.length ? "Priority: " + attention.priority.map((p) => p.name).join(", then ") : "";
+  priority.title = attention.priority.map((p) => p.name + ": " + p.issue_keys.join(", ")).join("\n");
+  if (!on || !changed("queue", { prs: queue.prs, error: queue.error, dry_run: queue.dry_run, ranking: attention.ranking, sort: queueSort, form: queueForm })) return;
+  const previous = box.querySelector(".tablewrap");
+  const scrolled = previous ? previous.scrollLeft : 0;
+  box.replaceChildren();
+  if (queue.prs.length) {
+    const table = el("table", "pipeline");
+    const head = el("tr");
+    const columns = el("colgroup");
+    for (const [key, name] of QUEUE_COLUMNS) {
+      columns.append(el("col", key));
+      head.append(renderQueueHead(key, name));
+    }
+    table.append(columns);
+    const thead = el("thead");
+    thead.append(head);
+    table.append(thead);
+    let groups = 0;
+    for (const [group, title] of QUEUE_GROUPS) {
+      const prs = queue.prs.filter((pr) => pr.group === group);
+      if (prs.length) table.append(renderQueueGroup(title, sortQueueGroup(prs, queueSort), groups++ === 0));
+    }
+    const wrap = el("div", "tablewrap");
+    wrap.append(table);
+    box.append(wrap);
+    wrap.scrollLeft = scrolled;
+    if (queueSortFocus) {
+      // The click rebuilt the header, so the keyboard user's focus moves to the new button.
+      const target = wrap.querySelector('[data-sort="' + queueSortFocus + '"]');
+      if (target) target.focus();
+    }
+    queueSortFocus = null;
+  } else if (!queue.error) {
+    box.append(el("div", "quiet", "No open PRs."));
+  }
+  if (queue.error) box.append(el("div", "quiet", "GitHub is not answering: " + queue.error));
+  const rules = queueFold("rules", queue.dry_run || queue.chat === "none" ? "How this list works · Publish posts nothing" : "How this list works");
+  for (const rule of queue.rules) rules.append(el("div", "quiet", rule));
+  box.append(rules);
+}
+
+function watchAgo(ms) {
+  const minutes = Math.max(0, Math.floor(ms / 60_000));
+  if (minutes < 1) return "just now";
+  return (minutes < 120 ? minutes + " min" : Math.floor(minutes / 60) + " h") + " ago";
+}
+
+function mapWatcherToLine(watcher, now) {
+  const ran = watcher.last_run_at ? watchAgo(now - watcher.last_run_at) : "";
+  const summary = watcher.summary ? ", " + watcher.summary : "";
+  const words = {
+    ok: "last sweep " + ran + summary,
+    failed: "last sweep failed " + ran + summary,
+    stale: "no sweep for " + ran.replace(/ ago$/, ""),
+  }[watcher.state] || watcher.why || "no status";
+  const tip = [];
+  if (watcher.last_run_at) tip.push("Last sweep " + fullTime(watcher.last_run_at) + (watcher.status === "failed" ? ", failed" : ""));
+  if (watcher.state === "stale" && watcher.summary) tip.push("It said: " + watcher.summary);
+  if (watcher.detail) tip.push(watcher.detail);
+  if (watcher.stale_after_min) tip.push("Turns red after " + watcher.stale_after_min + " min without a sweep");
+  if (watcher.why) tip.push(watcher.why);
+  tip.push("Status file: " + watcher.path);
+  return { name: watcher.name, words, bad: watcher.state !== "ok", tip: tip.join("\n") };
+}
+
+// Ages count from one shared minute mark, so every pill's words change together, at most once a minute.
+function renderWatchers() {
+  const minute = Math.floor(state.now / 60_000) * 60_000;
+  const lines = (state.watchers || []).map((watcher) => mapWatcherToLine(watcher, minute));
+  const box = document.getElementById("watchers");
+  box.hidden = lines.length === 0;
+  if (box.children.length !== lines.length) box.replaceChildren(...lines.map(() => el("span", "watch")));
+  lines.forEach((line, index) => {
+    const pill = box.children[index];
+    const signature = JSON.stringify(line);
+    if (pill.dataset.shown === signature) return;
+    pill.dataset.shown = signature;
+    pill.className = "watch" + (line.bad ? " bad" : "");
+    pill.title = line.tip;
+    const label = el("span", "label");
+    label.append(el("b", null, line.name), ": " + line.words);
+    pill.replaceChildren(el("span", "dot tiny " + (line.bad ? "stuck" : "working")), label);
+  });
+}
+
+const RENDERERS = [renderNeeds, renderAsks, renderQueue, renderLeads, renderRoom, renderResources, renderWatchers, renderVerdict];
+
+async function refresh() {
+  try {
+    const response = await fetch("/api/guild");
+    if (!response.ok) throw new Error("status " + response.status);
+    state = await response.json();
+    lastUpdate = Date.now();
+    offline = false;
+    mismatch = false;
+  } catch (error) {
+    offline = true;
+    renderVerdict();
+    return;
+  }
+  try {
+    keepReaderInPlace(() => {
+      for (const render of RENDERERS) render();
+    });
+  } catch (error) {
+    mismatch = true;
+    renderVerdict();
+  }
+}
+
+document.getElementById("compose").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const input = document.getElementById("text");
+  const text = input.value.trim();
+  if (!text) return;
+  const done = await post("/api/room", { text, reply_to: replyTo });
+  if (done.ok) {
+    input.value = "";
+    setReply(null);
+    setStatus("sent to " + done.detail);
+    refresh();
+  } else {
+    setStatus(done.detail || "not sent");
+  }
+});
+
+document.getElementById("text").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+    document.getElementById("compose").requestSubmit();
+  }
+});
+
+refresh();
+setInterval(refresh, POLL_MS);
+setInterval(renderVerdict, 1000);
+</script>
+</body>
+</html>

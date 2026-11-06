@@ -1,0 +1,1069 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bridge</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Crect x=%221%22 y=%229%22 width=%2214%22 height=%222%22 fill=%22%231f9d55%22/%3E%3Crect x=%223%22 y=%224%22 width=%222%22 height=%226%22 fill=%22%231f9d55%22/%3E%3Crect x=%2211%22 y=%224%22 width=%222%22 height=%226%22 fill=%22%231f9d55%22/%3E%3C/svg%3E">
+<style>
+:root {
+  --bg: #f6f5f2; --panel: #ffffff; --panel-2: #fbfaf8; --ink: #1d1d1b; --muted: #6d6a64; --faint: #9a968e;
+  --line: #e6e3dc; --chip: #f0eee9; --sel: #eef4ff;
+  --perm: #dc2626; --finished: #2563eb; --working: #1f9d55; --unknown: #c08a1a;
+  --pr: #2563eb; --issue: #7c3aed; --branch: #0f766e; --warn: #c2410c;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #121315; --panel: #1a1c1f; --panel-2: #16181b; --ink: #e8e6e1; --muted: #9a968f; --faint: #6f6c66;
+    --line: #2a2d32; --chip: #23262a; --sel: #1d2738;
+    --perm: #f87171; --finished: #6ea0ff; --working: #3ccf7a; --unknown: #f0b030;
+    --pr: #6ea0ff; --issue: #b18cff; --branch: #4fd1c5; --warn: #ff8a50;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #121315; --panel: #1a1c1f; --panel-2: #16181b; --ink: #e8e6e1; --muted: #9a968f; --faint: #6f6c66;
+  --line: #2a2d32; --chip: #23262a; --sel: #1d2738;
+  --perm: #f87171; --finished: #6ea0ff; --working: #3ccf7a; --unknown: #f0b030;
+  --pr: #6ea0ff; --issue: #b18cff; --branch: #4fd1c5; --warn: #ff8a50;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif; }
+.mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+a { color: inherit; }
+button, select, input, textarea { font: inherit; color: var(--ink); }
+button { font-size: 12.5px; padding: 3px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); cursor: pointer; white-space: nowrap; }
+button:hover { border-color: var(--faint); }
+button.primary { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+button.confirm { background: var(--warn); color: #fff; border-color: var(--warn); }
+button:disabled { opacity: .5; cursor: default; }
+
+header { position: sticky; top: 0; z-index: 5; background: var(--bg); border-bottom: 1px solid var(--line); }
+.bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; padding: 12px 20px; max-width: 1280px; margin: 0 auto; }
+.bar h1 { margin: 0 6px 0 0; font-size: 17px; }
+.filters { display: flex; gap: 6px; flex-wrap: wrap; }
+.filter { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); font-size: 12.5px; cursor: pointer; }
+.filter.on { border-color: var(--ink); }
+.filter .n { font-weight: 650; }
+.dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--faint); }
+.s-permission .dot, .dot.permission { background: var(--perm); }
+.s-finished .dot, .dot.finished { background: var(--finished); }
+.s-working .dot, .dot.working { background: var(--working); animation: pulse 1.6s ease-in-out infinite; }
+.s-unknown .dot, .dot.unknown { background: var(--unknown); }
+@keyframes pulse { 50% { opacity: .35; } }
+.tools { display: flex; gap: 8px; align-items: center; margin-left: auto; flex-wrap: wrap; }
+.tools input[type=search] { width: 220px; padding: 4px 9px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); }
+.tools select { padding: 3px 6px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); }
+.tools label { font-size: 12.5px; color: var(--muted); display: inline-flex; gap: 5px; align-items: center; }
+/* Fixed width and rarely changing text, so the header never shifts; details are in the tooltip. */
+.updated { font-size: 12px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; min-width: 104px; cursor: default; }
+.updated .dot { background: var(--working); }
+.updated.warn { color: var(--unknown); }
+.updated.warn .dot { background: var(--unknown); }
+.updated.error { color: var(--perm); }
+.updated.error .dot { background: var(--perm); }
+
+main { padding: 14px 20px 60px; max-width: 1280px; margin: 0 auto; }
+section { margin-bottom: 22px; }
+h2 { margin: 0 0 8px; font-size: 12px; font-weight: 650; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); display: flex; gap: 10px; align-items: baseline; }
+h2 .hint { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--faint); }
+
+.needs { display: flex; flex-direction: column; gap: 6px; }
+.need { display: grid; grid-template-columns: 92px 1fr auto auto; gap: 12px; align-items: center; background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--faint); border-radius: 8px; padding: 8px 12px; }
+.need.blocker, .need.permission { border-left-color: var(--perm); }
+.need.action, .need.overdue { border-left-color: var(--warn); }
+.need .kind { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.need.blocker .kind, .need.permission .kind { color: var(--perm); }
+.need.action .kind, .need.overdue .kind { color: var(--warn); }
+.need .text { overflow-wrap: anywhere; }
+.need .src { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.need .src a { cursor: pointer; text-decoration: underline dotted; }
+.need .acts { display: flex; gap: 6px; }
+.handled { margin-top: 6px; }
+.handled summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
+.need .post { min-width: 0; }
+.post .title { overflow-wrap: anywhere; }
+.need.blocker .post .title, .need.action .post .title { font-weight: 600; }
+.post .body { color: var(--muted); font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 2px; cursor: pointer; }
+.post .body.clamp { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.post .plinks, .post .options { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.post .options button { white-space: normal; text-align: left; max-width: 100%; overflow-wrap: anywhere; }
+.post .answer { margin-top: 4px; font-size: 12.5px; color: var(--working); overflow-wrap: anywhere; }
+.replybox, .compose { display: flex; gap: 6px; align-items: flex-start; }
+.replybox { margin-top: 6px; }
+.replybox textarea, .compose textarea { flex: 1; min-width: 0; resize: vertical; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel-2); font-size: 13px; }
+.compose { margin-bottom: 10px; }
+.compose select { padding: 3px 6px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); max-width: 40%; }
+.need.done-post { border-left-color: var(--working); }
+.need.done-post .kind { color: var(--working); }
+.need.insight { border-left-color: var(--finished); }
+.need.insight .kind { color: var(--finished); }
+.need.resolved { opacity: .7; }
+.timeline { display: flex; flex-direction: column; gap: 6px; }
+.timeline-head { font-size: 12px; color: var(--muted); margin: 14px 0 6px; }
+.board .thread { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; margin-bottom: 8px; }
+.topic { font-size: 11px; padding: 0 6px; border-radius: 999px; background: var(--chip); color: var(--branch); margin-left: 4px; }
+.msg.mine .h b { color: var(--finished); }
+.empty { color: var(--muted); font-style: italic; padding: 6px 2px; }
+
+.list { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--panel); }
+.group { padding: 6px 14px; font-size: 12px; font-weight: 650; color: var(--muted); background: var(--panel-2); border-top: 1px solid var(--line); }
+.group:first-child { border-top: none; }
+.row { display: grid; grid-template-columns: minmax(0, 220px) minmax(0, 1fr) minmax(0, 300px) 64px; gap: 14px; align-items: start; padding: 10px 14px; border-top: 1px solid var(--line); cursor: pointer; }
+.list > .row:first-child { border-top: none; }
+.row:hover { background: var(--panel-2); }
+.row.selected { background: var(--sel); }
+.ident { min-width: 0; }
+.ident .name { display: flex; gap: 8px; align-items: center; font-size: 15px; font-weight: 650; line-height: 1.3; }
+.ident .name b { font-weight: inherit; overflow-wrap: anywhere; }
+.ident .meta { color: var(--muted); font-size: 12px; margin: 2px 0 0 16px; overflow-wrap: anywhere; }
+.new { font-size: 10.5px; font-weight: 700; color: #fff; background: var(--finished); border-radius: 999px; padding: 0 6px; }
+.task { min-width: 0; }
+.task .what { font-weight: 600; overflow-wrap: anywhere; }
+.task .what.prompt { font-weight: 400; font-style: italic; color: var(--muted);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.task .reply { color: var(--muted); font-size: 12.5px; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.task .reply::before { content: "↳ "; }
+.task .flags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+.old-toggle { margin-top: 8px; }
+.flag.drives { color: var(--ink); display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+.flag.drives:hover { text-decoration: underline; }
+.flag.drives .dot { width: 6px; height: 6px; }
+.flag.driven { color: var(--muted); }
+.agent { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; margin-left: 6px; padding: 0 6px; border-radius: 999px; background: var(--chip); color: var(--issue); }
+.flag { font-size: 11px; padding: 0 7px; border-radius: 999px; background: var(--chip); color: var(--warn); }
+.links { display: flex; flex-wrap: wrap; gap: 5px; justify-content: flex-start; padding-top: 1px; }
+.link { font-size: 12px; padding: 1px 7px; border-radius: 999px; background: var(--chip); text-decoration: none; white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.link:hover { text-decoration: underline; }
+.link.pr { color: var(--pr); }
+.link.issue, .link.gh-issue { color: var(--issue); }
+.link.branch { color: var(--branch); }
+.link.nourl { opacity: .7; cursor: default; }
+.link .st2:empty { display: none; }
+.link.done { opacity: .55; }
+.link.more { background: none; color: var(--faint); cursor: pointer; padding-left: 2px; }
+.link .st2 { margin-left: 5px; font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: 11px; font-weight: 600; }
+.tone-good { color: var(--working); }
+.tone-bad { color: var(--perm); }
+.tone-warn { color: var(--warn); }
+.tone-busy { color: var(--unknown); }
+.tone-done { color: #8250df; }
+.tone-neutral { color: var(--muted); }
+.need.ready { border-left-color: var(--working); }
+.need.ready .kind { color: var(--working); }
+.need.ci { border-left-color: var(--perm); }
+.need.ci .kind { color: var(--perm); }
+.need.drift .kind, .need.changes .kind { color: var(--warn); }
+.need.drift, .need.changes { border-left-color: var(--warn); }
+.acts-col { display: flex; justify-content: flex-end; }
+.details { grid-column: 1 / -1; display: grid; grid-template-columns: 150px 1fr; gap: 6px 14px; font-size: 12.5px; padding: 8px 0 2px; cursor: auto; }
+.details .k { color: var(--muted); }
+.details .v { overflow-wrap: anywhere; white-space: pre-wrap; }
+.details .v button { margin-left: 6px; padding: 0 7px; font-size: 11px; }
+
+details.coord { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; }
+details.coord > summary { cursor: pointer; font-weight: 600; }
+details.coord .explain { color: var(--muted); font-size: 12.5px; margin: 6px 0 10px; }
+.coord h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 12px 0 6px; }
+.thread { border-left: 2px solid var(--line); padding-left: 10px; margin-bottom: 10px; }
+.msg { font-size: 13px; margin: 4px 0; }
+.msg .h { color: var(--muted); font-size: 12px; }
+.msg .h b { color: var(--ink); }
+.msg .b { overflow-wrap: anywhere; white-space: pre-wrap; }
+.msg .b.clamp { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; cursor: pointer; }
+.thread .reply-toggle { margin-top: 4px; padding: 0 8px; font-size: 11.5px; }
+.st { font-size: 11px; padding: 0 6px; border-radius: 999px; background: var(--chip); margin-left: 4px; }
+.st.done { color: var(--working); }
+.st.declined, .st.cancelled { color: var(--warn); }
+.st.queued, .st.delivered { color: var(--unknown); }
+.claim { font-size: 13px; margin: 4px 0; }
+.claim .h { color: var(--muted); font-size: 12px; }
+.toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--ink); color: var(--bg); padding: 7px 14px; border-radius: 8px; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+.toast.show { opacity: 1; }
+kbd { font: 11px ui-monospace, Menlo, monospace; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; color: var(--muted); }
+.keys { color: var(--faint); font-size: 12px; margin-top: 18px; }
+@media (max-width: 760px) {
+  .bar, main { padding-left: 16px; padding-right: 16px; }
+  .row { grid-template-columns: 1fr; gap: 6px; }
+  .acts-col { justify-content: flex-start; }
+  .need { grid-template-columns: 1fr; }
+  .tools input[type=search] { width: 100%; }
+  .details { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <h1>bridge</h1>
+    <div class="filters" id="filters"></div>
+    <div class="tools">
+      <input type="search" id="search" placeholder="Search sessions  /" autocomplete="off">
+      <select id="sort" title="">
+        <option value="attention">Sort: attention</option>
+        <option value="activity">Sort: last activity</option>
+        <option value="name">Sort: name</option>
+      </select>
+      <label><input type="checkbox" id="group"> by workspace</label>
+      <label id="remote-label" hidden><input type="checkbox" id="remote"> <span id="remote-text">remote</span></label>
+      <span class="updated" id="updated"></span>
+    </div>
+  </div>
+</header>
+<main>
+  <section>
+    <h2>Feed <span class="hint" id="needs-hint"></span></h2>
+    <div class="needs" id="needs"></div>
+    <div class="timeline-head" id="timeline-head" hidden>Recent</div>
+    <div class="timeline" id="timeline"></div>
+    <button id="timeline-more" class="old-toggle" hidden></button>
+  </section>
+  <section>
+    <h2>Sessions <span class="hint" id="sort-hint"></span></h2>
+    <div class="list" id="sessions"></div>
+    <button id="old-toggle" class="old-toggle" hidden></button>
+  </section>
+  <section>
+    <h2>Team board <span class="hint" id="board-hint"></span></h2>
+    <div class="compose">
+      <select id="compose-to" title="Everyone: a board post that reaches the sessions it mentions (@handle) or whose PRs and issues it names"></select>
+      <textarea id="compose-text" rows="1" placeholder="Write to the team (⌘↩ sends)"></textarea>
+      <button id="compose-send" class="primary">Send</button>
+    </div>
+    <div class="board" id="threads"></div>
+    <button id="threads-more" class="old-toggle" hidden></button>
+    <details class="coord" id="coord">
+      <summary id="coord-summary">Reservations</summary>
+      <div class="explain">Sessions reserve shared things (a PR, a branch, staging) before changing them. Reservations are advisory: they only work because every session asks first. Stuck cases also show up in the feed.</div>
+      <div id="claims"></div>
+    </details>
+  </section>
+  <div class="keys"><kbd>/</kbd> search · <kbd>j</kbd>/<kbd>k</kbd> move · <kbd>Enter</kbd> jump to tab · <kbd>o</kbd> expand · <kbd>n</kbd> next that needs you · <kbd>Esc</kbd> clear</div>
+</main>
+<div class="toast" id="toast"></div>
+<script>
+const POLL_MS = 3000;
+const OLD_AFTER_MS = 3 * 86400000;
+const STATES = {
+  permission: { label: "Needs permission", rank: 0 },
+  finished: { label: "Finished", rank: 1 },
+  working: { label: "Working", rank: 2 },
+  unknown: { label: "Status unknown", rank: 3 },
+};
+const SORT_HINTS = {
+  attention: "needs permission → finished, unseen first, newest first → working → unknown",
+  activity: "most recent activity first",
+  name: "by name",
+};
+
+const store = {
+  get(key, fallback) { try { const v = localStorage.getItem("bridge." + key); return v === null ? fallback : JSON.parse(v); } catch { return fallback; } },
+  set(key, value) { try { localStorage.setItem("bridge." + key, JSON.stringify(value)); } catch {} },
+};
+
+let showOld = store.get("showOld", false);
+let showRemote = store.get("showRemote", false);
+let state = null;
+let lastOk = 0;
+let lastFailed = false;
+const PROVIDER_STALE_MS = 10 * 60_000;
+let filter = store.get("filter", "all");
+let sortBy = store.get("sort", "attention");
+let grouped = store.get("group", false);
+let seen = store.get("seen", null);
+let selected = null;
+const expanded = new Set();
+const confirming = new Map();
+let pointerInList = false;
+let order = [];
+
+function el(tag, cls, text) {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined && text !== null) node.textContent = text;
+  return node;
+}
+
+// Handles are lowercase addresses for agents; people see the tab name with its own case when it maps to the handle.
+function slugOf(text) {
+  return (text || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+function displayName(s) {
+  if (!s.handle) return s.tab_name || "pid " + s.pid;
+  return !s.remote && s.tab_name && slugOf(s.tab_name) === s.handle ? s.tab_name : s.handle;
+}
+
+function nameOf(handle) {
+  const s = state && handle ? state.sessions.find(x => x.handle === handle) : null;
+  return s ? displayName(s) : handle;
+}
+
+function age(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return s + "s";
+  if (s < 3600) return Math.floor(s / 60) + "m";
+  if (s < 86400) return Math.floor(s / 3600) + "h " + Math.floor((s % 3600) / 60) + "m";
+  return Math.floor(s / 86400) + "d";
+}
+
+function toast(text) {
+  const node = document.getElementById("toast");
+  node.textContent = text;
+  node.classList.add("show");
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => node.classList.remove("show"), 2200);
+}
+
+async function post(path, body) {
+  const init = { method: "POST", headers: { "X-Bridge": "1" } };
+  if (body !== undefined) { init.headers["Content-Type"] = "application/json"; init.body = JSON.stringify(body); }
+  const response = await fetch(path, init);
+  return response.json().catch(() => ({ ok: false }));
+}
+
+// Typed text survives the 3-second re-render: it lives here, not in the DOM.
+const drafts = new Map();
+function draftBox(key, placeholder, onSend) {
+  const box = el("div", "replybox");
+  const input = el("textarea");
+  input.rows = 1;
+  input.placeholder = placeholder;
+  input.value = drafts.get(key) || "";
+  input.dataset.draft = key;
+  input.addEventListener("input", () => drafts.set(key, input.value));
+  const send = el("button", "", "Send");
+  let sending = false;
+  const go = async () => {
+    const sent = input.value;
+    if (sending || !sent.trim()) return;
+    sending = true;
+    send.disabled = true;
+    try {
+      const r = await onSend(sent.trim());
+      // Text typed while the request was in flight is a new draft; keep it.
+      if (r.ok && input.value === sent) { drafts.delete(key); input.value = ""; input.blur(); }
+    } finally {
+      sending = false;
+      send.disabled = false;
+    }
+  };
+  send.addEventListener("click", go);
+  input.addEventListener("keydown", e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); go(); } });
+  box.append(input, send);
+  return box;
+}
+
+async function sendMessage(to, text, replyTo) {
+  const r = await post("/api/messages", { to, text, reply_to: replyTo }).catch(() => ({ ok: false, detail: "bridge did not answer" }));
+  toast(r.ok ? convertSentToText(r.detail) : (r.detail || "Not sent"));
+  poll();
+  return r;
+}
+
+function convertSentToText(detail) {
+  if (detail.startsWith("team:")) {
+    const [, all, now] = detail.split(":");
+    return "Sent to the team (" + all + "): " + (now === "0" ? "each session reads it at its next turn" : now + " concerned now, the rest at their next turn");
+  }
+  return detail === "nobody" ? "Saved; no live session to deliver to" : "Sent to " + detail.split(", ").map(nameOf).join(", ");
+}
+
+async function answerPost(item, text) {
+  const r = await post("/api/items/" + item.id + "/answer", { answer: text }).catch(() => ({ ok: false, detail: "bridge did not answer" }));
+  toast(r.ok ? "Sent to " + nameOf(item.from_handle) : (r.detail || "Not sent"));
+  poll();
+  return r;
+}
+
+function sessionKey(s) { return s.conversation_id || s.instance_id; }
+
+function sessionState(s) {
+  if (s.attention === "permission") return "permission";
+  if (s.status === "stale") return "unknown";
+  if (s.status === "active") return "working";
+  return "finished";
+}
+
+function noteFirstSight(sessions) {
+  // A session first seen now (e.g. a new remote host) is not "new" until it does something after this.
+  let changed = false;
+  for (const s of sessions) {
+    if (!(sessionKey(s) in seen)) { seen[sessionKey(s)] = s.last_activity_at || 0; changed = true; }
+  }
+  if (changed) store.set("seen", seen);
+}
+
+function isOld(s) {
+  return sessionState(s) !== "working" && sessionState(s) !== "permission" && (state.now - (s.last_activity_at || 0)) > OLD_AFTER_MS;
+}
+
+function isNew(s) {
+  return sessionState(s) === "finished" && (s.last_activity_at || 0) > (seen[sessionKey(s)] || 0);
+}
+
+function markSeen(s) {
+  seen[sessionKey(s)] = Math.max(s.last_activity_at || 0, Date.now());
+  store.set("seen", seen);
+}
+
+function compare(a, b) {
+  if (sortBy === "name") return displayName(a).localeCompare(displayName(b), undefined, { sensitivity: "base" });
+  if (sortBy === "activity") return (b.last_activity_at || 0) - (a.last_activity_at || 0);
+  const sa = sessionState(a), sb = sessionState(b);
+  if (STATES[sa].rank !== STATES[sb].rank) return STATES[sa].rank - STATES[sb].rank;
+  if (sa === "finished" && isNew(a) !== isNew(b)) return isNew(a) ? -1 : 1;
+  return (b.last_activity_at || 0) - (a.last_activity_at || 0);
+}
+
+function matches(s, query) {
+  if (!query) return true;
+  const hay = [s.handle, s.tab_name, s.workspace_name, s.focus, s.last_prompt, s.branch, ...(s.links || []).map(l => l.label)].join(" ").toLowerCase();
+  return query.split(/\s+/).every(term => hay.includes(term));
+}
+
+function visibleSessions() {
+  const query = document.getElementById("search").value.trim().toLowerCase();
+  return state.sessions.filter(s => (filter === "all" || sessionState(s) === filter) && matches(s, query)
+    && (showOld || query || !isOld(s)) && (showRemote || !s.remote));
+}
+
+function attachRemote(session) {
+  if (session.conversation_id || session.instance_id) markSeen(session);
+  post("/api/remote/" + encodeURIComponent(session.remote.host) + "/" + encodeURIComponent(session.remote.tmux_id) + "/attach").then(r => {
+    toast(r.ok ? "Opened " + session.handle + " in a new tab" : "Could not attach: " + (r.detail || "error"));
+    render();
+  });
+}
+
+function jump(session) {
+  if (!session.surface) { toast("This session is not in an agterm tab"); return; }
+  markSeen(session);
+  post("/api/sessions/" + encodeURIComponent(session.surface) + "/jump").then(r => {
+    toast(r.ok ? "Switched to " + (session.tab_name || session.handle) : "Could not switch: " + (r.detail || "error"));
+    render();
+  });
+}
+
+function renderFilters() {
+  const counted = state.sessions.filter(s => showRemote || !s.remote);
+  const counts = { all: counted.length, permission: 0, finished: 0, working: 0, unknown: 0 };
+  for (const s of counted) counts[sessionState(s)]++;
+  const remotes = state.sessions.filter(s => s.remote);
+  document.getElementById("remote-label").hidden = !remotes.length;
+  const hosts = [...new Set(remotes.map(s => s.remote.host))].join(", ");
+  document.getElementById("remote-text").textContent = hosts + " (" + remotes.length + ")";
+  const box = document.getElementById("filters");
+  const chips = [["all", "All"], ...Object.entries(STATES).map(([k, v]) => [k, v.label])];
+  box.replaceChildren(...chips.filter(([k]) => k === "all" || counts[k] || filter === k).map(([key, label]) => {
+    const chip = el("span", "filter s-" + key + (filter === key ? " on" : ""));
+    if (key !== "all") chip.append(el("span", "dot"));
+    chip.append(el("span", "", label), el("span", "n", String(counts[key])));
+    chip.addEventListener("click", () => { filter = filter === key ? "all" : key; store.set("filter", filter); render(); });
+    return chip;
+  }));
+}
+
+function needRow(kind, cls, text, sourceLabel, session, actions, age_ms) {
+  const row = el("div", "need " + cls);
+  row.append(el("span", "kind", kind), typeof text === "string" ? el("span", "text", text) : text);
+  const src = el("span", "src");
+  if (session) {
+    const a = el("a", "", sourceLabel);
+    a.title = "Jump to this tab";
+    a.addEventListener("click", () => jump(session));
+    src.append(a);
+  } else if (sourceLabel) {
+    src.append(document.createTextNode(sourceLabel));
+  }
+  if (age_ms !== undefined) src.append(document.createTextNode(" · " + age(age_ms)));
+  const acts = el("span", "acts");
+  acts.append(...actions);
+  row.append(src, acts);
+  return row;
+}
+
+function handleButton(item) {
+  const pending = confirming.get(item.id);
+  const button = el("button", pending ? "confirm" : "", pending ? "Confirm handled" : "Mark handled");
+  button.addEventListener("click", async () => {
+    if (!confirming.get(item.id)) {
+      confirming.set(item.id, setTimeout(() => { confirming.delete(item.id); render(); }, 4000));
+      render();
+      return;
+    }
+    clearTimeout(confirming.get(item.id));
+    confirming.delete(item.id);
+    const r = await post("/api/items/" + item.id + "/resolve");
+    toast(r.ok ? "Marked handled — undo below" : "Already changed");
+    poll();
+  });
+  return button;
+}
+
+function renderNeeds() {
+  const bySurface = new Map(state.sessions.filter(s => s.surface).map(s => [s.surface, s]));
+  const rows = [];
+  for (const s of state.sessions.filter(s => sessionState(s) === "permission")) {
+    const jumpButton = el("button", "primary", "Jump");
+    jumpButton.addEventListener("click", () => jump(s));
+    rows.push(needRow("Permission", "permission", (s.focus || s.last_prompt || "waiting on a permission prompt"),
+      displayName(s), s, [jumpButton], state.now - (s.attention_at || state.now)));
+  }
+  for (const item of state.items.filter(isWaiting)) {
+    const session = item.surface ? bySurface.get(item.surface) : null;
+    const content = postContent(item);
+    if (item.source === "agent" && item.from_conversation) {
+      if (item.options && item.options.length) {
+        const options = el("div", "options");
+        for (const option of item.options) {
+          const button = el("button", "primary", option);
+          button.addEventListener("click", () => answerPost(item, option));
+          options.append(button);
+        }
+        content.append(options);
+      }
+      content.append(draftBox("item:" + item.id, item.options && item.options.length ? "Or answer in your own words" : "Answer", text => answerPost(item, text)));
+    }
+    const actions = [];
+    if (session) {
+      const jumpButton = el("button", "", "Jump");
+      jumpButton.addEventListener("click", () => jump(session));
+      actions.push(jumpButton);
+    }
+    actions.push(handleButton(item));
+    const kind = item.source === "overdue" ? "No answer" : (KIND_LABELS[item.kind] || item.severity);
+    const cls = item.source === "overdue" ? "overdue" : item.severity;
+    rows.push(needRow(kind, cls, content, nameOf(item.from_handle), session, actions, state.now - item.created_at));
+  }
+  for (const m of state.messages.filter(m => m.unread_for_user && !m.from_user)) {
+    const session = m.surface ? bySurface.get(m.surface) : null;
+    const content = el("div", "post");
+    content.append(clampedBody(m.body, "msg:" + m.id), draftBox("msg:" + m.id, "Reply", text => sendMessage([], text, m.id)));
+    const read = el("button", "", "Mark read");
+    read.addEventListener("click", async () => { await post("/api/messages/" + m.id + "/read"); poll(); });
+    const actions = [read];
+    if (session) {
+      const jumpButton = el("button", "", "Jump");
+      jumpButton.addEventListener("click", () => jump(session));
+      actions.unshift(jumpButton);
+    }
+    rows.push(needRow(m.kind === "reply" ? "Reply" : "Message", "action", content, nameOf(m.from_handle), session, actions, state.now - m.created_at));
+  }
+  const dismissed = store.get("dismissed", {});
+  const week = 7 * 86400000;
+  for (const [key, at] of Object.entries(dismissed)) if (Date.now() - at > week) delete dismissed[key];
+  store.set("dismissed", dismissed);
+  const SIGNAL_KINDS = { ready: "Ready", ci: "CI red", changes: "Changes", drift: "Tracker" };
+  for (const sig of (state.signals || []).filter(s => !dismissed[s.key])) {
+    const session = sig.surface ? bySurface.get(sig.surface) : null;
+    const actions = [];
+    if (sig.url) {
+      const open = el("a", "", "");
+      const button = el("button", sig.kind === "ready" ? "primary" : "", "Open");
+      open.href = sig.url; open.target = "_blank"; open.rel = "noopener";
+      open.append(button);
+      actions.push(open);
+    }
+    if (session) {
+      const jumpButton = el("button", "", "Jump");
+      jumpButton.addEventListener("click", () => jump(session));
+      actions.push(jumpButton);
+    }
+    const hide = el("button", "", "Dismiss");
+    hide.title = "Hide until this PR or issue changes";
+    hide.addEventListener("click", () => {
+      const current = store.get("dismissed", {});
+      current[sig.key] = Date.now();
+      store.set("dismissed", current);
+      render();
+    });
+    actions.push(hide);
+    rows.push(needRow(SIGNAL_KINDS[sig.kind] || sig.kind, sig.kind, sig.text, nameOf(sig.handle), session, actions));
+  }
+  for (const r of (state.remotes || []).filter(r => r.error)) {
+    const since = r.error_since ? state.now - r.error_since : undefined;
+    rows.push(needRow("Remote", "info", r.host + " unreachable: " + r.error + ". Its sessions show their last known state.", r.host, null, [], since));
+  }
+  for (const c of state.claims.filter(c => !c.live)) {
+    rows.push(needRow("Stale lock", "info", c.resource + " is still reserved by " + nameOf(c.holder_handle) + ", whose session ended; the next session that asks gets it.", "", null, [], state.now - c.acquired_at));
+  }
+  const box = document.getElementById("needs");
+  box.replaceChildren(...rows);
+  if (!rows.length) box.append(el("div", "empty", "Nothing needs you."));
+  document.getElementById("needs-hint").textContent = rows.length ? rows.length + " waiting on you" : "";
+}
+
+const KIND_LABELS = { blocked: "Blocked", decision: "Decision", done: "Done", insight: "Insight", info: "Note" };
+const TIMELINE_SHOWN = 8;
+const THREADS_SHOWN = 6;
+let timelineAll = false;
+let threadsAll = false;
+const replyOpen = new Set();
+
+function isWaiting(item) {
+  return !item.resolved_at && (item.severity === "blocker" || item.severity === "action");
+}
+
+// Expanded texts are remembered by key: the poll re-render would collapse them every 3 seconds.
+const unclamped = new Set();
+function clampedBody(text, key, cls = "body") {
+  const body = el("div", cls + (unclamped.has(key) ? "" : " clamp"), text);
+  body.title = "Click to expand or collapse";
+  body.addEventListener("click", () => {
+    if (unclamped.has(key)) unclamped.delete(key); else unclamped.add(key);
+    body.classList.toggle("clamp");
+  });
+  return body;
+}
+
+function postContent(item) {
+  const box = el("div", "post");
+  box.append(el("div", "title", item.text));
+  if (item.body) box.append(clampedBody(item.body, "item:" + item.id));
+  if (item.links && item.links.length) {
+    const links = el("div", "plinks");
+    for (const l of item.links) {
+      if (!/^https?:\/\//.test(l.url)) continue;
+      const a = el("a", "link pr", l.label);
+      a.href = l.url; a.target = "_blank"; a.rel = "noopener";
+      links.append(a);
+    }
+    box.append(links);
+  }
+  if (item.answer) box.append(el("div", "answer", "You answered: " + item.answer));
+  return box;
+}
+
+// News and settled questions, newest first: what the team did while you were elsewhere.
+function renderTimeline() {
+  const bySurface = new Map(state.sessions.filter(s => s.surface).map(s => [s.surface, s]));
+  const news = state.items.filter(i => !isWaiting(i))
+    .sort((a, b) => (b.answered_at || b.resolved_at || b.created_at) - (a.answered_at || a.resolved_at || a.created_at));
+  const shown = timelineAll ? news : news.slice(0, TIMELINE_SHOWN);
+  document.getElementById("timeline-head").hidden = !news.length;
+  document.getElementById("timeline").replaceChildren(...shown.map(item => {
+    const session = item.surface ? bySurface.get(item.surface) : null;
+    const actions = [];
+    if (session) {
+      const jumpButton = el("button", "", "Jump");
+      jumpButton.addEventListener("click", () => jump(session));
+      actions.push(jumpButton);
+    }
+    if (item.resolved_at && !item.answered_at && item.severity !== "info") {
+      const undo = el("button", "", "Undo");
+      undo.addEventListener("click", async () => { await post("/api/items/" + item.id + "/unresolve"); toast("Back in the feed"); poll(); });
+      actions.push(undo);
+    }
+    const cls = (item.kind === "done" ? "done-post" : item.kind || "info") + (item.resolved_at ? " resolved" : "");
+    const label = item.source === "overdue" ? "No answer" : (KIND_LABELS[item.kind] || item.severity);
+    return needRow(label, cls, postContent(item), nameOf(item.from_handle), session, actions, state.now - (item.answered_at || item.resolved_at || item.created_at));
+  }));
+  const more = document.getElementById("timeline-more");
+  more.hidden = news.length <= TIMELINE_SHOWN;
+  more.textContent = timelineAll ? "Show fewer" : "Show all " + news.length;
+}
+
+// Merged, closed and done refs are history: a row shows them only when expanded, after the live ones.
+function renderLinks(s) {
+  const box = el("div", "links");
+  const all = s.links || [];
+  const open = expanded.has(sessionKey(s));
+  const done = all.filter(l => l.done);
+  const shown = open ? [...all.filter(l => !l.done), ...done] : all.filter(l => !l.done);
+  for (const link of shown) {
+    const node = link.url ? el("a", "link mono " + link.kind, link.label) : el("span", "link mono nourl " + link.kind, link.label);
+    if (link.url) { node.href = link.url; node.target = "_blank"; node.rel = "noopener"; node.title = link.url; }
+    if (link.status) {
+      node.append(el("span", "st2 tone-" + link.status.tone, link.status.label));
+      node.title = (link.status.title ? link.status.title + "\n" : "") + (link.url || "");
+    }
+    if (link.done) node.classList.add("done");
+    node.addEventListener("click", e => e.stopPropagation());
+    box.append(node);
+  }
+  if (!open && done.length) {
+    const more = el("span", "link more", "+" + done.length + " done");
+    more.title = "Merged, closed or done; click the row to show";
+    box.append(more);
+  }
+  return box;
+}
+
+function copyButton(text) {
+  const b = el("button", "", "copy");
+  b.addEventListener("click", e => { e.stopPropagation(); navigator.clipboard.writeText(text).then(() => toast("Copied")); });
+  return b;
+}
+
+function renderDetails(s) {
+  const d = el("div", "details");
+  d.addEventListener("click", e => e.stopPropagation());
+  const add = (k, v, copy) => {
+    if (!v) return;
+    const value = el("div", "v", v);
+    if (copy) value.append(copyButton(v));
+    d.append(el("div", "k", k), value);
+  };
+  add("Last prompt", s.last_prompt);
+  add("Last reply", s.last_reply);
+  add("Focus set", s.focus_at ? age(state.now - s.focus_at) + " ago" : "never");
+  add("Directory", s.cwd);
+  add("Repo / branch", s.repo ? s.repo + " · " + (s.branch || "") : s.branch);
+  add("Reservations", (s.claims || []).join(", "));
+  add("Agent messages", (s.unread || s.open_requests) ? s.unread + " not yet seen by the agent, " + s.open_requests + " requests it is working on" : "");
+  add("Conversation", s.conversation_id, true);
+  add("Restore command", s.restore_command, true);
+  if (s.remote) add("Remote", s.remote.host + " · tmux " + s.remote.tmux_id + " · seen " + age(state.now - s.remote.observed_at) + " ago");
+  add("Turns seen", String(s.turns));
+  return d;
+}
+
+function renderRow(s) {
+  const st = sessionState(s);
+  const row = el("div", "row s-" + st + (selected === sessionKey(s) ? " selected" : ""));
+  row.dataset.key = sessionKey(s);
+  const since = st === "permission" ? s.attention_at : s.last_activity_at;
+  const ident = el("div", "ident");
+  const name = el("div", "name");
+  const dot = el("span", "dot");
+  dot.title = STATES[st].label + (since ? " · " + age(state.now - since) : "");
+  const title = el("b", "", displayName(s));
+  if (s.handle) title.title = "bridge handle: " + s.handle;
+  name.append(dot, title);
+  if (s.agent && s.agent !== "claude") name.append(el("span", "agent", s.agent));
+  if (isNew(s)) name.append(el("span", "new", "new"));
+  ident.append(name);
+  const meta = [
+    since ? age(state.now - since) : null,
+    s.context_tokens ? Math.round(s.context_tokens / 1000) + "k ctx" : null,
+    s.tab_name && s.tab_name !== displayName(s) ? s.tab_name : null,
+    grouped ? null : s.workspace_name,
+  ].filter(Boolean).join(" · ");
+  if (meta) ident.append(el("div", "meta", meta));
+
+  const task = el("div", "task");
+  if (s.focus) task.append(el("div", "what", s.focus));
+  else if (s.last_prompt) task.append(el("div", "what prompt", "» " + s.last_prompt));
+  else task.append(el("div", "what prompt", "No activity seen yet"));
+  if (s.last_reply) task.append(el("div", "reply", s.last_reply));
+  const flags = el("div", "flags");
+  if (s.open_requests) flags.append(el("span", "flag", s.open_requests + " request" + (s.open_requests > 1 ? "s" : "") + " from agents in progress"));
+  if (s.unread) flags.append(el("span", "flag", s.unread + " agent message" + (s.unread > 1 ? "s" : "") + " not yet seen"));
+  for (const c of s.claims || []) flags.append(el("span", "flag", "reserves " + c));
+  for (const d of s.drives || []) {
+    const chip = el("span", "flag drives s-" + sessionState({ status: d.status }), "");
+    chip.append(el("span", "dot"), document.createTextNode(" drives " + d.handle + (d.agent && d.agent !== "claude" ? " (" + d.agent + ")" : "") + " · " + age(state.now - d.used_at) + " ago"));
+    chip.title = "Click to attach to " + d.handle;
+    chip.addEventListener("click", e => { e.stopPropagation(); attachRemote({ handle: d.handle, remote: { host: d.host, tmux_id: d.tmux_id } }); });
+    flags.append(chip);
+  }
+  if ((s.driven_by || []).length) flags.append(el("span", "flag driven", "driven by " + s.driven_by.map(nameOf).join(", ")));
+  if (flags.childElementCount) task.append(flags);
+
+  const actions = el("div", "acts-col");
+  if (s.remote) {
+    const attach = el("button", "", "Attach");
+    attach.title = "Open a new agterm tab: ssh " + s.remote.host + " + tmux attach (Enter)";
+    attach.addEventListener("click", e => { e.stopPropagation(); attachRemote(s); });
+    actions.append(attach);
+  } else {
+    const jumpButton = el("button", "", "Jump");
+    jumpButton.disabled = !s.surface;
+    jumpButton.title = s.surface ? "Switch agterm to this tab (Enter)" : "Not in an agterm tab";
+    jumpButton.addEventListener("click", e => { e.stopPropagation(); jump(s); });
+    actions.append(jumpButton);
+  }
+
+  row.append(ident, task, renderLinks(s), actions);
+  if (expanded.has(sessionKey(s))) row.append(renderDetails(s));
+  row.addEventListener("click", () => {
+    selected = sessionKey(s);
+    if (expanded.has(selected)) expanded.delete(selected); else { expanded.add(selected); markSeen(s); }
+    render();
+  });
+  return row;
+}
+
+function renderSessions() {
+  let sessions = visibleSessions();
+  const byKey = new Map(sessions.map(s => [sessionKey(s), s]));
+  if (pointerInList && order.length) {
+    // Keep rows where they are while the pointer is over the list; new ones go to the end.
+    const kept = order.filter(k => byKey.has(k)).map(k => byKey.get(k));
+    sessions = kept.concat(sessions.filter(s => !order.includes(sessionKey(s))));
+  } else {
+    sessions.sort(compare);
+  }
+  order = sessions.map(sessionKey);
+  const list = document.getElementById("sessions");
+  const nodes = [];
+  if (grouped) {
+    const groups = new Map();
+    for (const s of sessions) {
+      const name = s.workspace_name || "Outside agterm";
+      if (!groups.has(name)) groups.set(name, []);
+      groups.get(name).push(s);
+    }
+    for (const [name, members] of groups) {
+      nodes.push(el("div", "group", name + " · " + members.length));
+      nodes.push(...members.map(renderRow));
+    }
+  } else {
+    nodes.push(...sessions.map(renderRow));
+  }
+  list.replaceChildren(...nodes);
+  if (!sessions.length) list.append(el("div", "empty", state.sessions.length ? "No session matches." : "No live sessions."));
+  document.getElementById("sort-hint").textContent = SORT_HINTS[sortBy];
+  const hiddenOld = state.sessions.filter(isOld).length;
+  const toggle = document.getElementById("old-toggle");
+  toggle.hidden = !hiddenOld;
+  toggle.textContent = showOld ? "Hide sessions idle over 3 days" : "Show " + hiddenOld + " sessions idle over 3 days";
+}
+
+function renderBoard() {
+  const claims = state.claims;
+  document.getElementById("coord-summary").textContent = "Reservations · " + claims.length;
+  const claimBox = document.getElementById("claims");
+  claimBox.replaceChildren(...claims.map(c => {
+    const row = el("div", "claim");
+    const name = c.url ? el("a", "mono", c.resource) : el("span", "mono", c.resource);
+    if (c.url) { name.href = c.url; name.target = "_blank"; name.rel = "noopener"; }
+    row.append(name);
+    const bits = ["by " + nameOf(c.holder_handle), age(state.now - c.acquired_at) + " ago"];
+    if (!c.live) bits.push("session ended"); else if (c.expires_at < state.now) bits.push("past its time limit");
+    if (c.reason) bits.push(c.reason);
+    row.append(el("div", "h", bits.join(" · ")));
+    return row;
+  }));
+  if (!claims.length) claimBox.append(el("div", "empty", "Nothing reserved."));
+
+  const threads = new Map();
+  for (const m of state.messages) {
+    if (!threads.has(m.thread_id)) threads.set(m.thread_id, []);
+    threads.get(m.thread_id).push(m);
+  }
+  const openRequests = state.messages.filter(m => m.kind === "request" && !m.cancelled_at && /:(queued|delivered|acked)/.test(m.recipients || "")).length;
+  document.getElementById("board-hint").textContent = openRequests ? openRequests + " open request" + (openRequests === 1 ? "" : "s") : "";
+  const threadBox = document.getElementById("threads");
+  const allThreads = [...threads.entries()];
+  const more = document.getElementById("threads-more");
+  more.hidden = allThreads.length <= THREADS_SHOWN;
+  more.textContent = threadsAll ? "Show fewer" : "Show all " + allThreads.length + " threads";
+  threadBox.replaceChildren(...(threadsAll ? allThreads : allThreads.slice(0, THREADS_SHOWN)).map(([threadId, messages]) => {
+    const t = el("div", "thread");
+    for (const m of messages) {
+      const node = el("div", "msg" + (m.from_user ? " mine" : ""));
+      const head = el("div", "h");
+      head.append(el("b", "", m.from_user ? "You" : nameOf(m.from_handle)));
+      head.append(document.createTextNode(m.kind === "reply" ? " replied" : m.kind === "request" ? " asked" : m.board ? " posted" : " said"));
+      for (const part of (m.recipients || "").split(" ").filter(Boolean)) {
+        const [handle, st] = part.split(":");
+        head.append(document.createTextNode(" → " + (handle === state.user ? "you" : nameOf(handle))));
+        head.append(el("span", "st " + st, st));
+      }
+      if (m.topic) head.append(el("span", "topic", m.topic));
+      if (m.cancelled_at) head.append(el("span", "st cancelled", "cancelled"));
+      head.append(document.createTextNode(" · " + age(state.now - m.created_at) + " ago"));
+      node.append(head, clampedBody(m.body, "msg:" + m.id, "b"));
+      t.append(node);
+    }
+    const last = messages[messages.length - 1];
+    const key = "thread:" + threadId;
+    if (replyOpen.has(key) || drafts.get(key)) {
+      t.append(draftBox(key, "Reply in this thread", async text => {
+        const r = await sendMessage([], text, last.id);
+        if (r.ok) replyOpen.delete(key);
+        return r;
+      }));
+    } else {
+      const reply = el("button", "reply-toggle", "Reply");
+      reply.addEventListener("click", () => {
+        replyOpen.add(key);
+        renderBoard();
+        document.querySelector('textarea[data-draft="' + CSS.escape(key) + '"]')?.focus();
+      });
+      t.append(reply);
+    }
+    return t;
+  }));
+  if (!threads.size) threadBox.append(el("div", "empty", "Nothing on the board yet."));
+  renderComposeTargets();
+}
+
+function renderComposeTargets() {
+  const select = document.getElementById("compose-to");
+  const live = state.sessions.filter(s => !s.remote && s.handle && s.status !== "ended")
+    .sort((a, b) => displayName(a).localeCompare(displayName(b)));
+  const key = live.map(s => s.surface + "=" + s.handle).join(",");
+  if (select.dataset.key === key) return;
+  // The choice is the tab, not its handle: a renamed tab keeps it, and a tab that takes the old name does not.
+  const current = select.value;
+  const chosen = select.selectedOptions[0];
+  const everyone = el("option", "", "Everyone");
+  everyone.value = "";
+  select.replaceChildren(everyone, ...live.map(s => {
+    const option = el("option", "", "→ " + displayName(s));
+    option.value = s.surface || s.handle;
+    option.dataset.handle = s.handle;
+    return option;
+  }));
+  if (current && !live.some(s => (s.surface || s.handle) === current)) {
+    // Keep a chosen recipient that went away: falling back to Everyone would send the draft to the whole team.
+    const gone = el("option", "", (chosen ? chosen.textContent.replace(/ \(not live\)$/, "") : "→ " + current) + " (not live)");
+    gone.value = current;
+    select.append(gone);
+  }
+  select.value = current;
+  select.dataset.key = key;
+}
+
+let composing = false;
+async function sendCompose() {
+  const input = document.getElementById("compose-text");
+  const sent = input.value;
+  if (composing || !sent.trim()) return;
+  composing = true;
+  try {
+    const option = document.getElementById("compose-to").selectedOptions[0];
+    const to = option && option.value ? option.dataset.handle : "";
+    if (option && option.value && !to) {
+      // Its old handle may belong to another tab by now.
+      toast("That tab is gone: pick another recipient");
+      return;
+    }
+    const r = await sendMessage(to ? [to] : [], sent.trim(), null);
+    if (r.ok && input.value === sent) input.value = "";
+  } finally {
+    composing = false;
+  }
+}
+
+// A re-render replaces nodes; skipping it while you type keeps focus and the caret.
+function editing(id) {
+  const active = document.activeElement;
+  return !!active && active.tagName === "TEXTAREA" && document.getElementById(id).contains(active);
+}
+
+function render() {
+  if (!state) return;
+  if (seen === null) {
+    // First visit: everything counts as seen, so "new" means new since you started using the page.
+    seen = {};
+    for (const s of state.sessions) seen[sessionKey(s)] = s.last_activity_at || 0;
+    store.set("seen", seen);
+  }
+  noteFirstSight(state.sessions);
+  renderFilters();
+  if (!editing("needs")) renderNeeds();
+  renderTimeline();
+  renderSessions();
+  if (!editing("threads")) renderBoard();
+}
+
+async function poll() {
+  try {
+    const response = await fetch("/api/state", { cache: "no-store" });
+    if (!response.ok) throw new Error(response.status);
+    state = await response.json();
+    lastOk = Date.now();
+    lastFailed = false;
+    render();
+  } catch (e) {
+    lastFailed = true;
+  }
+  tick();
+}
+
+
+function tick() {
+  const node = document.getElementById("updated");
+  if (!lastOk && !lastFailed) return;
+  const now = Date.now();
+  const lines = [lastOk ? "Dashboard data: " + age(now - lastOk) + " ago" : "Dashboard data: never loaded"];
+  let level = "", label = "live";
+  if (lastFailed || !lastOk || now - lastOk > POLL_MS * 3) {
+    level = "error"; label = "offline";
+    lines.push("The bridge service does not answer; showing the last data it sent.");
+  }
+  const hooks = state && state.hooks;
+  if (hooks && hooks.last_turn_at) {
+    lines.push("Claude Code hooks: last reached bridge " + (hooks.last_hook_at ? age(now - hooks.last_hook_at) + " ago" : "never"));
+  }
+  if (!level && hooks && hooks.silent) {
+    level = "error"; label = "Hooks silent";
+    lines.push("Sessions talked " + age(now - hooks.last_turn_at) + " ago, but no hook reached bridge after that: check the bridge-hook entries in ~/.claude/settings.json. Without them bridge sees no context, prompts or replies.");
+  }
+  for (const [name, f] of Object.entries((state && state.freshness) || {})) {
+    if (!f.watched) continue;
+    const title = name === "github" ? "GitHub" : "Tracker";
+    const checked = f.newest_ok_at ? age(now - f.newest_ok_at) + " ago" : "never";
+    lines.push(title + ": last answer " + checked + (f.failing ? "; " + f.failing + " of " + f.watched + " links not found or no access (hidden)" : ""));
+    if (!level && (!f.newest_ok_at || now - f.newest_ok_at > PROVIDER_STALE_MS)) { level = "warn"; label = title + " stale"; }
+  }
+  node.className = "updated" + (level ? " " + level : "");
+  node.replaceChildren(el("span", "dot"), document.createTextNode(label));
+  node.title = lines.join("\n");
+}
+
+function nextNeedingYou() {
+  const candidates = state.sessions.slice().sort((a, b) => {
+    const sa = sessionState(a), sb = sessionState(b);
+    return STATES[sa].rank - STATES[sb].rank || (isNew(b) - isNew(a)) || (b.last_activity_at || 0) - (a.last_activity_at || 0);
+  }).filter(s => sessionState(s) === "permission" || isNew(s));
+  if (!candidates.length) { toast("Nothing new needs you"); return; }
+  selected = sessionKey(candidates[0]);
+  jump(candidates[0]);
+}
+
+function moveSelection(delta) {
+  if (!order.length) return;
+  const index = Math.max(0, Math.min(order.length - 1, order.indexOf(selected) + delta));
+  selected = order[index];
+  render();
+  document.querySelector('.row[data-key="' + CSS.escape(selected) + '"]')?.scrollIntoView({ block: "nearest" });
+}
+
+document.getElementById("search").addEventListener("input", render);
+const sortSelect = document.getElementById("sort");
+sortSelect.value = sortBy;
+sortSelect.addEventListener("change", () => { sortBy = sortSelect.value; store.set("sort", sortBy); render(); });
+const remoteBox = document.getElementById("remote");
+remoteBox.checked = showRemote;
+remoteBox.addEventListener("change", () => { showRemote = remoteBox.checked; store.set("showRemote", showRemote); render(); });
+const groupBox = document.getElementById("group");
+groupBox.checked = grouped;
+groupBox.addEventListener("change", () => { grouped = groupBox.checked; store.set("group", grouped); render(); });
+document.getElementById("old-toggle").addEventListener("click", () => { showOld = !showOld; store.set("showOld", showOld); render(); });
+document.getElementById("timeline-more").addEventListener("click", () => { timelineAll = !timelineAll; render(); });
+document.getElementById("threads-more").addEventListener("click", () => { threadsAll = !threadsAll; render(); });
+document.getElementById("compose-send").addEventListener("click", sendCompose);
+document.getElementById("compose-text").addEventListener("keydown", e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendCompose(); } });
+const list = document.getElementById("sessions");
+list.addEventListener("mouseenter", () => { pointerInList = true; });
+list.addEventListener("mouseleave", () => { pointerInList = false; render(); });
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "BUTTON" && (e.key === "Enter" || e.key === " ")) return;
+  if (e.target.tagName === "TEXTAREA") {
+    if (e.key === "Escape") e.target.blur();
+    return;
+  }
+  if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") {
+    if (e.key === "Escape") { e.target.value = ""; e.target.blur(); render(); }
+    return;
+  }
+  const current = state && state.sessions.find(s => sessionKey(s) === selected);
+  if (e.key === "/") { e.preventDefault(); document.getElementById("search").focus(); }
+  else if (e.key === "j") moveSelection(1);
+  else if (e.key === "k") moveSelection(-1);
+  else if (e.key === "Enter" && current) (current.remote ? attachRemote : jump)(current);
+  else if (e.key === "o" && current) { if (expanded.has(selected)) expanded.delete(selected); else { expanded.add(selected); markSeen(current); } render(); }
+  else if (e.key === "n") nextNeedingYou();
+  else if (e.key === "Escape") { selected = null; expanded.clear(); render(); }
+});
+
+poll();
+setInterval(poll, POLL_MS);
+setInterval(tick, 1000);
+</script>
+</body>
+</html>
