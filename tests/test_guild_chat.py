@@ -1126,7 +1126,8 @@ def test_guild_worker_stores_the_parent_link_before_any_reconcile(
             "VALUES ('boris', 'Boris', 's', '[]', 'blue', 0)"
         )
     raw = json.loads(bridge_env.stub_tree.read_text())
-    raw["result"]["tree"]["workspaces"][0]["sessions"].append({"id": "TAB-W", "name": "Task", "status": "active"})
+    tab = {"id": "TAB-W", "name": "Task", "status": "active", "surfaces": [{"paneID": "PANE-W"}]}
+    raw["result"]["tree"]["workspaces"][0]["sessions"].append(tab)
     bridge_env.stub_tree.write_text(json.dumps(raw))
     env = dict(bridge_env.env, CLAUDE_PID=str(team.a), AGTERM_SESSION_ID="TAB-A")
 
@@ -1146,6 +1147,22 @@ def test_guild_worker_stores_the_parent_link_before_any_reconcile(
     assert "No browser use" in brief
     assert "OBSERVED (it happened to a real user" in brief and "say who would hit it and when" in brief
     assert "review doc follows ~/.claude/skills/bridge/review-doc.md" in brief
+    assert brief.startswith("# The Guild constitution") and "## 4. Signal hygiene" in brief
+    assert brief.index("# Your task") > brief.index("## 4. Signal hygiene")
+
+    worker = spawn_process(env={"AGTERM_PANE_ID": "PANE-W", "AGTERM_SESSION_ID": "TAB-W"})
+    bridge_env.write_session_file(worker, "conv-w")
+    started = _start_context(bridge_env, worker, "conv-w", "startup")
+    compacted = _start_context(bridge_env, worker, "conv-w", "compact")
+    assert "# The Guild constitution" not in started, "at startup the brief carries it"
+    assert "# The Guild constitution" in compacted and "## 4. Signal hygiene" in compacted
+
+
+def _start_context(bridge_env: BridgeEnv, pid: int, conv: str, source: str) -> str:
+    payload = {"session_id": conv, "cwd": str(bridge_env.root), "source": source}
+    env = {"AGTERM_PANE_ID": "PANE-W", "AGTERM_SESSION_ID": "TAB-W"}
+    out = bridge_env.hook("SessionStart", payload, pid, env).stdout
+    return str(json.loads(out)["hookSpecificOutput"]["additionalContext"]) if out.strip() else ""
 
 
 def test_new_tab_first_message_carries_its_handle_not_its_pid(

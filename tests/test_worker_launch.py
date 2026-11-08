@@ -101,7 +101,7 @@ def test_guild_worker_starts_claude_without_chrome_and_briefs_it_on_the_browser(
     brief_path = re.search(r"Your brief is in (\S+\.md)", launch)
     assert brief_path is not None
     brief = Path(brief_path.group(1)).read_text()
-    assert brief.startswith("Fix the thing\n")
+    assert brief.startswith("# The Guild constitution") and "# Your task\n\nFix the thing\n" in brief
     assert BROWSER_RULE in brief
     assert "gets a Codex review and a Claude review" in brief and "section headed Reviews" in brief
 

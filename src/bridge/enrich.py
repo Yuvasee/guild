@@ -6,6 +6,7 @@ from typing import cast
 
 from bridge.config import Config
 from bridge.db import transaction
+from bridge.feed_autoresolve import list_open_item_prs
 from bridge.registry import RECENT_REF_TURNS, current_ref_sql
 from bridge.trackers import IssueStatus, LinkedPr, load_tracker
 
@@ -16,7 +17,7 @@ STALE_AFTER_MS = 600_000
 BATCH_SIZE = 40
 _PR_FIELDS = """
   number title state isDraft url headRefName headRefOid baseRefName reviewDecision mergeable
-  mergeStateStatus isInMergeQueue updatedAt viewerDidAuthor author { login }
+  mergeStateStatus isInMergeQueue updatedAt closedAt viewerDidAuthor author { login }
   baseRef { associatedPullRequests(states: OPEN, first: 1) { totalCount } }
   commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
 """
@@ -46,6 +47,8 @@ class PrStatus:
     author: str = ""
     mine: bool = False
     """The user's gh account opened it; anyone else's PR is theirs to merge and fix."""
+    closed_at: str = ""
+    """When it was merged or closed; empty while open."""
 
 
 __all__ = ["IssueStatus", "LinkedPr", "PrStatus"]
@@ -54,8 +57,9 @@ Results = dict[str, PrStatus | IssueStatus | str]
 
 
 def enrich_due(conn: sqlite3.Connection, config: Config, at_ms: int, force: bool = False) -> dict[str, int]:
-    """Refreshes GitHub and tracker state for refs that live sessions or claims point at; each fails on its own."""
-    refs = collect_watched_refs(conn)
+    """Refreshes GitHub and tracker state for refs that live sessions, claims or open blocked posts point at; each
+    fails on its own."""
+    refs = collect_watched_refs(conn, config)
     fetched = {
         str(r["ref"]): (int(r["fetched_at"]), r["error"] is not None)
         for r in conn.execute("SELECT ref, fetched_at, error FROM enrichment")
@@ -105,7 +109,7 @@ def store_results(conn: sqlite3.Connection, results: Results, at_ms: int) -> Non
                 )
 
 
-def collect_watched_refs(conn: sqlite3.Connection) -> list[str]:
+def collect_watched_refs(conn: sqlite3.Connection, config: Config) -> list[str]:
     rows = conn.execute(
         f"""
         SELECT DISTINCT r.ref FROM refs r
@@ -123,7 +127,7 @@ def collect_watched_refs(conn: sqlite3.Connection) -> list[str]:
         WHERE w.done_at IS NULL AND (r.value LIKE 'pr:%' OR r.value LIKE 'issue:%')
         """
     ).fetchall()
-    return sorted(str(r[0]) for r in rows)
+    return sorted({*(str(r[0]) for r in rows), *list_open_item_prs(conn, config)})
 
 
 def fetch_prs(refs: list[str]) -> Results:
@@ -186,6 +190,7 @@ def map_node_to_pr(node: dict[str, object]) -> PrStatus:
         updated_at=str(_get(node, "updatedAt") or ""),
         author=str(_get(_get(node, "author"), "login") or ""),
         mine=_get(node, "viewerDidAuthor") is True,
+        closed_at=str(_get(node, "closedAt") or ""),
     )
 
 

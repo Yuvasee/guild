@@ -212,12 +212,12 @@ def test_work_chunks_are_declared_updated_finished_and_watched(
     outsider = team.guild("work", "set", "Mine", pid=team.b)
     by_name = team.guild("work", "set", "Seeded", "ABC-8", "--lead", "alex", pid=team.b)
     with bridge_env.connect() as conn:
-        watched = collect_watched_refs(conn)
+        watched = collect_watched_refs(conn, Config())
     listed = team.guild("work", "list", pid=team.a)
     done = team.guild("work", "done", "EXPORT WORKER", pid=team.a)
     again = team.guild("work", "done", "Export worker", pid=team.a)
     with bridge_env.connect() as conn:
-        after = collect_watched_refs(conn)
+        after = collect_watched_refs(conn, Config())
     back = team.guild("work", "set", "Export worker", pid=team.a)
 
     assert first.returncode == renamed.returncode == keep_refs.returncode == by_name.returncode == 0

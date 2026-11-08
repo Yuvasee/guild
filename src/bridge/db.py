@@ -640,6 +640,10 @@ MIGRATIONS: tuple[str, ...] = (
     """
     ALTER TABLE asks ADD COLUMN wait_until INTEGER;
     """,
+    """
+    ALTER TABLE user_items ADD COLUMN resolved_why TEXT;
+    ALTER TABLE user_items ADD COLUMN auto_resolve_off INTEGER NOT NULL DEFAULT 0;
+    """,
 )
 
 HOOK_BUSY_TIMEOUT_MS = 200

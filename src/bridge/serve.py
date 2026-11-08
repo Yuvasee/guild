@@ -54,6 +54,7 @@ from bridge.feed import (
     take_new_undelivered_tabs,
     tell_of_undelivered_tab,
 )
+from bridge.feed_autoresolve import resolve_settled_items
 from bridge.guard import sync_claims_flag
 from bridge.guildview import map_db_to_guild, post_signals_to_leads
 from bridge.health import check_hooks
@@ -377,6 +378,7 @@ class DashboardState:
             try:
                 with self._connection() as conn:
                     enrich_due(conn, self.config, now_ms())
+                    resolve_settled_items(conn, self.config, now_ms())
             except (sqlite3.Error, OSError, ValueError) as exc:
                 print(f"enrichment failed: {exc}", flush=True)
             time.sleep(ENRICH_EVERY_S)
@@ -513,9 +515,14 @@ class DashboardState:
         with self._connection() as conn, transaction(conn):
             if resolved and dismiss_undelivered_answer(conn, item_id, now_ms()):
                 return True
+            # Put back by the owner, it stays: bridge does not resolve it again on its own.
             cursor = conn.execute(
-                "UPDATE user_items SET resolved_at = ? WHERE id = ? AND (resolved_at IS NULL) = ?",
-                (now_ms() if resolved else None, item_id, resolved),
+                """
+                UPDATE user_items SET resolved_at = ?1, resolved_why = NULL,
+                    auto_resolve_off = CASE WHEN ?2 THEN auto_resolve_off ELSE 1 END
+                WHERE id = ?3 AND (resolved_at IS NULL) = ?2
+                """,
+                (now_ms() if resolved else None, resolved, item_id),
             )
             return cursor.rowcount > 0
 
@@ -669,7 +676,7 @@ def map_db_to_snapshot(conn: sqlite3.Connection, config: Config, now: int) -> di
         for r in conn.execute(
             """
             SELECT id, created_at, from_conversation, from_handle, severity, text, source, message_id, resolved_at,
-                   kind, body, links, options, answer, answered_at
+                   resolved_why, kind, body, links, options, answer, answered_at
             FROM user_items
             WHERE created_at > ? OR resolved_at > ? OR (resolved_at IS NULL AND severity != 'info')
             ORDER BY severity = 'blocker' DESC, severity = 'action' DESC, created_at DESC
@@ -770,7 +777,7 @@ def map_db_to_snapshot(conn: sqlite3.Connection, config: Config, now: int) -> di
         "messages": messages,
         "claims": claims,
         "signals": [map_signal_to_dict(s) for s in signals],
-        "freshness": provider_freshness(enrichment, collect_watched_refs(conn)),
+        "freshness": provider_freshness(enrichment, collect_watched_refs(conn, config)),
         "hooks": asdict(check_hooks(conn, now)),
         "user": config.user_alias or "user",
         "remotes": [dict(r) for r in conn.execute("SELECT * FROM remote_hosts ORDER BY host")],

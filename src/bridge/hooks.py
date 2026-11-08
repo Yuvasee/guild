@@ -53,6 +53,7 @@ from bridge.leads import (
     forget_assistant_role,
     forget_lead_role,
     is_conversation_locked,
+    is_surface_locked,
     take_assistant_role,
     take_lead_role,
 )
@@ -88,8 +89,10 @@ from bridge.start_context import (
     convert_lead_to_parts,
     finish_taken_start,
     has_pending_start,
+    is_nested_tab,
     map_packed_to_keep_status,
     put_back_taken_start,
+    read_constitution_part,
     read_start_parts,
     take_pending_start,
     write_pending_start,
@@ -265,6 +268,7 @@ def handle_hook(
     start_recorded = False
     contexts: list[str] = []
     restored: Part | None = None
+    worker_compacted = False
     packed: Packed | None = None
     surface = observation.surface.surface if observation.surface else None
     drive: str | None = None
@@ -313,6 +317,7 @@ def handle_hook(
                 kept = load_keep(conn, conversation_id)
                 if kept:
                     restored = convert_keep_to_part(kept[0], kept[1], at_ms)
+                worker_compacted = not is_surface_locked(conn, config, surface) and is_nested_tab(conn, surface)
             if config.pin_restore and not nested and source in _PIN_SOURCES and env.get("AGTERM_SESSION_ID"):
                 pin_conversation = conversation_id
         elif event == "UserPromptSubmit" and conversation_id and is_harness_prompt(text or ""):
@@ -396,6 +401,9 @@ def handle_hook(
                     parts += convert_lead_to_parts(lead, config)
                 if take_assistant_role(conn, config, surface, conversation_id) and give_roles:
                     parts += convert_assistant_to_parts(conn, config)
+                elif worker_compacted and not lead and give_roles:
+                    # A worker read the constitution in its brief; compaction drops it, so it comes back here.
+                    parts.append(read_constitution_part())
             packed = pack_parts([*parts, *(Part(c) for c in contexts)])
             if owner and conversation_id and packed.room < _MAIL_MIN_ROOM:
                 # Taking mail marks it offered; with no room it waits for the next event instead.

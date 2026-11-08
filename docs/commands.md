@@ -202,7 +202,7 @@ options:
 </details>
 
 <details>
-<summary><b>Your feed and the team board</b>: <code>post</code>, <code>tell-user</code>, <code>board</code></summary>
+<summary><b>Your feed and the team board</b>: <code>post</code>, <code>tell-user</code>, <code>board</code>, <code>settle-feed</code></summary>
 
 ### bridge post
 
@@ -260,6 +260,18 @@ options:
                         what kind of post this is
   --thread THREAD       an issue or PR id; posts with the same id form a thread
   --link LINK           the PR, issue or doc this post points to
+```
+
+### bridge settle-feed
+
+resolve open blocked/decision posts whose one PR has ended, as serve does
+
+```text
+usage: bridge settle-feed [-h] [--dry-run]
+
+options:
+  -h, --help  show this help message and exit
+  --dry-run   list what would resolve; the database is not written
 ```
 
 </details>

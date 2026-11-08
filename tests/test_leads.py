@@ -270,9 +270,12 @@ def test_role_comes_with_every_start_and_once_per_conversation(
     assert "You are Alex, a team lead" in running
     assert "Data readiness (tracker: P-PROJ-41)" in running
     assert "[guild]" not in quiet
-    for start in (compacted, resumed, cleared):
+    for start in (running, compacted, resumed, cleared):
         assert "You are Alex, a team lead" in start
+        assert "# The Guild constitution" in start and "## 4. Signal hygiene" in start
+    assert start.index("# The Guild constitution") < start.index("You are Alex, a team lead")
     assert "[guild]" not in other_tab
+    assert "The Guild constitution" not in other_tab
 
 
 def test_notes_outlive_the_conversation_and_are_cut_to_budget(
@@ -286,7 +289,9 @@ def test_notes_outlive_the_conversation_and_are_cut_to_budget(
     with_notes = team.start(team.a, "conv-a2", "clear")
     outsider = team.guild("notes", "--write", pid=team.b, stdin="x")
     too_long = team.guild("notes", "--write", pid=team.a, stdin="é" * 5000)
-    long_notes = team.start(team.a, "conv-a2", "resume")
+    long_start = team.start(team.a, "conv-a2", "resume")
+    # The constitution and the role come first; notes this long wait for the next event.
+    long_notes = long_start + team.prompt(team.a, "conv-a2", "next")
 
     assert "start here: make an honest pass" in empty
     assert saved.returncode == 0, saved.stderr
@@ -298,7 +303,7 @@ def test_notes_outlive_the_conversation_and_are_cut_to_budget(
     assert "Rewrite them shorter with `guild notes --write`" in long_notes
     (bridge_env.state_dir / "leads" / "alex" / "notes.md").write_bytes(b"caf\xff notes")
     assert "caf\ufffd notes" in team.start(team.a, "conv-a2", "resume")
-    assert measure_chars(long_notes) <= INJECT_MAX_CHARS
+    assert measure_chars(long_start) <= INJECT_MAX_CHARS
 
 
 def test_notes_over_the_limit_reach_the_lead_from_their_newest_end(
@@ -309,7 +314,8 @@ def test_notes_over_the_limit_reach_the_lead_from_their_newest_end(
     lines = [f"- Rule {i:03}: answer on the issue, relayed by the assistant, before anything else." for i in range(200)]
     team.guild("notes", "--write", pid=team.a, stdin="\n".join(lines) + "\n")
 
-    notes = team.start(team.a, "conv-a2", "clear").split("Their last ", 1)[1]
+    start = team.start(team.a, "conv-a2", "clear")
+    notes = (start + team.prompt(team.a, "conv-a2", "next")).split("Their last ", 1)[1]
 
     assert "- Rule 199:" in notes
     assert "- Rule 000:" not in notes
@@ -349,7 +355,8 @@ def test_the_worst_case_stays_under_claude_codes_limit_and_nothing_waits_unsaid(
         assert measure_chars(message) <= INJECT_MAX_CHARS
     assert keep.strip() in compacted, "the saved list comes first and whole"
     assert "Left out of this message to stay under Claude Code's 10,000-character limit" in compacted
-    assert "Rule (239" in compacted + following, "the newest notes line reaches the lead"
+    assert "# The Guild constitution" in compacted + following
+    assert "Rule (239" in compacted + following + after, "the newest notes line reaches the lead"
     assert "PROJ-34 is yours now" in compacted + following + after
     assert "Left out of this message" not in after
 
@@ -464,11 +471,13 @@ def test_assistant_role_comes_with_every_start_and_keeps_its_notes(
     assert "[guild]" not in quiet
     assert saved.returncode == 0, saved.stderr
     assert (bridge_env.state_dir / "assistant" / "notes.md").exists()
-    for start in (compacted, resumed, cleared):
+    for start in (running, compacted, resumed, cleared):
         assert "Right Hand" in start
+        assert "# The Guild constitution" in start and "## 4. Signal hygiene" in start
+    for start in (compacted, resumed, cleared):
         assert "Sam prefers one question at a time." in start
     assert "Right Hand" not in lead_start
-    assert len(running) <= ASSISTANT_ROLE_MAX_CHARS
+    assert len(running[running.index("[guild] You are Aide") :]) <= ASSISTANT_ROLE_MAX_CHARS
 
 
 def test_assistant_role_names_the_owner_and_the_words_from_config() -> None:

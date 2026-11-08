@@ -81,6 +81,7 @@ from bridge.review_post import (
 )
 from bridge.review_worktree import DocError, register_doc
 from bridge.reviews import map_db_to_reviews
+from bridge.start_context import CONSTITUTION_PATH
 from bridge.tabinput import is_tab_selected, run_agterm, type_when_idle
 from bridge.watcher import map_tree_to_parent, read_screen_tail, read_tree
 from bridge.workers import (
@@ -415,8 +416,10 @@ def cmd_worker(args: argparse.Namespace, conn: sqlite3.Connection, config: Confi
     brief = state_dir() / "worker-briefs" / f"{uuid.uuid4().hex}.md"
     brief.parent.mkdir(parents=True, exist_ok=True)
     rules = map_names_to_brief_rules(list_internal_names(conn, config), config.assistant_handle, config.owner_name)
+    constitution = CONSTITUTION_PATH.read_text(encoding="utf-8").strip()
     brief.write_text(
-        f"{prompt.strip()}\n\n{rules}\n{WORKER_BROWSER_RULE.format(owner=config.owner_name)}\n\n{report}\n"
+        f"{constitution}\n\n# Your task\n\n{prompt.strip()}\n\n{rules}\n"
+        f"{WORKER_BROWSER_RULE.format(owner=config.owner_name)}\n\n{report}\n"
     )
     first_prompt = f"Your brief is in {brief}. Read it and do it."
     cwd = Path(os.path.abspath(os.path.expanduser(args.cwd or os.getcwd())))

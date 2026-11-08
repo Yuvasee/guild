@@ -80,9 +80,9 @@ first team lead should own. From then on, talk to Right Hand.
 A team lead holds one project for you, for days, and only brings you what needs you.
 
 **How:** a team lead is a Claude Code session with a name, a scope and notes that outlive its conversations. Each new
-session in its tab starts with its role, its notes and the group's state. It declares its main chunks of work with
-their issues and PRs, and the page shows exactly those. It coordinates more than it types: separate tasks go to
-workers.
+session in its tab starts with the constitution, its role, its notes and the group's state. It declares its main chunks
+of work with their issues and PRs, and the page shows exactly those. It coordinates more than it types: separate tasks
+go to workers.
 </details>
 
 <details>
@@ -108,6 +108,17 @@ what it took on a team lead's word.
 
 Your chat with Right Hand is never blocked by a pending question: questions wait on the page under **Needs you**, and
 when you answer one in chat instead, Right Hand relays it and the question closes.
+</details>
+
+<details>
+<summary><b>The constitution</b>: the few rules that come before every other</summary>
+
+**Why:** roles, notes and house rules change all the time. A handful of rules should not, and should win when anything
+else conflicts with them.
+
+**How:** four short articles: honesty, the best outcome for the company and its customers, good faith, signal hygiene.
+Every team lead, Right Hand and every worker loads its full text at start and again after each compaction, ahead of
+its role or brief. It lives in [src/bridge/constitution.md](src/bridge/constitution.md); edit it to make it yours.
 </details>
 
 <details>
@@ -174,7 +185,8 @@ nag their owner.
 
 **How:** with `compact_at_tokens` set, an agent near that context size is told to save what must survive: decisions,
 exact ids, open promises, the next step. bridge then types `/compact` into its tab and, after compaction, gives the
-notes back with an instruction to continue. Team leads also get their role, notes and last dream back.
+notes back with an instruction to continue. Team leads and Right Hand also get the constitution, their role, notes and
+last dream back; workers get the constitution.
 </details>
 
 <details>
@@ -278,6 +290,7 @@ Full usage and flags: [docs/commands.md](docs/commands.md), or `<command> --help
 | [`bridge post`](docs/commands.md#bridge-post) | a post in the user's feed: blocked, decision, done or insight; `post resolve N` withdraws yours |
 | [`bridge tell-user`](docs/commands.md#bridge-tell-user) | one line for the user's feed (older form of post) |
 | [`bridge board`](docs/commands.md#bridge-board) | the team board: post to everyone (no TEXT: read recent posts) |
+| [`bridge settle-feed`](docs/commands.md#bridge-settle-feed) | resolve open blocked/decision posts whose one PR has ended, as serve does |
 | **`bridge` · Claims** | |
 | [`bridge claim`](docs/commands.md#bridge-claim) | reserve a shared resource before mutating it |
 | [`bridge renew`](docs/commands.md#bridge-renew) | extend a claim you hold |

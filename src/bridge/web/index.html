@@ -631,6 +631,7 @@ function postContent(item) {
     box.append(links);
   }
   if (item.answer) box.append(el("div", "answer", "You answered: " + item.answer));
+  else if (item.resolved_at && item.resolved_why) box.append(el("div", "answer", item.resolved_why));
   return box;
 }
 

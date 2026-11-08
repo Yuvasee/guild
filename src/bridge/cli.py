@@ -30,7 +30,7 @@ from bridge.compaction import (
 from bridge.config import Config, db_path, load_config, state_dir
 from bridge.db import connect, now_ms, transaction
 from bridge.dream import resolve_dreamers, run_dream, run_night, stop_claude_on_term
-from bridge.enrich import enrich_due
+from bridge.enrich import enrich_due, fetch_prs, store_results
 from bridge.errlog import log_error
 from bridge.errors import UsageError
 from bridge.feed import (
@@ -45,6 +45,7 @@ from bridge.feed import (
     spawn_typed_delivery,
     tell_assistant_of_draft,
 )
+from bridge.feed_autoresolve import list_open_item_prs, resolve_settled_items
 from bridge.guard import DEFAULT_TRIGGERS
 from bridge.identity import ensure_current_instance
 from bridge.inject import measure_chars
@@ -145,6 +146,10 @@ def build_parser(config: Config) -> argparse.ArgumentParser:
     p = sub.add_parser("enrich", help="refresh GitHub PR and tracker issue state for live sessions")
     p.add_argument("--force", action="store_true", help="ignore freshness and refetch everything")
     p.set_defaults(func=cmd_enrich)
+
+    p = sub.add_parser("settle-feed", help="resolve open blocked/decision posts whose one PR has ended, as serve does")
+    p.add_argument("--dry-run", action="store_true", help="list what would resolve; the database is not written")
+    p.set_defaults(func=cmd_settle_feed)
 
     p = sub.add_parser("remote-sync", help="collect sessions from configured remote hosts now")
     p.set_defaults(func=cmd_remote_sync)
@@ -346,6 +351,28 @@ def cmd_enrich(args: argparse.Namespace, conn: sqlite3.Connection, config: Confi
     errors = conn.execute("SELECT ref, error FROM enrichment WHERE error IS NOT NULL ORDER BY ref").fetchall()
     for row in errors:
         print(f"  {row['ref']}: {row['error']}")
+    return 0
+
+
+def cmd_settle_feed(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
+    at = now_ms()
+    prs = list_open_item_prs(conn, config)
+    results = fetch_prs(prs) if prs else {}
+    target = conn
+    if args.dry_run:
+        # GitHub's answers go into a copy in memory, so the run reads the database and never writes it.
+        target = sqlite3.connect(":memory:", isolation_level=None)
+        target.row_factory = sqlite3.Row
+        conn.backup(target)
+    store_results(target, results, at)
+    settled = resolve_settled_items(target, config, at)
+    for ref, result in results.items():
+        if isinstance(result, str):
+            print(f"  {ref}: {result}")
+    verb = "would resolve" if args.dry_run else "resolved"
+    print(f"{verb} {len(settled)} of the open posts ({len(prs)} PRs checked)")
+    for item in settled:
+        print(f"  #{item.item_id} {item.kind} from {item.from_handle}: {item.text} — {item.why}")
     return 0
 
 

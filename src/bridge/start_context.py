@@ -35,6 +35,7 @@ UNREADABLE_START_LINE = (
 )
 KEEP_COMMAND = "bridge keep --show"
 _SAFE_ID_RE = re.compile(r"^[\w.-]{1,200}$")
+CONSTITUTION_PATH = Path(__file__).with_name("constitution.md")
 
 
 @dataclass(frozen=True)
@@ -61,27 +62,30 @@ def map_packed_to_keep_status(keep: Part | None, packed: Packed | None) -> str:
 
 
 def convert_lead_to_parts(lead: Lead, config: Config) -> list[Part]:
-    parts = [Part(convert_lead_to_role(lead, config), "your lead role", rebuilt=True)]
+    parts = [read_constitution_part(), Part(convert_lead_to_role(lead, config), "your lead role", rebuilt=True)]
+    notes = convert_notes_to_lead_section(read_notes(lead_dir(lead.name)))
+    # Notes before the dream: with the constitution and the role they still fit one message; the dream can wait.
+    parts.append(Part(notes, "your notes", "guild notes", True))
     if dream := read_dream(lead_dir(lead.name)):
         parts.append(Part(dream, "your dream from last night", rebuilt=True))
-    notes = convert_notes_to_lead_section(read_notes(lead_dir(lead.name)))
-    parts.append(Part(notes, "your notes", "guild notes", True))
     return parts
 
 
 def convert_assistant_to_parts(conn: sqlite3.Connection, config: Config) -> list[Part]:
-    parts = [Part(convert_config_to_assistant_role(config, list_leads(conn)), "your role", rebuilt=True)]
-    if dream := read_dream(assistant_dir()):
-        parts.append(Part(dream, "your dream from last night", rebuilt=True))
+    role = convert_config_to_assistant_role(config, list_leads(conn))
+    parts = [read_constitution_part(), Part(role, "your role", rebuilt=True)]
     if (notes := read_notes(assistant_dir())).strip():
         parts.append(Part(convert_notes_to_section(notes), "your notes", "guild notes", True))
+    if dream := read_dream(assistant_dir()):
+        parts.append(Part(dream, "your dream from last night", rebuilt=True))
     return parts
 
 
 def read_start_parts(
     conn: sqlite3.Connection, config: Config, surface: str | None, conversation_id: str, source: str, at_ms: int
 ) -> list[Part]:
-    """What a session start gives, by reads alone, in the order the hook packs it: keep, role, dream, notes."""
+    """What a session start gives, by reads alone, in the order the hook packs it: keep, constitution, role, notes,
+    dream."""
     if is_conversation_locked(conn, config, conversation_id):
         return []
     parts: list[Part] = []
@@ -92,7 +96,21 @@ def read_start_parts(
         parts += convert_lead_to_parts(lead, config)
     elif is_assistant_surface(conn, config, surface):
         parts += convert_assistant_to_parts(conn, config)
+    elif source == "compact" and not is_surface_locked(conn, config, surface) and is_nested_tab(conn, surface):
+        parts.append(read_constitution_part())
     return parts
+
+
+def is_nested_tab(conn: sqlite3.Connection, surface: str | None) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM surfaces s JOIN tab_parents t ON t.agterm_session = s.agterm_session WHERE s.surface = ?",
+        (surface or "",),
+    ).fetchone()
+    return row is not None
+
+
+def read_constitution_part() -> Part:
+    return Part(CONSTITUTION_PATH.read_text(encoding="utf-8").strip(), "the constitution", rebuilt=True)
 
 
 def pending_start_path(conversation_id: str) -> Path | None:
