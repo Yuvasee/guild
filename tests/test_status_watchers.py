@@ -7,10 +7,23 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from test_page import STUBS
 
-from bridge.config import Watcher, map_toml_to_config
+from bridge.config import PageLink, Watcher, map_toml_to_config
 from bridge.status_watchers import MAX_FILE_BYTES, read_watcher
+
+STUBS = """
+const element = () => new Proxy(function () {}, {
+  get: (target, key) => key === Symbol.toPrimitive ? () => "" : (key in target ? target[key] : element()),
+  set: () => true,
+  apply: () => element(),
+});
+globalThis.document = element();
+globalThis.localStorage = { getItem: () => null, setItem: () => {} };
+globalThis.fetch = () => new Promise(() => {});
+globalThis.setInterval = () => 0;
+globalThis.setTimeout = () => 0;
+globalThis.CSS = { escape: s => s };
+"""
 
 NOW = int(datetime(2026, 11, 4, 12, 0, tzinfo=UTC).timestamp() * 1000)
 PAGE = Path(__file__).parent.parent / "src/bridge/web/guild.html"
@@ -149,7 +162,7 @@ def test_page_rewrites_pills_at_most_once_a_minute(tmp_path: Path) -> None:
     checks = """
     let writes = 0;
     const pills = [];
-    const box = { hidden: false, children: pills,
+    const box = { hidden: false, children: pills, dataset: {},
                   replaceChildren(...nodes) { pills.splice(0, pills.length, ...nodes); } };
     globalThis.document = {
       getElementById: () => box,
@@ -167,6 +180,66 @@ def test_page_rewrites_pills_at_most_once_a_minute(tmp_path: Path) -> None:
     }
     if (writes !== 6) throw new Error("pills rewritten " + writes + " times");
     if ([...moments].join() !== "0,60,120") throw new Error("rewritten at seconds " + [...moments].join());
+    """
+    path = tmp_path / "guild.js"
+    path.write_text(STUBS + script.group(1) + checks)
+    done = subprocess.run([node, str(path)], capture_output=True, text=True, timeout=20, check=False)
+    assert done.returncode == 0, done.stderr
+
+
+def test_laptop_load_is_a_plain_count_beside_the_links_and_absent_without_a_cap(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    assert node, "node is required to check the page script"
+    script = re.search(r"<script>(.*)</script>", PAGE.read_text(), re.S)
+    assert script is not None
+    checks = """
+    const eq = (a, b) => { if (a !== b) throw new Error(JSON.stringify(a) + " !== " + JSON.stringify(b)); };
+    globalThis.document = { createElement: (tag) => ({ tag }) };
+    eq(laptopLoadCount({ cap: 0, busy: 3 }), null);
+    const count = laptopLoadCount({ cap: 8, busy: 3, queued: 1, hosts: { devbox: 2 } });
+    eq(count.name, "Laptop load · 3/8 agents working · 2 on devbox · 1 queued");
+    const pill = renderPageLink(count);
+    eq(pill.tag, "span");
+    eq(pill.href, undefined);
+    eq(renderPageLink(DREAMS_LINK).href, "/dreams");
+    """
+    path = tmp_path / "guild.js"
+    path.write_text(STUBS + script.group(1) + checks)
+    done = subprocess.run([node, str(path)], capture_output=True, text=True, timeout=20, check=False)
+    assert done.returncode == 0, done.stderr
+
+
+def test_config_reads_page_links_and_refuses_a_non_http_one() -> None:
+    config = map_toml_to_config({"links": [{"name": "Versions", "url": "https://versions.example"}]})
+    assert config.links == (PageLink(name="Versions", url="https://versions.example"),)
+    for bad in ({"name": "x", "url": "javascript:alert(1)"}, {"url": "https://a.example"}):
+        with pytest.raises(ValueError):
+            map_toml_to_config({"links": [bad]})
+
+
+def test_an_open_page_reloads_when_the_service_serves_another_version(tmp_path: Path) -> None:
+    """A tab left open across a deploy kept its old script and showed wording the new page no longer has."""
+    node = shutil.which("node")
+    assert node, "node is required to check the page script"
+    script = re.search(r"<script>(.*)</script>", PAGE.read_text(), re.S)
+    assert script is not None
+    checks = """
+    const eq = (a, b) => { if (a !== b) throw new Error(JSON.stringify(a) + " !== " + JSON.stringify(b)); };
+    let reloads = 0;
+    let fields = [];
+    globalThis.location = { reload: () => { reloads += 1; } };
+    const page = globalThis.document;
+    globalThis.document = new Proxy(page, { get: (t, k) => (k === "querySelectorAll" ? () => fields : t[k]) });
+    state = { page_version: "aaa" };
+    eq(isPageOutdated(), false);
+    eq(isPageOutdated(), false);
+    state = { page_version: "bbb" };
+    fields = [{ value: "half a sentence" }];
+    eq(isPageOutdated(), true);
+    eq(reloads, 0);
+    fields = [{ value: "  " }];
+    eq(isPageOutdated(), true);
+    eq(reloads, 1);
     """
     path = tmp_path / "guild.js"
     path.write_text(STUBS + script.group(1) + checks)

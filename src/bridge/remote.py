@@ -3,7 +3,7 @@ import re
 import shlex
 import sqlite3
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from importlib.resources import files
 from typing import cast
 
@@ -16,7 +16,6 @@ TMUX_LIST_TIMEOUT_S = 20
 REMOTE_STALE_AFTER_MS = 300_000
 MISSES_BEFORE_DROP = 2
 _HOST_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
-_TMUX_ID_RE = re.compile(r"\$\d+")
 _GITHUB_RE = re.compile(r"github\.com[:/]([\w.-]+)/([\w.-]+?)(?:\.git)?/?$")
 
 
@@ -26,8 +25,6 @@ class Collected:
     error: str | None
     sessions: list[dict[str, object]]
     remote_now: int | None
-    runs: list[dict[str, object]] = field(default_factory=list[dict[str, object]])
-    """tmux panes running something other than an agent: tmux, tmux_id, pane, label."""
 
 
 def collect(remote: Remote) -> Collected:
@@ -55,13 +52,7 @@ def collect(remote: Remote) -> Collected:
     if not isinstance(sessions, list):
         return Collected(False, "probe returned no session list", [], None)
     rows = [cast(dict[str, object], s) for s in cast(list[object], sessions) if isinstance(s, dict)]
-    raw_runs = data.get("runs")
-    runs = (
-        [cast(dict[str, object], r) for r in cast(list[object], raw_runs) if isinstance(r, dict)]
-        if isinstance(raw_runs, list)
-        else []
-    )
-    return Collected(True, None, rows, now if isinstance(now, int) else None, runs)
+    return Collected(True, None, rows, now if isinstance(now, int) else None)
 
 
 def read_tmux_sessions(remote: Remote | None) -> set[str] | None:
@@ -118,22 +109,6 @@ def store(conn: sqlite3.Connection, remote: Remote, result: Collected, config: C
             previous_refs.setdefault(str(r["key"]), []).append(str(r["ref"]))
         conn.execute("DELETE FROM remote_sessions WHERE host = ?", (remote.name,))
         conn.execute("DELETE FROM remote_refs WHERE host = ?", (remote.name,))
-        conn.execute("DELETE FROM remote_runs WHERE host = ?", (remote.name,))
-        conn.executemany(
-            "INSERT OR REPLACE INTO remote_runs (host, tmux, tmux_id, pane, label, started_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            [
-                (
-                    remote.name,
-                    str(r.get("tmux")),
-                    str(r.get("tmux_id")),
-                    str(r.get("pane")),
-                    str(r.get("label") or ""),
-                    r.get("started_at"),
-                )
-                for r in result.runs
-            ],
-        )
         for session in result.sessions:
             key = f"{session.get('tmux_id')}:{session.get('pane')}:{session.get('pid')}:{session.get('started_at')}"
             before = previous.pop(key, {})
@@ -232,14 +207,6 @@ def list_remote_sessions(conn: sqlite3.Connection, at_ms: int) -> list[dict[str,
             }
         )
     return result
-
-
-def attach_command(remote: Remote, tmux_id: str) -> str:
-    """A local shell line that attaches to a remote tmux session; both shell layers are quoted."""
-    if not _TMUX_ID_RE.fullmatch(tmux_id):
-        raise ValueError("invalid tmux session id")
-    remote_line = shlex.join(["tmux", "attach", "-t", tmux_id])
-    return shlex.join(["ssh", "-t", remote.ssh, remote_line])
 
 
 def map_url_to_repo(url: object) -> str | None:

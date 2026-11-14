@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import re
@@ -6,44 +7,72 @@ import subprocess
 import sys
 import threading
 import time
-import urllib.parse
+import traceback
+from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import asdict, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
-from typing import cast
+from pathlib import Path
+from typing import Any, Literal, cast
 
 from bridge.activity import SessionActivity, read_session_activity
 from bridge.asks import (
+    ASK_AUTOCLOSE_HOURS,
     AskError,
     close_ask,
     close_settled_asks,
     map_db_to_asks_page,
     reopen_ask,
     send_ask_nags,
+    send_from_bridge,
     tell_owner_of_reopen,
 )
 from bridge.attention import load_projects, map_page_to_ranked_page
 from bridge.board import (
+    HINT_SENT,
+    SYSTEM_CONVERSATION,
     USER_CONVERSATION,
     AddressError,
     MessageStateError,
+    Party,
     Recipient,
     SendResult,
     flag_overdue,
+    resolve_handle,
+    send_message,
     write_hint,
 )
+from bridge.capacity import assess_leads, read_owner_presence, send_capacity_signals
 from bridge.claims import list_claims
+from bridge.colleague_comments import (
+    HIMSELF,
+    claim_choice,
+    finish_choice,
+    latch_held_breaches,
+    post_reply,
+    release_failed_choice,
+    settle_unfinished_choices,
+)
+from bridge.compaction import give_up_driving, map_screen_to_draft
 from bridge.config import Config, db_path
+from bridge.context_watch import CONTEXT_EVERY_S, list_context_tabs, read_pane_screen, record_context_screens
 from bridge.db import connect, now_ms, transaction
+from bridge.disk import DISK_EVERY_S, DiskReading, map_reading_to_dict, measure_disk, read_disk, send_disk_notice
+from bridge.dream import ALL, map_dreamers_to_page, resolve_dreamers
 from bridge.drivers import Link, load_drivers, scan_transcripts
 from bridge.enrich import collect_watched_refs, enrich_due, load_enrichment, provider_freshness
+from bridge.errlog import log_error
+from bridge.errors import UsageError
 from bridge.feed import (
     AGTERM_SILENT,
     SCREEN_UNREAD,
     TAB_NOT_FOUND,
+    StuckDelivery,
     UndeliveredTab,
     answer_post,
     dismiss_undelivered_answer,
+    find_stuck_deliveries,
     post_from_user_to_room,
     prune_typer_locks,
     release_dead_typing_claims,
@@ -52,13 +81,31 @@ from bridge.feed import (
     spawn_typed_delivery,
     take_delivery_retries,
     take_new_undelivered_tabs,
+    tell_assistant_of_stuck,
     tell_of_undelivered_tab,
 )
-from bridge.feed_autoresolve import resolve_settled_items
 from bridge.guard import sync_claims_flag
-from bridge.guildview import map_db_to_guild, post_signals_to_leads
+from bridge.guildview import TABS_STALE_MS, map_db_to_guild, post_signals_to_leads
 from bridge.health import check_hooks
+from bridge.hooks import spawn_compact_drive
+from bridge.issue_sync import run_issue_sync
 from bridge.notify import release_urgent_notice, show_notification, take_next_urgent_notice
+from bridge.outage import OutageNotices
+from bridge.pages import (
+    Page,
+    find_page,
+    find_redirect,
+    map_missing_page_to_html,
+    map_request_path_to_slug,
+    map_unpublished_page_to_html,
+)
+from bridge.pinned import (
+    PinnedRequest,
+    list_pinned_items,
+    map_query_string_to_request,
+    map_slice_to_json,
+    map_slice_to_page,
+)
 from bridge.refs import map_ref_to_label
 from bridge.registry import (
     RECENT_REF_TURNS,
@@ -69,19 +116,22 @@ from bridge.registry import (
     list_sessions,
     reconcile,
 )
-from bridge.remote import attach_command, collect, list_remote_sessions
+from bridge.remote import collect, list_remote_sessions
 from bridge.remote import store as store_remote
+from bridge.review_github import GitHubError, run_gh
 from bridge.review_post import (
     ReviewError,
     advance_posts,
     ask_for_doc_updates,
     ask_for_docs,
+    ask_for_usage_sections,
     ask_to_clean_up,
     ask_to_mark_drafts_ready,
     ask_to_resolve_conflicts,
     map_typed_comment_to_slack,
     record_post_choice,
     record_publish,
+    refuse_backport_post,
     reopen_unsent_post,
     retry_failed_post,
     spawn_review_post,
@@ -90,27 +140,63 @@ from bridge.review_slack import TOKEN_EVERY_S, apply_seen_posts, map_db_to_slack
 from bridge.review_worktree import (
     fill_doc_heads,
     fill_doc_reviews,
+    is_worktree_job_running,
     link_worktrees_to_prs,
     map_doc_to_served,
     pick_worktree_job,
-    run_worktree_job,
+    spawn_worktree_job,
 )
-from bridge.reviews import GITHUB_EVERY_S, map_db_to_reviews, poll_review_queue
+from bridge.reviews import (
+    GITHUB_EVERY_S,
+    MergeOkRefused,
+    find_issue_lead,
+    find_owner_of_ref,
+    map_db_to_reviews,
+    poll_review_queue,
+    record_merge_ok,
+)
+from bridge.rewake_marks import prune_rewake_marks
 from bridge.signals import SessionRefs, find_signals, map_enrichment_to_status, map_signal_to_dict
 from bridge.status_watchers import read_watchers
 from bridge.tabinput import map_tree_to_pane_session, run_agterm
 from bridge.wake import WakeWatch
-from bridge.watcher import map_tree_to_blocked_tabs, notify_blocked_tabs, read_screen_tail, read_tree
+from bridge.watcher import (
+    map_tree_to_blocked_tabs,
+    notify_blocked_tabs,
+    notify_stray_workers,
+    read_screen,
+    read_tree,
+)
+from bridge.worker_api import start_worker_api
+from bridge.workers import (
+    WORKER_CAP,
+    count_busy_agents,
+    count_busy_host_agents,
+    find_conversation_runs,
+    find_reopened_tabs,
+    hold_reopen_lock,
+    list_live_workers,
+    list_queued_launches,
+    map_tree_to_tab,
+    mark_reopened,
+    start_worker_tab,
+)
 
-DEFAULT_PORT = 8780
+DEFAULT_PORT = 8765
+GUILD_PAGE_VERSION = hashlib.sha256(files("bridge").joinpath("web/guild.html").read_bytes()).hexdigest()[:12]
+"""Of the page this service serves: an open page that loaded another one reloads itself."""
 RECONCILE_EVERY_S = 10
 MAINTAIN_EVERY_S = 30
 ASKS_EVERY_S = 60
+QUEUE_EVERY_S = 20
+CAPACITY_EVERY_S = 300
 ASK_WHY_MAX_CHARS = 2000
 ENRICH_EVERY_S = 60
 REMOTE_EVERY_S = 60
 SCAN_EVERY_S = 30
 SIGNALS_EVERY_S = 60
+TERMINAL_APP = "agterm"
+ISSUE_SYNC_EVERY_S = 900
 WATCH_EVERY_S = 30
 TREE_EVERY_S = 10
 WORKTREE_EVERY_S = 30
@@ -122,6 +208,8 @@ MAX_POST_BYTES = 16_384
 # Every SQLite call gives up the GIL, and taking it back waits out a busy sibling thread's slice: at the default 5 ms
 # serve's transactions held the write lock about 9x longer, and every hook and CLI waited on them.
 GIL_SWITCH_INTERVAL_S = 0.0005
+PAGES_ON_PINNED = "/pinned?kind=page"
+UNPUBLISHED_TOLD_EVERY_MS = 30 * 60_000
 
 
 def serve(config: Config, port: int) -> None:
@@ -132,19 +220,26 @@ def serve(config: Config, port: int) -> None:
     threading.Thread(target=state.enrich_forever, daemon=True).start()
     threading.Thread(target=state.post_signals_forever, daemon=True).start()
     threading.Thread(target=state.watch_blocked_tabs_forever, daemon=True).start()
+    threading.Thread(target=state.watch_context_forever, daemon=True).start()
     threading.Thread(target=state.read_tree_forever, daemon=True).start()
     threading.Thread(target=state.read_activity_forever, daemon=True).start()
     threading.Thread(target=state.scan_transcripts_forever, daemon=True).start()
     threading.Thread(target=state.notify_urgent_forever, daemon=True).start()
     threading.Thread(target=state.nag_asks_forever, daemon=True).start()
+    threading.Thread(target=state.start_queued_workers_forever, daemon=True).start()
+    threading.Thread(target=state.signal_capacity_forever, daemon=True).start()
+    threading.Thread(target=state.check_disk_forever, daemon=True).start()
     if config.review_org and config.review_author:
         threading.Thread(target=state.poll_reviews_forever, daemon=True).start()
-        if config.chat_adapter == "slack" and config.review_channel_id:
+        if config.review_channel_id:
             threading.Thread(target=state.read_slack_forever, daemon=True).start()
         if config.review_worktrees_dir:
             threading.Thread(target=state.prepare_worktrees_forever, daemon=True).start()
+    threading.Thread(target=state.sync_issues_forever, daemon=True).start()
     if config.remotes:
         threading.Thread(target=state.collect_remotes_forever, daemon=True).start()
+    if config.worker_host:
+        start_worker_api(config)
     server = ThreadingHTTPServer(("127.0.0.1", port), handler)
     print(f"bridge dashboard on http://127.0.0.1:{port}/", flush=True)
     server.serve_forever()
@@ -158,12 +253,58 @@ class DashboardState:
         self._tree: tuple[dict[str, object] | None, int | None] = (None, None)
         self._scanned_from: int | None = None
         self._activity: tuple[dict[int, SessionActivity] | None, int | None] = (None, None)
+        self._disk: DiskReading | None = None
         self._wake = WakeWatch()
+        self._outages = OutageNotices()
+        self._unpublished_told: dict[str, int] = {}
+        self._github: Callable[[list[str]], str] = run_gh
 
     def snapshot(self) -> dict[str, object]:
         with self._connection() as conn:
             self._maybe_reconcile(conn)
             return map_db_to_snapshot(conn, self.config, now_ms())
+
+    def pinned_page(self, request: PinnedRequest) -> str:
+        with self._connection() as conn:
+            return map_slice_to_page(list_pinned_items(conn, request), request)
+
+    def pinned_items(self, request: PinnedRequest) -> dict[str, object]:
+        with self._connection() as conn:
+            return map_slice_to_json(list_pinned_items(conn, request))
+
+    def dreams_page(self) -> str:
+        with self._connection() as conn:
+            return map_dreamers_to_page(resolve_dreamers(conn, self.config, [ALL]))
+
+    def page_response(self, path: str) -> tuple[int, str | None, str]:
+        """Status, redirect target and HTML for /p/<slug>; /p/ sends to the pages on Pinned."""
+        slug = map_request_path_to_slug(path)
+        if slug == "":
+            return 302, PAGES_ON_PINNED, ""
+        with self._connection() as conn:
+            page = find_page(conn, slug) if slug is not None else None
+        if page is None or page.archived_at is not None:
+            archived = page is not None
+            return (410 if archived else 404), None, map_missing_page_to_html(slug, archived)
+        target = find_redirect(page)
+        if target is not None:
+            return 302, target, ""
+        self._tell_owner_of_unpublished_page(page)
+        return 200, None, map_unpublished_page_to_html(page)
+
+    def _tell_owner_of_unpublished_page(self, page: Page) -> None:
+        """Whoever opened it was handed a dead link; its owner hears so, once per page per half hour."""
+        now = now_ms()
+        with self._lock:
+            if now - self._unpublished_told.get(page.slug, 0) < UNPUBLISHED_TOLD_EVERY_MS:
+                return
+            self._unpublished_told[page.slug] = now
+        text = (
+            f"Your page '{page.slug}' was just opened from its stable link, but it isn't published yet, so the reader "
+            f"saw a 'not published' notice. Publish it, then `bridge page set-url {page.slug} <artifact url>`."
+        )
+        with self._connection() as conn, transaction(conn):
+            send_from_bridge(conn, self.config, page.created_by, text, now)
 
     def guild_snapshot(self) -> dict[str, object]:
         # No reconcile here: it asks agterm, and maintain_forever keeps the registry current anyway.
@@ -174,7 +315,7 @@ class DashboardState:
                 conn,
                 self.config,
                 now_ms(),
-                lambda ref: map_ref_to_url(ref, self.config) or map_enrichment_to_url(conn, ref),
+                lambda ref: map_ref_to_url(ref, self.config),
                 tree,
                 tree_at,
                 activity,
@@ -185,6 +326,15 @@ class DashboardState:
                 "slack": map_db_to_slack_freshness(conn, self.config),
             }
             guild["watchers"] = read_watchers(self.config.watchers, now_ms())
+            guild["page_version"] = GUILD_PAGE_VERSION
+            guild["disk"] = map_reading_to_dict(self._disk) if self._disk else None
+            guild["links"] = [{"name": link.name, "url": link.url, "last": link.last} for link in self.config.links]
+            guild["agents"] = {
+                "busy": count_busy_agents(conn),
+                "hosts": count_busy_host_agents(conn),
+                "cap": self.config.laptop_agent_cap,
+                "queued": len(list_queued_launches()),
+            }
             asks = map_db_to_asks_page(conn, self.config, now_ms())
             by_owner = cast(dict[str, object], asks.pop("by_owner"))
             for lead in cast(list[dict[str, object]], guild["leads"]):
@@ -238,31 +388,65 @@ class DashboardState:
                         posted = post_signals_to_leads(conn, self.config, signals, now)
                     nudge = [r for r in posted if r.pid]
                 for recipient in nudge:
-                    write_hint(recipient.pid, 0)
-            except (sqlite3.Error, OSError) as exc:
+                    write_hint(recipient.pid, HINT_SENT)
+            except Exception as exc:
+                # Any failure, not just the expected ones: an escaped exception would end signal posts until restart.
                 print(f"signal posts failed: {exc}", flush=True)
+                log_error("signal posts", traceback.format_exc())
             time.sleep(SIGNALS_EVERY_S)
 
     def watch_blocked_tabs_forever(self) -> None:
-        """A worker stuck on a dialog tells its owner, with nobody needing to look at it."""
+        """A worker stuck on a dialog tells its owner, and a closed one resumed outside its lead's tree its lead."""
         while True:
             try:
                 tree = read_tree(self.config)
                 if tree is not None:
                     blocked = map_tree_to_blocked_tabs(tree, self.config)
-                    screens = {tab.session_id: read_screen_tail(self.config, tab.session_id) for tab in blocked}
+                    screens = {tab.session_id: read_screen(self.config, tab.session_id) for tab in blocked}
                     with self._connection() as conn, transaction(conn):
                         sent = notify_blocked_tabs(conn, self.config, blocked, screens, now_ms())
+                        sent += notify_stray_workers(conn, self.config, tree, now_ms())
                     for message_id, recipient in sent:
                         if recipient.pid:
-                            write_hint(recipient.pid, 0)
+                            write_hint(recipient.pid, HINT_SENT)
                         spawn_typed_delivery(message_id, [recipient])
             except (sqlite3.Error, OSError, TypeError, ValueError, KeyError) as exc:
                 print(f"blocked tab watch failed: {exc}", flush=True)
             time.sleep(WATCH_EVERY_S)
 
+    def watch_context_forever(self) -> None:
+        """Slower than the blocked watch: a screen read per tab, and agterm is slow under load."""
+        while True:
+            try:
+                self.watch_context_once()
+            except Exception:
+                # Any failure: an escaped exception would end the watch until restart.
+                log_error("context watch", traceback.format_exc())
+            time.sleep(CONTEXT_EVERY_S)
+
+    def watch_context_once(self) -> None:
+        tree, tree_at = self._tree
+        if tree is None or tree_at is None or now_ms() - tree_at > TABS_STALE_MS:
+            return
+        with self._connection() as conn:
+            tabs = list_context_tabs(conn, self.config, tree)
+        screens: dict[str, tuple[str | None, int]] = {}
+        for tab in tabs:
+            read_at = now_ms()
+            screens[tab.conversation_id] = (read_pane_screen(self.config, tab), read_at)
+        with self._connection() as conn, transaction(conn):
+            actions = record_context_screens(conn, self.config, tabs, screens, now_ms())
+        for instance_id, conversation_id, generic_keep in actions.drives:
+            if not spawn_compact_drive("compact", instance_id, conversation_id, "none", generic_keep=generic_keep):
+                with self._connection() as conn, transaction(conn):
+                    give_up_driving(conn, conversation_id)
+        for message_id, recipient in actions.messages:
+            if recipient.pid:
+                write_hint(recipient.pid, HINT_SENT)
+            spawn_typed_delivery(message_id, [recipient])
+
     def notify_urgent_forever(self) -> None:
-        """Wherever they are looking: no typing, and no tab is selected or marked."""
+        """Wherever the owner is looking: no typing, and no tab is selected or marked."""
         while True:
             try:
                 with self._connection() as conn:
@@ -272,13 +456,83 @@ class DashboardState:
                             notice = take_next_urgent_notice(conn, self.config, now_ms(), failed)
                         if notice is None:
                             break
-                        if not show_notification(self.config, notice.text):
+                        if not show_notification(notice.text):
                             failed |= {notice.item_id}
                             with transaction(conn):
                                 release_urgent_notice(conn, notice.item_id)
             except sqlite3.Error as exc:
                 print(f"urgent notification failed: {exc}", flush=True)
             time.sleep(NOTIFY_EVERY_S)
+
+    def start_queued_workers_forever(self) -> None:
+        """Workers queued by the laptop cap start, oldest first, as slots free; the lead that asked is told."""
+        while True:
+            try:
+                self.start_queued_workers_once()
+            except Exception:
+                log_error("start queued workers", traceback.format_exc())
+            time.sleep(QUEUE_EVERY_S)
+
+    def start_queued_workers_once(self) -> None:
+        for path in list_queued_launches():
+            try:
+                launch = json.loads(path.read_text())
+            except FileNotFoundError:
+                continue
+            reopens = launch.get("reopens")
+            # A reopen's checks and start run under the CLI's lock, taken before any write transaction.
+            with self._connection() as conn, hold_reopen_lock() if reopens else nullcontext():
+                if not path.exists():
+                    continue
+                started = self._start_queued_launch(conn, path, launch)
+                if started is None:
+                    return
+            if started:
+                spawn_typed_delivery(started.message_id, started.recipients)
+
+    def _start_queued_launch(
+        self, conn: sqlite3.Connection, path: Path, launch: dict[str, Any]
+    ) -> SendResult | Literal[False] | None:
+        """None: no slot, stop for now; False: this one waits or was dropped quietly."""
+        cap = self.config.laptop_agent_cap
+        if cap and count_busy_agents(conn) >= cap:
+            return None
+        tree = read_tree(self.config)
+        if tree is None:
+            return None
+        parent = str(launch["parent"])
+        if map_tree_to_tab(tree, parent) is None:
+            path.unlink(missing_ok=True)
+            return False
+        if len(list_live_workers(conn, tree, parent)) >= WORKER_CAP:
+            return False
+        reopens = launch.get("reopens")
+        if reopens:
+            dead = find_dead_instances(conn)
+            with transaction(conn):
+                end_instances(conn, dead, now_ms())
+        path.unlink(missing_ok=True)
+        with transaction(conn):
+            if reopens and (
+                find_conversation_runs(conn, str(reopens))
+                or any(map_tree_to_tab(tree, tab) for tab in find_reopened_tabs(conn, str(reopens)))
+            ):
+                text = f"Your queued reopen of {launch['name']!r} is dropped: it already runs."
+            else:
+                session_id = start_worker_tab(
+                    conn, self.config, parent, str(launch["name"]), Path(str(launch["cwd"])), str(launch["command"])
+                )
+                if reopens:
+                    mark_reopened(conn, str(reopens), session_id, now_ms())
+                text = f"Your queued worker {launch['name']!r} has started (tab {session_id}): a laptop slot freed."
+            return send_message(
+                conn,
+                Party(SYSTEM_CONVERSATION, "bridge"),
+                [resolve_handle(conn, str(launch["requested_by"]))],
+                "info",
+                text,
+                now_ms(),
+            )
 
     def nag_asks_forever(self) -> None:
         """With every page closed too: an ask nobody moved, or claimed and never checked, reaches its owner."""
@@ -291,12 +545,71 @@ class DashboardState:
 
     def nag_asks_once(self, now: int) -> None:
         with self._connection() as conn, transaction(conn):
-            close_settled_asks(conn, now, self.config.ask_autoclose_hours * 3_600_000)
-            sent = send_ask_nags(conn, self.config, now)
+            close_settled_asks(conn, now, ASK_AUTOCLOSE_HOURS * 3_600_000)
+            sent = send_ask_nags(conn, self.config, now, read_owner_presence(conn, self.config, now).off)
         for message_id, recipient in sent:
             if recipient.pid:
-                write_hint(recipient.pid, 0)
+                write_hint(recipient.pid, HINT_SENT)
             spawn_typed_delivery(message_id, [recipient])
+
+    def signal_capacity_forever(self) -> None:
+        """With every page closed too: a lead with room for planned work is named to the assistant, with next items."""
+        while True:
+            try:
+                self.signal_capacity_once(now_ms())
+            except Exception as exc:
+                # An escaped exception would end capacity signals until restart.
+                print(f"capacity signals failed: {exc}", flush=True)
+                log_error("capacity signals", traceback.format_exc())
+            time.sleep(CAPACITY_EVERY_S)
+
+    def signal_capacity_once(self, now: int) -> None:
+        tree = read_tree(self.config)
+        with self._connection() as conn:
+            # Read before the write lock: the review queue and enrichment reads take a while.
+            loads = assess_leads(conn, self.config, now, tree)
+            with transaction(conn):
+                sent = send_capacity_signals(conn, self.config, now, loads)
+        for message_id, recipient in sent:
+            if recipient.pid:
+                write_hint(recipient.pid, HINT_SENT)
+            spawn_typed_delivery(message_id, [recipient])
+
+    def check_disk_forever(self) -> None:
+        """Hourly, with every page closed too: free space for the page, and the assistant hears when it runs low."""
+        while True:
+            try:
+                self.check_disk_once(now_ms())
+            except Exception as exc:
+                # An escaped exception would end disk checks until restart.
+                print(f"disk check failed: {exc}", flush=True)
+                log_error("disk check", traceback.format_exc())
+            time.sleep(DISK_EVERY_S)
+
+    def check_disk_once(self, now: int) -> None:
+        reading = read_disk(now)
+        if self._disk is None:
+            self._disk = reading
+        # du takes tens of seconds: outside any transaction, and the page shows the last reading meanwhile.
+        self._disk = reading = measure_disk(reading, self.config.disk_folders)
+        with self._connection() as conn, transaction(conn):
+            sent = send_disk_notice(conn, self.config, reading)
+        for message_id, recipient in sent:
+            if recipient.pid:
+                write_hint(recipient.pid, HINT_SENT)
+            spawn_typed_delivery(message_id, [recipient])
+
+    def sync_issues_forever(self) -> None:
+        while True:
+            try:
+                with self._connection() as conn:
+                    report = run_issue_sync(conn, self.config, now_ms(), dry_run=False)
+                for _, recipient in report.sent:
+                    if recipient.pid:
+                        write_hint(recipient.pid, HINT_SENT)
+            except Exception:
+                log_error("issue sync", traceback.format_exc())
+            time.sleep(ISSUE_SYNC_EVERY_S)
 
     def close_ask_by_owner(self, ask_id: int) -> tuple[bool, str]:
         try:
@@ -316,7 +629,7 @@ class DashboardState:
             return False, str(exc)
         for message_id, recipient in told:
             if recipient.pid:
-                write_hint(recipient.pid, 0)
+                write_hint(recipient.pid, HINT_SENT)
             spawn_typed_delivery(message_id, [recipient])
         return True, "open again"
 
@@ -334,7 +647,14 @@ class DashboardState:
                         release_dead_typing_claims(conn, now_ms())
                         retries = take_delivery_retries(conn, now_ms())
                         undelivered = take_new_undelivered_tabs(conn, self.config, now_ms(), self._wake.counted_from())
+                        stuck = find_stuck_deliveries(conn, now_ms())
                     sync_claims_flag(conn)
+                    for found in stuck:
+                        box = self._read_stuck_box(found)
+                        with transaction(conn):
+                            told = tell_assistant_of_stuck(conn, self.config, found, box, now_ms())
+                        if told is not None:
+                            retries.append(told)
                     for tab in undelivered:
                         screen, unread_reason = self._read_undelivered_tab(tab)
                         # A sleep or agterm going silent or coming back during the read moves the count on.
@@ -345,13 +665,27 @@ class DashboardState:
                             )
                         if told is not None:
                             retries.append(told)
+                    overdue = [str(r[0]) for r in conn.execute("SELECT handle FROM undelivered_tabs")]
+                    for cause, text in self._outages.take(
+                        overdue, self.config.assistant_handle, self._wake.silent_since(), now_ms()
+                    ):
+                        if not show_notification(text):
+                            self._outages.release(cause)
                 for message_id, recipient in retries:
                     spawn_typed_delivery(message_id, [recipient])
                 spawn_queued_retries()
                 prune_typer_locks()
+                prune_rewake_marks()
             except sqlite3.Error as exc:
                 print(f"maintenance failed: {exc}", flush=True)
             time.sleep(MAINTAIN_EVERY_S)
+
+    def _read_stuck_box(self, stuck: StuckDelivery) -> str | None:
+        if not stuck.agterm_session or not stuck.surface:
+            return None
+        target = ["--target", stuck.agterm_session, "--pane-id", stuck.surface]
+        screen = run_agterm(self.config, ["session", "text", *target, "--lines", "40"])
+        return map_screen_to_draft(screen) if screen is not None else None
 
     def _read_undelivered_tab(self, tab: UndeliveredTab) -> tuple[str | None, str]:
         """The tab's screen, or why there is none; a tab not found by its id is looked up by its pane."""
@@ -373,12 +707,11 @@ class DashboardState:
         return (read(found) if found != tab.agterm_session else None), SCREEN_UNREAD
 
     def enrich_forever(self) -> None:
-        """GitHub and the tracker are polled here, never from hooks."""
+        """GitHub and Linear are polled here, never from hooks."""
         while True:
             try:
                 with self._connection() as conn:
                     enrich_due(conn, self.config, now_ms())
-                    resolve_settled_items(conn, self.config, now_ms())
             except (sqlite3.Error, OSError, ValueError) as exc:
                 print(f"enrichment failed: {exc}", flush=True)
             time.sleep(ENRICH_EVERY_S)
@@ -396,11 +729,16 @@ class DashboardState:
             time.sleep(REMOTE_EVERY_S)
 
     def poll_reviews_forever(self) -> None:
-        """With every page closed too: the queue stays current and their comments reach their owners."""
+        """With every page closed too: the queue stays current and the owner's comments reach their owners."""
         while True:
             try:
                 with self._connection() as conn:
                     sent = poll_review_queue(conn, self.config, now_ms(), self._tree[0], self._scanned_from)
+                    with transaction(conn):
+                        latch_held_breaches(conn, now_ms())
+                    user = self.config.user_alias or "user"
+                    for result in settle_unfinished_choices(conn, self.config, self._github, user, now_ms()):
+                        self._deliver(result, result.recipients)
                     self._advance_reviews(conn, sent)
             except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, MessageStateError) as exc:
                 print(f"review queue poll failed: {exc}", flush=True)
@@ -422,8 +760,9 @@ class DashboardState:
             apply_seen_posts(conn, claim)
             to_send, told = advance_posts(conn, self.config, claim)
             fill_doc_heads(conn)
-            fill_doc_reviews(conn)
+            fill_doc_reviews(conn, self.config)
             told = [*told, *ask_for_docs(conn, self.config, now_ms())]
+            told = [*told, *ask_for_usage_sections(conn, self.config, now_ms())]
             told = [*told, *ask_for_doc_updates(conn, self.config, now_ms())]
             told = [*told, *ask_to_clean_up(conn, self.config, now_ms())]
             told = [*told, *ask_to_mark_drafts_ready(conn, self.config, now_ms())]
@@ -432,18 +771,20 @@ class DashboardState:
             spawn_review_post(ref, claim)
         for message_id, recipient in [*sent, *told]:
             if recipient.pid:
-                write_hint(recipient.pid, 0)
+                write_hint(recipient.pid, HINT_SENT)
             spawn_typed_delivery(message_id, [recipient])
 
     def prepare_worktrees_forever(self) -> None:
-        """One at a time, in this one thread, so a batch of large PRs cannot load the laptop."""
+        """One job at a time, in a runner of its own that outlives a restart, so a batch of large PRs cannot load the
+        laptop and a deploy does not cut an install short."""
         while True:
             try:
                 with self._connection() as conn:
-                    link_worktrees_to_prs(conn)
-                    job = pick_worktree_job(conn, self.config, now_ms())
-                    if job is not None:
-                        run_worktree_job(conn, self.config, job, now_ms())
+                    link_worktrees_to_prs(conn, self.config.review_python_paths)
+                    # The runner picks again under its lock; this look only spares a start when nothing is due.
+                    due = not is_worktree_job_running() and pick_worktree_job(conn, self.config, now_ms()) is not None
+                if due:
+                    spawn_worktree_job()
             except (sqlite3.Error, OSError, ValueError) as exc:
                 print(f"review worktree failed: {exc}", flush=True)
             time.sleep(WORKTREE_EVERY_S)
@@ -459,10 +800,10 @@ class DashboardState:
         if unknown := [name for name in mention if name not in people]:
             return False, f"not in review_mention_people: {', '.join(unknown)}"
         try:
-            slack = self.config.chat_adapter not in ("file", "webhook")
-            post_comment = map_typed_comment_to_slack(comment, people, slack) if mention else ""
+            post_comment = map_typed_comment_to_slack(comment, people) if mention else ""
             with self._connection() as conn:
                 with transaction(conn):
+                    refuse_backport_post(conn, self.config, ref)
                     if action == "retry":
                         retry_failed_post(conn, ref)
                     elif action == "repost":
@@ -477,6 +818,21 @@ class DashboardState:
             return False, str(exc)
         return True, "ok"
 
+    def ok_merge(self, ref: str, head_oid: str) -> tuple[bool, str]:
+        try:
+            with self._connection() as conn, transaction(conn):
+                by = self.config.user_alias or "user"
+                message_id, recipient = record_merge_ok(conn, self.config, ref, head_oid, by, now_ms())
+        except (MergeOkRefused, MessageStateError) as exc:
+            return False, str(exc)
+        try:
+            if recipient.pid:
+                write_hint(recipient.pid, HINT_SENT)
+            spawn_typed_delivery(message_id, [recipient])
+        except OSError as exc:
+            print(f"merge OK delivery to {recipient.handle} failed to start: {exc}", flush=True)
+        return True, recipient.handle
+
     def scan_transcripts_forever(self) -> None:
         while True:
             try:
@@ -488,41 +844,13 @@ class DashboardState:
                 print(f"transcript scan failed: {exc}", flush=True)
             time.sleep(SCAN_EVERY_S)
 
-    def attach_remote(self, host: str, tmux_id: str) -> tuple[bool, str]:
-        remote = next((r for r in self.config.remotes if r.name == host), None)
-        if remote is None:
-            return False, "unknown remote"
-        with self._connection() as conn:
-            known = conn.execute(
-                "SELECT 1 FROM remote_sessions WHERE host = ? AND json_extract(data, '$.tmux_id') = ?", (host, tmux_id)
-            ).fetchone()
-        if known is None:
-            return False, "unknown remote session"
-        try:
-            line = attach_command(remote, tmux_id)
-        except ValueError as exc:
-            return False, str(exc)
-        command = [self.config.agtermctl, "session", "new", "--name", f"{host} {tmux_id}", "--command", line]
-        try:
-            done = subprocess.run(command, capture_output=True, text=True, timeout=10, check=False)
-            if self.config.terminal_app:
-                subprocess.run(["open", "-a", self.config.terminal_app], capture_output=True, timeout=5, check=False)
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            return False, str(exc)
-        return done.returncode == 0, (done.stdout + done.stderr).strip() or "ok"
-
     def set_item_resolved(self, item_id: int, resolved: bool) -> bool:
         with self._connection() as conn, transaction(conn):
             if resolved and dismiss_undelivered_answer(conn, item_id, now_ms()):
                 return True
-            # Put back by the owner, it stays: bridge does not resolve it again on its own.
             cursor = conn.execute(
-                """
-                UPDATE user_items SET resolved_at = ?1, resolved_why = NULL,
-                    auto_resolve_off = CASE WHEN ?2 THEN auto_resolve_off ELSE 1 END
-                WHERE id = ?3 AND (resolved_at IS NULL) = ?2
-                """,
-                (now_ms() if resolved else None, resolved, item_id),
+                "UPDATE user_items SET resolved_at = ?1 WHERE id = ?2 AND (resolved_at IS NULL) = ?3",
+                (now_ms() if resolved else None, item_id, resolved),
             )
             return cursor.rowcount > 0
 
@@ -531,6 +859,32 @@ class DashboardState:
             with self._connection() as conn, transaction(conn):
                 result = answer_post(conn, item_id, answer, self.config.user_alias or "user", now_ms())
         except MessageStateError as exc:
+            return False, str(exc)
+        self._deliver(result, result.recipients)
+        return True, "sent"
+
+    def choose_colleague_reply(self, item_id: int, choice: str, text: str) -> tuple[bool, str]:
+        """GitHub is written only here, on the owner's click, and with no transaction open."""
+        user = self.config.user_alias or "user"
+        try:
+            with self._connection() as conn, transaction(conn):
+                chosen = claim_choice(conn, item_id, choice, text, now_ms())
+            url = None
+            if chosen.choice != HIMSELF:
+                try:
+                    url, text = post_reply(chosen, self._github)
+                    chosen = replace(chosen, reply=text)
+                except GitHubError as exc:
+                    with self._connection() as conn, transaction(conn):
+                        release_failed_choice(conn, item_id, str(exc))
+                    return False, f"not posted: {exc}"
+            try:
+                with self._connection() as conn, transaction(conn):
+                    result = finish_choice(conn, self.config, chosen, url, user, now_ms())
+            except sqlite3.Error as exc:
+                posted = f"posted as {url}" if url else "chosen"
+                return False, f"{posted}, but not recorded ({exc}); bridge records it within minutes and never reposts"
+        except (UsageError, MessageStateError) as exc:
             return False, str(exc)
         self._deliver(result, result.recipients)
         return True, "sent"
@@ -564,7 +918,7 @@ class DashboardState:
         for recipient in result.recipients:
             if recipient.pid:
                 try:
-                    write_hint(recipient.pid, 0)
+                    write_hint(recipient.pid, HINT_SENT)
                 except OSError as exc:
                     print(f"hint for {recipient.handle} failed: {exc}", flush=True)
         try:
@@ -581,8 +935,7 @@ class DashboardState:
         try:
             done = subprocess.run(select, capture_output=True, text=True, timeout=5, check=False)
             # From a browser tab the terminal is behind; inside an agterm overlay this is a no-op.
-            if self.config.terminal_app:
-                subprocess.run(["open", "-a", self.config.terminal_app], capture_output=True, timeout=5, check=False)
+            subprocess.run(["open", "-a", TERMINAL_APP], capture_output=True, timeout=5, check=False)
         except (OSError, subprocess.TimeoutExpired) as exc:
             return False, str(exc)
         if done.returncode != 0:
@@ -647,7 +1000,7 @@ def map_db_to_snapshot(conn: sqlite3.Connection, config: Config, now: int) -> di
         if config.hides(r["tab_name"], r["workspace_name"])
     }
     views: list[SessionView] = []
-    for view in list_sessions(conn, config, now):
+    for view in list_sessions(conn, now):
         if config.hides(view.tab_name, view.workspace_name):
             hidden_conversations.add(view.conversation_id or "")
         else:
@@ -676,7 +1029,7 @@ def map_db_to_snapshot(conn: sqlite3.Connection, config: Config, now: int) -> di
         for r in conn.execute(
             """
             SELECT id, created_at, from_conversation, from_handle, severity, text, source, message_id, resolved_at,
-                   resolved_why, kind, body, links, options, answer, answered_at
+                   kind, body, links, options, answer, answered_at
             FROM user_items
             WHERE created_at > ? OR resolved_at > ? OR (resolved_at IS NULL AND severity != 'info')
             ORDER BY severity = 'blocker' DESC, severity = 'action' DESC, created_at DESC
@@ -753,6 +1106,15 @@ def map_db_to_snapshot(conn: sqlite3.Connection, config: Config, now: int) -> di
             ),
         )
     sessions.extend(remote_sessions)
+
+    def route_issue(issue_ref: str, linked: list[str], closing: list[str]) -> tuple[str | None, str | None] | None:
+        owner = find_issue_lead(conn, config, issue_ref, linked, closing, enrichment)
+        return (owner.surface, owner.handle) if owner else None
+
+    def route_pr(ref: str, data: dict[str, object]) -> tuple[str | None, str | None] | None:
+        owner = find_owner_of_ref(conn, config, ref, str(data.get("head") or ""))
+        return (owner.surface, owner.handle) if owner else None
+
     signals = find_signals(
         [
             SessionRefs(
@@ -765,10 +1127,15 @@ def map_db_to_snapshot(conn: sqlite3.Connection, config: Config, now: int) -> di
             for v in views
             if v.status != "ended"
         ]
-        + [map_remote_to_session_refs(r, sessions) for r in remote_sessions],
+        + [map_remote_to_session_refs(r, sessions) for r in remote_sessions]
+        # A lead's declared PR still has a lead after the worker that made it has ended.
+        + [SessionRefs(None, None, None, list_lead_work_prs(conn))],
         enrichment,
-        config.repo_labels,
         now,
+        route_issue,
+        route_pr,
+        config.review_stall_status,
+        config.review_bot_name,
     )
     return {
         "now": now,
@@ -777,11 +1144,18 @@ def map_db_to_snapshot(conn: sqlite3.Connection, config: Config, now: int) -> di
         "messages": messages,
         "claims": claims,
         "signals": [map_signal_to_dict(s) for s in signals],
-        "freshness": provider_freshness(enrichment, collect_watched_refs(conn, config)),
+        "freshness": provider_freshness(enrichment, collect_watched_refs(conn)),
         "hooks": asdict(check_hooks(conn, now)),
         "user": config.user_alias or "user",
         "remotes": [dict(r) for r in conn.execute("SELECT * FROM remote_hosts ORDER BY host")],
     }
+
+
+def list_lead_work_prs(conn: sqlite3.Connection) -> list[str]:
+    rows = conn.execute(
+        "SELECT DISTINCT r.value FROM lead_work w, json_each(w.refs) r WHERE w.done_at IS NULL AND r.value LIKE 'pr:%'"
+    )
+    return sorted(str(r[0]) for r in rows)
 
 
 def attach_drivers(local: list[dict[str, object]], remote: list[dict[str, object]], links: list[Link]) -> None:
@@ -838,7 +1212,7 @@ def map_refs_to_links(
         links.append({"kind": "branch", "label": branch, "url": f"https://github.com/{repo}/tree/{branch}"})
     for ref in refs:
         kind = ref.partition(":")[0]
-        label = map_ref_to_label(ref, config.repo_labels)
+        label = map_ref_to_label(ref)
         data = enrichment.get(ref)
         if data and "state" not in data and data.get("error") == "not found or no access":
             # A bare number that is not a PR (or a repo we cannot see) is noise, not a link worth showing.
@@ -848,28 +1222,13 @@ def map_refs_to_links(
             {
                 "kind": kind,
                 "label": label,
-                "url": map_ref_to_url(ref, config) or (map_data_to_web_url(data) if kind == "issue" else ""),
+                "url": map_ref_to_url(ref, config),
                 "status": asdict(status) if status else None,
                 "done": bool(data)
                 and (data.get("state") in ("MERGED", "CLOSED") or data.get("state_type") in ("completed", "canceled")),
             }
         )
     return links
-
-
-def map_enrichment_to_url(conn: sqlite3.Connection, ref: str) -> str:
-    """The tracker's own link for an issue when issue_url gives none."""
-    if not ref.startswith("issue:"):
-        return ""
-    row = conn.execute("SELECT data FROM enrichment WHERE ref = ?", (ref,)).fetchone()
-    data: object = json.loads(row["data"]) if row and row["data"] else None
-    return map_data_to_web_url(cast(dict[str, object], data) if isinstance(data, dict) else None)
-
-
-def map_data_to_web_url(data: dict[str, object] | None) -> str:
-    """Only http(s): the URL comes from a tracker adapter and ends up in an href."""
-    url = (data or {}).get("url")
-    return url if isinstance(url, str) and url.startswith(("https://", "http://")) else ""
 
 
 def map_ref_to_url(ref: str, config: Config) -> str:
@@ -894,15 +1253,30 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if self.path in ("/", "/guild"):
             body = files("bridge").joinpath("web/guild.html").read_bytes()
             self._send(200, "text/html; charset=utf-8", body)
-        elif self.path in ("/dashboard", "/index.html"):
-            body = files("bridge").joinpath("web/index.html").read_bytes()
-            self._send(200, "text/html; charset=utf-8", body)
         elif match := re.fullmatch(r"/reviews/([\w.-]+/[\w.-]+)/(\d{1,9})/doc", self.path):
             doc = self.state.read_review_doc(match.group(1), int(match.group(2)))
             if doc is None:
                 self._send(404, "text/plain", b"no document registered for this PR")
             else:
                 self._send_sandboxed_html(doc)
+        elif match := re.fullmatch(r"/(api/)?pinned(?:\?(.*))?", self.path):
+            try:
+                request = map_query_string_to_request(match.group(2) or "")
+            except ValueError as error:
+                self._send(400, "text/plain", str(error).encode())
+            else:
+                if match.group(1):
+                    self._json(200, self.state.pinned_items(request))
+                else:
+                    self._send(200, "text/html; charset=utf-8", self.state.pinned_page(request).encode())
+        elif self.path == "/dreams":
+            self._send(200, "text/html; charset=utf-8", self.state.dreams_page().encode())
+        elif self.path == "/p" or self.path.startswith(("/p/", "/p?")):
+            status, target, page = self.state.page_response(self.path)
+            if target is not None:
+                self._redirect(target)
+            else:
+                self._send(status, "text/html; charset=utf-8", page.encode())
         elif self.path == "/api/guild":
             self._json(200, self.state.guild_snapshot())
         elif self.path == "/api/state":
@@ -918,15 +1292,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if match := re.fullmatch(r"/api/items/(\d+)/(resolve|unresolve)", self.path):
             ok = self.state.set_item_resolved(int(match.group(1)), match.group(2) == "resolve")
             self._json(200 if ok else 409, {"ok": ok})
-        elif match := re.fullmatch(r"/api/remote/([a-z0-9-]+)/((?:\$|%24)\d+)/attach", self.path):
-            ok, detail = self.state.attach_remote(match.group(1), urllib.parse.unquote(match.group(2)))
-            self._json(200 if ok else 409, {"ok": ok, "detail": detail})
         elif match := re.fullmatch(r"/api/items/(\d{1,12})/answer", self.path):
             data = self._read_json()
             if data is None or not isinstance(data.get("answer"), str):
                 self._json(400, {"ok": False, "detail": "expected {answer: string}"})
                 return
             ok, detail = self.state.answer_item(int(match.group(1)), str(data["answer"]))
+            self._json(200 if ok else 409, {"ok": ok, "detail": detail})
+        elif match := re.fullmatch(r"/api/colleague-replies/(\d{1,12})", self.path):
+            data = self._read_json()
+            choice, text = (data or {}).get("choice"), (data or {}).get("text", "")
+            if not isinstance(choice, str) or not isinstance(text, str):
+                self._json(400, {"ok": False, "detail": "expected {choice: string, text: string}"})
+                return
+            ok, detail = self.state.choose_colleague_reply(int(match.group(1)), choice, text)
             self._json(200 if ok else 409, {"ok": ok, "detail": detail})
         elif self.path == "/api/messages":
             data = self._read_json()
@@ -955,6 +1334,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._json(400, {"ok": False, "detail": "expected {direct: bool, mention: [name], comment: string}"})
                 return
             ok, detail = self.state.publish_review(ref, match.group(3), *choice)
+            self._json(200 if ok else 409, {"ok": ok, "detail": detail})
+        elif match := re.fullmatch(r"/api/reviews/([\w.-]+/[\w.-]+)/(\d{1,9})/merge-ok", self.path):
+            head_oid = (self._read_json() or {}).get("head_oid")
+            if not isinstance(head_oid, str) or not re.fullmatch(r"[0-9a-f]{1,64}", head_oid):
+                self._json(400, {"ok": False, "detail": "expected {head_oid: hex string}"})
+                return
+            ok, detail = self.state.ok_merge(f"pr:{match.group(1)}#{match.group(2)}", head_oid)
             self._json(200 if ok else 409, {"ok": ok, "detail": detail})
         elif match := re.fullmatch(r"/api/asks/(\d{1,9})/(close|reopen)", self.path):
             data = self._read_json() or {}
@@ -1011,6 +1397,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _redirect(self, location: str) -> None:
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def _send(self, status: int, content_type: str, body: bytes) -> None:
         self.send_response(status)

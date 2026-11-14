@@ -1,5 +1,5 @@
 import sys
 
-from bridge.cli import main
+from bridge.entry import cli_main
 
-sys.exit(main())
+sys.exit(cli_main())

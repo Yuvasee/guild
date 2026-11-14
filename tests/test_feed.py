@@ -119,7 +119,7 @@ def test_a_long_message_from_the_user_is_cut_to_fit_and_blocks_nothing(
     bridge_env: BridgeEnv, spawn_process: SpawnProcess, dashboard: str
 ) -> None:
     pids = start(bridge_env, spawn_process, agterm_tabs=False)
-    http_request(dashboard + "/api/messages", post=True, data={"to": ["b"], "text": "ünïcödé " * 120})
+    http_request(dashboard + "/api/messages", post=True, data={"to": ["b"], "text": "έλεγξε " * 120})
     bridge_env.cli("send", "b", "can I take staging?", "--request", pid=pids["a"])
     context = prompt(bridge_env, pids["b"], "conv-b", "next")
     assert "(full text: bridge show 1)" in context
@@ -146,3 +146,21 @@ def test_a_team_post_is_typed_only_where_it_concerns_the_session(
     log = bridge_env.stub_log.read_text()
     assert "--target TAB-A" in log and "--target TAB-B" not in log
     assert "100 merged" in prompt(bridge_env, pids["b"], "conv-b", "next", True), "b reads it at its next turn"
+
+
+def test_a_long_user_message_is_typed_as_its_start_and_where_to_read_it_all() -> None:
+    """Typed whole, 2,000 characters became a paste chip in the box and never got its Enter."""
+    from typing import Any
+
+    from bridge.board import USER_CONVERSATION
+    from bridge.feed import TYPED_USER_MAX_CHARS, _convert_message_to_typed_text  # pyright: ignore[reportPrivateUsage]
+
+    def typed(body: str) -> str:
+        row: Any = {"from_conversation": USER_CONVERSATION, "from_handle": "user", "body": body, "kind": "info"}
+        return _convert_message_to_typed_text(row, 7, 0)
+
+    short = "Send it.\n\nFinal text:\nfine as it is"
+    assert typed(short) == "[bridge] user on the dashboard (#7): Send it. Final text: fine as it is"
+    long = typed("word " * 400)
+    assert len(long) < TYPED_USER_MAX_CHARS and long.endswith("with bridge show 7 before you act)")
+    assert long.startswith("[bridge] user on the dashboard (#7): word word")

@@ -1,6 +1,5 @@
 import json
 import os
-import re
 import subprocess
 import time
 from pathlib import Path
@@ -9,20 +8,16 @@ from unittest import mock
 from conftest import VENV_BIN, BridgeEnv, SpawnProcess
 from test_board import Pair
 
-from bridge.config import GuardRule
 from bridge.db import transaction
 from bridge.guard import (
     GITHUB_STALE_S,
+    Unreadable,
     find_merge_blocks,
     map_command_to_targets,
     map_merge_blocks_to_lines,
     sync_claims_flag,
 )
 from bridge.install import convert_event_to_command
-
-STAGING = GuardRule(
-    trigger="helm", pattern=re.compile(r"helm (upgrade|install|rollback)\b.*\bstaging\b"), resource="env:staging"
-)
 
 
 def repo(path: Path, branch: str = "feat/x") -> Path:
@@ -34,7 +29,7 @@ def repo(path: Path, branch: str = "feat/x") -> Path:
 
 
 def keys(command: str, cwd: Path) -> list[str]:
-    return [t.key for t in map_command_to_targets(command, str(cwd), (STAGING,))]
+    return [t.key for t in map_command_to_targets(command, str(cwd))]
 
 
 def test_push_and_merge_commands_map_to_claim_keys(tmp_path: Path) -> None:
@@ -52,7 +47,6 @@ def test_push_and_merge_commands_map_to_claim_keys(tmp_path: Path) -> None:
     assert keys("gh pr merge https://github.com/Acme/Api/pull/7", web) == ["pr:acme/api#7"]
     assert keys("gh pr close -R acme/api feat/y", web) == ["branch:acme/api:feat/y"]
     assert keys("gh pr merge", web) == ["branch:acme/web:feat/x"]
-    assert keys("helm upgrade app ./chart -n staging", web) == ["env:staging"]
 
 
 def test_read_only_commands_are_not_targets(tmp_path: Path) -> None:
@@ -103,7 +97,11 @@ def test_parsing_cases_from_review(tmp_path: Path) -> None:
     assert keys("printf 'hello;git push origin main;world'", web) == []
     assert keys(f"false || cd {other}; git push", web) == []
     assert keys("git push --dry-run", web) == []
-    assert keys("git push origin --delete feat/x", web) == []
+    assert keys("git push origin --delete feat/x", web) == ["branch:acme/web:feat/x"]
+    assert keys("git push -d origin feat/x refs/heads/feat/y", web) == [
+        "branch:acme/web:feat/x",
+        "branch:acme/web:feat/y",
+    ]
     assert keys("git checkout release && git push", web) == ["branch:acme/web:release"]
     assert keys("git push origin 'refs/heads/*:refs/heads/*'", web) == []
     assert keys("cat <<EOF\ngit push\nEOF", web) == []
@@ -121,12 +119,11 @@ def test_parsing_cases_from_review(tmp_path: Path) -> None:
     assert keys("cat <<'X' > notes.md\ngit push origin main\nX\ngit status", web) == []
     assert keys("echo '<<EOF'\ngit push origin main", web) == ["branch:acme/web:main"]
     assert keys("cat <<EOF\n EOF \ngit push origin main\nEOF\ngit status", web) == []
-    helm_glob = GuardRule(trigger="helm*upgrade", pattern=re.compile(r"helm upgrade .*staging"), resource="env:staging")
-    assert [t.key for t in map_command_to_targets("helm upgrade app -n staging", str(web), (helm_glob,))] == [
-        "env:staging"
-    ]
     (web / ".git" / "config").write_text((web / ".git" / "config").read_text() + '[remote "origin"]\n\tpushurl = x\n')
-    assert keys("git push", web) == []
+    unreadable: list[Unreadable] = []
+    # The Mac keeps its best reading, so a claim still holds, and fails closed where it must (hosts).
+    assert [t.key for t in map_command_to_targets("git push", str(web), unreadable)] == ["branch:acme/web:feat/x"]
+    assert [u.text for u in unreadable] == ["git push"]
 
 
 def test_shell_gate_reaches_python_for_spaced_and_dash_c_forms(
@@ -156,7 +153,7 @@ def test_a_merge_through_the_api_maps_to_its_pr_and_a_read_does_not(tmp_path: Pa
     assert keys("gh api repos/Acme/Web/pulls/12/merge", web) == []
 
 
-def test_a_merge_waits_for_approval_owner_comments_and_green_ci_by_number_and_by_branch(
+def test_a_merge_waits_for_approval_owners_comments_and_green_ci_by_number_and_by_branch(
     bridge_env: BridgeEnv, spawn_process: SpawnProcess
 ) -> None:
     from test_reviews import make_pr
@@ -183,12 +180,16 @@ def test_a_merge_waits_for_approval_owner_comments_and_green_ci_by_number_and_by
         store_open_prs(conn, [make_pr(ref="pr:Acme/Web#12", repo="Acme/Web", number=12, head="feat/x")], 500)
         conn.execute("INSERT OR REPLACE INTO review_poll (id, ok_at) VALUES (1, ?)", (now,))
     update("UPDATE review_prs SET merge_block = NULL")
+    assert "Acme/Web#12 is not mergeable yet: the owner has not reviewed it" in refusal("gh pr merge 12")
+    update("""UPDATE review_prs SET approved_by = '["mira"]'""")
+    assert "a colleague's or the bot's approval does not stand in" in refusal("gh pr merge 12")
+    update("UPDATE review_prs SET approved_by = '[]', reviewed_at = 600")
     assert "Acme/Web#12 is not mergeable yet: not approved." in refusal("gh pr merge 12")
-    update("""UPDATE review_prs SET approved_by = '["mira"]', open_threads = 1, owner_open_threads = 1""")
+    update("""UPDATE review_prs SET approved_by = '["mira"]', open_threads = 1, his_open_threads = 1""")
     for command in ("gh pr merge 12 --squash", "gh pr merge", "gh api -X PUT repos/Acme/Web/pulls/12/merge"):
         assert "the owner's comments are open (1 review thread is unresolved)" in refusal(command)
     assert _run_guard(bridge_env, pair.b, "conv-b", "gh pr merge 13", web) == ""
-    update("UPDATE review_prs SET open_threads = 0, owner_open_threads = 0, checks = 'PENDING'")
+    update("UPDATE review_prs SET open_threads = 0, his_open_threads = 0, checks = 'PENDING'")
     assert "not mergeable yet: CI pending." in refusal("gh pr merge 12")
     update("UPDATE review_prs SET checks = NULL, merge_state = 'BLOCKED'")
     assert "not mergeable yet: blocked on GitHub." in refusal("gh pr merge 12")
@@ -210,13 +211,13 @@ def test_a_stale_queue_reads_github_once_and_an_unreadable_pr_is_refused(tmp_pat
     conn = connect(tmp_path / "t.db")
     with transaction(conn):
         store_open_prs(conn, [make_pr(ref="pr:Acme/Web#12", repo="Acme/Web", number=12, head="feat/x")], 500)
-        conn.execute("""UPDATE review_prs SET approved_by = '["mira"]'""")
+        conn.execute("""UPDATE review_prs SET approved_by = '["mira"]', reviewed_at = 600""")
         conn.execute("INSERT OR REPLACE INTO review_poll (id, ok_at) VALUES (1, 1000)")
-    targets = map_command_to_targets("gh pr merge 12", str(web), ())
+    targets = map_command_to_targets("gh pr merge 12", str(web))
     now = 1000 + GITHUB_STALE_S * 1000 + 1
     with mock.patch("bridge.guard.fetch_merge_facts", return_value=(False, True, "FAILURE", "CLEAN", 0)) as fetch:
         [refused] = find_merge_blocks(conn, CONFIG, targets, now)
-    fetch.assert_called_once_with(CONFIG, "Acme/Web", 12)
+    assert fetch.call_args.args[:3] == (CONFIG, "Acme/Web", 12)
     assert refused.waits == ("CI red",)
     with mock.patch("bridge.guard.fetch_merge_facts", return_value=(False, True, None, "CLEAN", 0)):
         assert find_merge_blocks(conn, CONFIG, targets, now) == []
@@ -252,7 +253,7 @@ def test_a_stale_queue_reads_github_once_and_an_unreadable_pr_is_refused(tmp_pat
     fetch.assert_not_called()
 
 
-def test_the_live_read_is_short_and_counts_only_owner_unresolved_threads() -> None:
+def test_the_live_read_is_short_and_counts_only_owners_unresolved_threads() -> None:
     from test_reviews import CONFIG
 
     from bridge.review_github import fetch_merge_facts

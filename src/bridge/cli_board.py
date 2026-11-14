@@ -5,13 +5,13 @@ from datetime import datetime
 
 from bridge.board import (
     DEFAULT_RESPOND_WITHIN_S,
+    HINT_SENT,
     MAX_AGENT_HOPS,
     USER_CONVERSATION,
     AddressError,
     MessageStateError,
     Party,
     Recipient,
-    cancel,
     flag_overdue,
     list_board,
     list_inbox,
@@ -78,10 +78,6 @@ def add_board_commands(sub: "argparse._SubParsersAction[argparse.ArgumentParser]
         p.add_argument("ids", type=int, nargs="+")
         p.set_defaults(func=cmd_respond, action=action)
 
-    p = sub.add_parser("cancel", help="withdraw a message you sent")
-    p.add_argument("id", type=int)
-    p.set_defaults(func=cmd_cancel)
-
     p = sub.add_parser("inbox", help="messages for this session")
     p.add_argument("--all", action="store_true", help="include closed ones")
     p.set_defaults(func=cmd_inbox)
@@ -101,7 +97,7 @@ def add_board_commands(sub: "argparse._SubParsersAction[argparse.ArgumentParser]
     p.add_argument(
         "--urgent",
         action="store_true",
-        help="blocked/decision only, when prod or a customer is hurting, money is leaking, or a deadline is today",
+        help="blocked/decision only, when prod or users are hurting, money is leaking, or a deadline is today",
     )
     p.set_defaults(func=cmd_post)
 
@@ -194,17 +190,6 @@ def cmd_respond(args: argparse.Namespace, conn: sqlite3.Connection, config: Conf
     except MessageStateError as exc:
         raise UsageError(str(exc)) from exc
     print(f"{args.action}: {' '.join(f'#{i}' for i in args.ids)}")
-    return 0
-
-
-def cmd_cancel(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
-    me = current_party(conn)
-    try:
-        with transaction(conn):
-            cancel(conn, me, int(args.id), now_ms())
-    except MessageStateError as exc:
-        raise UsageError(str(exc)) from exc
-    print(f"cancelled #{args.id}")
     return 0
 
 
@@ -384,7 +369,7 @@ def nudge_recipients(recipients: list[Recipient]) -> None:
         if not recipient.pid:
             continue
         try:
-            write_hint(recipient.pid, 0)
+            write_hint(recipient.pid, HINT_SENT)
         except OSError as exc:
             print(f"warning: could not flag {recipient.handle} for mid-turn delivery: {exc}", file=sys.stderr)
 

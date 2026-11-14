@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pinned</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M5 1h6l-1 5 3 3H3l3-3zM8 9v6' stroke='%23888' stroke-width='1.6' fill='none'/%3E%3C/svg%3E">
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #fbfbf9; --raise: #ffffff; --ink: #1c1c1a; --soft: #6e6e68; --faint: #a6a69f; --line: #ecebe6;
+  --code: #f3f2ed; --link: #2456d6; --ok: #3f9a6b;
+  --accent: #7a4fd0; --page: #fcfbff; --page-line: #e8e3f4; --badge: #efe9fb;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #141413; --raise: #1b1b1a; --ink: #ecece8; --soft: #9d9d97; --faint: #65655f; --line: #282826;
+    --code: #232321; --link: #86a8ff; --ok: #55b482;
+    --accent: #b49cf0; --page: #1d1b22; --page-line: #2e2a38; --badge: #2c2640;
+  }
+}
+* { box-sizing: border-box; }
+/* The script keeps the reader's place itself; the browser's own anchoring would pin the end-of-list marker and load everything. */
+html { -webkit-text-size-adjust: 100%; overflow-anchor: none; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+main { max-width: 780px; margin: 0 auto; padding: 24px 16px 64px; }
+#top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; }
+h1 { margin: 0; font-size: 21px; font-weight: 700; }
+#top a { font-size: 13px; color: var(--soft); text-decoration-color: var(--faint); text-underline-offset: 2px; }
+.sub { margin: 4px 0 18px; font-size: 13px; color: var(--soft); }
+#pins { display: flex; flex-direction: column; gap: 10px; }
+.pin { background: var(--raise); border: 1px solid var(--line); border-radius: 10px; padding: 11px 14px; min-width: 0; }
+.pin h2 { margin: 0 0 6px; font-size: 15px; font-weight: 650; overflow-wrap: anywhere; }
+.cmd { display: flex; gap: 8px; align-items: flex-start; }
+.cmd pre { flex: 1; min-width: 0; margin: 0; background: var(--code); border-radius: 6px; padding: 6px 9px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 16em; overflow-y: auto; }
+.cmd code { font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.copy { flex: none; font: 12px -apple-system, BlinkMacSystemFont, sans-serif; color: var(--ink); background: var(--raise); border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; cursor: pointer; }
+.copy:hover { border-color: var(--faint); }
+.copy.done { color: var(--ok); border-color: var(--ok); }
+a.link { color: var(--link); overflow-wrap: anywhere; }
+.note { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.meta { margin-top: 6px; font-size: 12px; color: var(--faint); overflow-wrap: anywhere; }
+.empty { color: var(--soft); }
+.todo { font-style: italic; }
+#tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin: 0 0 14px; }
+#search { flex: 1 1 220px; min-width: 0; font: 14px -apple-system, BlinkMacSystemFont, sans-serif; color: var(--ink); background: var(--raise); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; }
+#search:focus { outline: none; border-color: var(--faint); }
+.chips { display: flex; gap: 4px; }
+.chip { font: 12px -apple-system, BlinkMacSystemFont, sans-serif; color: var(--soft); background: transparent; border: 1px solid var(--line); border-radius: 999px; padding: 4px 11px; cursor: pointer; }
+.chip:hover { border-color: var(--faint); }
+.chip[aria-pressed="true"] { color: var(--ink); background: var(--raise); border-color: var(--faint); }
+#count { font-size: 12px; color: var(--faint); }
+.pin.page { background: var(--page); border-color: var(--page-line); border-left: 3px solid var(--accent); }
+.pin.page h2 a.link { text-decoration: none; }
+.pin.page h2 a.link:hover { text-decoration: underline; text-underline-offset: 2px; }
+.badge { display: inline-block; margin-right: 8px; padding: 1px 7px; border-radius: 4px; font-size: 11px; font-weight: 600; letter-spacing: .02em; text-transform: uppercase; vertical-align: 1px; color: var(--accent); background: var(--badge); }
+#more { height: 1px; }
+/* A day's heading rides on its first item, so the list stays one node per item for paging and keyed updates. */
+.pin.day-start { position: relative; margin-top: 30px; }
+.pin.day-start::before { content: attr(data-day); position: absolute; left: -1px; top: -28px; font-size: 13px; font-weight: 650; color: var(--soft); }
+.pin.page.day-start::before { left: -3px; }
+</style>
+</head>
+<body>
+<main>
+  <div id="top"><h1>Pinned</h1><a href="/">← Guild</a></div>
+  <p class="sub">Commands, links and where credentials live, never the secrets themselves; every page we register and every Artifact a session publishes. Newest on top, by day.</p>
+  <div id="tools">
+    <input id="search" type="search" placeholder="Search pins and pages" maxlength="200" autocomplete="off" spellcheck="false" aria-label="Search pins and pages">
+    <div class="chips" role="group" aria-label="Show">
+      <button type="button" class="chip" data-kind="" aria-pressed="true">All</button>
+      <button type="button" class="chip" data-kind="pin" aria-pressed="false">Pins</button>
+      <button type="button" class="chip" data-kind="page" aria-pressed="false">Pages</button>
+    </div>
+    <span id="count"></span>
+  </div>
+  <div id="pins" data-total="<!--TOTAL-->">
+<!--PINS-->
+  </div>
+  <!--EMPTY-->
+  <div id="more"></div>
+</main>
+<script>
+"use strict";
+const PAGE_SIZE = 30;
+const MAX_FETCH = 1000;
+const POLL_MS = 5000;
+const list = document.getElementById("pins");
+const empty = document.getElementById("empty");
+const search = document.getElementById("search");
+const count = document.getElementById("count");
+const more = document.getElementById("more");
+const chips = [...document.querySelectorAll(".chip")];
+const params = new URLSearchParams(location.search);
+// The last value of a repeated parameter wins, as on the server.
+let query = (params.getAll("q").at(-1) || "").trim();
+let kind = params.getAll("kind").at(-1) || "";
+let total = Number(list.dataset.total) || 0;
+// queryTurn changes with the search or the filter; listTurn with every change to the shown list.
+// A response started before either changed is dropped, so a slow one never overwrites a newer one.
+let queryTurn = 0;
+let listTurn = 0;
+let reloading = false;
+let loadingMore = false;
+// Set when a next page added nothing (items moved since the list was fetched); the next refresh realigns the list.
+let stalled = false;
+// The server's HTML per item as the browser serializes it, so an unchanged item keeps its node.
+const shown = new Map([...list.children].map((node) => [node.id, node.outerHTML]));
+
+list.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-copy]");
+  if (!button) return;
+  const code = button.parentElement.querySelector("code");
+  try {
+    await navigator.clipboard.writeText(code.textContent);
+    button.textContent = "Copied";
+    button.classList.add("done");
+  } catch (error) {
+    // No clipboard access (an insecure origin or a denied permission): select it for Cmd+C instead.
+    const range = document.createRange();
+    range.selectNodeContents(code);
+    getSelection().removeAllRanges();
+    getSelection().addRange(range);
+    button.textContent = "Selected";
+  }
+  setTimeout(() => { button.textContent = "Copy"; button.classList.remove("done"); }, 1500);
+});
+
+function mapItemToNode(item) {
+  const template = document.createElement("template");
+  template.innerHTML = item.html;
+  const fresh = template.content.firstElementChild;
+  const current = document.getElementById(item.key);
+  if (current && current.parentElement === list && shown.get(item.key) === fresh.outerHTML) return current;
+  shown.set(item.key, fresh.outerHTML);
+  return fresh;
+}
+
+// The first item still on screen keeps its place, so items added or removed above never move what is being read.
+function findAnchor() {
+  if (window.scrollY <= 0) return null;
+  for (const node of list.children) {
+    const box = node.getBoundingClientRect();
+    if (box.bottom > 0) return { key: node.id, top: box.top };
+  }
+  return null;
+}
+
+function restoreAnchor(anchor) {
+  const node = anchor && document.getElementById(anchor.key);
+  if (node && node.parentElement === list) window.scrollBy(0, node.getBoundingClientRect().top - anchor.top);
+}
+
+function showItems(items) {
+  const anchor = findAnchor();
+  const nodes = items.map(mapItemToNode);
+  const keep = new Set(nodes);
+  for (const node of [...list.children]) {
+    if (!keep.has(node)) node.remove();
+  }
+  nodes.forEach((node, index) => {
+    if (list.children[index] !== node) list.insertBefore(node, list.children[index] || null);
+  });
+  const keys = new Set(items.map((item) => item.key));
+  for (const key of [...shown.keys()]) {
+    if (!keys.has(key)) shown.delete(key);
+  }
+  restoreAnchor(anchor);
+}
+
+function appendItems(items) {
+  for (const item of items) {
+    if (!shown.has(item.key)) list.append(mapItemToNode(item));
+  }
+}
+
+function markDays() {
+  let previous = null;
+  for (const node of list.children) {
+    node.classList.toggle("day-start", node.dataset.day !== previous);
+    previous = node.dataset.day;
+  }
+}
+
+function showState() {
+  markDays();
+  for (const chip of chips) chip.setAttribute("aria-pressed", String(chip.dataset.kind === kind));
+  empty.hidden = list.children.length > 0;
+  empty.textContent = query ? "Nothing matches." : kind === "page" ? "No pages yet." : "Nothing pinned yet.";
+  count.textContent = total === 1 ? "1 item" : `${total} items`;
+  if (list.children.length < total && !stalled) {
+    // Observing again reports the sentinel at once, so a short list keeps filling while it stays in view.
+    observer.unobserve(more);
+    observer.observe(more);
+  }
+}
+
+async function fetchItems(offset, limit) {
+  const asked = new URLSearchParams({ offset: String(offset), limit: String(limit) });
+  if (query) asked.set("q", query);
+  if (kind) asked.set("kind", kind);
+  const response = await fetch("/api/pinned?" + asked, { cache: "no-store" });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+async function fetchWindow(limit) {
+  const items = [];
+  const seen = new Set();
+  let total = 0;
+  for (let offset = 0; offset < limit; offset += MAX_FETCH) {
+    const fresh = await fetchItems(offset, Math.min(MAX_FETCH, limit - offset));
+    total = fresh.total;
+    for (const item of fresh.items) {
+      if (!seen.has(item.key)) { seen.add(item.key); items.push(item); }
+    }
+    if (offset + MAX_FETCH >= total) break;
+  }
+  return { items, total };
+}
+
+async function reload() {
+  const turn = ++queryTurn;
+  reloading = true;
+  const address = new URLSearchParams();
+  if (query) address.set("q", query);
+  if (kind) address.set("kind", kind);
+  history.replaceState(null, "", address.toString() ? "/pinned?" + address : "/pinned");
+  try {
+    const fresh = await fetchItems(0, PAGE_SIZE);
+    if (turn !== queryTurn) return;
+    total = fresh.total;
+    showItems(fresh.items);
+    listTurn++;
+    stalled = false;
+    showState();
+  } catch (error) {
+    // The server is restarting; the next poll shows the current list.
+  } finally {
+    if (turn === queryTurn) reloading = false;
+  }
+}
+
+async function loadMore() {
+  if (reloading || loadingMore || list.children.length >= total) return;
+  loadingMore = true;
+  const turn = queryTurn;
+  let added = -1;
+  try {
+    const before = list.children.length;
+    const fresh = await fetchItems(before, PAGE_SIZE);
+    if (turn !== queryTurn) return;
+    total = fresh.total;
+    appendItems(fresh.items);
+    listTurn++;
+    added = list.children.length - before;
+  } catch (error) {
+    // The next poll tries again.
+  } finally {
+    loadingMore = false;
+  }
+  if (added === 0 && list.children.length < total) {
+    stalled = true;
+    refresh(PAGE_SIZE);
+  } else if (added > 0) {
+    showState();
+  }
+}
+
+// Pins and pages change without a reload; a refresh waits while text on the page is selected, so a selection survives.
+// It fetches a page beyond what is shown and keeps every item still shown, so arrivals above never push the one being
+// read out of the list.
+async function refresh(grow = 0) {
+  if (document.hidden || reloading || loadingMore || !getSelection().isCollapsed) return;
+  const turns = [queryTurn, listTurn];
+  const wanted = Math.max(list.children.length + grow, PAGE_SIZE);
+  try {
+    const fresh = await fetchWindow(wanted + PAGE_SIZE);
+    if (turns[0] !== queryTurn || turns[1] !== listTurn || !getSelection().isCollapsed) return;
+    let keep = wanted;
+    fresh.items.forEach((item, index) => {
+      if (shown.has(item.key)) keep = Math.max(keep, index + 1);
+    });
+    total = fresh.total;
+    showItems(fresh.items.slice(0, keep));
+    listTurn++;
+    stalled = false;
+    showState();
+  } catch (error) {
+    // The server is restarting; the next tick tries again.
+  }
+}
+
+const observer = new IntersectionObserver((entries) => {
+  if (entries.some((entry) => entry.isIntersecting)) loadMore();
+}, { rootMargin: "0px 0px 800px 0px" });
+observer.observe(more);
+
+let typing = 0;
+search.addEventListener("input", () => {
+  clearTimeout(typing);
+  typing = setTimeout(() => {
+    const next = search.value.trim();
+    if (next === query) return;
+    query = next;
+    reload();
+  }, 200);
+});
+
+for (const chip of chips) {
+  chip.addEventListener("click", () => {
+    if (chip.dataset.kind === kind) return;
+    kind = chip.dataset.kind;
+    showState();
+    reload();
+  });
+}
+
+search.value = query;
+showState();
+setInterval(() => refresh(), POLL_MS);
+document.addEventListener("visibilitychange", () => refresh());
+</script>
+</body>
+</html>

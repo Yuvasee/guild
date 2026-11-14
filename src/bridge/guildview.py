@@ -1,22 +1,29 @@
 import json
 import re
 import sqlite3
+import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import cast
 
 from bridge.activity import RunningShell, SessionActivity
-from bridge.board import ACK_POST, SYSTEM_CONVERSATION, Party, Recipient, send_message
+from bridge.board import ACK_POST, SYSTEM_CONVERSATION, AddressError, Party, Recipient, resolve_handle, send_message
 from bridge.claims import list_claims
+from bridge.colleague_comments import load_draft_entry, map_db_to_colleague_feed
+from bridge.compaction import read_context_death
 from bridge.config import Config
 from bridge.enrich import load_enrichment
+from bridge.errlog import log_error
 from bridge.feed import DELIVERY_MARKS, OPEN_KINDS, RELAYED_ANSWER, USER_CONVERSATION, resolve_tab
+from bridge.host_workers import HOST_KIND_PREFIX
 from bridge.leads import TINTS, Lead, find_lead_on_surface, is_conversation_locked, list_lead_work, list_leads
 from bridge.refs import map_ref_to_label
 from bridge.registry import list_sessions
 from bridge.remote import REMOTE_STALE_AFTER_MS
-from bridge.signals import map_enrichment_to_status
+from bridge.reviews import find_lead_of
+from bridge.signals import STALL, map_enrichment_to_status
 from bridge.watcher import BLOCKED_AFTER_S
+from bridge.workers import WORKER_CAP
 
 ROOM_POSTS = 80
 CLAIM_LINES_FOR_MS = 24 * 3_600_000
@@ -32,6 +39,7 @@ _MESSAGE_POST_TYPES = (None, "report", "question", "handoff")
 _SIGNATURE_RE = re.compile(r"\s*([^:()\n]{1,60}?)\s*(?:\(([^:()\n]{1,60})\))?\s*:\s*")
 # A worker's tab keeps the brief's first words until its lead names it; those say nothing about the task.
 _UNNAMED_TASK_RE = re.compile(r"worker brief|your brief", re.I)
+_HOST_STATUS_TO_TAB = {"active": "active", "idle": "completed"}
 NOTHING_FOR_ME = "nothing for me"
 _SECTION_LABELS = r"What|Why now|Cost|Cost of [\w' -]{1,40}|[A-Z][\w'-]*(?: [\w'-]+){0,2} cost"
 _ROLLUP_ORDER = ("stuck", "working", "waiting", "unknown", "rest")
@@ -49,6 +57,8 @@ class Evidence:
     remote_running: tuple[str, ...]
     remote_unsure: tuple[str, ...]
     waits: tuple[str, ...]
+    context_dead: str | None = None
+    """Why its tab can take no turn, if so."""
 
 
 def map_db_to_guild(
@@ -61,7 +71,7 @@ def map_db_to_guild(
     activity: dict[int, SessionActivity] | None = None,
     activity_at: int | None = None,
 ) -> dict[str, object]:
-    sessions = list_sessions(conn, config, now)
+    sessions = list_sessions(conn, now)
     tabs = _map_tree_to_tabs(tree, config)
     tabs_fresh = tree is not None and (tree_at is None or now - tree_at <= TABS_STALE_MS)
     activity_fresh = activity is not None and (activity_at is None or now - activity_at <= ACTIVITY_STALE_MS)
@@ -100,16 +110,24 @@ def map_db_to_guild(
             if not tab_id or tab.get("parent") != tab_id:
                 continue
             instance = _load_tab_instance(conn, str(tab.get("id")))
+            host = _map_instance_to_host(instance)
+            if host and instance is not None:
+                tab = _map_host_instance_to_tab(tab, instance)
             worker_conversation = str(instance["conversation_id"]) if instance and instance["conversation_id"] else None
             if worker_conversation:
                 authors[worker_conversation] = lead.name
                 worker_tasks[worker_conversation] = str(tab.get("name") or "")
-            state = map_evidence_to_state(
-                evidence_for(int(instance["pid"]) if instance else None, worker_conversation, tab, [])
-            )
+            if host:
+                # Its pid here is the tab's ssh loop, whose CPU and files say nothing about the worker.
+                state = map_host_worker_to_state(tab, host, evidence_for(None, worker_conversation, tab, []), now)
+            else:
+                state = map_evidence_to_state(
+                    evidence_for(int(instance["pid"]) if instance else None, worker_conversation, tab, [])
+                )
             if tabs_fresh and _worker_is_gone(str(state["state"]), tab, instance is not None, now):
                 continue
-            workers.append({"task": tab.get("name"), "surface": instance["surface"] if instance else None, **state})
+            surface = instance["surface"] if instance else None
+            workers.append({"task": tab.get("name"), "surface": surface, "host": host, **state})
         if session is None or session.status in ("offline", "ended"):
             own = {"state": "stuck", "why": "no live session"}
             needs.append(
@@ -131,11 +149,10 @@ def map_db_to_guild(
                 **map_states_to_rollup(own, workers),
                 "workers": workers,
                 "worker_count": worker_count,
-                "worker_cap": config.worker_cap,
+                "worker_cap": WORKER_CAP,
                 "asks_you": _has_open_post(conn, conversation, now),
                 "work": [
-                    {"name": c.name, "links": [_map_ref_to_link(r, config, enrichment, url_of) for r in c.refs]}
-                    for c in chunks
+                    {"name": c.name, "links": [_map_ref_to_link(r, enrichment, url_of) for r in c.refs]} for c in chunks
                 ],
             }
         )
@@ -146,15 +163,19 @@ def map_db_to_guild(
         "tabs_at": tree_at,
         "activity_at": activity_at if activity_fresh else None,
         "user": config.user_alias or "user",
+        "review_bot": config.review_bot_name,
         "needs": needs,
         "leads": leads,
         "room": _load_room(conn, config, now, url_of, active, authors, worker_tasks),
+        "colleague_comments": map_db_to_colleague_feed(conn, config, now),
         "claims": _load_active_claims(conn, config, now, url_of),
     }
 
 
 def map_evidence_to_state(evidence: Evidence) -> dict[str, object]:
     """Claude's session file and process tree beat agterm's status, which a crash or an Esc can leave behind."""
+    if evidence.context_dead:
+        return {"state": "stuck", "why": evidence.context_dead}
     if evidence.tab_fresh and evidence.tab_status == "blocked":
         blocked = evidence.blocked_for_ms
         if blocked is not None and blocked >= BLOCKED_AFTER_S * 1000:
@@ -188,6 +209,23 @@ def map_evidence_to_state(evidence: Evidence) -> dict[str, object]:
     if activity.file_status == "idle":
         return {"state": "rest", "why": "turn ended, nothing running"}
     return {"state": "unknown", "why": "no session file for this process"}
+
+
+def map_host_worker_to_state(tab: dict[str, object], host: str, evidence: Evidence, now: int) -> dict[str, object]:
+    status = tab.get("status")
+    changed = tab.get("statusChangedAt")
+    since_ms = now - int(changed * 1000) if isinstance(changed, int | float) else None
+    if evidence.context_dead:
+        return {"state": "stuck", "why": f"{evidence.context_dead} on {host}"}
+    if status == "blocked":
+        if since_ms is not None and since_ms >= BLOCKED_AFTER_S * 1000:
+            return {"state": "stuck", "why": f"a dialog has been open on {host} for {_convert_ms_to_age(since_ms)}"}
+        return {"state": "waiting", "why": f"waiting on a dialog on {host}"}
+    if status == "active":
+        return {"state": "working", "why": f"in a turn on {host}"}
+    if evidence.waits:
+        return {"state": "waiting", "why": evidence.waits[0]}
+    return {"state": "rest", "why": f"turn ended on {host}"}
 
 
 def map_states_to_rollup(own: dict[str, object], workers: list[dict[str, object]]) -> dict[str, object]:
@@ -234,6 +272,7 @@ def _gather_evidence(
         remote_running=running,
         remote_unsure=unsure,
         waits=tuple(_load_waits(conn, config, conversation_id, now, enrichment, extra_refs)),
+        context_dead=read_context_death(conn, conversation_id),
     )
 
 
@@ -253,7 +292,7 @@ def _convert_ms_to_age(ms: int) -> str:
 def _load_remote_work(
     conn: sqlite3.Connection, config: Config, conversation_id: str | None, now: int
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Remote tmux sessions this conversation drove (by name or id) that run something, or may: (running, unsure).
+    """Remote tmux sessions this conversation drove (by name or id) whose agent works, or may: (running, unsure).
 
     A link holds for days, since a run outlives the command that started it, but not for a later run under one name.
     """
@@ -274,9 +313,8 @@ def _load_remote_work(
         earliest_start = int(link["last_seen_at"]) + REMOTE_LINK_BEFORE_START_MS
         for row in conn.execute(
             """
-            SELECT tmux, started_at, 'working' AS state FROM remote_runs WHERE host = ?1 AND (tmux = ?2 OR tmux_id = ?2)
-            UNION ALL
-            SELECT json_extract(data, '$.tmux'), json_extract(data, '$.started_at'), json_extract(data, '$.state')
+            SELECT json_extract(data, '$.tmux') AS tmux, json_extract(data, '$.started_at') AS started_at,
+                   json_extract(data, '$.state') AS state
             FROM remote_sessions WHERE host = ?1
               AND (json_extract(data, '$.tmux') = ?2 OR json_extract(data, '$.tmux_id') = ?2)
             """,
@@ -308,10 +346,23 @@ def _agterm_session_of(conn: sqlite3.Connection, surface: str | None) -> str | N
     return str(row[0]) if row and row[0] else None
 
 
+def _map_instance_to_host(instance: sqlite3.Row | None) -> str | None:
+    kind = str(instance["kind"] or "") if instance is not None else ""
+    return kind.removeprefix(HOST_KIND_PREFIX) if kind.startswith(HOST_KIND_PREFIX) else None
+
+
+def _map_host_instance_to_tab(tab: dict[str, object], instance: sqlite3.Row) -> dict[str, object]:
+    """agterm sees only ssh in a host worker's tab; the worker's own hooks give the status it would show."""
+    status = "blocked" if instance["attention"] else _HOST_STATUS_TO_TAB.get(str(instance["status"]))
+    changed = instance["attention_at"] or instance["last_activity_at"]
+    return {**tab, "status": status, "statusChangedAt": int(changed) / 1000 if changed else tab.get("statusChangedAt")}
+
+
 def _load_tab_instance(conn: sqlite3.Connection, session_id: str) -> sqlite3.Row | None:
     return conn.execute(
         """
-        SELECT i.pid, i.conversation_id, i.surface FROM surfaces s
+        SELECT i.pid, i.conversation_id, i.surface, i.kind, i.status, i.attention, i.attention_at, i.last_activity_at
+        FROM surfaces s
         JOIN instances i ON i.surface = s.surface AND i.ended_at IS NULL
         WHERE s.agterm_session = ? ORDER BY i.proc_start_ms DESC LIMIT 1
         """,
@@ -374,7 +425,7 @@ def _load_waits(
             and data.get("checks") in ("PENDING", "EXPECTED")
             and not data.get("stale")
         ):
-            waits.append(f"waiting on CI, {map_ref_to_label(ref, config.repo_labels)}")
+            waits.append(f"waiting on CI, {map_ref_to_label(ref)}")
     return waits
 
 
@@ -393,7 +444,7 @@ def _has_open_post(conn: sqlite3.Connection, conversation_id: str | None, now: i
 
 
 def _map_ref_to_link(
-    ref: str, config: Config, enrichment: dict[str, dict[str, object]], url_of: Callable[[str], str]
+    ref: str, enrichment: dict[str, dict[str, object]], url_of: Callable[[str], str]
 ) -> dict[str, object]:
     data = enrichment.get(ref)
     # A state past its refresh is left out: an old "CI running" on the page would be a guess.
@@ -403,7 +454,7 @@ def _map_ref_to_link(
     )
     return {
         "kind": ref.partition(":")[0],
-        "label": map_ref_to_label(ref, config.repo_labels),
+        "label": map_ref_to_label(ref),
         "url": url_of(ref),
         "state": status.label if status else None,
         "title": str(data.get("title") or "") if data else "",
@@ -414,34 +465,78 @@ def _map_ref_to_link(
 def post_signals_to_leads(
     conn: sqlite3.Connection, config: Config, signals: list[dict[str, object]], now: int
 ) -> list[Recipient]:
-    """Each signal once, by its key, which stays the same while the underlying state does."""
+    """Each signal once, by its key, which stays the same while the underlying state does; a stalled review bot also
+    once to the assistant. One that fails is logged and undone alone, so it never holds back the signals after it."""
     posted: list[Recipient] = []
     for signal in signals:
-        key = str(signal["key"])
-        surface = signal.get("surface")
-        lead = find_lead_on_surface(conn, surface if isinstance(surface, str) else None)
-        if lead is None or conn.execute("SELECT 1 FROM signal_posts WHERE key = ?", (key,)).fetchone():
+        conn.execute("SAVEPOINT signal_post")
+        try:
+            recipients = [_post_signal_to_lead(conn, config, signal, now)]
+            if signal.get("kind") == STALL:
+                recipients.append(_post_signal_to_assistant(conn, config, signal, now))
+        except Exception:
+            conn.execute("ROLLBACK TO signal_post")
+            conn.execute("RELEASE signal_post")
+            log_error("signal post", f"{signal.get('key')}\n{traceback.format_exc()}")
             continue
-        row = conn.execute(
-            "SELECT conversation_id FROM instances WHERE surface = ? AND ended_at IS NULL "
-            "AND conversation_id IS NOT NULL ORDER BY proc_start_ms DESC LIMIT 1",
-            (lead.surface,),
-        ).fetchone()
-        if row is None or is_conversation_locked(conn, config, str(row[0])):
-            continue
-        recipient = resolve_tab(conn, str(row[0]), lead.name)
-        text = f"{signal['text']} ({signal['kind']})"
-        result = send_message(conn, Party(SYSTEM_CONVERSATION, "bridge"), [recipient], "info", text, now)
-        # Not on the board: routine CI and review are for the lead, and the user must not see them.
-        conn.execute(
-            "UPDATE messages SET post_type = 'report', link = ? WHERE id = ?",
-            (signal.get("url") or None, result.message_id),
-        )
-        conn.execute(
-            "INSERT INTO signal_posts (key, message_id, posted_at) VALUES (?, ?, ?)", (key, result.message_id, now)
-        )
-        posted.append(recipient)
+        conn.execute("RELEASE signal_post")
+        posted += [r for r in recipients if r is not None]
     return posted
+
+
+def _post_signal_to_lead(
+    conn: sqlite3.Connection, config: Config, signal: dict[str, object], now: int
+) -> Recipient | None:
+    key = str(signal["key"])
+    surface = signal.get("surface")
+    # A worker's tab is no lead's: its signal goes to the lead above it.
+    lead = find_lead_on_surface(conn, find_lead_of(conn, surface if isinstance(surface, str) else None)[1])
+    if lead is None or _is_signal_posted(conn, key):
+        return None
+    row = conn.execute(
+        "SELECT conversation_id FROM instances WHERE surface = ? AND ended_at IS NULL "
+        "AND conversation_id IS NOT NULL ORDER BY proc_start_ms DESC LIMIT 1",
+        (lead.surface,),
+    ).fetchone()
+    if row is None or is_conversation_locked(conn, config, str(row[0])):
+        return None
+    return _send_signal(conn, signal, key, resolve_tab(conn, str(row[0]), lead.name), now)
+
+
+def _post_signal_to_assistant(
+    conn: sqlite3.Connection, config: Config, signal: dict[str, object], now: int
+) -> Recipient | None:
+    key = f"{signal['key']}:{config.assistant_handle}"
+    if _is_signal_posted(conn, key):
+        return None
+    try:
+        recipient = resolve_handle(conn, config.assistant_handle)
+    except AddressError:
+        return None
+    if is_conversation_locked(conn, config, recipient.conversation_id):
+        return None
+    return _send_signal(conn, signal, key, recipient, now)
+
+
+def _is_signal_posted(conn: sqlite3.Connection, key: str) -> bool:
+    return conn.execute("SELECT 1 FROM signal_posts WHERE key = ?", (key,)).fetchone() is not None
+
+
+def _send_signal(
+    conn: sqlite3.Connection, signal: dict[str, object], key: str, recipient: Recipient, now: int
+) -> Recipient:
+    # A stall's text says what it is; every other kind is named after its PR.
+    text = str(signal["text"]) if signal.get("kind") == STALL else f"{signal['text']} ({signal['kind']})"
+    result = send_message(conn, Party(SYSTEM_CONVERSATION, "bridge"), [recipient], "info", text, now)
+    # Not on the board: routine CI and review are for the lead, and the user must not see them.
+    conn.execute(
+        "UPDATE messages SET post_type = 'report', link = ? WHERE id = ?",
+        (signal.get("url") or None, result.message_id),
+    )
+    conn.execute(
+        "INSERT INTO signal_posts (key, message_id, posted_at) VALUES (?, ?, ?)", (key, result.message_id, now)
+    )
+    return recipient
 
 
 def _tab_names(conn: sqlite3.Connection, surface: str) -> tuple[str | None, str | None]:
@@ -480,8 +575,8 @@ def map_body_to_sections(body: str, options: list[str]) -> list[dict[str, object
 
 
 def _map_open_posts_to_needs(conn: sqlite3.Connection, config: Config, now: int) -> list[dict[str, object]]:
-    """A question leaves only when its answer has reached the session, or they dismiss it. A claim to type it counts
-    as offered so a hook does not deliver it too, but it has not arrived until the typing is over."""
+    """A question leaves only when its answer has reached the session, or the owner dismisses it. A claim to type it
+    counts as offered so a hook does not deliver it too, but it has not arrived until the typing is over."""
     marks = ",".join("?" * len(OPEN_KINDS))
     needs: list[dict[str, object]] = []
     for row in conn.execute(
@@ -496,7 +591,7 @@ def _map_open_posts_to_needs(conn: sqlite3.Connection, config: Config, now: int)
                 ORDER BY i.proc_start_ms DESC LIMIT 1) AS surface
         FROM user_items
         WHERE source = 'agent' AND kind IN ({marks})
-          AND ((resolved_at IS NULL AND created_at > ?)
+          AND ((resolved_at IS NULL AND (created_at > ? OR id IN (SELECT item_id FROM colleague_calls)))
                OR (answer_message_id IS NOT NULL AND answer_dismissed_at IS NULL AND NOT EXISTS (
                    SELECT 1 FROM message_recipients r WHERE r.message_id = answer_message_id
                      AND (r.offered_at IS NOT NULL OR r.acked_at IS NOT NULL) AND r.typing_started_at IS NULL)))
@@ -508,6 +603,7 @@ def _map_open_posts_to_needs(conn: sqlite3.Connection, config: Config, now: int)
             continue
         options: list[str] = json.loads(row["options"]) if row["options"] else []
         delivering = row["answer_message_id"] is not None and row["resolved_at"] is not None
+        colleague = load_draft_entry(conn, config, int(row["id"]))
         needs.append(
             {
                 "type": "post",
@@ -520,6 +616,7 @@ def _map_open_posts_to_needs(conn: sqlite3.Connection, config: Config, now: int)
                 "sections": map_body_to_sections(str(row["body"]), options) if row["body"] else [],
                 "links": json.loads(row["links"]) if row["links"] else [],
                 "options": options,
+                **({"colleague": colleague} if colleague is not None else {}),
                 **(
                     {
                         "delivering": True,
@@ -698,7 +795,7 @@ def _load_room(
                 "who": who(conversation, handle, owner),
                 "leads": [owner] if owner else [],
                 "resource": row["resource"],
-                "label": _convert_resource_to_label(str(row["resource"]), config),
+                "label": _convert_resource_to_label(str(row["resource"])),
                 "reason": row["reason"],
                 "state": ended or "held",
                 "url": url_of(str(row["resource"])),
@@ -708,7 +805,7 @@ def _load_room(
 
 
 def convert_body_to_shown_text(body: str, author_names: tuple[str | None, ...]) -> str:
-    """Leads sign their posts ("Ada: Ada: …", "Access (Boris): …"), and the page names the author above the text."""
+    """Leads sign their posts ("Ada: Ada: …", "Access (Ben): …"), and the page names the author above the text."""
     names = {name.lower() for name in author_names if name}
     shown = body
     while match := _SIGNATURE_RE.match(shown):
@@ -772,11 +869,11 @@ def _map_post_to_level(
     return "message" if team or conversation in authors or handle in lead_names else "line"
 
 
-def _convert_resource_to_label(resource: str, config: Config) -> str:
+def _convert_resource_to_label(resource: str) -> str:
     kind, _, value = resource.partition(":")
     if kind == "branch":
         return value.rpartition(":")[2]
-    return map_ref_to_label(resource, config.repo_labels) if kind in ("pr", "gh-issue", "issue") else value or resource
+    return map_ref_to_label(resource) if kind in ("pr", "gh-issue", "issue") else value or resource
 
 
 def _load_active_claims(
@@ -793,7 +890,7 @@ def _load_active_claims(
             {
                 "resource": row["resource"],
                 "kind": str(row["resource"]).partition(":")[0],
-                "label": _convert_resource_to_label(str(row["resource"]), config),
+                "label": _convert_resource_to_label(str(row["resource"])),
                 "holder": row["holder_handle"],
                 "reason": row["reason"],
                 "acquired_at": row["acquired_at"],

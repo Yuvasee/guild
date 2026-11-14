@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 import subprocess
@@ -7,12 +8,15 @@ from pathlib import Path
 from typing import Any, cast
 from unittest import mock
 
+import pytest
 from conftest import VENV_BIN, BridgeEnv, SpawnProcess, http_request, wait_for
 from test_leads import Team
 
 from bridge.activity import SessionActivity
 from bridge.board import Party, flag_overdue, resolve_handle, send_message
+from bridge.cli import cmd_deliver
 from bridge.config import Config
+from bridge.db import transaction
 from bridge.feed import (
     TYPING_CLAIM_BACKSTOP_MS,
     answer_post,
@@ -230,6 +234,27 @@ def test_signal_reaches_the_owning_lead_once_with_no_page_open(
         assert conn.execute("SELECT board FROM messages").fetchone()[0] == 0
 
 
+def test_a_signal_that_fails_to_post_is_logged_and_the_next_one_still_goes(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess, monkeypatch: Any
+) -> None:
+    monkeypatch.setenv("BRIDGE_STATE_DIR", str(bridge_env.state_dir))
+    team = Team(bridge_env, spawn_process)
+    team.enroll()
+    too_long: dict[str, object] = {"key": "ci:1", "kind": "CI red", "text": "x" * 3000, "url": "", "surface": "PANE-A"}
+    fine: dict[str, object] = {"key": "ci:2", "kind": "CI red", "text": "web#8", "url": "", "surface": "PANE-A"}
+    with bridge_env.connect() as conn, transaction(conn):
+        posted = post_signals_to_leads(conn, Config(), [too_long, fine], 1000)
+    with bridge_env.connect() as conn:
+        rows = conn.execute("SELECT body FROM messages").fetchall()
+        keys = [r[0] for r in conn.execute("SELECT key FROM signal_posts")]
+
+    assert [r.handle for r in posted] == ["alex"]
+    assert [r[0] for r in rows] == ["web#8 (CI red)"]
+    assert keys == ["ci:2"], "the failed one is retried next round"
+    log = (bridge_env.state_dir / "errors.log").read_text()
+    assert "signal post" in log and "ci:1" in log and "Traceback" in log
+
+
 def test_answer_relay_is_for_the_assistant_only(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:
     team = Team(bridge_env, spawn_process)
     bridge_env.cli("post", "decision", "Ship?", pid=team.a)
@@ -257,9 +282,9 @@ def test_lapsed_claims_never_reach_the_page(bridge_env: BridgeEnv, spawn_process
     assert room(dashboard)["claims"] == []
 
 
-def test_page_opens_at_root_and_old_one_moves(dashboard: str) -> None:
+def test_page_opens_at_root_and_the_old_dashboard_is_gone(dashboard: str) -> None:
     assert "<title>Guild</title>" in http_request(dashboard + "/")
-    assert "<title>bridge</title>" in http_request(dashboard + "/dashboard")
+    http_request(dashboard + "/dashboard", expect=404)
 
 
 def test_failed_delivery_of_a_user_answer_shows_and_is_retried(
@@ -355,6 +380,32 @@ def test_reply_in_the_room_reaches_mentions_and_resumed_writers(
     assert "what was held back: bridge show 1" in body
 
 
+_RULE = "\u2500" * 40
+_BOX = (
+    f"{_RULE}\n\u276f \n{_RULE}\n  Opus 5.5 | 54% ctx | ~/projects/bridge-wt/context-window\n"
+    "  -- INSERT -- \u23f5\u23f5 bypass permissions on (shift+tab to cycle)"
+)
+DIALOG_SCREEN = (
+    '\u25cf Bash(bridge send eli "done")\n'
+    "  \u2502 asked to send it, go on without it. [plugin:example-plugin]\n"
+    "  plugin hooks.json to update hooks\n"
+    "  Do you want to proceed?\n"
+    "  \u276f 1. Yes\n"
+    "    2. No\n"
+    "  Esc to cancel \u00b7 Tab to amend"
+)
+TIMED_OUT_SCREEN = (
+    "\u25cf Bash(rm -f $S/*_OUT*; python3 $S/job.py)\n"
+    "  \u23bf  Permission for this command was denied by a built-in Claude Code safety check, not by the user.\n"
+    '\u25cf Bash(rm -f "${S:?}"/*_OUT*; python3 $S/job.py)\n'
+    "  \u23bf  Running\u2026\n"
+    "\u273b Gusting\u2026 (2m 17s \u00b7 \u2193 3.1k tokens)\n"
+    "  \u23bf  Tip: Paste images into Claude Code using control+v (not cmd+v!)\n" + _BOX
+)
+"""After Claude Code timed a dialog out: agterm still says blocked while the next command runs."""
+IDLE_SCREEN = "\u25cf high \u00b7 /effort\n" + _BOX
+
+
 def _blocked_tree(status: str = "blocked", workspace: str = "Work") -> dict[str, object]:
     tab = {"id": "W-1", "name": "Task", "parent": "TAB-A", "status": status}
     return {"workspaces": [{"name": workspace, "sessions": [tab]}]}
@@ -370,10 +421,10 @@ def test_blocked_tab_tells_its_parent_lead_and_repeats_until_clear(
     locked = map_tree_to_blocked_tabs(_blocked_tree(workspace="🔒 Misc"), config)
     broken = map_tree_to_blocked_tabs({"workspaces": None}, config)
     with bridge_env.connect() as conn:
-        early = notify_blocked_tabs(conn, config, blocked, {"W-1": "Allow this read?"}, 1_000_000)
-        first = notify_blocked_tabs(conn, config, blocked, {"W-1": "Allow this read?"}, 1_121_000)
-        quiet = notify_blocked_tabs(conn, config, blocked, {}, 1_200_000)
-        again = notify_blocked_tabs(conn, config, blocked, {}, 1_800_000)
+        early = notify_blocked_tabs(conn, config, blocked, {"W-1": DIALOG_SCREEN}, 1_000_000)
+        first = notify_blocked_tabs(conn, config, blocked, {"W-1": DIALOG_SCREEN}, 1_121_000)
+        quiet = notify_blocked_tabs(conn, config, blocked, {"W-1": DIALOG_SCREEN}, 1_200_000)
+        again = notify_blocked_tabs(conn, config, blocked, {"W-1": DIALOG_SCREEN}, 1_800_000)
         cleared = notify_blocked_tabs(conn, config, [], {}, 1_900_000)
         body = conn.execute("SELECT body, post_type FROM messages ORDER BY id LIMIT 1").fetchone()
         left = conn.execute("SELECT count(*) FROM blocked_notices").fetchone()[0]
@@ -385,25 +436,43 @@ def test_blocked_tab_tells_its_parent_lead_and_repeats_until_clear(
     assert quiet == []
     assert len(again) == 1
     assert cleared == []
-    assert "Allow this read?" in body["body"]
+    assert "Do you want to proceed?\n\u276f 1. Yes" in body["body"]
     assert body["post_type"] == "blocked-tab"
     assert left == 0
+
+
+def test_blocked_tab_without_a_dialog_on_screen_is_not_told_and_its_wait_starts_at_the_dialog(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    Team(bridge_env, spawn_process).enroll()
+    config = Config()
+    blocked = map_tree_to_blocked_tabs(_blocked_tree(), config)
+    with bridge_env.connect() as conn:
+        running = [notify_blocked_tabs(conn, config, blocked, {"W-1": TIMED_OUT_SCREEN}, at) for at in (0, 121_000)]
+        idle = notify_blocked_tabs(conn, config, blocked, {"W-1": IDLE_SCREEN}, 300_000)
+        unread = notify_blocked_tabs(conn, config, blocked, {}, 400_000)
+        dialog_opens = notify_blocked_tabs(conn, config, blocked, {"W-1": DIALOG_SCREEN}, 500_000)
+        told = notify_blocked_tabs(conn, config, blocked, {"W-1": DIALOG_SCREEN}, 621_000)
+
+    assert running == [[], []]
+    assert idle == unread == dialog_opens == []
+    assert [r.handle for _, r in told] == ["alex"]
 
 
 def test_blocked_tab_without_a_parent_goes_to_the_assistant_and_is_typed_in(
     bridge_env: BridgeEnv, spawn_process: SpawnProcess
 ) -> None:
     team = Team(bridge_env, spawn_process)
-    assert bridge_env.cli("handle", "helm", pid=team.b).returncode == 0
+    assert bridge_env.cli("handle", "zed", pid=team.b).returncode == 0
     tab = BlockedTab("W-1", "Task", None)
-    config = Config(assistant_handle="helm")
+    config = Config(assistant_handle="zed")
     with bridge_env.connect() as conn:
-        notify_blocked_tabs(conn, config, [tab], {}, 1_000_000)
-        sent = notify_blocked_tabs(conn, config, [tab], {}, 1_200_000)
+        notify_blocked_tabs(conn, config, [tab], {"W-1": DIALOG_SCREEN}, 1_000_000)
+        sent = notify_blocked_tabs(conn, config, [tab], {"W-1": DIALOG_SCREEN}, 1_200_000)
     bridge_env.stub_log.write_text("")
     bridge_env.cli("_deliver", str(sent[0][0]), "conv-b")
 
-    assert [r.handle for _, r in sent] == ["helm"]
+    assert [r.handle for _, r in sent] == ["zed"]
     assert "Peer message" in team.log()
 
 
@@ -453,7 +522,9 @@ def test_worker_message_is_typed_into_its_idle_lead_and_retried_quietly(
     wait_for(lambda: "Peer message" in team.log())
     with bridge_env.connect() as conn:
         message_id = conn.execute("SELECT max(id) FROM messages").fetchone()[0]
-        conn.execute("UPDATE message_recipients SET acked_at = NULL WHERE message_id = ?", (message_id,))
+        conn.execute(
+            "UPDATE message_recipients SET acked_at = NULL, offered_at = NULL WHERE message_id = ?", (message_id,)
+        )
         record_failed_delivery(conn, message_id, "conv-a", 1000)
         retries = take_delivery_retries(conn, 1000 + 700_000)
     assert [m for m, _ in retries] == [message_id]
@@ -492,11 +563,66 @@ def test_message_from_any_tab_is_typed_into_an_idle_lead_and_retried_quietly(
     assert wait_for(lambda: "--target TAB-A" in team.log())
     with bridge_env.connect() as conn:
         assert conn.execute("SELECT post_type FROM messages").fetchone()[0] == "to-lead"
-        conn.execute("UPDATE message_recipients SET acked_at = NULL")
+        conn.execute("UPDATE message_recipients SET acked_at = NULL, offered_at = NULL")
         record_failed_delivery(conn, 1, "conv-a", 1000)
         retries = take_delivery_retries(conn, 1000 + 700_000)
     assert [m for m, _ in retries] == [1]
     assert room(dashboard)["needs"] == []
+
+
+def test_a_retry_picks_one_waiting_message_per_tab_and_never_one_a_hook_already_offered(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    team = Team(bridge_env, spawn_process)
+    team.enroll()
+    for text in ("one", "two", "three"):
+        bridge_env.cli("send", "alex", text, "--request", pid=team.b)
+    with bridge_env.connect() as conn:
+        conn.execute("UPDATE message_recipients SET acked_at = NULL, offered_at = NULL")
+        for message_id in (1, 2, 3):
+            record_failed_delivery(conn, message_id, "conv-a", 1000)
+        conn.execute("UPDATE message_recipients SET offered_at = 2000 WHERE message_id = 1")
+        first = take_delivery_retries(conn, 1000 + 700_000)
+        while_its_typer_waits = take_delivery_retries(conn, 1000 + 700_000 + 60_000)
+        later = take_delivery_retries(conn, 1000 + 700_000 + 130_000)
+
+    assert [m for m, _ in first] == [2]
+    assert while_its_typer_waits == []
+    assert [m for m, _ in later] == [2]
+
+
+def test_a_conversation_with_no_live_process_is_not_retried(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:
+    team = Team(bridge_env, spawn_process)
+    team.enroll()
+    bridge_env.cli("send", "alex", "check", pid=team.b)
+    with bridge_env.connect() as conn:
+        conn.execute("UPDATE message_recipients SET acked_at = NULL, offered_at = NULL")
+        record_failed_delivery(conn, 1, "conv-a", 1000)
+        conn.execute("UPDATE instances SET ended_at = 2000 WHERE conversation_id = 'conv-a'")
+        retries = take_delivery_retries(conn, 1000 + 700_000)
+
+    assert retries == []
+
+
+def test_an_answer_given_while_a_dead_typer_held_the_claim_keeps_its_ack_and_is_never_retried(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    team = Team(bridge_env, spawn_process)
+    team.enroll()
+    bridge_env.cli("send", "alex", "check", pid=team.b)
+    with bridge_env.connect() as conn:
+        record_failed_delivery(conn, 1, "conv-a", 1000)
+        # The typer's claim set the ack; the reply that came in meanwhile kept that time as its own.
+        conn.execute(
+            "UPDATE message_recipients SET offered_at = 5000, acked_at = 5000, typing_started_at = 5000,"
+            " typing_pid = 999999, typing_pid_start_ms = 1, done_at = 6000"
+        )
+        release_dead_typing_claims(conn, 5000 + 3_600_000)
+        acked = conn.execute("SELECT acked_at FROM message_recipients").fetchone()[0]
+        retries = take_delivery_retries(conn, 5000 + 3_600_000 + 700_000)
+
+    assert acked == 5000
+    assert retries == []
 
 
 def test_lead_message_and_reply_to_another_lead_are_typed(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:
@@ -575,6 +701,42 @@ def test_failed_typing_is_retried_and_then_delivered_once(bridge_env: BridgeEnv,
     assert team.log().count("Peer message") == 1
     with bridge_env.connect() as conn:
         assert conn.execute("SELECT acked_at FROM message_recipients").fetchone()[0] is not None
+
+
+def test_typing_that_keeps_failing_is_logged_once_per_message(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    team = Team(bridge_env, spawn_process)
+    team.enroll()
+    message_id = _queue_for_alex_without_typing(bridge_env, "info", "every attempt fails")
+    Path(bridge_env.env["STUB_TYPE_FAILS"]).write_text("")
+    with bridge_env.connect() as conn:
+        conn.execute("UPDATE messages SET post_type = 'to-lead' WHERE id = ?", (message_id,))
+
+    bridge_env.cli("_deliver", str(message_id), "conv-a")
+    bridge_env.cli("_deliver", str(message_id), "conv-a")
+
+    log = (bridge_env.state_dir / "errors.log").read_text()
+    assert log.count(f"message #{message_id} to conv-a not typed: failed") == 1
+
+
+def test_a_tab_busy_through_the_wait_is_retried_without_an_error(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    team = Team(bridge_env, spawn_process)
+    team.enroll()
+    message_id = _queue_for_alex_without_typing(bridge_env, "info", "alex is mid-turn")
+    with bridge_env.connect() as conn:
+        conn.execute("UPDATE messages SET post_type = 'to-lead' WHERE id = ?", (message_id,))
+    monkeypatch.setenv("BRIDGE_STATE_DIR", str(bridge_env.state_dir))
+    args = argparse.Namespace(message_id=str(message_id), conversation_id="conv-a")
+
+    with bridge_env.connect() as conn, mock.patch("bridge.cli.deliver_typed", return_value="timeout"):
+        assert cmd_deliver(args, conn, Config()) == 0
+        retried = conn.execute("SELECT delivery_failed_at FROM message_recipients").fetchone()[0]
+
+    assert retried is not None
+    assert not (bridge_env.state_dir / "errors.log").exists()
 
 
 def test_mail_whose_typer_died_mid_claim_comes_by_the_next_hook(
@@ -771,7 +933,9 @@ def test_lead_message_is_typed_into_its_idle_worker_and_retried_quietly(
     assert "--target TAB-B" in team.log()
     with bridge_env.connect() as conn:
         message_id = conn.execute("SELECT max(id) FROM messages").fetchone()[0]
-        conn.execute("UPDATE message_recipients SET acked_at = NULL WHERE message_id = ?", (message_id,))
+        conn.execute(
+            "UPDATE message_recipients SET acked_at = NULL, offered_at = NULL WHERE message_id = ?", (message_id,)
+        )
         record_failed_delivery(conn, message_id, "conv-b", 1000)
         retries = take_delivery_retries(conn, 1000 + 700_000)
     assert [m for m, _ in retries] == [message_id]
@@ -990,7 +1154,9 @@ def test_any_message_to_the_idle_assistant_is_typed_and_retried_quietly(
     assert "--target TAB-B" in team.log()
     with bridge_env.connect() as conn:
         message_id = conn.execute("SELECT max(id) FROM messages").fetchone()[0]
-        conn.execute("UPDATE message_recipients SET acked_at = NULL WHERE message_id = ?", (message_id,))
+        conn.execute(
+            "UPDATE message_recipients SET acked_at = NULL, offered_at = NULL WHERE message_id = ?", (message_id,)
+        )
         record_failed_delivery(conn, message_id, "conv-b", 1000)
         retries = take_delivery_retries(conn, 1000 + 700_000)
     assert [m for m, _ in retries] == [message_id]
@@ -1141,7 +1307,7 @@ def test_guild_worker_stores_the_parent_link_before_any_reconcile(
         rows = conn.execute("SELECT agterm_session, parent_session FROM tab_parents").fetchall()
     assert [tuple(r) for r in rows] == [("TAB-W", "TAB-A")]
     brief = next((bridge_env.state_dir / "worker-briefs").iterdir()).read_text()
-    assert "starts with '🤖 Claude:'; in chat it never does" in brief
+    assert "you write to colleagues starts with '🤖 Claude:'; a PR, issue or commit title never" in brief
     assert "not Boris, Aide, worker, lead, Guild, bridge." in brief
     assert "through Aide" in brief and "never a sub-issue" in brief
     assert "No browser use" in brief
@@ -1255,7 +1421,7 @@ def test_worker_refuses_a_non_english_name(bridge_env: BridgeEnv, spawn_process:
     team = Team(bridge_env, spawn_process)
     env = dict(bridge_env.env, CLAUDE_PID=str(team.a), AGTERM_SESSION_ID="TAB-A")
     done = subprocess.run(
-        [str(VENV_BIN / "guild"), "worker", "Tâche", "--prompt", "x"],
+        [str(VENV_BIN / "guild"), "worker", "Εργασία", "--prompt", "x"],
         env=env, capture_output=True, text=True, timeout=30, check=False,
     )  # fmt: skip
 

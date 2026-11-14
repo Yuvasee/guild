@@ -11,13 +11,23 @@ from pathlib import Path
 from typing import cast
 
 import pytest
-from conftest import BridgeEnv, SpawnProcess, wait_for
+from conftest import BridgeEnv, SpawnProcess, http_request, wait_for
 from test_leads import Team
 
 from bridge import dream
 from bridge.board import BODY_MAX_CHARS
 from bridge.config import map_toml_to_config
-from bridge.dream import DREAM_FRAME, DREAM_MAX_CHARS, TRANSCRIPT_CUT_MARK, DreamCut, Rule, cut_dream, fit_transcript
+from bridge.dream import (
+    DREAM_FRAME,
+    DREAM_MAX_CHARS,
+    TRANSCRIPT_CUT_MARK,
+    DreamCut,
+    Dreamer,
+    Rule,
+    cut_dream,
+    fit_transcript,
+    map_dreamers_to_page,
+)
 
 FAKE_CLAUDE = """#!{python}
 import json, os, sys, time
@@ -241,7 +251,7 @@ def test_a_dream_that_does_not_fit_the_start_comes_with_the_next_prompt(
     assert night.dream().returncode == 0
     keep = subprocess.run(
         [str(Path(sys.executable).parent / "bridge"), "keep"],
-        input="k" * 6000,
+        input="k" * 5200,
         env={**bridge_env.env, "CLAUDE_PID": str(night.team.a)},
         capture_output=True,
         text=True,
@@ -252,7 +262,7 @@ def test_a_dream_that_does_not_fit_the_start_comes_with_the_next_prompt(
     started = night.team.start(night.team.a, "conv-a", "compact")
     following = night.team.prompt(night.team.a, "conv-a", "go on")
 
-    assert "k" * 6000 in started and len(started) <= 10_000
+    assert "k" * 5200 in started and len(started) <= 10_000
     assert DREAM_FRAME not in started
     assert DREAM_FRAME in following and "d" * 2900 in following and len(following) <= 10_000
 
@@ -539,3 +549,40 @@ def test_a_term_while_the_dream_is_stored_waits_for_the_night_mark(
     finally:
         signal.signal(signal.SIGTERM, signal.SIG_DFL)
         monkeypatch.setattr(dream, "_term_pending", None)
+
+
+def test_dreams_page_shows_each_latest_dream_newest_first_escaped(tmp_path: Path) -> None:
+    older, newer, empty = tmp_path / "alex", tmp_path / "xavi", tmp_path / "bob"
+    for directory, text, at in ((older, "a <b>gate</b>\n\nsecond", 1000), (newer, "the box has no floor", 2000)):
+        directory.mkdir()
+        (directory / "dream.md").write_text(text + "\n")
+        os.utime(directory / "dream.md", (at, at))
+    empty.mkdir()
+
+    page = map_dreamers_to_page(
+        [
+            Dreamer("alex", "Alex", older, None, None),
+            Dreamer("xavi", "Xavi", newer, None, None),
+            Dreamer("bob", "Bob", empty, None, None),
+        ]
+    )
+
+    assert "<title>Dreams</title>" in page and "&lt;b&gt;gate&lt;/b&gt;" in page and "<p>second</p>" in page
+    assert page.index("Xavi") < page.index("Alex") and "Bob" not in page
+
+
+def test_dreams_page_is_served_and_linked_last_from_the_guild_page(dashboard: str) -> None:
+    assert "<title>Dreams</title>" in http_request(dashboard + "/dreams")
+    guild = http_request(dashboard + "/guild")
+    assert 'url: "/dreams"' in guild and "diskFree(state.disk), DREAMS_LINK," in guild
+
+
+def test_a_configured_link_marked_last_comes_after_the_pages_own() -> None:
+    config = map_toml_to_config(
+        tomllib.loads(
+            '[[links]]\nname = "Status board"\nurl = "https://tv.example"\nlast = true\n'
+            '[[links]]\nname = "Versions"\nurl = "https://v.example"\n'
+        )
+    )
+
+    assert [(link.name, link.last) for link in config.links] == [("Status board", True), ("Versions", False)]

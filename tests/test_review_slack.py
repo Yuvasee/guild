@@ -56,7 +56,7 @@ PR_URL = "https://github.com/Org/app/pull/7"
 NOW = 1_793_700_000_000
 
 
-def seen(ts: str = "1793635980.000100", text: str = f"<{PR_URL}> - direct") -> SeenPost:
+def seen(ts: str = "1793622222.000222", text: str = f"<{PR_URL}> - direct") -> SeenPost:
     return SeenPost(ts, text, f"https://acme.slack.com/archives/C1/p{ts.replace('.', '')}")
 
 
@@ -125,17 +125,24 @@ def test_the_first_read_looks_back_a_week_and_a_resumed_first_walk_keeps_that_fl
     assert fetch.params[-1]["oldest"] == floor and [p.ts for p in posts] == [f"{NOW // 1000 - 7 * 86_400 + 10}.000001"]
 
 
-def test_a_post_made_by_hand_publishes_and_tells_nobody(tmp_path: Path) -> None:
+def test_a_hand_post_like_a_colleagues_publishes_and_tells_nobody(tmp_path: Path) -> None:
     conn = setup_pr(tmp_path)
     with transaction(conn):
         add_session(conn, "c1", "worker", branch="dev/x")
         changed = record_seen_posts(conn, [seen(), seen("1793636000.000001")], NOW)
         assert changed == [REF] and advance_posts(conn, CONFIG, NOW)[1] == []
     row = conn.execute("SELECT post_state, post_link FROM review_prs").fetchone()
-    assert (row[0], row[1]) == (EXTERNAL, "https://acme.slack.com/archives/C1/p1793635980000100")
+    assert (row[0], row[1]) == (EXTERNAL, "https://acme.slack.com/archives/C1/p1793622222000222")
     pr = map_db_to_reviews(conn, CONFIG, NOW)["prs"][0]  # type: ignore[index]
     assert pr["group"] == "published" and not pr["can_publish"]
     assert pr["merge_path"] is None
+
+
+def test_an_ignored_post_publishes_nothing(tmp_path: Path) -> None:
+    conn = setup_pr(tmp_path)
+    with transaction(conn):
+        assert record_seen_posts(conn, [seen("1793600000.000001")], NOW, ("1793600000.000001",)) == []
+    assert conn.execute("SELECT post_state FROM review_prs").fetchone()[0] is None
 
 
 def test_any_link_form_and_repo_case_match(tmp_path: Path) -> None:
@@ -165,13 +172,13 @@ def test_a_send_in_flight_or_a_known_post_is_left_alone_and_a_missing_link_is_fi
         conn.execute("UPDATE review_prs SET post_state = ?, post_link = NULL", (POSTED_NO_LINK,))
         assert record_seen_posts(conn, [seen()], NOW) == [REF]
     row = conn.execute("SELECT post_state, post_link FROM review_prs").fetchone()
-    assert (row[0], row[1]) == (POSTED_NO_LINK, "https://acme.slack.com/archives/C1/p1793635980000100")
+    assert (row[0], row[1]) == (POSTED_NO_LINK, "https://acme.slack.com/archives/C1/p1793622222000222")
 
 
 SEARCH_TEXT = (
     "# Search Results for: \n\n## Messages (2 results)\n### Result 1 of 2\nChannel: #reviews (ID: C1)\n"
-    "From: Sam <sam@example.com> (ID: U1) \nTime: 2026-11-02 11:01:50 UTC\nMessage_ts: 1793617310.000100\n"
-    "Reply count: 3\nPermalink: [link](https://acme.slack.com/archives/C1/p1793617310000100?thread_ts=1793617310.000100"
+    "From: Sam <sam@example.com> (ID: U1) \nTime: 2026-11-02 09:18:31 UTC\nMessage_ts: 1793611111.000111\n"
+    "Reply count: 3\nPermalink: [link](https://acme.slack.com/archives/C1/p1793611111000111?thread_ts=1793611111.000111"
     "&cid=C1)\nText: \n<https://github.com/Org/app/pull/7>"
     "\n\n---\n\n### Result 2 of 2\nChannel: #general (ID: C9)\nFrom: Kai (ID: U2) \nTime: 2026-11-02 11:02:00 UTC\n"
     "Message_ts: 1793617320.000001\nPermalink: [link](https://acme.slack.com/archives/C9/p1793617320000001)\n"
@@ -196,8 +203,8 @@ def search_events(request: dict[str, Any], text: str = SEARCH_TEXT, cursor: str 
 def test_a_search_result_gives_each_posts_ts_and_permalink_in_the_channel_only() -> None:
     request = build_search_request(CHANNEL, ReadState(), NOW)
     page = map_events_to_search(search_events(request, cursor="abc"), CHANNEL, request, NOW)
-    link = "https://acme.slack.com/archives/C1/p1793617310000100?thread_ts=1793617310.000100&cid=C1"
-    assert [(p.ts, p.link) for p in page.posts] == [("1793617310.000100", link)]
+    link = "https://acme.slack.com/archives/C1/p1793611111000111?thread_ts=1793611111.000111&cid=C1"
+    assert [(p.ts, p.link) for p in page.posts] == [("1793611111.000111", link)]
     assert PR_URL in page.posts[0].text and page.cursor == "abc"
 
 
@@ -245,7 +252,7 @@ def test_the_search_overlaps_the_last_post_read_and_follows_a_cursor_from_the_sa
 
 
 def test_the_search_gives_the_model_no_turn_to_read_what_it_found() -> None:
-    command = build_search_command(Config(), build_search_request(CHANNEL, ReadState(), NOW))
+    command = build_search_command(build_search_request(CHANNEL, ReadState(), NOW))
     assert command[command.index("--allowedTools") + 1] == READ_TOOL
     assert command[command.index("--tools") + 1] == ""
     assert command[command.index("--max-turns") + 1] == "1"
@@ -282,7 +289,7 @@ def test_a_connector_read_records_posts_and_one_back_from_a_stop_writes_nothing(
         run_connector_read(conn, config, first)
         assert post_state(conn) == EXTERNAL
         state = load_read_state(conn)
-        assert (state.mode, state.last_ts, state.finished_at) == (CONNECTOR, "1793617310.000100", NOW)
+        assert (state.mode, state.last_ts, state.finished_at) == (CONNECTOR, "1793611111.000111", NOW)
         conn.execute("UPDATE review_prs SET post_state = NULL, post_link = NULL")
         conn.execute("DELETE FROM review_slack_posts")
         run_connector_read(conn, config, first - 1)
@@ -341,12 +348,12 @@ def test_a_token_read_fences_out_a_search_still_running(tmp_path: Path) -> None:
 def test_a_post_first_seen_without_its_link_gets_it_from_a_later_read(tmp_path: Path) -> None:
     conn = setup_pr(tmp_path)
     with transaction(conn):
-        assert record_seen_posts(conn, [SeenPost("1793635980.000100", PR_URL, None)], NOW) == [REF]
-        assert record_seen_posts(conn, [SeenPost("1793635980.000100", PR_URL, None)], NOW + 1) == []
+        assert record_seen_posts(conn, [SeenPost("1793622222.000222", PR_URL, None)], NOW) == [REF]
+        assert record_seen_posts(conn, [SeenPost("1793622222.000222", PR_URL, None)], NOW + 1) == []
         assert record_seen_posts(conn, [seen()], NOW + 2) == [REF]
         assert record_seen_posts(conn, [seen("1793635999.000001")], NOW + 3) == []
     row = conn.execute("SELECT post_state, post_link, post_at FROM review_prs").fetchone()
-    assert tuple(row) == (EXTERNAL, "https://acme.slack.com/archives/C1/p1793635980000100", NOW)
+    assert tuple(row) == (EXTERNAL, "https://acme.slack.com/archives/C1/p1793622222000222", NOW)
 
 
 def test_an_empty_history_page_with_more_to_come_goes_on_by_its_cursor() -> None:
@@ -373,7 +380,7 @@ def test_a_search_failing_on_a_later_page_starts_over_from_its_floor_not_from_wh
     floor = f"{NOW // 1000 - 86_400}.000000"
     with transaction(conn):
         store_read_state(conn, ReadState(CONNECTOR, floor))
-    forged = SEARCH_TEXT.replace("p1793617310000100)", "p1)").replace("1793617310.000100", f"{NOW // 1000}.000001")
+    forged = SEARCH_TEXT.replace("p1793611111000111)", "p1)").replace("1793611111.000111", f"{NOW // 1000}.000001")
     first_page = search_events_for(forged, cursor="c2")
     calls: list[int] = []
 
@@ -434,11 +441,11 @@ def test_a_published_pr_says_when_its_slack_message_went_out(tmp_path: Path) -> 
         return map_db_to_reviews(conn, config, NOW)["prs"][0]["posted_at"]  # type: ignore[index]
 
     with transaction(conn):
-        record_seen_posts(conn, [seen("1793635980.000100")], NOW)
-    assert posted_at() == 1793635980000
+        record_seen_posts(conn, [seen("1793622222.000222")], NOW)
+    assert posted_at() == 1793622222000
     with transaction(conn):
-        conn.execute("UPDATE review_prs SET post_link = post_link || '?thread_ts=1793635980.000100&cid=C1'")
-    assert posted_at() == 1793635980000
+        conn.execute("UPDATE review_prs SET post_link = post_link || '?thread_ts=1793622222.000222&cid=C1'")
+    assert posted_at() == 1793622222000
     with transaction(conn):
         conn.execute("UPDATE review_prs SET post_state = 'posted-link-unknown', post_link = NULL, post_at = 5000")
     assert posted_at() == 5000
@@ -491,8 +498,8 @@ def test_with_a_token_every_call_reads_and_without_one_a_search_is_spawned_when_
     assert spawned == [NOW]
     (tmp_path / "slack").write_text("xoxp-secret")
     (tmp_path / "slack").chmod(0o600)
-    history = FakeHistory(["1793635980.000100"])
-    history_by_text = {"1793635980.000100": f"<{PR_URL}>"}
+    history = FakeHistory(["1793622222.000222"])
+    history_by_text = {"1793622222.000222": f"<{PR_URL}>"}
 
     def fetch_for(token: str) -> Any:
         assert token == "xoxp-secret"

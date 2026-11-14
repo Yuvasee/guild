@@ -2,6 +2,7 @@ import fcntl
 import json
 import re
 import subprocess
+import threading
 import time
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
@@ -10,6 +11,7 @@ from typing import Literal
 
 from bridge.compaction import map_screen_to_busy, map_screen_to_draft, map_screen_to_idle, map_screen_to_transcript
 from bridge.config import Config, state_dir
+from bridge.errlog import log_error, log_slow
 
 TYPE_WAIT_S = 600
 SUBMIT_RETRIES = 3
@@ -25,10 +27,16 @@ PASTE_EDGE_CHARS = 40
 BRIDGE_TEXT_PREFIX = "[bridge]"
 PROMPT_GLYPH = "\u276f"
 _BOX_RULE_RE = re.compile("[\u2500-\u257f]+")
+_PASTE_CHIP_RE = re.compile(r"\[Pasted text #\d+(?: \+\d+ lines?)?\]")
+CHIP_AT_CHARS = 801
+"""Claude Code 2.1.322 folds an insert of this many characters (ASCII; one agterm injection) into a paste chip."""
 ORPHAN_STEADY_S = 4.0
 STUCK_ENTER_ROUNDS = 10
 ENTER_BUDGET_S = 60.0
 SLEEP_GAP_S = 30.0
+AGTERM_TIMEOUT_S = 10
+AGTERM_SLOW_S = 3.0
+AGTERM_LOG_EVERY_S = 30.0
 
 TypeResult = Literal["typed", "stuck", "unwanted", "failed", "timeout", "draft", "unproven"]
 SubmitResult = Literal["sent", "pressed", "untouched"]
@@ -46,6 +54,7 @@ def type_when_idle(
     may_probe_box: Callable[[], bool] | None = None,
     own_pattern: re.Pattern[str] | None = None,
     claim_left_unsent: Callable[[str], Callable[[bool], None] | None] | None = None,
+    may_type: Callable[[], bool] | None = None,
 ) -> TypeResult:
     """Types one line plus Enter into a Claude Code tab once its input box is empty and idle.
 
@@ -66,18 +75,31 @@ def type_when_idle(
     claim_left_unsent claims the message whose text bridge typed and never submitted, when the box holds it unedited,
     and returns how to settle that claim. Such text that stays the same for ORPHAN_STEADY_S gets Enter alone where a
     probe key would be allowed, never a clear or an edit.
+    may_type False holds this try back without a key or a screen read while something else may deliver the text;
+    once text is claimed it is not asked.
     """
     command = map_text_to_typable(command)
+
+    own_chip: str | None = None
 
     def left_by_earlier_try(box: str | None) -> bool:
         # Exact, spacing aside: any other change may be someone's edit, and Enter would submit it.
         if not box:
             return False
+        if own_chip is not None and box == own_chip:
+            return True
         squashed = _squash(box)
         return squashed == _squash(command) or (own_pattern is not None and own_pattern.fullmatch(squashed) is not None)
 
     def just_typed(box: str | None) -> bool:
         return holds_text(box, command)
+
+    def just_typed_or_folded(box: str | None) -> bool:
+        """Into a box that was empty, the chip Claude Code folds a long insert into is ours: nothing else typed it."""
+        nonlocal own_chip
+        if own_chip is None and is_paste_chip(box):
+            own_chip = box
+        return just_typed(box) or (own_chip is not None and box == own_chip)
 
     target = ["--target", session, "--pane-id", pane]
     waiting = _Stopwatch()
@@ -100,6 +122,10 @@ def type_when_idle(
         while waiting.seconds() < wait_s or (entered is not None and entered.seconds() < ENTER_BUDGET_S):
             if not still_wanted():
                 return "unwanted"
+            if not claimed and may_type is not None and not may_type():
+                idle_before, known_draft, box, orphan_since, busy = False, None, None, None, False
+                time.sleep(1)
+                continue
             screen = _read_screen(config, target)
             if screen is None and (moved := _find_pane_session(config, pane)) and moved != target[1]:
                 target[1] = moved
@@ -234,7 +260,7 @@ def type_when_idle(
                             return "unwanted"
                         claimed, pressed = True, _squash(command)
                         pressed_was_last = _is_last_prompt(again, pressed)
-                        result = _type_and_submit(config, target, command, just_typed, still_wanted)
+                        result = _type_and_submit(config, target, command, just_typed_or_folded, still_wanted)
                         entered = _Stopwatch()
                 if result == "stuck":
                     # A dialog that opened, or an Enter that did not take: the loop above presses it again.
@@ -433,6 +459,11 @@ def _submit(
     return "pressed" if presses else "untouched"
 
 
+def is_paste_chip(box: str | None) -> bool:
+    """One chip alone, as "[Pasted text #3]" or "[Pasted text #3 +18 lines]"; with other text beside it, it is not."""
+    return box is not None and _PASTE_CHIP_RE.fullmatch(box) is not None
+
+
 def holds_text(box: str | None, text: str) -> bool:
     """Wrapping can split a word across lines, and a long paste may show only its two ends."""
     if not box:
@@ -475,12 +506,51 @@ def map_text_to_typable(text: str) -> str:
     return " ".join(_map_glyphs_to_plain("".join(ch if ch.isprintable() else " " for ch in text)).split())
 
 
+class _AgtermTrouble:
+    """Timed-out and unstartable agtermctl calls of this process, or slow ones, logged at most every
+    AGTERM_LOG_EVERY_S with a count, so a hung agterm shows without one line per screen read."""
+
+    def __init__(self, log: Callable[[str, str], None] = log_error) -> None:
+        self.logged_at = 0.0
+        self.unlogged = 0
+        self._log = log
+        self._lock = threading.Lock()
+
+    def note(self, args: list[str], outcome: str, seconds: float) -> None:
+        with self._lock:
+            self.unlogged += 1
+            now = time.monotonic()
+            if self.logged_at and now - self.logged_at < AGTERM_LOG_EVERY_S:
+                return
+            more = f" ({self.unlogged - 1} more since the last line)" if self.unlogged > 1 else ""
+            self.logged_at, self.unlogged = now, 0
+        self._log("agterm", f"agtermctl {' '.join(args[:2])}: {outcome} after {seconds:.1f} s{more}")
+
+
+_agterm_trouble = _AgtermTrouble()
+_agterm_slow = _AgtermTrouble(log_slow)
+
+
 def run_agterm(config: Config, args: list[str]) -> str | None:
+    started = time.monotonic()
     try:
         # Explicit UTF-8: hooks can run under a C locale, which would garble the prompt glyph.
         done = subprocess.run(
-            [config.agtermctl, *args], capture_output=True, encoding="utf-8", errors="replace", timeout=10, check=False
+            [config.agtermctl, *args],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=AGTERM_TIMEOUT_S,
+            check=False,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except subprocess.TimeoutExpired:
+        _agterm_trouble.note(args, "timed out", time.monotonic() - started)
         return None
+    except OSError as exc:
+        _agterm_trouble.note(args, f"failed to start ({exc})", time.monotonic() - started)
+        return None
+    seconds = time.monotonic() - started
+    # A non-zero exit is agterm answering (a closed tab, say); only silence and slowness mean it is in trouble.
+    if seconds >= AGTERM_SLOW_S:
+        _agterm_slow.note(args, "slow", seconds)
     return done.stdout if done.returncode == 0 else None

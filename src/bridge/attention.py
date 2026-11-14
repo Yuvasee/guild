@@ -5,7 +5,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from typing import cast
 
-from bridge.reviews import FIXED, WAITING_FOR_OWNER, WAITING_FOR_YOU
+from bridge.reviews import BACKPORTS, FIXED, WAITING_FOR_OWNER, WAITING_FOR_YOU
 
 MARKED = 3
 QUESTION_MINUTES = 1
@@ -62,11 +62,11 @@ class Ranked:
 
 
 def map_streams_to_ranking(questions: list[Question], prs: list[QueuedPr], projects: list[Project]) -> list[Ranked]:
-    """PRs only the owner's own answered threads keep from merging, in any group, then urgent questions, other
-    questions, PRs with fixes after the owner's comments, other PRs waiting for the owner. A PR with the owner's
-    comments still open waits on the lead that owns it, so it is not ranked, like a PR whose reviews are missing,
-    published PRs and drafts in progress. A PR whose parent, its stack base or the PR it merges after, is listed in
-    its group follows that parent, and is not ranked while that parent is not."""
+    """PRs only the owner's own answered threads keep from merging, in any group but backports, then urgent
+    questions, other questions, PRs with fixes after the owner's comments, other PRs waiting for the owner. A PR with
+    the owner's comments still open waits on the lead that owns it, so it is not ranked, like a PR whose reviews are
+    missing, published PRs and drafts in progress. A PR whose parent, its stack base or the PR it merges after, is
+    listed in its group follows that parent, and is not ranked while that parent is not."""
     parents = map_prs_to_parents(prs)
     blocked_by_each = _map_prs_to_stack_children(prs)
     by_ref = {pr.ref: pr for pr in prs}
@@ -142,7 +142,7 @@ def _find_rankable_prs(prs: list[QueuedPr], parents: dict[str, str]) -> set[str]
     rankable = {
         pr.ref
         for pr in prs
-        if pr.resolve_threads
+        if (pr.resolve_threads and pr.group != BACKPORTS)
         or (pr.group == WAITING_FOR_YOU and not pr.not_ready and pr.state in (FIXED, WAITING_FOR_OWNER))
     }
     changed = True

@@ -3,7 +3,7 @@ import signal
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 
-from conftest import VENV_BIN, BridgeEnv, SpawnProcess, needs_github
+from conftest import VENV_BIN, BridgeEnv, SpawnProcess, requires_github
 from test_board import Pair
 
 
@@ -79,7 +79,7 @@ def test_invalid_resources_are_rejected(bridge_env: BridgeEnv, spawn_process: Sp
         assert result.returncode == 2, resource
 
 
-@needs_github
+@requires_github
 def test_pr_and_head_branch_are_one_resource(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:
     """Uses the real GitHub API: a merged public PR whose head branch never changes."""
     pair = Pair(bridge_env, spawn_process)

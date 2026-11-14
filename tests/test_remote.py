@@ -5,10 +5,10 @@ import sys
 from pathlib import Path
 
 import pytest
-from conftest import VENV_BIN, BridgeEnv, free_port, http_request, wait_up
+from conftest import BridgeEnv
 
 from bridge.config import Config, Remote
-from bridge.remote import Collected, attach_command, collect, list_remote_sessions, store
+from bridge.remote import Collected, collect, list_remote_sessions, store
 
 POD = Remote(name="devbox", ssh="devbox")
 CONFIG = Config(issue_prefixes=("ABC",))
@@ -40,12 +40,6 @@ def test_store_replaces_on_success_and_keeps_rows_on_failure(bridge_env: BridgeE
     assert tuple(error) == ("ssh TimeoutExpired", 20_000)
 
 
-def test_attach_command_quotes_both_shell_layers() -> None:
-    assert attach_command(POD, "$3") == "ssh -t devbox 'tmux attach -t '\"'\"'$3'\"'\"''"
-    with pytest.raises(ValueError):
-        attach_command(POD, "$3; rm -rf ~")
-
-
 def test_probe_runs_isolated_and_prints_json(tmp_path: Path) -> None:
     probe = Path(__file__).parent.parent / "src/bridge/remote_probe.py"
     done = subprocess.run(
@@ -71,23 +65,6 @@ def test_unreadable_transcript_keeps_previous_text(bridge_env: BridgeEnv) -> Non
         store(conn, POD, Collected(True, None, [blank], 4_000), CONFIG, 20_000)
         [row] = list_remote_sessions(conn, 20_000)
     assert (row["last_prompt"], row["last_reply"]) == ("first prompt", "done")
-
-
-def test_dashboard_attach_opens_an_agterm_tab(bridge_env: BridgeEnv) -> None:
-    config = Path(bridge_env.env["BRIDGE_CONFIG"])
-    config.write_text(config.read_text() + '\n[[remotes]]\nname = "devbox"\nssh = "devbox"\n')
-    with bridge_env.connect() as conn:
-        store(conn, POD, Collected(True, None, [session("s10", "idle", "x")], 4_000), CONFIG, 10_000)
-    port = free_port()
-    server = subprocess.Popen([str(VENV_BIN / "bridge"), "serve", "--port", str(port)], env=bridge_env.env)
-    try:
-        wait_up(f"http://127.0.0.1:{port}")
-        body = http_request(f"http://127.0.0.1:{port}/api/remote/devbox/%243/attach", post=True)
-    finally:
-        server.terminate()
-        server.wait()
-    assert json.loads(body)["ok"] is True
-    assert bridge_env.stub_log.read_text() == f"session new --name devbox $3 --command {attach_command(POD, '$3')}\n"
 
 
 def test_conversation_switch_does_not_inherit_text_and_misses_are_tolerated(bridge_env: BridgeEnv) -> None:

@@ -6,8 +6,8 @@ adapter, picked in `~/.config/bridge/config.toml`:
 
 | Adapter | Config key | Default | Built in |
 |---|---|---|---|
-| Task tracker | `tracker` | `"tasks"` (a local file) | `tasks`, `exec`, `linear`, `none` |
-| Review chat | `chat` | none (Slack when `review_channel_id` is set) | `slack`, `file`, `webhook`, `none` |
+| Task tracker | `linear_api_key_file` | none | Linear |
+| Review chat | `review_channel_id` | none; with `review_post_dry_run` (the default) posts go to a log | Slack, through the claude.ai connector |
 | Code host | (GitHub) | on when `gh` is signed in | GitHub |
 | Remote hosts | `[[remotes]]` | none | ssh + tmux |
 
@@ -19,120 +19,31 @@ The tracker turns an issue key that sessions mention (`ABC-12`) into a title, a 
 the issue. The page shows them next to each lead's work, and bridge flags an issue that is still open after every
 PR linked to it has merged.
 
-### What bridge does, and what the adapter does
-
 - **Finding refs is bridge's job.** It reads keys of the form `PREFIX-NUMBER` from prompts, branch names, board posts
   and `guild work set`. `issue_prefixes = ["ABC", "OPS"]` limits them to your projects; empty takes any
-  `[A-Z][A-Z0-9]+-\d+` that is not an obvious acronym. A tracker URL with `/issue/KEY`, `/issues/KEY` or
-  `/browse/KEY` in it counts too. Refs are stored as `issue:ABC-12`.
-- **Links are config.** `issue_url = "https://tracker.example/browse/{key}"` makes every key on the page a link;
-  without it, the issue's own `url` from the adapter is used.
-- **The adapter answers `fetch`:** given keys, return what it knows about each. Bridge calls it from the dashboard
-  service, at most every 5 minutes per watched issue (2 minutes after a failure), in batches of 40.
+  `[A-Z][A-Z0-9]+-\d+` that is not an obvious acronym. A Linear URL with `/issue/KEY` in it counts too. Refs are
+  stored as `issue:ABC-12`.
+- **Links are config.** `issue_url = "https://linear.app/acme/issue/{key}"` makes every key on the page a link.
+- **Linear is the one tracker built in:**
 
-### The issue shape
+  ```toml
+  linear_api_key_file = "~/.secrets/linear-api-key"   # a personal API key; read-only is enough unless issue sync runs
+  ```
 
-Every adapter returns this per key, as JSON (the exec adapter) or the matching Python dataclass
-(`bridge.trackers.IssueStatus`):
+  Bridge reads each watched issue's title, state, assignee and GitHub attachments (its linked PRs) through Linear's
+  GraphQL API, from the dashboard service, in batches. Without the key file, issue columns stay empty.
+- **Issue sync** (`bridge issue-sync`, also run by the dashboard service) moves a Linear issue forward when its PRs
+  and the work on it say it has moved. It runs only with `review_org`, `review_author` and `issue_prefixes` set, and
+  needs a key that may write. `grooming_states` names the states it never moves an issue out of; the lead
+  is told once instead.
 
-```json
-{
-  "title": "Speed up the export",
-  "state": "In review",
-  "state_type": "started",
-  "url": "https://tracker.example/browse/ABC-2",
-  "assignee": "sam",
-  "linked_prs": [
-    {"ref": "acme/web#7", "status": "merged", "closes": true, "merged_at": "2026-11-03T08:00:00Z"}
-  ],
-  "linked_complete": true
-}
-```
+### Another tracker
 
-- `title`, `state`: shown as given.
-- `state_type`: what bridge reasons with, one of `triage`, `backlog`, `unstarted`, `started`, `completed`,
-  `canceled`. Left out or unknown, bridge guesses it from `state` ("Done" → completed, "In progress" → started, …).
-- `url`, `assignee`: optional.
-- `linked_prs`: optional. `ref` is `owner/repo#N`, `pr:owner/repo#N` or a GitHub PR URL; `status` is the tracker's
-  view (`open`, `draft`, `merged`, `closed`); `closes` says the PR is meant to close the issue; `merged_at` is ISO
-  8601 or epoch milliseconds.
-- `linked_complete`: `true` only when `linked_prs` is the whole list. The "still open after its PRs merged" flag
-  needs it, so leave it out when you cannot be sure.
-
-### `tasks`: a local file (the default)
-
-`tasks_file` (default: `tasks.md` next to `config.toml`), read on every poll. A Markdown checklist:
-
-```markdown
-- [ ] ABC-1 Write the importer
-- [~] ABC-2 Speed up the export https://tracker.example/ABC-2
-- [x] ABC-3 Ship the flag
-- [-] ABC-4 Old idea
-```
-
-`[ ]` todo, `[~]` or `[/]` in progress, `[x]` done, `[-]` canceled; a URL at the end of the line is the link. Any
-other line is ignored, so the file can hold notes and headings. A `.json` file takes the issue shape instead, as
-`{"issues": {"ABC-1": {...}}}`, `{"ABC-1": {...}}` or a list of issues that each carry `"key"`.
-
-### `exec`: any executable
-
-```toml
-tracker = "exec"
-tracker_command = ["~/bin/jira-tracker", "--site", "acme"]
-```
-
-Bridge runs the command once per batch, writes one JSON object to its stdin and reads one from its stdout:
-
-```json
-{"version": 1, "op": "fetch", "keys": ["ABC-1", "ABC-2"]}
-```
-
-```json
-{"issues": {"ABC-1": {"title": "…", "state": "Done"}}, "errors": {"ABC-2": "no access"}}
-```
-
-- A key in neither map shows as "not found or no access".
-- A non-zero exit fails the whole batch with the last line of stderr; so does output that is not JSON. Never print
-  a token to stderr: it is stored and shown on the page.
-- 30 seconds per batch. The command inherits bridge's environment, so keep secrets in a file it reads or in the
-  keychain, not in `tracker_command`.
-
-### `linear`
-
-```toml
-tracker = "linear"
-linear_api_key_file = "~/.secrets/linear-api-key"   # a personal API key, read-only is enough
-```
-
-Uses Linear's GraphQL API, and the GitHub attachments of each issue as its linked PRs.
-
-### Writing an adapter with your coding agent
-
-The exec adapter is meant to be written by an agent in one sitting. Give it this file and a prompt like:
-
-> Write `~/bin/jira-tracker`, a Guild exec tracker adapter (docs/adapters.md, "exec"). Read the request JSON from
-> stdin; for each key call `GET /rest/api/3/issue/{key}?fields=summary,status,assignee` on
-> `https://acme.atlassian.net` with the token in `~/.secrets/jira`; map `summary` to title, `status.name` to state,
-> `status.statusCategory.key` (new / indeterminate / done) to state_type (unstarted / started / completed), the
-> browse URL to url. Put per-key failures in `errors`. Python stdlib only. Add a `--selftest` that prints the answer
-> for one key I give it.
-
-What changes per tracker is only the mapping:
-
-- **Jira:** issue keys are native (`ABC-12`). `statusCategory` gives `state_type`; the development panel
-  (`/rest/dev-status/latest/issue/detail`) gives linked PRs.
-- **Notion:** a database with a unique-ID property (prefix `TASK`) gives keys `TASK-12`; query it with a filter on
-  that property, map a Status property to `state` and its group to `state_type`, and the page URL to `url`.
-- **A kanban board** (Trello, GitHub Projects, Plane, a YAML file): give cards a key in their title (`OPS-7 Fix
-  login`), find them by that prefix, and map the column name to `state`; `state_type` can be left to bridge's guess,
-  or set from a column-to-type table in the adapter.
-
-Test it by hand before pointing bridge at it:
-
-```sh
-echo '{"version": 1, "op": "fetch", "keys": ["ABC-1"]}' | ~/bin/jira-tracker | python3 -m json.tool
-bridge enrich --force    # prints which tracker ran and every ref that failed
-```
+Porting is a job for your coding agent with this in hand: `fetch_issues` in `src/bridge/enrich.py` takes refs and
+returns one `IssueStatus` per ref (title, state, `state_type` as one of `triage`, `backlog`, `unstarted`, `started`,
+`completed`, `canceled`, assignee, url, linked PRs and whether that list is complete) or an error string. Replace it
+with your tracker's API and keep the shape; the page, the stale-issue flag and the review queue read only that shape.
+Issue sync writes back to Linear and stays off for another tracker until it is ported too.
 
 ## Review chat
 
@@ -141,23 +52,16 @@ Only the owner's PR review queue posts to a chat: pressing Publish on a PR posts
 themselves. The lead board and direct messages between sessions are separate, and always on.
 
 ```toml
-chat = "webhook"                                      # none | slack | file | webhook
-chat_webhook_url = "https://hooks.example/T000/B000"  # an incoming webhook
-review_post_dry_run = false                           # true (the default) writes review-posts.log and posts nothing
+review_channel_id = "C0123456789"         # the Slack channel of review posts
+review_channel_name = "#reviews"          # how texts name it
+review_post_dry_run = false               # true (the default) writes review-posts.log in the state dir and posts nothing
 ```
 
-- `none`: Publish records the PR as published and posts nothing.
-- `file`: one JSON line per post (`{"at": <ms>, "text": "…"}`) in `chat_file` (default: `chat-posts.log` in the
-  state dir). A script of yours can forward it anywhere.
-- `webhook`: a POST of `{"text": "…", "content": "…"}`: Slack, Mattermost and Rocket.Chat read `text`, Discord reads
-  `content`. A 2xx answer counts as posted.
-- `slack`: posts through the Slack connector of claude.ai (`claude -p` with only the send tool), and reads the
-  channel (`review_channel_id`) back, with a token in `~/.secrets/slack` or else through the connector: a post with
-  a PR's link, by anyone, marks the PR published. `review_mention_people` maps names to Slack member ids.
+Posts go through the Slack connector of claude.ai (`claude -p` with only the send tool). Bridge also reads the
+channel back, with a token in `~/.secrets/slack` or else through the connector: a post with a PR's link, by anyone,
+marks the PR published. `review_mention_people` (in the people file, below) maps names to Slack member ids.
 
-Outside Slack, a mention is `@` plus whatever `review_mention_people` maps the name to.
-
-To add another chat, `send_to_chat` in `src/bridge/review_post.py` is the one function to extend: it gets the text
+To post somewhere else, `send_to_slack` in `src/bridge/review_post.py` is the function to replace: it gets the text
 and returns posted, failed or a link.
 
 ## Code host: GitHub
@@ -214,17 +118,71 @@ says so.
 ## Team rules: defaults you can change
 
 Some rules are a way of working rather than a mechanism. They ship as defaults, written into the lead role and the
-bridge skill, and each lives in one place you can edit:
+bridge skill:
 
 | Rule | Default | Where |
 |---|---|---|
-| Large PRs need independent reviews before the owner's queue | Codex and a fresh Claude session, at 100+ lines | `REQUIRED_REVIEWS` in `src/bridge/review_marks.py`, `review_large_loc` in config, the role text in `src/bridge/leads.py` |
+| Large PRs name their reviews before the owner's queue | a review doc at 100+ lines with a Reviews section; no review is required by name | `required_reviews` and `review_bot_name` in config, the `brief-reviews` and `lead-reviews` texts (below), `REVIEW_LARGE_LOC` in `src/bridge/review_worktree.py` |
 | How a large PR's review doc looks | sections, folds, provenance marks | `agent/skills/bridge/review-doc.md` |
-| What agents write on GitHub and the tracker starts with a prefix, and names no internal session | `🤖 Claude:`; leads' names and the words worker, lead, Guild, bridge | `CLAUDE_PREFIX` and `INTERNAL_WORDS` in `src/bridge/leads.py`, `AGENT_PREFIX` in `src/bridge/reviews.py` |
+| What agents write on GitHub and the tracker starts with a prefix, and names no internal session | `🤖 Claude:`; leads' names and the words worker, lead, Guild, bridge | `CLAUDE_PREFIX` in `src/bridge/agent_prefix.py`, `INTERNAL_WORDS` in `src/bridge/leads.py` |
 | Tab, workspace and worker names are in English | non-ASCII letters are refused | `is_english_name` in `src/bridge/registry.py` |
 
 Bridge tells agents' comments from the owner's on a shared GitHub account by that prefix, so keep one if agents post
 under your account.
+
+## Your install's own values
+
+Everything that differs between teams comes from your config, a folder of house texts and a people file, so the code
+stays the same for everyone. Every key is optional.
+
+```toml
+work_timezone = "Europe/Lisbon"           # working hours (09-19) for daytime-only nudges; default: this Mac's zone
+work_days = [0, 1, 2, 3, 4]               # Monday is 0 (the default)
+review_bot_name = "ReviewBot"             # your review bot as people name it; its approval counts
+required_reviews = ["Codex"]              # reviews a large PR's doc must name before it reaches you
+review_stall_status = "reviewbot/stall"   # the commit status your bot sets red when it stalls; empty watches none
+review_ignored_posts = ["1700000000.000100"]  # Slack ts of review-channel posts that publish nothing (a digest)
+agent_prefix_from_ms = 1700000000000      # when agents began prefixing GitHub posts; older unprefixed ones stay unclear
+host_worker_disabled_plugins = ["example@plugins"]  # plugins host workers run without, besides the defaults
+grooming_states = ["Grooming"]            # tracker states issue sync never moves an issue out of
+review_generated_files = ["api-client.ts"]  # left out of a PR's line count, besides lockfiles
+review_python_paths = ["lib/python"]      # extra Python roots for review worktrees' editor and services
+pages_dir = "~/pages"                     # where published pages' sources live (the default)
+disk_folders = ["~/code/worktrees"]       # measured hourly; Right Hand hears when the disk runs low
+overlay_dir = "~/.config/bridge/house"    # your house texts, below
+people_dir = "~/.config/bridge/people"    # your people file, below
+```
+
+**House texts** (`overlay_dir`): one `<slot>.md` per slot replaces or adds a passage of the roles and briefs. A
+missing file keeps the generic text, or drops the line. `{owner}` and `{assistant}` are filled in where noted.
+
+| Slot | Where it goes |
+|---|---|
+| `grooming.md` | the lead role and worker briefs, after the tracker rule ({owner}, {assistant}) |
+| `lead-heavy-work.md` | the lead role's line on what it coordinates ({owner}, {assistant}) |
+| `lead-reviews.md` | the lead role, before the merge rule ({owner}, {assistant}) |
+| `assistant-rules.md` | Right Hand's role, in place of the generic deploy line ({owner}) |
+| `brief-reviews.md` | worker briefs, in place of the generic Reviews rule ({owner}) |
+| `doc-reviews.md` | bridge's request for a large PR's review doc |
+| `issue-sync-grooming.md` | issue sync's note to a lead about issues held in grooming ({owner}) |
+| `merge-rule.md` | how an approval names the merge rule (default "the merge rule") |
+| `ready-to-merge.md` | how the "may merge" message says ready (default "ready to merge") |
+| `host-worker-codex.md` | a host worker's brief, a note on running Codex there ({lead}); none by default |
+
+House rules for the bridge skill go in `agent/skills/bridge/house.md` next to `SKILL.md`, which reads it when
+present; it is ignored by git, so a link to a file of yours keeps it out of any commit.
+
+**The people file** (`people_dir`): `people.toml` holds the keys about people, and once `people_dir` is set,
+`config.toml` may not hold them, so a config you share or commit names no one:
+
+```toml
+owner_name = "Mira"                       # how agents name you
+user_alias = "mira"                       # the name you post under on the board
+review_author = "mira-gh"                 # your GitHub login: the review queue's PRs and your comments
+
+[review_mention_people]                    # colleagues a review post may mention, by Slack member id
+Sam = "U0123456789"
+```
 
 ## Remote hosts
 

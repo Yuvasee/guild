@@ -39,7 +39,7 @@ def add_ask_commands(sub: "argparse._SubParsersAction[argparse.ArgumentParser]",
     ask_sub = ask.add_subparsers(dest="ask_command", required=True)
     p = ask_sub.add_parser("add", help="record an ask in the owner's own words")
     p.add_argument("owner", help="the lead that answers for it, or the assistant's handle")
-    p.add_argument("--words", help="their words verbatim; default: stdin")
+    p.add_argument("--words", help="the owner's words verbatim; default: stdin")
     p.add_argument("--from", dest="from_id", type=int, metavar="N", help="quote message N's body as the words")
     p.add_argument("--ref", action="append", default=[], help="a PR, issue or page URL; repeat")
     p.set_defaults(func=cmd_ask_add)
@@ -94,7 +94,7 @@ def add_ask_commands(sub: "argparse._SubParsersAction[argparse.ArgumentParser]",
     p.add_argument("id", type=int)
     p.add_argument("--dropped", metavar="WHY", help="close an unfinished ask the owner let go, and why")
     p.set_defaults(func=cmd_ask_close)
-    p = ask_sub.add_parser("reopen", help="back to open: the result is not what they asked for")
+    p = ask_sub.add_parser("reopen", help="back to open: the result is not what the owner asked for")
     p.add_argument("id", type=int)
     p.add_argument("--why", required=True)
     p.set_defaults(func=cmd_ask_reopen)
@@ -114,7 +114,7 @@ def cmd_ask_add(args: argparse.Namespace, conn: sqlite3.Connection, config: Conf
         words, source = str(args.words), "tab"
     else:
         if sys.stdin.isatty():
-            raise AskError("give their words: --words '…', --from N, or stdin")
+            raise AskError("give the owner's words: --words '…', --from N, or stdin")
         words, source = sys.stdin.read(), "tab"
     for ref in args.ref:
         if not str(ref).startswith(("https://", "http://")):
@@ -204,7 +204,7 @@ def cmd_ask_close(args: argparse.Namespace, conn: sqlite3.Connection, config: Co
     actor = current_actor(conn, config)
     if actor.role != "assistant":
         raise AskError(
-            f"only {config.assistant_handle} closes an ask, relaying the owner; the page has their own button"
+            f"only {config.assistant_handle} closes an ask, relaying the owner; the page has the owner's own button"
         )
     with transaction(conn):
         ask = close_ask(conn, int(args.id), "assistant", actor.handle, now_ms(), args.dropped)

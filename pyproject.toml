@@ -8,9 +8,9 @@ requires-python = ">=3.12"
 dependencies = []
 
 [project.scripts]
-bridge = "bridge.cli:main"
-bridge-hook = "bridge.hooks:main"
-guild = "bridge.cli_guild:main"
+bridge = "bridge.entry:cli_main"
+bridge-hook = "bridge.entry:hook_main"
+guild = "bridge.entry:guild_main"
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.6", "pyright>=1.1.380"]

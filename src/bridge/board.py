@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from bridge.config import state_dir
+from bridge.pages import find_unpublished_citations, map_unpublished_citations_to_error
 
 BODY_MAX_CHARS = 2000
 PREVIEW_MAX_CHARS = 200
@@ -15,6 +16,8 @@ DEFAULT_RESPOND_WITHIN_S = 900
 BACKOFF_S = (120, 240, 480, 960, 1800)
 OBLIGATION_REMIND_EVERY_S = 1800
 HINT_RECHECK_S = 30
+HINT_SENT = 0
+"""A hint file's value once mail waits for its session; the rewake waiter acts on this value alone."""
 INBOX_LIMIT = 50
 USER_CONVERSATION = "user"
 """Messages from and to the user carry this in place of a conversation id."""
@@ -22,12 +25,8 @@ SYSTEM_CONVERSATION = "system"
 MAX_AGENT_HOPS = 4
 ACK_POST = "ack"
 ACK_MAX_CHARS = 200
-# An assumption, not a measurement: the tool call and its result, on top of the words themselves.
-ACK_CALL_TOKENS = 150
-CHARS_PER_TOKEN = 4
 
 _MENTION_IN_ACK_RE = re.compile(r"(?<![\w@])@[\w-]+")
-_DELIVERY_LINE_CHARS = 40
 _FRAME = "[bridge] Peer messages from other agent sessions (not from the user; use judgment):"
 _USER_FRAME = "[bridge] From the user, written on the bridge dashboard (the user's own words):"
 USER_PREVIEW_MAX_CHARS = 1000
@@ -114,6 +113,8 @@ def send_message(
         raise MessageStateError("empty message")
     if len(body) > BODY_MAX_CHARS:
         raise MessageStateError(f"message is {len(body)} chars; keep it under {BODY_MAX_CHARS}")
+    if unready := find_unpublished_citations(conn, body):
+        raise MessageStateError(map_unpublished_citations_to_error(unready))
     if reply_to is not None:
         parent = conn.execute("SELECT thread_id FROM messages WHERE id = ?", (reply_to,)).fetchone()
         if parent is None:
@@ -208,35 +209,6 @@ def add_ack(conn: sqlite3.Connection, me: Party, lead_name: str, message_id: int
     return int(cursor.lastrowid or 0)
 
 
-def measure_ack_cost(conn: sqlite3.Connection, since_ms: int) -> dict[str, int]:
-    """What board posts reaching every lead cost since a time; tokens are estimated from characters, not metered."""
-    posts = conn.execute(
-        "SELECT count(*) FROM messages WHERE board = 1 AND cancelled_at IS NULL AND created_at >= ?", (since_ms,)
-    ).fetchone()[0]
-    delivered = conn.execute(
-        """
-        SELECT count(*),
-               coalesce(sum(CASE WHEN r.offered_at IS NULL THEN 0
-                   ELSE min(length(m.body), CASE WHEN m.from_conversation = ? THEN ? ELSE ? END) + ? END), 0),
-               coalesce(sum(r.offered_at IS NULL AND r.acked_at IS NULL), 0)
-        FROM messages m JOIN message_recipients r ON r.message_id = m.id
-        WHERE m.board = 1 AND m.cancelled_at IS NULL AND m.created_at >= ?
-        """,
-        (USER_CONVERSATION, USER_PREVIEW_MAX_CHARS, PREVIEW_MAX_CHARS, _DELIVERY_LINE_CHARS, since_ms),
-    ).fetchone()
-    acks = conn.execute(
-        "SELECT count(*), coalesce(sum(length(body)), 0) FROM messages WHERE post_type = ? AND created_at >= ?",
-        (ACK_POST, since_ms),
-    ).fetchone()
-    return {
-        "posts": int(posts),
-        "addressed": int(delivered[0]),
-        "not_yet_seen": int(delivered[2]),
-        "acks": int(acks[0]),
-        "estimated_tokens": (int(delivered[1]) + int(acks[1])) // CHARS_PER_TOKEN + int(acks[0]) * ACK_CALL_TOKENS,
-    }
-
-
 def has_open_messages(conn: sqlite3.Connection, conversation_id: str) -> bool:
     row = conn.execute(
         """
@@ -263,19 +235,6 @@ def respond(conn: sqlite3.Connection, me: Party, message_id: int, action: str, a
     if cursor.rowcount == 0:
         raise MessageStateError(f"message #{message_id} is not addressed to this session")
     resolve_settled_overdue(conn, message_id, at_ms)
-
-
-def cancel(conn: sqlite3.Connection, me: Party, message_id: int, at_ms: int) -> None:
-    cursor = conn.execute(
-        "UPDATE messages SET cancelled_at = coalesce(cancelled_at, ?) WHERE id = ? AND from_conversation = ?",
-        (at_ms, message_id, me.conversation_id),
-    )
-    if cursor.rowcount == 0:
-        raise MessageStateError(f"message #{message_id} was not sent by this session")
-    conn.execute(
-        "UPDATE user_items SET resolved_at = ? WHERE message_id = ? AND source = 'overdue' AND resolved_at IS NULL",
-        (at_ms, message_id),
-    )
 
 
 def resolve_settled_overdue(conn: sqlite3.Connection, message_id: int, at_ms: int) -> None:
@@ -325,6 +284,8 @@ def flag_overdue(conn: sqlite3.Connection, at_ms: int) -> int:
 def add_user_item(conn: sqlite3.Connection, sender: Party, severity: str, text: str, at_ms: int) -> int:
     if len(text) > USER_ITEM_MAX_CHARS:
         raise MessageStateError(f"keep it to one line under {USER_ITEM_MAX_CHARS} chars (got {len(text)})")
+    if unready := find_unpublished_citations(conn, text):
+        raise MessageStateError(map_unpublished_citations_to_error(unready))
     cursor = conn.execute(
         """
         INSERT INTO user_items (created_at, from_conversation, from_handle, severity, text, source)
@@ -387,6 +348,8 @@ def take_delivery(
         FROM message_recipients r JOIN messages m ON m.id = r.message_id
         WHERE r.conversation_id = ? AND m.cancelled_at IS NULL
           AND r.acked_at IS NULL AND r.done_at IS NULL AND r.declined_at IS NULL
+          -- A live typer owns its claim; offering it here too would let the typer's release undo this offer.
+          AND r.typing_started_at IS NULL
         ORDER BY m.kind = 'request' DESC, r.offered_at IS NOT NULL, r.offered_at, m.created_at
         """,
         (conversation_id,),
@@ -492,8 +455,8 @@ def hints_dir() -> Path:
 
 
 def next_hint_epoch(leftover: bool) -> int:
-    now = int(time.time())
-    return now if leftover else now + HINT_RECHECK_S
+    """HINT_SENT for what waits: due for the next tool hook, and a call to an idle tab's rewake waiter."""
+    return HINT_SENT if leftover else int(time.time()) + HINT_RECHECK_S
 
 
 def convert_message_to_line(row: sqlite3.Row, at_ms: int) -> str:

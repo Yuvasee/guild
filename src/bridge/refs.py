@@ -1,5 +1,4 @@
 import re
-from collections.abc import Mapping
 
 MAX_SCAN_CHARS = 20_000
 MAX_REFS_PER_TEXT = 20
@@ -48,8 +47,7 @@ def map_text_to_ref(text: str, *, issue_prefixes: tuple[str, ...], default_repo:
         return f"pr:{match.group(1)}/{match.group(2)}#{match.group(3)}"
     if (match := re.fullmatch(r"#(\d+)", value)) and default_repo:
         return f"pr:{default_repo}#{match.group(1)}"
-    # A tracker's issue URL: /issue/KEY (Linear and most), /browse/KEY (Jira), /issues/KEY.
-    key = re.search(r"https?://\S+?/(?:issues?|browse)/([A-Za-z][A-Za-z0-9]*-\d+)", value)
+    key = re.search(r"/issue/([A-Za-z][A-Za-z0-9]*-\d+)", value) if "linear.app/" in value else None
     keys = extract_issue_keys(key.group(1) if key else value, issue_prefixes)
     return f"issue:{keys[0]}" if keys and (key or value.upper() == keys[0]) else None
 
@@ -69,10 +67,8 @@ def extract_branch_refs(branch: str, issue_prefixes: tuple[str, ...]) -> list[st
     return [f"issue:{key}" for key in extract_issue_keys(branch, issue_prefixes)]
 
 
-def map_repo_to_label(repo: str, overrides: Mapping[str, str]) -> str:
+def map_repo_to_label(repo: str) -> str:
     """A four-letter repo tag for tight UI: the repo name without the org's own prefix (Acme-Org/acme-infra → infr)."""
-    if repo in overrides:
-        return overrides[repo]
     org, _, name = repo.partition("/")
     org_word = org.lower().split("-")[0]
     if name.lower().startswith(org_word + "-") and len(name) > len(org_word) + 1:
@@ -80,60 +76,10 @@ def map_repo_to_label(repo: str, overrides: Mapping[str, str]) -> str:
     return re.sub(r"[^a-z0-9]", "", name.lower())[:4] or name[:4]
 
 
-def map_ref_to_label(ref: str, overrides: Mapping[str, str]) -> str:
-    """pr:Acme-Org/acme-infra#21 → infr#21; issue keys stay as they are."""
+def map_ref_to_label(ref: str) -> str:
+    """pr:Acme-Org/acme-infra#36 → infr#36; issue keys stay as they are."""
     kind, _, value = ref.partition(":")
     repo, sep, number = value.rpartition("#")
     if kind in ("pr", "gh-issue") and sep and "/" in repo:
-        return f"{map_repo_to_label(repo, overrides)}#{number}"
+        return f"{map_repo_to_label(repo)}#{number}"
     return value
-
-
-_NAMED_PR_RE = re.compile(
-    r"github\.com/(?P<url_owner>[\w.-]+)/(?P<url_repo>[\w.-]+)/pull/(?P<url_number>\d+)"
-    r"|(?<![\w/.-])(?P<owner>[\w.-]+)/(?P<repo>[\w.-]+)#(?P<number>\d+)\b"
-    r"|\bPR\s*#?(?P<pr_number>\d{1,6})\b"
-    r"|(?<![\w/.#-])(?P<label>[a-z][a-z0-9]{1,11})#(?P<label_number>\d+)\b"
-    r"|(?<![\w&/#])#(?P<bare_number>\d{1,6})\b",
-    re.IGNORECASE,
-)
-
-
-def extract_named_prs(text: str, labels: Mapping[str, str]) -> tuple[list[str], bool]:
-    """PRs a text names, in order of first mention, and whether it also names one that cannot be pinned to a repo.
-
-    labels maps short tags (mono) to repos; a bare #N or PR N belongs to the one repo the text names in full, if one.
-    """
-    named: list[str | tuple[str]] = []
-    unknown = False
-    for match in _NAMED_PR_RE.finditer(text[:MAX_SCAN_CHARS]):
-        groups = match.groupdict()
-        if groups["url_number"]:
-            named.append(f"pr:{groups['url_owner']}/{groups['url_repo']}#{groups['url_number']}")
-        elif groups["number"]:
-            named.append(f"pr:{groups['owner']}/{groups['repo']}#{groups['number']}")
-        elif groups["label"]:
-            repo = labels.get(groups["label"].lower())
-            unknown = unknown or repo is None
-            if repo is not None:
-                named.append(f"pr:{repo}#{groups['label_number']}")
-        else:
-            named.append((groups["pr_number"] or groups["bare_number"],))
-    repos = {ref.removeprefix("pr:").rpartition("#")[0] for ref in named if isinstance(ref, str)}
-    if any(isinstance(ref, tuple) for ref in named) and len(repos) != 1:
-        unknown = True
-    found: dict[str, None] = {}
-    for ref in named:
-        if isinstance(ref, str):
-            found[ref] = None
-        elif len(repos) == 1:
-            found[f"pr:{next(iter(repos))}#{ref[0]}"] = None
-    return list(found), unknown
-
-
-def map_repos_to_labels(repos: set[str], overrides: Mapping[str, str]) -> dict[str, str]:
-    """Short tag → repo, as map_repo_to_label shows them; a tag two repos share names neither."""
-    by_label: dict[str, set[str]] = {}
-    for repo in repos:
-        by_label.setdefault(map_repo_to_label(repo, overrides).lower(), set()).add(repo)
-    return {label: next(iter(owners)) for label, owners in by_label.items() if len(owners) == 1}

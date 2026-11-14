@@ -22,19 +22,22 @@ from bridge.board import (
     Party,
     Recipient,
     SendResult,
+    add_user_item,
     convert_text_to_preview,
     is_delivery_owner,
     resolve_handle,
     send_message,
 )
-from bridge.compaction import map_screen_to_busy, map_screen_to_draft
+from bridge.compaction import DEAD_COMPACTABLE, FULL_CONTEXT_SQL, map_screen_to_busy, map_screen_to_draft
 from bridge.config import Config, state_dir
 from bridge.db import now_ms, transaction
 from bridge.errlog import log_error
 from bridge.leads import find_lead_conversations, is_conversation_locked, is_surface_locked, list_leads
+from bridge.pages import find_unpublished_citations, map_unpublished_citations_to_error
 from bridge.procinfo import pid_alive, process_start_ms
 from bridge.refs import extract_refs
 from bridge.registry import PROC_START_TOLERANCE_MS, RECENT_REF_TURNS, current_ref_sql
+from bridge.rewake_marks import WaiterDeferral
 from bridge.tabinput import (
     BRIDGE_TEXT_PREFIX,
     PROBE_KEY,
@@ -55,12 +58,20 @@ ANSWER_MAX_CHARS = 1000
 _PR_NUMBER_RE = re.compile(r"(?<![\w/.-])#?(\d{3,6})\b")
 POST_TYPES = ("heads-up", "question", "report", "handoff")
 TYPED_PEER_PREVIEW_CHARS = 500
-DELIVERY_RETRY_EVERY_MS = 600_000
-UNDELIVERED_ALERT_AFTER_MS = 600_000
+TYPED_USER_MAX_CHARS = 700
+"""The user's words are typed whole up to here; a longer text is typed as its start and where to read it all."""
+DELIVERY_RETRY_EVERY_MS = 120_000
+UNDELIVERED_ALERT_AFTER_MS = 300_000
+STUCK_ALERT_AFTER_MS = 60_000
 TYPER_LOCK_KEPT_S = 86_400
 LOCKED_RETRY_DELAYS_S = (0.5, 1.0, 2.0, 4.0)
 # Outside the pane lock a long wait costs only the typer's own process, and giving up there loses the delivery.
 LOCKED_PATIENT_DELAYS_S = (1.0, 2.0, 4.0, 8.0, 15.0, 30.0, *(60.0,) * 8)
+TYPED_MESSAGE_SQL = """(m.from_conversation = 'user'
+               OR m.post_type IN ('blocked-tab', 'lead-to-worker', 'to-assistant', 'review-queue')
+               OR i.surface IN (SELECT surface FROM leads WHERE retired_at IS NULL))"""
+"""Messages m that reach i's tab at once, typed or by a rewake: the user's reach any session; a peer's only a team
+lead, that lead's worker or the assistant."""
 TAB_NOT_FOUND = "Its tab was not found"
 AGTERM_SILENT = "agterm is not answering"
 SCREEN_UNREAD = "agterm shows its tab but does not return its screen"
@@ -114,6 +125,9 @@ def add_post(
     title = " ".join(title.split())
     if not title:
         raise MessageStateError("empty title")
+    cited = "\n".join([title, body, *(link.url for link in links)])
+    if unready := find_unpublished_citations(conn, cited):
+        raise MessageStateError(map_unpublished_citations_to_error(unready))
     if len(title) > USER_ITEM_MAX_CHARS:
         raise MessageStateError(
             f"keep the title under {USER_ITEM_MAX_CHARS} chars (got {len(title)}); details go in --body"
@@ -153,8 +167,8 @@ def add_post(
 def answer_post(
     conn: sqlite3.Connection, item_id: int, answer: str, user: str, at_ms: int, relayed_by: Party | None = None
 ) -> SendResult:
-    """Closes a blocked or decision post with the user's answer and queues the answer for the session. Sent as the user
-    only for the user's own click; a relayed answer stays the relay's message and says so."""
+    """Sent as the user only for the user's own click; a relayed answer stays the relay's message and says so."""
+    """Closes a blocked or decision post with the user's answer and queues the answer for the session."""
     answer = answer.strip()
     if not answer:
         raise MessageStateError("empty answer")
@@ -167,6 +181,8 @@ def answer_post(
         raise MessageStateError(f"no post #{item_id} from a session")
     if row["answered_at"] is not None:
         raise MessageStateError(f"post #{item_id} is already answered")
+    if conn.execute("SELECT 1 FROM colleague_calls WHERE item_id = ?", (item_id,)).fetchone():
+        raise MessageStateError(f"post #{item_id} is a draft reply to a colleague; {user} chooses on the page")
     conn.execute(
         """
         UPDATE user_items SET answer = ?, answered_at = ?, answered_by = ?, resolved_at = coalesce(resolved_at, ?)
@@ -426,7 +442,7 @@ def find_board_recipients(conn: sqlite3.Connection, text: str, config: Config) -
             continue
         found[recipient.conversation_id] = recipient
     refs = extract_refs(text, issue_prefixes=config.issue_prefixes, default_repo=None)
-    # "41 merged" names no repo; it still means the PR a session is on with that number.
+    # "48 merged" names no repo; it still means the PR a session is on with that number.
     numbers = sorted(set(_PR_NUMBER_RE.findall(text)))
     if refs or numbers:
         marks = ",".join("?" * len(refs)) or "NULL"
@@ -531,18 +547,19 @@ def _find_typable_row(
         (now_ms(), message_id, conversation_id),
     )
     row = conn.execute(
-        """
+        f"""
         SELECT m.from_conversation, m.from_handle, m.body, m.kind, m.respond_by, s.agterm_session, i.surface,
-               i.instance_id
+               i.instance_id, i.pid
         FROM messages m JOIN message_recipients r ON r.message_id = m.id
         JOIN instances i ON i.conversation_id = r.conversation_id AND i.ended_at IS NULL AND i.agent = 'claude'
         JOIN surfaces s ON s.surface = i.surface
         WHERE m.id = ? AND r.conversation_id = ? AND r.acked_at IS NULL AND r.offered_at IS NULL
           AND s.agterm_session IS NOT NULL
           AND m.cancelled_at IS NULL
-          AND (m.from_conversation = 'user'
-               OR m.post_type IN ('blocked-tab', 'lead-to-worker', 'to-assistant', 'review-queue')
-               OR i.surface IN (SELECT surface FROM leads WHERE retired_at IS NULL))
+          AND {TYPED_MESSAGE_SQL}
+          -- With its context full the prompt would fail unread; the first hook after compaction gives it instead.
+          AND NOT EXISTS (SELECT 1 FROM conversations c
+                          WHERE c.conversation_id = r.conversation_id AND {FULL_CONTEXT_SQL})
         ORDER BY i.proc_start_ms DESC LIMIT 1
         """,
         (message_id, conversation_id),
@@ -555,7 +572,8 @@ def deliver_typed(conn: sqlite3.Connection, config: Config, message_id: int, con
 
     The user's reach any session; a peer's only a team lead, that lead's worker or the assistant, framed as a peer's.
     A busy session gets it from its next hook instead; whichever comes first marks it delivered. A request a hook
-    has offered stays unacked for its reminders, so it is not typed as well.
+    has offered stays unacked for its reminders, so it is not typed as well. An idle tab whose rewake waiter listens
+    gets it from that waiter as a new turn, and is typed into only when that has not happened within the grace.
     """
     gave_up = False
 
@@ -626,7 +644,8 @@ def deliver_typed(conn: sqlite3.Connection, config: Config, message_id: int, con
             conn.execute(
                 """
                 UPDATE message_recipients
-                SET acked_at = CASE WHEN acked_at = ?1 THEN NULL ELSE acked_at END,
+                SET acked_at = CASE WHEN acked_at = ?1 AND done_at IS NULL AND declined_at IS NULL THEN NULL
+                                    ELSE acked_at END,
                     offer_count = max(offer_count - 1, 0), offered_at = NULL, typing_started_at = NULL,
                     typing_pid = NULL, typing_pid_start_ms = NULL
                 WHERE message_id = ?2 AND typing_started_at = ?1
@@ -655,6 +674,7 @@ def deliver_typed(conn: sqlite3.Connection, config: Config, message_id: int, con
         # Unreadable once typed: an Enter may submit a cancelled message, and "unwanted" after one counts as sent.
         return retry_when_locked(f"#{message_id} to {conversation_id}: check it is still wanted", still_wanted)
 
+    deferral = WaiterDeferral(int(row["pid"]), f"#{message_id} to {conversation_id}")
     try:
         result = type_when_idle(
             config,
@@ -670,6 +690,7 @@ def deliver_typed(conn: sqlite3.Connection, config: Config, message_id: int, con
             claim_left_unsent=lambda box: unlocked(
                 "claim text left unsent", lambda: claim_unsent_message(conn, conversation_id, box), None
             ),
+            may_type=deferral.may_type,
         )
     except StillLockedError:
         # Typed, its Enter unproven: as a stuck one, the retry pass presses Enter only if it is still wanted.
@@ -741,12 +762,14 @@ def claim_unsent_message(conn: sqlite3.Connection, conversation_id: str, box: st
                     (message_id, claimed_at),
                 )
             else:
-                # Only what the claim set goes back: an answer that came in meanwhile stays.
+                # Only what the claim set goes back: an answer that came in meanwhile stays, and its ack with it, though
+                # the answer kept the claim's time as its ack.
                 conn.execute(
                     """
                     UPDATE message_recipients
                     SET offered_at = CASE WHEN offered_at = :claimed THEN :offered ELSE offered_at END,
-                        acked_at = CASE WHEN acked_at = :claimed THEN :acked ELSE acked_at END,
+                        acked_at = CASE WHEN acked_at = :claimed AND done_at IS NULL AND declined_at IS NULL THEN :acked
+                                     ELSE acked_at END,
                         offer_count = CASE WHEN offered_at = :claimed THEN :count ELSE offer_count END,
                         typing_started_at = :typing, typing_pid = :pid, typing_pid_start_ms = :pid_start,
                         stuck_at = :stuck
@@ -778,13 +801,25 @@ def claim_unsent_message(conn: sqlite3.Connection, conversation_id: str, box: st
 
 def _convert_message_to_typed_text(row: sqlite3.Row, message_id: int, at_ms: int) -> str:
     if row["from_conversation"] == USER_CONVERSATION:
-        return f"[bridge] {row['from_handle']} on the dashboard (#{message_id}): {row['body']}"
+        return convert_user_message_to_typed_text(str(row["from_handle"]), str(row["body"]), message_id)
     preview = convert_text_to_preview(str(row["body"]), TYPED_PEER_PREVIEW_CHARS)
     if row["kind"] == "request":
         return _convert_request_to_typed_text(row, message_id, preview, at_ms)
     return (
         f"[bridge] Peer message #{message_id} from {row['from_handle']}, not from the user; use judgment: "
         f"{preview} (full text and answer: bridge show {message_id}, bridge reply {message_id})"
+    )
+
+
+def convert_user_message_to_typed_text(handle: str, text: str, message_id: int) -> str:
+    body = " ".join(text.split())
+    head = f"[bridge] {handle} on the dashboard (#{message_id}): "
+    if len(body) <= TYPED_USER_MAX_CHARS:
+        return head + body
+    # Claude Code folds a long insert into a "[Pasted text #N]" chip; kept under it, the text shows and gets its Enter.
+    return (
+        f"{head}{body[: TYPED_PEER_PREVIEW_CHARS - 1]}… (cut here; these are the user's words: read all of them "
+        f"with bridge show {message_id} before you act)"
     )
 
 
@@ -812,12 +847,17 @@ def _convert_request_to_typed_text(row: sqlite3.Row, message_id: int, preview: s
 
 
 def record_failed_delivery(
-    conn: sqlite3.Connection, message_id: int, conversation_id: str, at_ms: int, unproven: bool = False
+    conn: sqlite3.Connection,
+    message_id: int,
+    conversation_id: str,
+    at_ms: int,
+    unproven: bool = False,
+    stuck: bool = False,
 ) -> None:
     """What could not be typed is retried, and a hook may still deliver it. A user's message also shows on the page,
     unless only unproven text held it, which may be Claude Code's grey suggestion. A lead's every message is retried:
-    an idle lead gets no hook."""
-    to_lead = conversation_id in find_lead_conversations(conn)
+    an idle lead gets no hook; so is one left typed in the box, which holds the tab idle and its hooks silent."""
+    to_lead = stuck or conversation_id in find_lead_conversations(conn)
     conn.execute(
         """
         UPDATE message_recipients SET delivery_failed_at = coalesce(delivery_failed_at, ?), delivery_retried_at = ?,
@@ -847,14 +887,14 @@ def tell_assistant_of_draft(
     assistant hears it once per message, and the assistant's own tab shows on the page; the retries go on."""
     row = conn.execute(
         """
-        SELECT r.handle, r.draft_told_at, s.agterm_session FROM message_recipients r
+        SELECT r.handle, r.draft_told_at, r.stuck_told_at, s.agterm_session FROM message_recipients r
         LEFT JOIN instances i ON i.conversation_id = r.conversation_id AND i.ended_at IS NULL
         LEFT JOIN surfaces s ON s.surface = i.surface
         WHERE r.message_id = ? AND r.conversation_id = ?
         """,
         (message_id, conversation_id),
     ).fetchone()
-    if row is None or row["draft_told_at"] is not None:
+    if row is None or row["draft_told_at"] is not None or row["stuck_told_at"] is not None:
         return None
     # Also marks the draft proven for the undelivered alert, which says nothing of unproven text.
     conn.execute(
@@ -913,7 +953,8 @@ def release_dead_typing_claims(conn: sqlite3.Connection, at_ms: int, conversatio
         cursor = conn.execute(
             """
             UPDATE message_recipients
-            SET acked_at = CASE WHEN acked_at = ?1 THEN NULL ELSE acked_at END,
+            SET acked_at = CASE WHEN acked_at = ?1 AND done_at IS NULL AND declined_at IS NULL THEN NULL
+                                ELSE acked_at END,
                 offered_at = CASE WHEN offered_at = ?1 THEN NULL ELSE offered_at END,
                 offer_count = max(offer_count - 1, 0), typing_started_at = NULL, typing_pid = NULL,
                 typing_pid_start_ms = NULL
@@ -928,20 +969,117 @@ def release_dead_typing_claims(conn: sqlite3.Connection, at_ms: int, conversatio
     return released
 
 
+def claim_failure_log(conn: sqlite3.Connection, message_id: int, conversation_id: str, at_ms: int) -> bool:
+    """True for the first failed try of a message to a tab, so the retries that follow log nothing more."""
+    return (
+        conn.execute(
+            "UPDATE message_recipients SET failure_logged_at = ?"
+            " WHERE message_id = ? AND conversation_id = ? AND failure_logged_at IS NULL",
+            (at_ms, message_id, conversation_id),
+        ).rowcount
+        > 0
+    )
+
+
 def record_stuck_delivery(conn: sqlite3.Connection, message_id: int, conversation_id: str, at_ms: int) -> None:
-    """Its text was typed but stayed unsubmitted in the box; the retry presses Enter on it."""
+    """Its text was typed but stayed unsubmitted in the box; the retry presses Enter on it. The first time counts."""
     conn.execute(
-        "UPDATE message_recipients SET stuck_at = ? WHERE message_id = ? AND conversation_id = ? AND acked_at IS NULL",
+        "UPDATE message_recipients SET stuck_at = coalesce(stuck_at, ?)"
+        " WHERE message_id = ? AND conversation_id = ? AND acked_at IS NULL",
         (at_ms, message_id, conversation_id),
     )
+
+
+@dataclass(frozen=True)
+class StuckDelivery:
+    message_id: int
+    conversation_id: str
+    handle: str
+    agterm_session: str | None
+    surface: str | None
+    stuck_at: int
+
+
+_STUCK_UNTOLD_SQL = """
+    r.stuck_at IS NOT NULL AND r.stuck_told_at IS NULL AND r.draft_told_at IS NULL
+    AND r.offered_at IS NULL AND r.acked_at IS NULL AND r.done_at IS NULL AND r.declined_at IS NULL
+    AND m.cancelled_at IS NULL
+"""
+
+
+def find_stuck_deliveries(conn: sqlite3.Connection, at_ms: int) -> list[StuckDelivery]:
+    """Messages left unsent in a box for STUCK_ALERT_AFTER_MS since the first try that left them, not yet told of."""
+    rows = conn.execute(
+        f"""
+        SELECT r.message_id, r.conversation_id, r.handle, r.stuck_at,
+               (SELECT s.agterm_session FROM instances i JOIN surfaces s ON s.surface = i.surface
+                WHERE i.conversation_id = r.conversation_id AND i.ended_at IS NULL
+                ORDER BY i.proc_start_ms DESC LIMIT 1) AS agterm_session,
+               (SELECT i.surface FROM instances i WHERE i.conversation_id = r.conversation_id AND i.ended_at IS NULL
+                ORDER BY i.proc_start_ms DESC LIMIT 1) AS surface
+        FROM message_recipients r JOIN messages m ON m.id = r.message_id
+        WHERE {_STUCK_UNTOLD_SQL} AND r.stuck_at <= ?
+        """,
+        (at_ms - STUCK_ALERT_AFTER_MS,),
+    ).fetchall()
+    return [
+        StuckDelivery(int(r["message_id"]), str(r["conversation_id"]), str(r["handle"]), r["agterm_session"],
+                      r["surface"], int(r["stuck_at"]))
+        for r in rows
+    ]  # fmt: skip
+
+
+def tell_assistant_of_stuck(
+    conn: sqlite3.Connection, config: Config, stuck: StuckDelivery, box: str | None, at_ms: int
+) -> tuple[int, Recipient] | None:
+    """Once per message: the assistant hears which tab holds it, and what its box shows. The assistant's own tab, or
+    one with no assistant to tell, goes on the user's page instead."""
+    row = conn.execute(
+        f"""
+        SELECT 1 FROM message_recipients r JOIN messages m ON m.id = r.message_id
+        WHERE r.message_id = ? AND r.conversation_id = ? AND {_STUCK_UNTOLD_SQL}
+        """,
+        (stuck.message_id, stuck.conversation_id),
+    ).fetchone()
+    if row is None:
+        return None
+    conn.execute(
+        "UPDATE message_recipients SET stuck_told_at = ? WHERE message_id = ? AND conversation_id = ?",
+        (at_ms, stuck.message_id, stuck.conversation_id),
+    )
+    tab = f"{stuck.handle}'s tab" + (f" ({stuck.agterm_session})" if stuck.agterm_session else "")
+    shown = f"its box holds {convert_text_to_preview(box, BOX_PREVIEW_CHARS)!r}" if box else "its box reads empty now"
+    seconds = (at_ms - stuck.stuck_at) // 1000
+    assistant: Recipient | None = None
+    if stuck.handle != config.assistant_handle:
+        with contextlib.suppress(AddressError):
+            assistant = resolve_handle(conn, config.assistant_handle)
+    if assistant is None:
+        text = f"bridge: #{stuck.message_id} sits unsent in {tab} for {seconds}s; press Enter there if it is that"
+        add_user_item(conn, Party(SYSTEM_CONVERSATION, "bridge"), "action", text[:USER_ITEM_MAX_CHARS], at_ms)
+        return None
+    target = (
+        f"agtermctl session type --target {stuck.agterm_session} --pane-id {stuck.surface} $'\\r'"
+        if stuck.agterm_session and stuck.surface
+        else "Enter in that tab"
+    )
+    body = (
+        f"#{stuck.message_id} was typed into {tab} and has sat unsent for {seconds}s; {shown}. bridge presses Enter "
+        f"only on text it can prove is its own. If the box holds only that message, submit it: {target}. "
+        "If it is someone's draft, leave it."
+    )
+    result = send_message(conn, Party(SYSTEM_CONVERSATION, "bridge"), [assistant], "info", body, at_ms)
+    conn.execute("UPDATE messages SET post_type = ? WHERE id = ?", (TO_ASSISTANT, result.message_id))
+    return result.message_id, assistant
 
 
 _PENDING_SQL = """
     r.done_at IS NULL AND r.declined_at IS NULL AND m.cancelled_at IS NULL AND r.typing_wanted_at IS NOT NULL
     AND ((r.acked_at IS NULL AND r.offered_at IS NULL) OR r.typing_started_at IS NOT NULL)
+    AND r.stuck_told_at IS NULL
 """
 """Meant to be typed and not yet in the tab: a claim taken for typing counts until its Enter is confirmed. What waits
-for the next hook by design, such as a board post naming nobody, is not overdue."""
+for the next hook by design, such as a board post naming nobody, is not overdue; nor is one the stuck alert told of."""
 
 
 @dataclass(frozen=True)
@@ -958,7 +1096,7 @@ class UndeliveredTab:
     compacting: bool
     busy: bool
     draft_proven: bool
-    # Mail counts as waiting from no earlier than this: hours the Mac slept, or agterm did not answer, are not a delay.
+    # Mail counts as waiting from no earlier than this: hours the Mac slept are not a delay.
     counted_from: int = 0
 
 
@@ -979,7 +1117,8 @@ def take_new_undelivered_tabs(
                 ORDER BY i.proc_start_ms DESC LIMIT 1) AS surface,
                (SELECT i.status FROM instances i WHERE i.conversation_id = r.conversation_id AND i.ended_at IS NULL
                 ORDER BY i.proc_start_ms DESC LIMIT 1) AS status,
-               (SELECT c.compact_phase FROM conversations c WHERE c.conversation_id = r.conversation_id) AS phase
+               (SELECT c.compact_phase FROM conversations c WHERE c.conversation_id = r.conversation_id) AS phase,
+               (SELECT c.context_dead_why FROM conversations c WHERE c.conversation_id = r.conversation_id) AS dead
         FROM message_recipients r JOIN messages m ON m.id = r.message_id
         WHERE {_PENDING_SQL} AND max(m.created_at, ?) <= ?
         GROUP BY r.conversation_id
@@ -991,7 +1130,12 @@ def take_new_undelivered_tabs(
         conversation = str(row["conversation_id"])
         if conversation not in leads and row["handle"] != config.assistant_handle:
             continue
-        if row["surface"] is None or is_conversation_locked(conn, config, conversation):
+        # A full context holds its mail by design, and the context watch already told of it.
+        if (
+            row["surface"] is None
+            or row["dead"] in DEAD_COMPACTABLE
+            or is_conversation_locked(conn, config, conversation)
+        ):
             continue
         tab = conn.execute(
             "SELECT agterm_session, tab_name FROM surfaces WHERE surface = ?", (row["surface"],)
@@ -1089,7 +1233,7 @@ def tell_of_undelivered_tab(
             return None
     name = f"{tab.handle}'s tab" + (f" ({tab.tab_name})" if tab.tab_name else "")
     minutes = (at_ms - max(tab.oldest_at, tab.counted_from)) // 60_000
-    since = " since the Mac woke or agterm answered again" if tab.counted_from > tab.oldest_at else ""
+    since = " since the Mac woke" if tab.counted_from > tab.oldest_at else ""
     more = f" and {tab.waiting - 1} more" if tab.waiting > 1 else ""
     stuck = (
         f" #{tab.stuck_message_id} was typed there but its Enter did not take."
@@ -1109,11 +1253,22 @@ def tell_of_undelivered_tab(
 
 
 def take_delivery_retries(conn: sqlite3.Connection, at_ms: int) -> list[tuple[int, Recipient]]:
+    """Only the oldest failed message per tab still waiting for it: once one is typed, its prompt's hook hands over the
+    rest. It stays the one picked while its typer waits, so a Mac short of memory never runs typers for several of one
+    tab's messages at once; one already offered by a hook is no longer waiting and never holds the others back."""
     rows = conn.execute(
         """
         SELECT r.message_id, r.conversation_id, r.handle FROM message_recipients r
-        JOIN messages m ON m.id = r.message_id AND m.cancelled_at IS NULL
-        WHERE r.delivery_failed_at IS NOT NULL AND r.acked_at IS NULL AND r.delivery_retried_at < ?
+        WHERE r.delivery_retried_at < ?1
+          -- A conversation with no live process gets its mail from the start hook when it resumes; a retry
+          -- would only spawn a typer with nothing to type into.
+          AND EXISTS (SELECT 1 FROM instances i WHERE i.conversation_id = r.conversation_id AND i.ended_at IS NULL)
+          AND r.message_id = (
+            SELECT min(w.message_id) FROM message_recipients w
+            JOIN messages m ON m.id = w.message_id AND m.cancelled_at IS NULL
+            WHERE w.conversation_id = r.conversation_id AND w.delivery_failed_at IS NOT NULL
+              AND w.acked_at IS NULL AND w.offered_at IS NULL
+        )
         """,
         (at_ms - DELIVERY_RETRY_EVERY_MS,),
     ).fetchall()

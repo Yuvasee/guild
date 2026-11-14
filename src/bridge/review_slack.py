@@ -15,7 +15,15 @@ from typing import Any, cast
 
 from bridge.config import Config, state_dir
 from bridge.db import now_ms, transaction
-from bridge.review_post import EXTERNAL, POSTED, POSTED_NO_LINK, SENDING, build_send_env, read_event_blocks
+from bridge.review_post import (
+    EXTERNAL,
+    POSTED,
+    POSTED_NO_LINK,
+    REVIEW_POST_MODEL,
+    SENDING,
+    build_send_env,
+    read_event_blocks,
+)
 from bridge.reviews import store_merge_blocks
 
 TOKEN = "token"
@@ -190,7 +198,7 @@ def build_search_request(channel: str, state: ReadState, now: int) -> dict[str, 
     return request
 
 
-def build_search_command(config: Config, request: dict[str, Any]) -> list[str]:
+def build_search_command(request: dict[str, Any]) -> list[str]:
     """One turn: the tool runs and its result is read from the events, and the model never reads what people wrote.
     Other tools stay unapproved under dontAsk, but a turn after the result could still try one."""
     prompt = (
@@ -199,7 +207,7 @@ def build_search_command(config: Config, request: dict[str, Any]) -> list[str]:
     )
     return [
         shutil.which("claude") or "claude", "-p", prompt,
-        "--model", config.review_post_model,
+        "--model", REVIEW_POST_MODEL,
         "--setting-sources", "user",
         "--settings", '{"disableAllHooks":true}',
         "--tools", "",
@@ -276,10 +284,14 @@ def map_search_to_state(page: SearchPage, request: dict[str, Any], state: ReadSt
     )
 
 
-def record_seen_posts(conn: sqlite3.Connection, posts: list[SeenPost], now: int) -> list[str]:
+def record_seen_posts(
+    conn: sqlite3.Connection, posts: list[SeenPost], now: int, ignored: tuple[str, ...] = ()
+) -> list[str]:
     """Kept per PR link, the earliest post first, whether or not the PR is in the queue yet: GitHub may list it after
     Slack does. Refs whose record changed."""
     for post in posts:
+        if post.ts in ignored:
+            continue
         for repo, number in _PR_URL_RE.findall(post.text):
             known = conn.execute(
                 "SELECT ts, link FROM review_slack_posts WHERE repo = ? AND number = ?", (repo.lower(), int(number))
@@ -387,7 +399,7 @@ def read_with_token(conn: sqlite3.Connection, config: Config, token: str, team_u
             raise SlackError("auth.test gave no workspace URL")
     posts, state, error = read_history(fetch, config.review_channel_id, team_url, load_read_state(conn), now)
     with transaction(conn):
-        record_seen_posts(conn, posts, now)
+        record_seen_posts(conn, posts, now, config.review_ignored_posts)
         store_read_state(conn, state)
         record_read_outcome(conn, error, now)
     return team_url
@@ -424,7 +436,7 @@ def run_connector_read(conn: sqlite3.Connection, config: Config, claim: int) -> 
                 return
         try:
             done = subprocess.run(
-                build_search_command(config, request),
+                build_search_command(request),
                 capture_output=True,
                 encoding="utf-8",
                 errors="replace",
@@ -456,7 +468,7 @@ def run_connector_read(conn: sqlite3.Connection, config: Config, claim: int) -> 
             store_read_state(conn, replace(current, search_cursor=None, finished_at=now))
             record_read_outcome(conn, error, now)
             return
-        record_seen_posts(conn, page.posts, now)
+        record_seen_posts(conn, page.posts, now, config.review_ignored_posts)
         store_read_state(conn, replace(map_search_to_state(page, request, current), finished_at=now))
         record_read_outcome(conn, None, now)
 
@@ -499,7 +511,7 @@ def map_db_to_slack_freshness(conn: sqlite3.Connection, config: Config) -> dict[
     row = conn.execute("SELECT mode, ok_at, error, error_at, failures FROM slack_read WHERE id = 1").fetchone()
     mode = row["mode"] if row else None
     return {
-        "enabled": config.chat_adapter == "slack" and bool(config.review_channel_id),
+        "enabled": bool(config.review_channel_id),
         "mode": mode,
         "every_s": CONNECTOR_EVERY_S if mode == CONNECTOR else TOKEN_EVERY_S,
         "ok_at": row["ok_at"] if row else None,

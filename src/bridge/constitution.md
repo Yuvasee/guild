@@ -29,3 +29,10 @@ These come before any other rule.
 - Every error and alert is tracked to its cause; none is ignored because it is familiar.
 - A repeating one is a defect: fix its cause, or its level if it was never an error. Never accept it as normal.
 - Known noise is a debt to clear, not a filter to keep, so a real error takes our attention at once.
+
+## 5. Simplicity
+
+- For every task and project, first ask how it can be done more simply: what can we cut so the function stays and the implementation shrinks.
+- Build for the need we have, not one we imagine. No generalization, extension point or support for a future consumer without a clear requirement and a real need today.
+- Between a generic, more complex option and a focused, simpler one, pick the simpler and name what it gives up. Keeping complexity needs evidence that it is needed, not the other way round.
+- A plan, design doc or PR says what was cut and which simpler option was considered, and why it was or wasn't taken.

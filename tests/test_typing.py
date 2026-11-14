@@ -12,7 +12,7 @@ from unittest import mock
 from conftest import VENV_BIN, BridgeEnv, SpawnProcess, free_port, http_request, wait_for, wait_up
 from test_leads import Team
 
-from bridge.compaction import map_screen_to_busy, map_screen_to_draft, map_screen_to_idle
+from bridge.compaction import map_screen_to_busy, map_screen_to_dialog, map_screen_to_draft, map_screen_to_idle
 from bridge.config import Config
 from bridge.feed import (
     deliver_typed,
@@ -273,6 +273,11 @@ def test_busy_reads_a_live_spinner_and_a_ruled_dialog_but_not_quotes_of_them() -
     assert not map_screen_to_busy(f"  {spinner}\n{empty_box}")
     assert map_screen_to_busy(f"{rule}\n{PROMPT} 1. Yes\n  2. No\n  Enter to confirm {chr(0xB7)} Esc to cancel\n{rule}")
     assert not map_screen_to_busy(f"{rule}\n{PROMPT} [bridge] quoting: Esc to cancel\n{rule}")
+    assert map_screen_to_dialog(
+        f"{rule}\n{PROMPT} 1. Yes\n  2. No\n  Enter to confirm {chr(0xB7)} Esc to cancel\n{rule}"
+    )
+    assert not map_screen_to_dialog(f"{spinner}\n{empty_box}")
+    assert not map_screen_to_dialog(f"{rule}\n{PROMPT} [bridge] quoting: Esc to cancel\n{rule}")
 
 
 def test_a_draft_under_an_indented_rule_is_neither_an_empty_box_nor_cut_at_it() -> None:
@@ -847,7 +852,7 @@ def test_a_lead_tab_with_mail_overdue_tells_the_assistant_once_per_episode_with_
     screen = f"{RULE}\n{PROMPT} [bridge] Peer message #{message_id} from old-b: please look\n{RULE}"
     at = 1000 + 11 * 60_000
     with bridge_env.connect() as conn:
-        early = take_new_undelivered_tabs(conn, config, 1000 + 9 * 60_000)
+        early = take_new_undelivered_tabs(conn, config, 1000 + 4 * 60_000)
         tabs = take_new_undelivered_tabs(conn, config, at)
         told = tell_of_undelivered_tab(conn, config, tabs[0], screen, at)
         again = take_new_undelivered_tabs(conn, config, at + 60_000)
@@ -955,6 +960,9 @@ def test_mail_that_arrives_while_the_screen_is_read_raises_no_alert(
     with bridge_env.connect() as conn:
         tabs = take_new_undelivered_tabs(conn, config, at)
         conn.execute("UPDATE message_recipients SET offered_at = 5 WHERE message_id = ?", (message_id,))
+        print(
+            "ROW", dict(conn.execute("SELECT * FROM message_recipients WHERE message_id = ?", (message_id,)).fetchone())
+        )
         told = tell_of_undelivered_tab(conn, config, tabs[0], None, at)
 
     assert told is None

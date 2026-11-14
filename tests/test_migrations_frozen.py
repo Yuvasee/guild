@@ -1,0 +1,95 @@
+import hashlib
+
+from bridge.db import MIGRATIONS
+
+APPLIED = (
+    "6c3808515bec8e7c",
+    "c70e48f2ec87abaa",
+    "f4dc6f607d4d7114",
+    "4d1353e2b8b77c7d",
+    "6f07f13b8a6f703b",
+    "38fff4a6b9eb1b6c",
+    "1f8f9378d097d22b",
+    "547419953ba291e9",
+    "0023d1927360eb11",
+    "a81cb03335d759f1",
+    "087ed161557114f0",
+    "087ed161557114f0",
+    "087ed161557114f0",
+    "5cf5b22240ed6480",
+    "26eacaaddf4eb5dc",
+    "0909ce7667eaac58",
+    "f0998c14594158b1",
+    "2c3d7c802ac18d20",
+    "c2c3c0f0a2d9a064",
+    "c68cb838021f6d3c",
+    "89b709e531ae4feb",
+    "21897e96364e1f0e",
+    "afe273916ff499c8",
+    "cf3041dd060de9ca",
+    "ad02d05026a78198",
+    "8bbe3ed900c2b274",
+    "54fafb78849a444e",
+    "88a35427b2da5c5e",
+    "9d5660e9d4692048",
+    "92ced2bb90f83ffe",
+    "b1f60f4fea7d9270",
+    "a250d73d7232fe6a",
+    "310df70171141723",
+    "536ebbb3440d4b7b",
+    "b88b9ebec3f3969a",
+    "f1c9a65499fd131e",
+    "c2563bfdcbb16215",
+    "0043d86891d7e473",
+    "016b9728d2941b37",
+    "11606659726661c7",
+    "1b316c77dd85bdd7",
+    "d5cb10d4eaaafcb0",
+    "2063aaf21b99b580",
+    "2fb31fa21b29b796",
+    "b1be2a3a2c95e14a",
+    "bedec5ff05be4a7b",
+    "c9ba6b42b2af90fd",
+    "b4b6e3dbc160c951",
+    "ee1b7255edd45993",
+    "cf035aecdfeff787",
+    "1667406007af3449",
+    "3a4cceee2d896831",
+    "a1d07f9fdcecced2",
+    "ca58c047846c8e46",
+    "ee7d9f17e72a7624",
+    "67bcc38fb82a0592",
+    "239c00b13e7d3f30",
+    "d9116868a4a1dd34",
+    "b227e39b4275e959",
+    "9d30990252b22e8a",
+    "8413a411da1d8c02",
+    "48dcb0d70b4e215b",
+    "51d3af82fa5086fa",
+    "39743a12bf4f6ed3",
+    "c6010376dabacf20",
+    "17b30552d8255ef6",
+    "935a4912bb7ab33e",
+    "edce309270944b2b",
+    "acfd494e1511b5e4",
+    "a2d2be1ca8b62288",
+    "7a9c3c24cea5fa49",
+    "7a1b5e153ed2fe29",
+    "eef1c4dfabb09860",
+    "b49a87cf7fdf6922",
+    "6d3fd9a2978ae966",
+)
+"""One hash per migration that has shipped, in order. A new migration is appended to MIGRATIONS and its hash here."""
+
+
+def map_migration_to_hash(migration: str) -> str:
+    # 16 hex digits: 12 can come out all digits, which leak checks read as an AWS account id.
+    return hashlib.sha256(" ".join(migration.split()).encode()).hexdigest()[:16]
+
+
+def test_shipped_migrations_keep_their_text_and_their_place() -> None:
+    """Live databases record only how many migrations ran: one inserted before the end, or edited, is run against a
+    schema that already has it, and every hook and the service then fail to open the database."""
+    shipped = tuple(map_migration_to_hash(m) for m in MIGRATIONS[: len(APPLIED)])
+    assert shipped == APPLIED, "a shipped migration moved or changed: add new ones at the end only"
+    assert len(MIGRATIONS) == len(APPLIED), "append the new migration's hash to APPLIED in this file"

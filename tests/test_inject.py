@@ -15,7 +15,7 @@ from bridge.inject import (
 
 
 def test_characters_are_counted_as_claude_code_counts_them() -> None:
-    assert measure_chars("éß") == 2
+    assert measure_chars("αβ") == 2
     assert measure_chars("🤖") == 2, "outside the BMP a character is two UTF-16 units, as in JavaScript"
 
 
@@ -34,7 +34,7 @@ def test_a_part_bigger_than_any_message_is_cut_with_a_pointer() -> None:
     assert not packed.later
     assert packed.text.endswith("`bridge keep --show` prints all of it)")
     assert measure_chars(packed.text) <= INJECT_MAX_CHARS
-    assert measure_chars(cap_context("é" * 20_000)) <= INJECT_MAX_CHARS
+    assert measure_chars(cap_context("ω" * 20_000)) <= INJECT_MAX_CHARS
 
 
 def test_mail_that_does_not_fit_waits_and_a_start_keeps_waiting_notices(tmp_path: Path) -> None:

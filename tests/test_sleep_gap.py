@@ -72,11 +72,11 @@ def _type_on(clock: MacClock, tmp_path: Path, run: Callable[[Config, list[str]],
 
 
 def _two_unsent_messages_screen() -> str:
-    """The shape of a tab after two typers typed into one box overnight: a 14-line box in a 101-column pane,
+    """The shape of a real tab after two typers typed into one box overnight: a 14-line box in a 101-column pane,
     its top rule 18 lines above the screen's foot."""
-    first = "[bridge] Peer message #41 from rev, not from the user; use judgment: " + "done with the sweep " * 26
-    second = "[bridge] Peer message #42 from rev, not from the user; use judgment: " + "review doc reordered " * 24
-    text = f"{first}(full text and answer: bridge show 41){second}(full text and answer: bridge show 42)"
+    first = "[bridge] Peer message #54 from rev, not from the user; use judgment: " + "done with the sweep " * 26
+    second = "[bridge] Peer message #55 from rev, not from the user; use judgment: " + "review doc reordered " * 24
+    text = f"{first}(full text and answer: bridge show 54){second}(full text and answer: bridge show 55)"
     lines: list[str] = []
     line = ""
     words = text.split(" ")
@@ -110,8 +110,8 @@ def test_a_box_holding_two_unsent_bridge_messages_reads_as_their_text() -> None:
 
     box = map_screen_to_draft(screen)
 
-    assert box is not None and box.startswith("[bridge] Peer message #41")
-    assert box.endswith("bridge show 42)")
+    assert box is not None and box.startswith("[bridge] Peer message #54")
+    assert box.endswith("bridge show 55)")
 
 
 def test_the_saved_screen_of_two_unsent_bridge_messages_reads_as_their_text() -> None:
@@ -119,16 +119,16 @@ def test_the_saved_screen_of_two_unsent_bridge_messages_reads_as_their_text() ->
 
     box = map_screen_to_draft(screen)
 
-    assert box is not None and box.startswith("[bridge] Peer message #41 from")
-    assert "41)[bridge] Peer message #42 from" in box and box.endswith("bridge reply 42)")
+    assert box is not None and box.startswith("[bridge] Peer message #54 from")
+    assert "54)[bridge] Peer message #55 from" in box and box.endswith("bridge reply 55)")
 
 
 def test_the_alert_for_two_unsent_bridge_messages_names_bridges_own_text() -> None:
-    tab = UndeliveredTab("c", "denis", "S", "P", None, 41, 0, 2, None, False, False, False)
+    tab = UndeliveredTab("c", "denis", "S", "P", None, 54, 0, 2, None, False, False, False)
 
     reason = convert_screen_to_hold_reason(tab, _two_unsent_messages_screen())
 
-    assert reason is not None and "bridge's own text of #41" in reason
+    assert reason is not None and "bridge's own text of #54" in reason
 
 
 def test_a_wait_that_spans_a_night_ends_right_after_wake(tmp_path: Path) -> None:
@@ -366,21 +366,22 @@ def test_a_wall_clock_set_back_leaves_no_count_starting_in_the_future() -> None:
     assert watch.counted_from() == int(clocks.wall * 1000)
 
 
-def test_the_delay_counts_from_when_agterm_stopped_answering_and_then_from_its_return() -> None:
+def test_agterm_going_silent_never_pauses_the_count_and_is_known_since_it_stopped() -> None:
     clocks = Clocks()
     watch = WakeWatch(lambda: clocks.wall, lambda: clocks.mono)
     clocks.awake(60)
+    before = watch.counted_from()
     watch.note_agterm(False)
     stopped = int(clocks.wall * 1000)
     clocks.awake(300)
     watch.note_agterm(False)
-    silent = watch.counted_from()
+    silent = (watch.counted_from(), watch.silent_since())
     clocks.awake(60)
     watch.note_agterm(True)
-    back = int(clocks.wall * 1000)
 
-    assert silent == stopped
-    assert watch.counted_from() == back
+    assert silent == (before, stopped)
+    assert watch.counted_from() == before
+    assert watch.silent_since() is None
 
 
 def test_an_alert_read_with_agterm_silent_says_so_and_never_that_the_tab_is_gone() -> None:
@@ -426,7 +427,7 @@ def test_an_alert_for_a_tab_agterm_shows_but_cannot_read_never_says_it_is_gone()
     assert (screen, why) == (None, SCREEN_UNREAD)
 
 
-def test_a_screen_read_after_agterm_was_silent_restarts_the_count() -> None:
+def test_a_screen_read_after_agterm_was_silent_ends_the_silence_but_never_restarts_the_count() -> None:
     clocks = Clocks()
     state = DashboardState(Config())
     state._wake = WakeWatch(lambda: clocks.wall, lambda: clocks.mono)  # pyright: ignore[reportPrivateUsage]
@@ -440,10 +441,11 @@ def test_a_screen_read_after_agterm_was_silent_restarts_the_count() -> None:
     with mock.patch("bridge.serve.run_agterm", idle):
         state._read_undelivered_tab(tab)  # pyright: ignore[reportPrivateUsage]
 
-    assert state._wake.counted_from() == int(clocks.wall * 1000)  # pyright: ignore[reportPrivateUsage]
+    assert state._wake.counted_from() == 0  # pyright: ignore[reportPrivateUsage]
+    assert state._wake.silent_since() is None  # pyright: ignore[reportPrivateUsage]
 
 
-def test_mail_that_waited_through_a_night_is_overdue_only_ten_minutes_after_wake(
+def test_mail_that_waited_through_a_night_is_overdue_only_five_minutes_after_wake(
     bridge_env: BridgeEnv, spawn_process: SpawnProcess
 ) -> None:
     team = Team(bridge_env, spawn_process)
@@ -459,7 +461,7 @@ def test_mail_that_waited_through_a_night_is_overdue_only_ten_minutes_after_wake
 
     assert just_woke == []
     assert [t.oldest_message_id for t in awake] == [message_id]
-    assert f"not received #{message_id} for 11 min since the Mac woke or agterm answered again" in body
+    assert f"not received #{message_id} for 11 min since the Mac woke" in body
 
 
 LOCKED = sqlite3.OperationalError("database is locked")
@@ -522,6 +524,7 @@ def _deliver_with_locked(tmp_path: Path, locked_sql: str, typer: Callable[..., s
         "agterm_session": "S",
         "surface": "P",
         "instance_id": "i",
+        "pid": 1,
     }
     with (
         mock.patch("bridge.feed.time.sleep"),
@@ -582,7 +585,7 @@ def test_a_claimed_typer_that_cannot_read_whether_it_is_wanted_stops_as_stuck_an
     conn = mock.MagicMock()
     conn.execute.side_effect = execute
     row = {"from_conversation": "conv-b", "from_handle": "b", "body": "look", "kind": "message", "respond_by": None}
-    row |= {"agterm_session": "S", "surface": "P", "instance_id": "i"}
+    row |= {"agterm_session": "S", "surface": "P", "instance_id": "i", "pid": 1}
     with (
         mock.patch("bridge.feed.time.sleep"),
         mock.patch("bridge.errlog.state_dir", lambda: tmp_path),

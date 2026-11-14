@@ -35,22 +35,29 @@ def install_service(port: int) -> Path:
             ]
         )
     )
-    plist = {
-        "Label": LABEL,
-        "ProgramArguments": [executable, "serve", "--port", str(port)],
-        "RunAtLoad": True,
-        "KeepAlive": True,
-        "ThrottleInterval": 10,
-        "StandardOutPath": str(log),
-        "StandardErrorPath": str(log),
-        "EnvironmentVariables": {"PATH": path, "HOME": str(Path.home())},
-    }
+    plist = map_port_to_plist(executable, port, log, path)
     target = plist_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     _bootout()
     target.write_bytes(plistlib.dumps(plist))
     subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(target)], check=True, capture_output=True)
     return target
+
+
+def map_port_to_plist(executable: str, port: int, log: Path, path: str) -> dict[str, object]:
+    return {
+        "Label": LABEL,
+        "ProgramArguments": [executable, "serve", "--port", str(port)],
+        "RunAtLoad": True,
+        "KeepAlive": True,
+        "ThrottleInterval": 10,
+        # Without it launchd throttles the job's CPU and I/O, and under load every hook waits on a write lock that a
+        # descheduled serve thread still holds.
+        "ProcessType": "Interactive",
+        "StandardOutPath": str(log),
+        "StandardErrorPath": str(log),
+        "EnvironmentVariables": {"PATH": path, "HOME": str(Path.home())},
+    }
 
 
 def uninstall_service() -> None:

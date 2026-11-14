@@ -17,8 +17,6 @@ HARNESS = (
     "Caveat:", "<environment_context>", "<user_instructions>", "<turn_aborted>",
 )  # fmt: skip
 HOME = os.path.expanduser("~")
-# An editor left open in a pane for weeks is not work in progress.
-NOT_A_RUN = ("vi", "vim", "nvim", "nano", "emacs", "less", "more", "man", "top", "htop", "btop", "tmux")
 
 
 def main():
@@ -60,38 +58,7 @@ def main():
             row.update(describe_codex(pid, argv[pid], pane["cwd"], codex_dirs.count(pane["cwd"]) == 1))
         row["branch"], row["origin"] = read_git(row.get("cwd") or pane["cwd"])
         sessions.append(row)
-    runs = list_runs(panes, tree, argv, {pane["pane"] + pane["session_id"]: agent for pane, (_, agent) in found})
-    print(json.dumps({"now": int(time.time() * 1000), "complete": True, "sessions": sessions, "runs": runs}))
-
-
-def list_runs(panes, children, argv, agent_panes):
-    """Panes running something besides an agent, such as a load test; also beside an agent in the same pane."""
-    runs = []
-    for pane in panes:
-        root = int(pane["pid"])
-        agent = agent_panes.get(pane["pane"] + pane["session_id"])
-        if agent == root:
-            continue
-        args = argv.get(root, [])
-        is_shell = bool(args) and os.path.basename(args[0]).lstrip("-") in ("sh", "bash", "zsh", "dash", "fish")
-        for pid in children.get(root, []) if is_shell else [root]:
-            if agent is not None and holds_pid(pid, agent, children):
-                continue
-            words = [os.path.basename(a)[:30] for a in argv.get(pid, [])[:3] if not a.startswith("-")]
-            if not words or words[0] in NOT_A_RUN:
-                continue
-            runs.append(
-                {
-                    "tmux": pane["session"], "tmux_id": pane["session_id"], "pane": pane["pane"],
-                    "label": " ".join(words), "started_at": process_start_ms(pid),
-                }
-            )  # fmt: skip
-            break
-    return runs
-
-
-def holds_pid(pid, target, children):
-    return pid == target or any(holds_pid(kid, target, children) for kid in children.get(pid, []))
+    print(json.dumps({"now": int(time.time() * 1000), "complete": True, "sessions": sessions}))
 
 
 def list_panes():

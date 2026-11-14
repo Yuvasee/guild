@@ -6,9 +6,10 @@ from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any, cast
 
+from bridge.agent_prefix import strip_agent_prefix
 from bridge.config import Config
 from bridge.review_deps import map_markdown_to_dependency
-from bridge.review_marks import map_markdown_to_reviews
+from bridge.review_marks import find_missing_usage_section, map_markdown_to_reviews
 
 _PAGES_MAX = 10
 _GH_TIMEOUT_S = 60
@@ -57,7 +58,15 @@ query($owner: String!, $name: String!, $number: Int!) {
 # The merge guard runs inside a 5 s hook: a read cut short must still end in its refusal.
 _MERGE_FACTS_TIMEOUT_S = 3
 PENDING = "PENDING"
+REVIEW_LOCKFILES = ("uv.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock")
 APPROVED_STATE = "APPROVED"
+
+
+def list_loc_excluded(config: Config) -> tuple[str, ...]:
+    """File names left out of a PR's line count (fnmatch on the base name)."""
+    return (*REVIEW_LOCKFILES, *config.review_generated_files)
+
+
 DOCS_AND_ASSETS = (
     "*.md", "*.mdx", "*.markdown", "*.rst",
     "*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp", "*.svg", "*.ico", "*.pdf",
@@ -69,7 +78,7 @@ class GitHubError(Exception):
 
 
 @dataclass(frozen=True)
-class OwnerThread:
+class HisThread:
     url: str
     replies: int
     last_id: str | None
@@ -80,7 +89,7 @@ class OwnerThread:
 @dataclass(frozen=True)
 class ReviewThreads:
     open: int
-    theirs: tuple[OwnerThread, ...]
+    his: tuple[HisThread, ...]
 
 
 @dataclass(frozen=True)
@@ -100,9 +109,11 @@ class OpenPr:
     requested: int
     approved_by: tuple[str, ...] = ()
     bot_approved: bool = False
-    """The review bot's latest verdict is APPROVED: GitHub-approved, though no person has seen the PR."""
     body_reviews: tuple[str, ...] | None = None
     """The reviews its body's Reviews section names; None without one."""
+    usage_missing: str | None = None
+    """The words by which it says it only enables something while its body lacks How this will be used."""
+    """The review bot's latest verdict is APPROVED: GitHub-approved, though no person has seen the PR."""
     others_reviewed: bool = False
     """A person other than the author reviewed, in any state. GitHub drops a request once its reviewer reviews."""
     merge_state: str | None = None
@@ -111,7 +122,7 @@ class OpenPr:
     """(oid, committer time), oldest first."""
     updated_at: str = ""
     open_threads: int = 0
-    """Unresolved threads, a thread of their pending review among them: GitHub lists it before it is sent."""
+    """Unresolved threads, a thread of the owner's pending review among them: GitHub lists it before it is sent."""
     thread_flags: str = ""
     """One letter per thread, r resolved and o open: a thread resolved and another reopened keep the count."""
     depends_on: str | None = None
@@ -192,7 +203,7 @@ def map_node_to_open_pr(node: Any, config: Config, known_loc: dict[tuple[str, st
     loc = (known_loc or {}).get((ref, head_oid)) if files["pageInfo"]["hasNextPage"] else None
     if loc is None:
         rows = fetch_all_files(repo, number) if files["pageInfo"]["hasNextPage"] else list(files["nodes"])
-        loc = map_files_to_loc(int(node["additions"]), int(node["deletions"]), rows, config.review_loc_excluded)
+        loc = map_files_to_loc(int(node["additions"]), int(node["deletions"]), rows, list_loc_excluded(config))
     commits = [n["commit"] for n in node["commits"]["nodes"]]
     last: Any = commits[-1] if commits else {}
     base_ref: Any = node.get("baseRef") or {}
@@ -204,7 +215,7 @@ def map_node_to_open_pr(node: Any, config: Config, known_loc: dict[tuple[str, st
         ref=ref,
         repo=repo,
         number=number,
-        title=str(node["title"]),
+        title=strip_agent_prefix(str(node["title"])),
         url=str(node["url"]),
         draft=bool(node["isDraft"]),
         head=str(node["headRefName"]),
@@ -216,7 +227,8 @@ def map_node_to_open_pr(node: Any, config: Config, known_loc: dict[tuple[str, st
         requested=count_real_review_requests(node["reviewRequests"]["nodes"], config),
         approved_by=map_reviews_to_approvers(node["reviews"]["nodes"], config),
         bot_approved=is_approved_by_review_bot(node["reviews"]["nodes"], config),
-        body_reviews=map_markdown_to_reviews(str(node.get("body") or "")),
+        body_reviews=map_markdown_to_reviews(str(node.get("body") or ""), config.review_names),
+        usage_missing=find_missing_usage_section(strip_agent_prefix(str(node["title"])), str(node.get("body") or "")),
         depends_on=map_markdown_to_dependency(str(node.get("body") or ""), repo, number),
         others_reviewed=has_review_by_others(node["latestReviews"]["nodes"], config),
         merge_state=node.get("mergeStateStatus"),
@@ -239,13 +251,15 @@ def fetch_review_threads(config: Config, repo: str, number: int) -> ReviewThread
     return map_threads_to_review_threads(nodes, config.review_author)
 
 
-def fetch_merge_facts(config: Config, repo: str, number: int) -> tuple[bool, bool, str | None, str | None, int]:
+def fetch_merge_facts(
+    config: Config, repo: str, number: int, timeout_s: float = _MERGE_FACTS_TIMEOUT_S
+) -> tuple[bool, bool, str | None, str | None, int]:
     """(draft, approved, CI rollup, merge state, the author's unresolved threads) of one PR, read live for the merge
     guard."""
     owner, _, name = repo.partition("/")
     args = ["api", "graphql", "-f", f"query={_MERGE_FACTS_QUERY}", "-f", f"owner={owner}", "-f", f"name={name}"]
     try:
-        raw: Any = json.loads(run_gh([*args, "-F", f"number={number}"], _MERGE_FACTS_TIMEOUT_S))
+        raw: Any = json.loads(run_gh([*args, "-F", f"number={number}"], timeout_s))
         pr: Any = raw["data"]["repository"]["pullRequest"]
         commits: list[Any] = pr["commits"]["nodes"]
         rollup: Any = (commits[-1]["commit"].get("statusCheckRollup") if commits else None) or {}
@@ -253,17 +267,17 @@ def fetch_merge_facts(config: Config, repo: str, number: int) -> tuple[bool, boo
         author = config.review_author.casefold()
         approved = bool(map_reviews_to_approvers(reviews, config)) or is_approved_by_review_bot(reviews, config)
         threads: list[Any] = pr["reviewThreads"]["nodes"]
-        theirs = sum(1 for t in threads if not t.get("isResolved") and _map_thread_to_starter(t) == author)
-        return bool(pr["isDraft"]), approved, rollup.get("state"), pr.get("mergeStateStatus"), theirs
+        his = sum(1 for t in threads if not t.get("isResolved") and _map_thread_to_starter(t) == author)
+        return bool(pr["isDraft"]), approved, rollup.get("state"), pr.get("mergeStateStatus"), his
     except (ValueError, KeyError, TypeError, IndexError) as exc:
         raise GitHubError(f"unexpected answer from GitHub: {type(exc).__name__}") from exc
 
 
 def map_threads_to_review_threads(nodes: list[Any], author: str) -> ReviewThreads:
-    """A thread their pending review opened is a draft only they see: it counts as neither open nor theirs."""
+    """A thread the owner's pending review opened is a draft only they see: it counts as neither open nor theirs."""
     sent = [t for t in nodes if t and not t.get("isResolved") and _map_thread_to_first_review_state(t) != PENDING]
-    theirs = [t for t in sent if _map_thread_to_starter(t) == author.casefold()]
-    return ReviewThreads(len(sent), tuple(map_thread_to_owner_thread(t) for t in theirs))
+    his = [t for t in sent if _map_thread_to_starter(t) == author.casefold()]
+    return ReviewThreads(len(sent), tuple(map_thread_to_his_thread(t) for t in his))
 
 
 def _map_thread_to_first_review_state(thread: Any) -> str | None:
@@ -273,19 +287,19 @@ def _map_thread_to_first_review_state(thread: Any) -> str | None:
     return review.get("state")
 
 
-def map_thread_to_owner_thread(thread: Any) -> OwnerThread:
+def map_thread_to_his_thread(thread: Any) -> HisThread:
     first_connection: Any = thread.get("comments") or {}
     first: list[Any] = first_connection.get("nodes") or []
     last_connection: Any = thread.get("lastComment") or {}
     last: list[Any] = last_connection.get("nodes") or []
     node: Any = last[0] if last else {}
     review: Any = node.get("pullRequestReview") or {}
-    # Their unsent reply is no answer, and its words stay theirs until they submit them.
+    # The owner's unsent reply is no answer, and its words stay theirs until they submit them.
     if review.get("state") == PENDING:
         node = {"author": node.get("author")}
     author: Any = node.get("author") or {}
     replies = max(int(last_connection.get("totalCount") or 0) - 1, 0)
-    return OwnerThread(
+    return HisThread(
         url=str(first[0].get("url") or "") if first else "",
         replies=replies,
         last_id=f"p{node['databaseId']}" if replies and node.get("databaseId") else None,

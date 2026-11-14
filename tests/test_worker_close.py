@@ -190,7 +190,12 @@ def test_detached_processes_that_are_not_this_tabs_work_do_not_refuse(
 ) -> None:
     other = spawn_process(env={"AGTERM_SESSION_ID": "TAB-ELSE"})
     mux = spawn_process(env={"AGTERM_SESSION_ID": WORKER_TAB})
-    worker.stub_output("ps", f"{other} 1 nohup-job\n{mux} 1 ssh: /tmp/ctl [mux]\n")
+    live_session = spawn_process(env={"AGTERM_SESSION_ID": WORKER_TAB})
+    worker.stub_output(
+        "ps",
+        f"{other} 1 nohup-job\n{mux} 1 ssh: /tmp/ctl [mux]\n"
+        f"{live_session} 1 /Applications/agterm.app/Contents/MacOS/zmx attach agterm-0041 /bin/zsh -lic claude\n",
+    )
 
     assert worker.close().returncode == 0
 
@@ -229,7 +234,7 @@ def test_live_remote_tmux_session_refuses(worker: Worker) -> None:
     assert "outside tmux on devbox" in done.stderr
 
 
-def test_remote_tmux_link_from_the_remote_drivers_refuses(worker: Worker) -> None:
+def test_remote_tmux_link_from_the_watchers_table_refuses(worker: Worker) -> None:
     worker.add_remote()
     worker.write_transcript()
     conn = worker.env.connect()
@@ -420,7 +425,7 @@ def test_a_turn_that_starts_during_the_checks_refuses(worker: Worker) -> None:
     worker.assert_refused(worker.close(), "Task one is mid-turn")
 
 
-def test_old_tmux_launch_past_the_drivers_scan_window_is_still_seen(worker: Worker) -> None:
+def test_old_tmux_launch_past_the_watchers_scan_window_is_still_seen(worker: Worker) -> None:
     path = worker.write_transcript("tmux new -d -s nightly ./job.sh")
     with path.open("a") as transcript:
         transcript.write(json.dumps({"type": "padding", "text": "x" * 6_000_000}) + "\n")
@@ -540,4 +545,14 @@ def test_a_task_name_with_close_in_it_still_starts_a_worker() -> None:
 
 
 def test_role_suggests_not_keeping_idle_workers() -> None:
-    assert "Don't keep idle workers who have no plans for a new job or whose job is clearly done" in ROLE_TEMPLATE
+    assert "Close idle workers with no next job" in ROLE_TEMPLATE
+
+
+def test_the_rewake_waiter_under_a_workers_claude_is_a_helper_not_work() -> None:
+    from bridge.procinfo import ProcessRow
+    from bridge.workers import find_unrecognised_children
+
+    rows = [
+        ProcessRow(pid=11, ppid=10, command="sh /Users/u/.local/state/bridge/bin/bridge-rewake.sh /x/bridge-hook 10")
+    ]
+    assert find_unrecognised_children(rows, {10}) == []

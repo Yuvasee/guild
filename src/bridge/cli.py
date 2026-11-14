@@ -3,23 +3,25 @@ import fcntl
 import json
 import os
 import sqlite3
-import statistics
-import subprocess
 import sys
 import time
 import urllib.request
 from dataclasses import asdict
 from pathlib import Path
 
-from bridge.board import Party, Recipient, add_user_item
+from bridge.board import HINT_SENT, Party, Recipient, add_user_item, write_hint
 from bridge.claude import read_session_file
 from bridge.cli_board import add_board_commands
 from bridge.cli_claims import add_claim_commands
+from bridge.cli_pages import add_page_commands
+from bridge.cli_pins import add_pin_commands
 from bridge.compaction import (
     CONTINUE_PROMPTS,
+    GENERIC_KEEP,
     KEEP_MAX_CHARS,
     PHASE_COMPACTING,
     PHASE_CONTINUE,
+    UNREAD_NOTE,
     give_up_driving,
     list_dropped_lines,
     load_keep,
@@ -29,13 +31,14 @@ from bridge.compaction import (
 )
 from bridge.config import Config, db_path, load_config, state_dir
 from bridge.db import connect, now_ms, transaction
+from bridge.deploycheck import check_long_message, check_rewake, check_typing
 from bridge.dream import resolve_dreamers, run_dream, run_night, stop_claude_on_term
-from bridge.enrich import enrich_due, fetch_prs, store_results
 from bridge.errlog import log_error
 from bridge.errors import UsageError
 from bridge.feed import (
     LOCKED_PATIENT_DELAYS_S,
     StillLockedError,
+    claim_failure_log,
     deliver_typed,
     hold_typer_lock,
     queue_retry_without_db,
@@ -45,11 +48,11 @@ from bridge.feed import (
     spawn_typed_delivery,
     tell_assistant_of_draft,
 )
-from bridge.feed_autoresolve import list_open_item_prs, resolve_settled_items
-from bridge.guard import DEFAULT_TRIGGERS
+from bridge.host_workers import HOST_KIND_PREFIX, run_tab_loop
 from bridge.identity import ensure_current_instance
 from bridge.inject import measure_chars
 from bridge.install import find_hook_executable, install_hooks, uninstall_hooks
+from bridge.issue_sync import map_report_to_lines, run_issue_sync
 from bridge.procinfo import process_args, process_start_ms
 from bridge.registry import (
     FOCUS_MAX_CHARS,
@@ -63,15 +66,15 @@ from bridge.registry import (
     set_focus,
     set_handle,
 )
-from bridge.remote import collect
-from bridge.remote import store as store_remote
 from bridge.restore import build_restore_command, pin_restore_command
 from bridge.review_post import run_review_post
 from bridge.review_slack import run_connector_read
+from bridge.review_worktree import run_next_worktree_job
+from bridge.rewake_marks import install_waiter_script
 from bridge.serve import DEFAULT_PORT, serve
 from bridge.service import install_service, restart_service, uninstall_service
 from bridge.tabinput import is_tab_selected, type_when_idle
-from bridge.trackers import load_tracker
+from bridge.worker_api import WORKER_API_PORT, convert_bridge_commands_to_gbridge
 
 DEFAULT_SETTINGS = Path.home() / ".claude/settings.json"
 PIN_SESSION_FILE_RETRIES = 10
@@ -128,10 +131,6 @@ def build_parser(config: Config) -> argparse.ArgumentParser:
     p.add_argument("name")
     p.set_defaults(func=cmd_handle)
 
-    p = sub.add_parser("hook-stats", help="hook latency percentiles")
-    p.add_argument("--last", type=int, default=1000)
-    p.set_defaults(func=cmd_hook_stats)
-
     p = sub.add_parser("install-hooks", help="add bridge hooks to Claude Code settings")
     p.add_argument("--settings", type=Path, default=DEFAULT_SETTINGS)
     p.set_defaults(func=cmd_install_hooks)
@@ -142,17 +141,12 @@ def build_parser(config: Config) -> argparse.ArgumentParser:
 
     add_board_commands(sub, config)
     add_claim_commands(sub, config)
+    add_pin_commands(sub)
+    add_page_commands(sub)
 
-    p = sub.add_parser("enrich", help="refresh GitHub PR and tracker issue state for live sessions")
-    p.add_argument("--force", action="store_true", help="ignore freshness and refetch everything")
-    p.set_defaults(func=cmd_enrich)
-
-    p = sub.add_parser("settle-feed", help="resolve open blocked/decision posts whose one PR has ended, as serve does")
-    p.add_argument("--dry-run", action="store_true", help="list what would resolve; the database is not written")
-    p.set_defaults(func=cmd_settle_feed)
-
-    p = sub.add_parser("remote-sync", help="collect sessions from configured remote hosts now")
-    p.set_defaults(func=cmd_remote_sync)
+    p = sub.add_parser("issue-sync", help="move Linear issues forward to match their PRs and live work")
+    p.add_argument("--dry-run", action="store_true", help="print the moves without making them")
+    p.set_defaults(func=cmd_issue_sync)
 
     p = sub.add_parser("serve", help="run the dashboard web server")
     p.add_argument("--port", type=int, default=DEFAULT_PORT)
@@ -168,20 +162,26 @@ def build_parser(config: Config) -> argparse.ArgumentParser:
     p = sub.add_parser("restart-service", help="restart the dashboard service (after reinstalling bridge)")
     p.set_defaults(func=cmd_restart_service)
 
-    p = sub.add_parser("open", help="open the dashboard as an agterm overlay (or in the browser)")
-    p.add_argument("--port", type=int, default=DEFAULT_PORT)
-    p.add_argument("--target", help="agterm session id to overlay (default: this tab)")
-    p.add_argument("--browser", action="store_true")
-    p.set_defaults(func=cmd_open)
+    p = sub.add_parser(
+        "deploy-check",
+        help="type a line and its Enter into a throwaway tab, as bridge types into leads' tabs, and wake an idle "
+        "throwaway Claude through the rewake waiter; run before and after a deploy, exit 1 if either does not work",
+    )
+    p.set_defaults(func=cmd_deploy_check)
 
     p = sub.add_parser("_compact-drive", help=argparse.SUPPRESS)
     p.add_argument("phase", choices=("compact", "continue"))
     p.add_argument("--keep", choices=tuple(CONTINUE_PROMPTS), default="shown")
     # From a start whose hook could not write: the drive moves the cycle to "continue" itself.
     p.add_argument("--claim", action="store_true")
+    p.add_argument("--reopened", action="store_true", help="messages from while the context was full are given again")
+    p.add_argument("--generic-keep", action="store_true", help="/compact says what to keep: no notes were saved")
     p.add_argument("instance_id")
     p.add_argument("conversation_id")
     p.set_defaults(func=cmd_compact_drive)
+
+    p = sub.add_parser("_worktree-job", help=argparse.SUPPRESS)
+    p.set_defaults(func=cmd_worktree_job)
 
     p = sub.add_parser("_deliver", help=argparse.SUPPRESS)
     p.add_argument("message_id", type=int)
@@ -207,6 +207,10 @@ def build_parser(config: Config) -> argparse.ArgumentParser:
     p.add_argument("handles", nargs="+")
     p.set_defaults(func=cmd_dream_night)
 
+    p = sub.add_parser("_host-tab", help=argparse.SUPPRESS)
+    p.add_argument("worker")
+    p.set_defaults(func=cmd_host_tab)
+
     p = sub.add_parser("_pin-restore", help=argparse.SUPPRESS)
     p.add_argument("instance_id")
     p.add_argument("conversation_id")
@@ -220,7 +224,7 @@ def cmd_sessions(args: argparse.Namespace, conn: sqlite3.Connection, config: Con
     me = _current_instance_id()
     sessions = [
         s
-        for s in list_sessions(conn, config, now, include_ended=bool(args.all))
+        for s in list_sessions(conn, now, include_ended=bool(args.all))
         if s.instance_id == me or not config.hides(s.tab_name, s.workspace_name)
     ]
     if args.json:
@@ -234,7 +238,7 @@ def cmd_sessions(args: argparse.Namespace, conn: sqlite3.Connection, config: Con
 def cmd_whoami(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
     instance_id = ensure_current_instance(conn)
     now = now_ms()
-    view = next((s for s in list_sessions(conn, config, now) if s.instance_id == instance_id), None)
+    view = next((s for s in list_sessions(conn, now) if s.instance_id == instance_id), None)
     if view is None:
         raise UsageError(f"instance {instance_id} is not live in the registry")
     if args.json:
@@ -310,81 +314,27 @@ def cmd_handle(args: argparse.Namespace, conn: sqlite3.Connection, config: Confi
     return 0
 
 
-def cmd_hook_stats(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
-    rows = conn.execute(
-        "SELECT event, duration_us FROM hook_runs ORDER BY id DESC LIMIT ?", (int(args.last),)
-    ).fetchall()
-    by_event: dict[str, list[int]] = {}
-    for row in rows:
-        by_event.setdefault(str(row["event"]), []).append(int(row["duration_us"]))
-    print("wall time from hook process start (includes interpreter start-up and lock waits)")
-    for event, durations in sorted(by_event.items()):
-        print(f"{event:18} n={len(durations):5}  {format_percentiles(durations)}")
-    errors = state_dir() / "errors.log"
-    text = errors.read_text() if errors.exists() else ""
-    print(
-        f"dropped on a locked database: {text.count('database is locked')}; other hook errors: "
-        f"{text.count('Traceback') - text.count('database is locked')} (see {errors})"
-    )
-    return 0
+def cmd_issue_sync(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
+    report = run_issue_sync(conn, config, now_ms(), dry_run=bool(args.dry_run))
+    for line in map_report_to_lines(report, dry_run=bool(args.dry_run)):
+        print(line)
+    for _, recipient in report.sent:
+        if recipient.pid:
+            write_hint(recipient.pid, HINT_SENT)
+    return 1 if report.failed or report.errors else 0
 
 
 def cmd_install_hooks(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
     executable = find_hook_executable()
-    triggers = (*DEFAULT_TRIGGERS, *(g.trigger for g in config.guards))
-    events = install_hooks(Path(args.settings), executable, triggers)
-    print(f"installed {', '.join(events)} hooks → {executable} in {args.settings}")
+    waiter = install_waiter_script()
+    events = install_hooks(Path(args.settings), executable, waiter_script=waiter)
+    print(f"installed {', '.join(events)} hooks → {executable} in {args.settings}; rewake waiter {waiter}")
     return 0
 
 
 def cmd_uninstall_hooks(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
     uninstall_hooks(Path(args.settings))
     print(f"removed bridge hooks from {args.settings}")
-    return 0
-
-
-def cmd_enrich(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
-    counts = enrich_due(conn, config, now_ms(), force=bool(args.force))
-    tracker = load_tracker(config)
-    where = tracker.describe() if tracker else "tracker off"
-    print(f"refreshed {counts['prs']} PRs and {counts['issues']} issues ({where})")
-    errors = conn.execute("SELECT ref, error FROM enrichment WHERE error IS NOT NULL ORDER BY ref").fetchall()
-    for row in errors:
-        print(f"  {row['ref']}: {row['error']}")
-    return 0
-
-
-def cmd_settle_feed(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
-    at = now_ms()
-    prs = list_open_item_prs(conn, config)
-    results = fetch_prs(prs) if prs else {}
-    target = conn
-    if args.dry_run:
-        # GitHub's answers go into a copy in memory, so the run reads the database and never writes it.
-        target = sqlite3.connect(":memory:", isolation_level=None)
-        target.row_factory = sqlite3.Row
-        conn.backup(target)
-    store_results(target, results, at)
-    settled = resolve_settled_items(target, config, at)
-    for ref, result in results.items():
-        if isinstance(result, str):
-            print(f"  {ref}: {result}")
-    verb = "would resolve" if args.dry_run else "resolved"
-    print(f"{verb} {len(settled)} of the open posts ({len(prs)} PRs checked)")
-    for item in settled:
-        print(f"  #{item.item_id} {item.kind} from {item.from_handle}: {item.text} — {item.why}")
-    return 0
-
-
-def cmd_remote_sync(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
-    if not config.remotes:
-        raise UsageError("no [[remotes]] in config.toml")
-    for remote in config.remotes:
-        result = collect(remote)
-        store_remote(conn, remote, result, config, now_ms())
-        print(
-            f"{remote.name}: {len(result.sessions)} agent sessions" if result.ok else f"{remote.name}: {result.error}"
-        )
     return 0
 
 
@@ -418,33 +368,15 @@ def cmd_restart_service(args: argparse.Namespace, conn: sqlite3.Connection, conf
     return 0
 
 
-def cmd_open(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
-    url = f"http://127.0.0.1:{args.port}/"
-    if not dashboard_is_up(url):
-        log = (state_dir() / "serve.log").open("a")
-        subprocess.Popen(
-            [sys.executable, "-m", "bridge", "serve", "--port", str(args.port)],
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=log,
-            start_new_session=True,
-        )
-        deadline = time.monotonic() + 5
-        while not dashboard_is_up(url):
-            if time.monotonic() > deadline:
-                raise UsageError(f"dashboard did not start; see {state_dir() / 'serve.log'}")
-            time.sleep(0.1)
-    target = args.target or os.environ.get("AGTERM_SESSION_ID")
-    if args.browser or not target:
-        subprocess.run(["open", url], check=False)
-        print(url)
-        return 0
-    command = [config.agtermctl, "session", "overlay", "open", "--url", url, "--js", "--target", target]
-    completed = subprocess.run(command, capture_output=True, text=True, check=False)
-    if completed.returncode != 0:
-        raise UsageError(f"agterm overlay failed: {(completed.stdout + completed.stderr).strip()}")
-    print(f"dashboard {url} opened over agterm session {target}")
-    return 0
+def cmd_deploy_check(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
+    results = [
+        ("typing", check_typing(config)),
+        ("rewake", check_rewake(config)),
+        ("long message", check_long_message(config)),
+    ]
+    for name, result in results:
+        print(f"deploy check {name} {'passed' if result.ok else 'FAILED'}: {result.detail}")
+    return 0 if all(result.ok for _, result in results) else 1
 
 
 def dashboard_is_up(url: str) -> bool:
@@ -468,12 +400,36 @@ def claim_compaction(conn: sqlite3.Connection, conversation_id: str) -> bool:
     return False
 
 
+def find_instance_tab(conn: sqlite3.Connection, instance_id: str) -> tuple[str, str, bool]:
+    """(session, pane, on a host). A host worker's drive starts in serve, whose environment names no tab: its
+    registered tab is the one."""
+    row = conn.execute(
+        "SELECT s.agterm_session, s.surface, i.kind FROM instances i JOIN surfaces s ON s.surface = i.surface"
+        " WHERE i.instance_id = ?",
+        (instance_id,),
+    ).fetchone()
+    if row is not None and row["agterm_session"]:
+        host = str(row["kind"] or "").startswith(HOST_KIND_PREFIX)
+        return str(row["agterm_session"]), str(row["surface"]), host
+    return os.environ.get("AGTERM_SESSION_ID", ""), os.environ.get("AGTERM_PANE_ID", ""), False
+
+
+def cmd_worktree_job(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
+    run_next_worktree_job(conn, config)
+    return 0
+
+
 def cmd_compact_drive(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
     """Types /compact (or the continue prompt) into the session's agterm pane once Claude Code waits for input."""
     phase, instance_id, conversation_id = str(args.phase), str(args.instance_id), str(args.conversation_id)
-    session, pane = os.environ.get("AGTERM_SESSION_ID", ""), os.environ.get("AGTERM_PANE_ID", "")
+    session, pane, on_host = find_instance_tab(conn, instance_id)
     expected = PHASE_COMPACTING if phase == "compact" else PHASE_CONTINUE
-    command = "/compact" if phase == "compact" else CONTINUE_PROMPTS[str(args.keep)]
+    if phase == "compact":
+        command = f"/compact {GENERIC_KEEP}" if args.generic_keep else "/compact"
+    else:
+        command = CONTINUE_PROMPTS[str(args.keep)] + (UNREAD_NOTE if args.reopened else "")
+        if on_host:
+            command = convert_bridge_commands_to_gbridge(command)
     if args.claim and not claim_compaction(conn, conversation_id):
         return 0
 
@@ -492,7 +448,7 @@ def cmd_compact_drive(args: argparse.Namespace, conn: sqlite3.Connection, config
 
     result = type_when_idle(config, session, pane, command, still_wanted, may_probe_box=may_probe_box)
     for _ in range(COMPACT_UNPROVEN_WAITS):
-        # Most likely Claude Code's grey suggestion in a selected tab: wait for them to leave it, telling nobody.
+        # Most likely Claude Code's grey suggestion in a selected tab: wait for the owner to leave it, telling nobody.
         if result != "unproven" or not still_wanted():
             break
         result = type_when_idle(config, session, pane, command, still_wanted, may_probe_box=may_probe_box)
@@ -560,22 +516,32 @@ def _deliver_as_only_typer(args: argparse.Namespace, conn: sqlite3.Connection, c
     result = deliver_typed(conn, config, message_id, conversation_id)
     if result in (None, "typed", "unwanted"):
         return 0
-    log_error("deliver", f"message #{message_id} to {conversation_id} not typed: {result}")
 
-    def record() -> tuple[int, Recipient] | None:
+    def record() -> tuple[bool, tuple[int, Recipient] | None]:
         with transaction(conn):
-            record_failed_delivery(conn, message_id, conversation_id, now_ms(), unproven=result == "unproven")
+            record_failed_delivery(
+                conn, message_id, conversation_id, now_ms(), unproven=result == "unproven", stuck=result == "stuck"
+            )
             if result == "stuck":
                 record_stuck_delivery(conn, message_id, conversation_id, now_ms())
+            # A busy tab, the owner at it, or their draft in the box holds the message by design, and its retry follows.
+            first = result in ("failed", "stuck") and claim_failure_log(conn, message_id, conversation_id, now_ms())
             if result == "draft":
-                return tell_assistant_of_draft(conn, config, message_id, conversation_id, now_ms())
-        return None
+                return first, tell_assistant_of_draft(conn, config, message_id, conversation_id, now_ms())
+        return first, None
 
     what = f"#{message_id} to {conversation_id}: record {result}"
-    told = retry_when_locked(what, record, LOCKED_PATIENT_DELAYS_S)
+    first, told = retry_when_locked(what, record, LOCKED_PATIENT_DELAYS_S)
+    if first:
+        log_error("deliver", f"message #{message_id} to {conversation_id} not typed: {result}")
     if told is not None:
         spawn_typed_delivery(told[0], [told[1]])
     return 0
+
+
+def cmd_host_tab(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
+    conn.close()
+    return run_tab_loop(str(args.worker), WORKER_API_PORT, config.agtermctl)
 
 
 def cmd_pin_restore(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
@@ -640,13 +606,6 @@ def map_sessions_to_lines(sessions: list[SessionView], me: str | None, now: int)
         if s.refs:
             lines.append(f"  {'':20} {'':7} {'':5}  refs: {' '.join(s.refs[:8])}")
     return lines
-
-
-def format_percentiles(durations_us: list[int]) -> str:
-    ordered = sorted(durations_us)
-    p50 = statistics.median(ordered) / 1000
-    p95 = ordered[min(len(ordered) - 1, int(len(ordered) * 0.95))] / 1000
-    return f"p50={p50:6.1f}ms  p95={p95:6.1f}ms  max={ordered[-1] / 1000:6.1f}ms"
 
 
 def _current_instance_id() -> str | None:

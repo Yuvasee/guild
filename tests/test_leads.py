@@ -85,8 +85,8 @@ def test_enroll_names_and_tints_the_tab_and_moves_it_to_the_team_workspace(
 ) -> None:
     team = Team(bridge_env, spawn_process)
 
-    done = team.enroll("Alex", "old-a", "--alias", "Arlow", "--ref", "P-PROJ-41", "--tint", "blue")
-    mentioned = bridge_env.cli("send", "arlow", "hello", pid=team.b)
+    done = team.enroll("Alex", "old-a", "--alias", "Άρλο", "--ref", "P-PROJ-41", "--tint", "blue")
+    mentioned = bridge_env.cli("send", "άρλο", "hello", pid=team.b)
     old_name = bridge_env.cli("send", "old-a", "still reachable", pid=team.b)
     listed = json.loads(team.guild("leads", "--json").stdout)
 
@@ -181,11 +181,11 @@ def test_retired_name_is_never_reused_and_the_tab_goes_back(bridge_env: BridgeEn
 
 def test_lead_names_and_aliases_cannot_be_taken(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:
     team = Team(bridge_env, spawn_process)
-    team.enroll("Alex", "old-a", "--alias", "Arlow")
+    team.enroll("Alex", "old-a", "--alias", "Άρλο")
     team.write_tree(tab_a="Alex")
 
     latin = bridge_env.cli("handle", "alex", pid=team.b)
-    alias = bridge_env.cli("handle", "arlow", pid=team.b)
+    non_latin = bridge_env.cli("handle", "άρλο", pid=team.b)
     own = bridge_env.cli("handle", "someone", pid=team.a)
     team.write_tree(tab_a="Alex")
     team.env.stub_tree.write_text(team.env.stub_tree.read_text().replace("Old B", "Alex"))
@@ -193,7 +193,7 @@ def test_lead_names_and_aliases_cannot_be_taken(bridge_env: BridgeEnv, spawn_pro
     listed = {s["pid"]: s["handle"] for s in json.loads(bridge_env.cli("sessions", "--json").stdout)}
 
     assert latin.returncode != 0
-    assert alias.returncode != 0
+    assert non_latin.returncode != 0
     assert own.returncode != 0
     assert listed[team.a] == "alex"
     assert listed[team.b] == "alex-2"
@@ -268,7 +268,7 @@ def test_role_comes_with_every_start_and_once_per_conversation(
     other_tab = team.prompt(team.b, "conv-b", "not a lead")
 
     assert "You are Alex, a team lead" in running
-    assert "Data readiness (tracker: P-PROJ-41)" in running
+    assert "Data readiness (Linear: P-PROJ-41)" in running
     assert "[guild]" not in quiet
     for start in (running, compacted, resumed, cleared):
         assert "You are Alex, a team lead" in start
@@ -285,17 +285,17 @@ def test_notes_outlive_the_conversation_and_are_cut_to_budget(
     team.enroll()
 
     empty = team.start(team.a, "conv-a")
-    saved = team.guild("notes", "--write", pid=team.a, stdin="Owns PROJ-33; ✓ ünïcödé.\n")
+    saved = team.guild("notes", "--write", pid=team.a, stdin="Owns PROJ-33; περιμένει έλεγχο.\n")
     with_notes = team.start(team.a, "conv-a2", "clear")
     outsider = team.guild("notes", "--write", pid=team.b, stdin="x")
-    too_long = team.guild("notes", "--write", pid=team.a, stdin="é" * 5000)
+    too_long = team.guild("notes", "--write", pid=team.a, stdin="ω" * 5000)
     long_start = team.start(team.a, "conv-a2", "resume")
     # The constitution and the role come first; notes this long wait for the next event.
     long_notes = long_start + team.prompt(team.a, "conv-a2", "next")
 
     assert "start here: make an honest pass" in empty
     assert saved.returncode == 0, saved.stderr
-    assert "Owns PROJ-33; ✓ ünïcödé." in with_notes
+    assert "Owns PROJ-33; περιμένει έλεγχο." in with_notes
     assert "start here" not in with_notes
     assert outsider.returncode == 2
     assert "over the 4,000 that reach you" in too_long.stdout
@@ -327,10 +327,10 @@ def test_the_worst_case_stays_under_claude_codes_limit_and_nothing_waits_unsaid(
     bridge_env: BridgeEnv, spawn_process: SpawnProcess
 ) -> None:
     team = Team(bridge_env, spawn_process)
-    scope = ("Search quality: indexing, ranking, PROJ-33, PROJ-53; " * 10)[:500]
+    scope = ("Faster search: index, cache, PROJ-33, PROJ-53; " * 10)[:500]
     refs = [arg for i in range(10) for arg in ("--ref", f"P-PROJ-{40 + i}")]
     assert team.enroll("Alex", "old-a", "--scope", scope, *refs).returncode == 0
-    notes = "".join(f"- Rule ({i:03}, Theo via Xavi): no merge while a thread is open ✓ 🤖.\n" for i in range(240))
+    notes = "".join(f"- Rule ({i:03}, Theo via Xavi): ποτέ συγχώνευση με ανοιχτό νήμα 🤖.\n" for i in range(240))
     assert len(notes.encode()) > 16_000
     team.guild("notes", "--write", pid=team.a, stdin=notes)
     # Mid-turn, so the mail cannot be typed: an idle stub tab lets the typer win the race against the hooks.
@@ -339,7 +339,7 @@ def test_the_worst_case_stays_under_claude_codes_limit_and_nothing_waits_unsaid(
     Path(bridge_env.env["STUB_DRAFT"]).write_text(busy)
     bridge_env.cli("send", "alex", "PROJ-34 is yours now: " + "x" * 900, pid=team.b)
     assert wait_for(lambda: _typing_wanted(bridge_env)), "bridge tries to type mail to a lead"
-    keep = ("🤖 PROJ-34 mine, PR acme/web#7 waits ✓\n" * 400)[: KEEP_MAX_CHARS // 2]
+    keep = ("🤖 PROJ-34 δικό μου, PR acme/web#7 περιμένει έλεγχο\n" * 400)[: KEEP_MAX_CHARS // 2]
     while measure_chars(keep) < KEEP_MAX_CHARS:
         keep += "k"
     over = bridge_env.cli("keep", keep + "k", pid=team.a)
@@ -412,23 +412,23 @@ def test_label_names_the_tab_and_can_change(bridge_env: BridgeEnv, spawn_process
     bridge_env.stub_log.write_text("")
 
     changed = team.guild("lead", "label", "alex", "Scale & Load")
-    non_english = team.guild("lead", "label", "alex", "Données")
+    greek = team.guild("lead", "label", "alex", "Δεδομένα")
 
     assert changed.returncode == 0, changed.stderr
     assert "session rename Alex · Scale & Load --target TAB-A" in team.log()
     assert "workspace rename" not in team.log()
-    assert non_english.returncode == 2
+    assert greek.returncode == 2
     assert json.loads(team.guild("leads", "--json").stdout)[0]["label"] == "Scale & Load"
 
 
-def test_non_english_session_title_is_not_set_and_the_session_is_asked(
+def test_a_non_english_session_title_is_not_set_and_the_session_is_asked(
     bridge_env: BridgeEnv, spawn_process: SpawnProcess
 ) -> None:
     team = Team(bridge_env, spawn_process)
     projects = Path(bridge_env.env["BRIDGE_CLAUDE_PROJECTS_DIR"]) / "p"
     projects.mkdir(parents=True)
     (projects / "conv-a3.jsonl").write_text(
-        json.dumps({"type": "custom-title", "customTitle": "Fonctionnalités"}) + "\n"
+        json.dumps({"type": "custom-title", "customTitle": "Χάρτης λειτουργιών"}) + "\n"
     )
     bridge_env.write_session_file(team.a, "conv-a3")
     team.start(team.a, "conv-a3", "clear")
@@ -464,7 +464,7 @@ def test_assistant_role_comes_with_every_start_and_keeps_its_notes(
     assert "You are Aide (`aide`), the owner's Right Hand" in running
     assert "team leads (Alex)" in running
     assert "You route and manage, and effectiveness comes first." in running
-    assert "Delegate by default to save your context" in running and "nothing bans depth" in running
+    assert "Delegate by default: code reading" in running and "nothing bans depth" in running
     assert "self-contained HTML page that you publish" in running and "Spot-check a lead's claim" in running
     assert "offer the owner to talk to the lead in its tab, and tell the lead that the owner decides there" in running
     assert "nobody else" not in running
@@ -482,14 +482,16 @@ def test_assistant_role_comes_with_every_start_and_keeps_its_notes(
 
 def test_assistant_role_names_the_owner_and_the_words_from_config() -> None:
     default = convert_config_to_assistant_role(map_toml_to_config({}), [])
-    config = map_toml_to_config({"owner_name": "Sam", "night_words": ["Good night", "Nite"]})
+    config = map_toml_to_config(
+        {"owner_name": "Sam", "night_words": ["Good night", "Nite"], "morning_words": ["Good morning", "Up"]}
+    )
     named = convert_config_to_assistant_role(config, [])
 
     assert "the owner's Right Hand; the owner leads" in default
-    assert "'Good night' starts the night: run `guild dream --wait-all` (Bash" in default
-    assert "the owner its total time in one line." in default
+    assert "'Good night': run `guild dream --wait-all` (Bash" in default
+    assert "the owner its total time. 'Good morning' in the morning runs `guild day`." in default
     assert "Sam's Right Hand; Sam leads" in named and "the owner" not in named
-    assert "'Good night' or 'Nite' starts the night: run" in named and "tell Sam its total time" in named
+    assert "'Good night' or 'Nite': run `guild dream" in named and "tell Sam its total time" in named
     assert len(named) <= ASSISTANT_ROLE_MAX_CHARS
 
 
@@ -510,25 +512,25 @@ def test_assistant_stays_out_of_lead_paths(bridge_env: BridgeEnv, spawn_process:
     assert "Right Hand" not in other
 
 
-def test_former_assistant_handles_route_to_the_assistant_and_only_it_relays(
+def test_old_assistant_handles_route_to_the_assistant_and_only_it_relays(
     bridge_env: BridgeEnv, spawn_process: SpawnProcess
 ) -> None:
     team = Team(bridge_env, spawn_process)
-    for handle in ("ward", "helm", "aide"):
+    for handle in ("hq", "zed", "aide"):
         assert bridge_env.cli("handle", handle, pid=team.b).returncode == 0
     bridge_env.cli("post", "decision", "Ship?", pid=team.a)
 
-    by_helm = bridge_env.cli("send", "helm", "former name", pid=team.a)
-    by_ward = bridge_env.cli("send", "ward", "first name", pid=team.a)
+    by_zed = bridge_env.cli("send", "zed", "old name", pid=team.a)
+    by_hq = bridge_env.cli("send", "hq", "older name", pid=team.a)
     answer_refused = team.guild("answer", "1", "yes", pid=team.a)
     priority_refused = team.guild("priority", "set", "export=PROJ-27", pid=team.a)
     answered = team.guild("answer", "1", "yes", pid=team.b)
     prioritised = team.guild("priority", "set", "export=PROJ-27", pid=team.b)
 
-    assert by_helm.returncode == 0, by_helm.stderr
-    assert "→ aide" in by_helm.stdout
-    assert by_ward.returncode == 0, by_ward.stderr
-    assert "→ aide" in by_ward.stdout
+    assert by_zed.returncode == 0, by_zed.stderr
+    assert "→ aide" in by_zed.stdout
+    assert by_hq.returncode == 0, by_hq.stderr
+    assert "→ aide" in by_hq.stdout
     assert answer_refused.returncode == 2
     assert "only aide" in answer_refused.stderr
     assert priority_refused.returncode == 2

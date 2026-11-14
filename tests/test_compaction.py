@@ -23,6 +23,12 @@ def _assistant(tokens: int, sidechain: bool = False, at: str = "") -> str:
     return json.dumps(entry) + "\n"
 
 
+def _synthetic() -> str:
+    usage = {"input_tokens": 0, "output_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}
+    message = {"role": "assistant", "model": "<synthetic>", "usage": usage}
+    return json.dumps({"type": "assistant", "message": message, "timestamp": "2026-11-10T08:14:39.000Z"}) + "\n"
+
+
 def _context(result_stdout: str) -> str:
     if not result_stdout.strip():
         return ""
@@ -36,6 +42,13 @@ def test_context_size_comes_from_the_newest_main_thread_usage(tmp_path: Path) ->
     transcript.write_text(_assistant(1_000) + filler + _assistant(5_000, at=at) + _assistant(9_000, sidechain=True))
     assert read_context_tokens(transcript) == ContextReading(5_000, 1793628970000)
     assert read_context_tokens(tmp_path / "missing.jsonl") is None
+
+
+def test_a_failed_requests_stand_in_message_does_not_reset_the_context_size(tmp_path: Path) -> None:
+    transcript = tmp_path / "t.jsonl"
+    at = "2026-11-02T14:16:10.000Z"
+    transcript.write_text(_assistant(900_000, at=at) + _synthetic() + _synthetic())
+    assert read_context_tokens(transcript) == ContextReading(900_000, 1793628970000)
 
 
 def test_warning_then_notes_come_back_after_compaction(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:
@@ -168,6 +181,27 @@ def test_an_image_counts_as_an_image_not_as_its_base64(bridge_env: BridgeEnv, sp
 IDLE = "──────\n\u276f\u00a0\n──────\n  Opus | 61% ctx\n  -- INSERT -- ⏵⏵ auto mode on\n"
 
 
+TORN = (
+    "✻ Cooked for 7s · done 11:50\n"
+    "                                   ✔ Update installed · /restart to apply\n"
+    "──────────────────────────────\n"
+    "\u276f\u00a0\n"
+    "  Opus 5.5 | 65% ctx | ~/acme-co\n"
+    "  -- INSERT --8⏵⏵ bypass permissi/monorepoabshell\n"
+    "                                        (shift+tab to cycle)\n"
+)
+
+
+def test_a_box_whose_redraw_lost_its_closing_rule_ends_at_the_footer() -> None:
+    assert map_screen_to_idle(TORN)
+    assert map_screen_to_draft(TORN) == ""
+    typed = TORN.replace("\u276f\u00a0", "\u276f [bridge] Peer message #51 from xavi, not\n  from the user")
+    assert not map_screen_to_idle(typed)
+    assert map_screen_to_draft(typed) == "[bridge] Peer message #51 from xavi, not from the user"
+    footer_first = TORN.replace("  Opus 5.5 | 65% ctx | ~/acme-co\n", "").replace("\u276f\u00a0", "\u276f half")
+    assert map_screen_to_draft(footer_first) == "half", "the mode line ends it too"
+
+
 def test_screen_is_idle_only_with_an_empty_prompt_and_nothing_in_the_way() -> None:
     assert map_screen_to_idle(IDLE)
     assert not map_screen_to_idle(IDLE.replace("\u276f\u00a0", "\u276f half-typed message"))
@@ -241,6 +275,16 @@ def test_draft_is_the_text_inside_the_input_box() -> None:
     assert map_screen_to_draft("\u276f a shell prompt") is None
 
 
+def test_a_clear_hint_left_on_the_box_line_is_no_draft() -> None:
+    rule = "\u2500" * 60
+    hint = " " * 99 + "new task? /clear to save 108.7k tokens"
+    above = " " * 78 + "new task? /clear to save 108.7k tokens \u00b7 Checking for updates"
+    screen = f"{above}\n{rule}\n\u276f\u00a0{hint}\n{rule}"
+    assert map_screen_to_draft(f"{screen}\n  Opus 5.5 | 10% ctx | ~/repo\n  -- INSERT --") == ""
+    typed = screen.replace("\u00a0 ", "\u00a0[bridge] Peer message #89", 1)
+    assert map_screen_to_draft(typed) == "[bridge] Peer message #89"
+
+
 def _wait_for_log(bridge_env: BridgeEnv, needle: str) -> None:
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
@@ -286,3 +330,21 @@ def test_a_driven_compaction_whose_start_cannot_write_is_still_continued(
     with bridge_env.connect() as conn:
         warned_at, compacted_at = conn.execute("SELECT compact_warned_at, compacted_at FROM conversations").fetchone()
     assert (warned_at, compacted_at is not None) == (None, True), "the next cycle can warn again"
+
+
+def test_the_slash_command_list_under_the_box_is_not_the_box() -> None:
+    """A host worker's Claude Code marks the chosen command with the prompt glyph; /compact was typed, never sent."""
+    screen = "\n".join(
+        [
+            "\u273b Churned for 5m 50s \u00b7 done 13:00",
+            "\u2500" * 60,
+            "\u276f /compact",
+            "\u2500" * 60,
+            "  \u276f /compact                           Free up context by summarizing the conversation so far",
+            "    /companion                         Start and supervise a runner while the parent does scoped work",
+            "                                       and keeps an HTML explanation in the session.",
+            "    /autocompact                       Set how full the context gets before auto-summarizing",
+        ]
+    )
+    assert map_screen_to_draft(screen) == "/compact"
+    assert not map_screen_to_idle(screen)

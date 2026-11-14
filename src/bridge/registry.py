@@ -19,6 +19,10 @@ PROC_START_TOLERANCE_MS = 2_000
 SESSION_FILE_START_TOLERANCE_MS = 60_000
 RECENT_REF_TURNS = 5
 NEVER_RECENT_TURN = -1_000_000_000
+STALE_AFTER_S = 900
+FOCUS_STALE_AFTER_S = 7200
+FOCUS_NUDGE_EVERY_S = 1800
+FOCUS_NUDGE_MIN_TURNS = 2
 """last_turn of a PR link that was never mentioned in a turn: no session is young enough to count it as recent."""
 
 
@@ -328,21 +332,21 @@ def set_focus(conn: sqlite3.Connection, conversation_id: str, focus: str | None,
     )
 
 
-def take_focus_nudge(conn: sqlite3.Connection, conversation_id: str, config: Config, at_ms: int) -> str | None:
+def take_focus_nudge(conn: sqlite3.Connection, conversation_id: str, at_ms: int) -> str | None:
     """Returns a reminder to refresh focus when it is missing or old, at most once per nudge interval."""
     row = conn.execute(
         "SELECT focus, focus_at, focus_nudged_at, turns FROM conversations WHERE conversation_id = ?",
         (conversation_id,),
     ).fetchone()
-    if row is None or int(row["turns"]) < config.focus_nudge_min_turns:
+    if row is None or int(row["turns"]) < FOCUS_NUDGE_MIN_TURNS:
         return None
     nudged_at = row["focus_nudged_at"]
-    if nudged_at is not None and at_ms - int(nudged_at) < config.focus_nudge_every_s * 1000:
+    if nudged_at is not None and at_ms - int(nudged_at) < FOCUS_NUDGE_EVERY_S * 1000:
         return None
     focus = row["focus"]
     if focus is None:
         state = "is not set"
-    elif at_ms - int(row["focus_at"]) > config.focus_stale_after_s * 1000:
+    elif at_ms - int(row["focus_at"]) > FOCUS_STALE_AFTER_S * 1000:
         hours = (at_ms - int(row["focus_at"])) / 3_600_000
         state = f'is {hours:.1f}h old: "{focus}"'
     else:
@@ -530,6 +534,11 @@ def _sync_tab_parents(conn: sqlite3.Connection, tabs: dict[str, AgtermTab]) -> N
     for tab in tabs.values():
         if tab.parent and tab.session_id:
             record_tab_parent(conn, tab.session_id, tab.parent)
+    # A closed worker resumed by hand has no agterm parent; its lead stays known until it is reopened properly.
+    orphans = {tab.session_id for tab in tabs.values() if tab.session_id and not tab.parent}
+    for row in conn.execute("SELECT agterm_session, parent_session FROM stray_workers").fetchall():
+        if row["agterm_session"] in orphans:
+            record_tab_parent(conn, str(row["agterm_session"]), str(row["parent_session"]))
 
 
 def read_agterm_tabs(agtermctl: str) -> dict[str, AgtermTab]:
@@ -749,9 +758,7 @@ def set_handle(conn: sqlite3.Connection, surface: str, handle: str, at_ms: int) 
     sync_claim_handles(conn)
 
 
-def list_sessions(
-    conn: sqlite3.Connection, config: Config, now_ms: int, include_ended: bool = False
-) -> list[SessionView]:
+def list_sessions(conn: sqlite3.Connection, now_ms: int, include_ended: bool = False) -> list[SessionView]:
     rows = conn.execute(
         f"""
         SELECT i.*, s.handle, s.tab_name, s.workspace_name, s.agterm_session,
@@ -764,12 +771,12 @@ def list_sessions(
         ORDER BY s.workspace_name, s.tab_name, i.pid
         """
     ).fetchall()
-    return [map_row_to_session_view(conn, row, config, now_ms) for row in rows]
+    return [map_row_to_session_view(conn, row, now_ms) for row in rows]
 
 
-def map_row_to_session_view(conn: sqlite3.Connection, row: sqlite3.Row, config: Config, now_ms: int) -> SessionView:
+def map_row_to_session_view(conn: sqlite3.Connection, row: sqlite3.Row, now_ms: int) -> SessionView:
     status = str(row["status"])
-    if status != "ended" and now_ms - int(row["last_observed_at"]) > config.stale_after_s * 1000:
+    if status != "ended" and now_ms - int(row["last_observed_at"]) > STALE_AFTER_S * 1000:
         status = "stale"
     refs: list[str] = []
     if row["conversation_id"]:

@@ -7,20 +7,19 @@ import sqlite3
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.request
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Any, cast
 from zoneinfo import ZoneInfo
 
+from bridge.agent_prefix import CLAUDE_PREFIX
+from bridge.backport import is_backport_base
 from bridge.board import BODY_MAX_CHARS, Recipient
-from bridge.config import Config, state_dir
+from bridge.config import Config, read_overlay, state_dir
 from bridge.db import now_ms, transaction
-from bridge.leads import CLAUDE_PREFIX, REVIEW_DOC_SPEC, find_internal_names, list_internal_names
-from bridge.review_worktree import DOC_SHA_CHARS, is_worth_preparing, map_row_to_doc_heads
+from bridge.leads import REVIEW_DOC_SPEC, find_internal_names, list_internal_names
+from bridge.review_worktree import DOC_MIN_TERMS, DOC_SHA_CHARS, is_worth_preparing, map_row_to_doc_heads
 from bridge.reviews import (
     COMMENT_MAX_CHARS,
     Owner,
@@ -32,12 +31,13 @@ from bridge.reviews import (
 )
 
 SEND_TOOL = "mcp__claude_ai_Slack__slack_send_message"
+REVIEW_POST_MODEL = "haiku"
 SEND_TIMEOUT_S = 180
 SEND_ATTEMPTS = 2
 CONNECTOR_RETRY_S = 20
 SENDING_STALE_MS = 600_000
-WEBHOOK_TIMEOUT_S = 30
 SENTENCE_MAX_CHARS = 300
+HOLD_WHY_MAX_CHARS = 300
 DESCRIPTION_MAX_WORDS = 7
 NEVER_CALLED = "the send tool was never called"
 
@@ -68,21 +68,18 @@ class SendOutcome:
     detail: str | None
 
 
-def map_pr_to_slack_text(
-    url: str, description: str, direct: bool, mention_ids: list[str], comment: str = "", slack: bool = True
-) -> str:
-    """'<link> - <description> - direct', then the people they picked and their comment to them. No agent prefix: in
-    the review channel the post is theirs. Outside Slack a mention is a plain @handle."""
+def map_pr_to_slack_text(url: str, description: str, direct: bool, mention_ids: list[str], comment: str = "") -> str:
+    """'<link> - <description> - direct', then the people the owner picked and their comment to them. No agent prefix:
+    in the review channel the post is the owner's."""
     text = f"{url} - {' '.join(description.split())}" + (" - direct" if direct else "")
     if not mention_ids:
         return text
-    mentions = "".join(f" <@{who}>" if slack else f" @{who}" for who in mention_ids)
-    return text + mentions + (f" {comment}" if comment else "")
+    return text + "".join(f" <@{slack_id}>" for slack_id in mention_ids) + (f" {comment}" if comment else "")
 
 
-def map_typed_comment_to_slack(text: str, people: dict[str, str], slack: bool = True) -> str:
-    """Unescaped on purpose: they are its only author, so links and <@U…> they type render as Slack renders them. A
-    typed @name of someone in the picker becomes a real mention; any other @word stays as typed."""
+def map_typed_comment_to_slack(text: str, people: dict[str, str]) -> str:
+    """Unescaped on purpose: the owner is its only author, so links and <@U…> they type render as Slack renders them.
+    A typed @name of someone in the picker becomes a real mention; any other @word stays as typed."""
     comment = text.replace("\r\n", "\n").strip()
     if len(comment) > COMMENT_MAX_CHARS:
         raise ReviewError(f"the comment is {len(comment)} characters; at most {COMMENT_MAX_CHARS}")
@@ -93,9 +90,7 @@ def map_typed_comment_to_slack(text: str, people: dict[str, str], slack: bool = 
 
     def map_match_to_mention(match: re.Match[str]) -> str:
         slack_id = ids.get(match.group(1).casefold())
-        if slack_id is None:
-            return match.group(0)
-        return f"<@{slack_id}>" if slack else f"@{slack_id}"
+        return f"<@{slack_id}>" if slack_id else match.group(0)
 
     # Only a standalone @name: inside a link, an address or <@U…> it is part of something else.
     return re.sub(rf"(?<![^\s(\[\"'])@({names})(?!\w)", map_match_to_mention, comment, flags=re.IGNORECASE)
@@ -106,8 +101,14 @@ def is_short_description(text: str) -> bool:
 
 
 def is_published_elsewhere(row: sqlite3.Row) -> bool:
-    """Only a known post. Reviewers on a PR do not count: whether it goes to Slack is their call."""
+    """Only a known post. Reviewers on a PR do not count: whether it goes to Slack is the owner's call."""
     return row["post_state"] == EXTERNAL
+
+
+def refuse_backport_post(conn: sqlite3.Connection, config: Config, ref: str) -> None:
+    row = conn.execute("SELECT base FROM review_prs WHERE ref = ?", (ref,)).fetchone()
+    if row is not None and is_backport_base(config.backport_bases, str(row["base"])):
+        raise ReviewError("a backport gets no Slack post: its lead merges it")
 
 
 def record_publish(
@@ -119,7 +120,7 @@ def record_publish(
     mention_ids: tuple[str, ...] = (),
     comment: str = "",
 ) -> None:
-    """Their "done reviewing": it stands whatever happens to the post after it. On a draft it also marks it ready;
+    """The owner's "done reviewing": it stands whatever happens to the post after it. On a draft it also marks it ready;
     bridge leaves the PR on GitHub to its owner, who is told once the post is out. What they picked in the form shapes
     the post until it is sent."""
     row = conn.execute("SELECT * FROM review_prs WHERE ref = ? AND closed_at IS NULL", (ref,)).fetchone()
@@ -166,11 +167,11 @@ def record_sentence(conn: sqlite3.Connection, config: Config, ref: str, sentence
         raise ReviewError(f"no '{CLAUDE_PREFIX}' on Slack: the post is {config.owner_name}'s")
     if not is_short_description(text) or len(text) > SENTENCE_MAX_CHARS:
         raise ReviewError(
-            f"at most {DESCRIPTION_MAX_WORDS} words, as the review channel shows '<link> - <description>'; this has "
-            f"{len(text.split())}"
+            f"at most {DESCRIPTION_MAX_WORDS} words, as {config.review_channel_name} shows '<link> - <description>'; "
+            f"this has {len(text.split())}"
         )
     if text.casefold().rstrip(".") == " ".join(str(row["title"]).split()).casefold():
-        raise ReviewError("the post already shows the title; say in a few words what the PR does")
+        raise ReviewError("the post already shows the title; say what bigger project this PR serves")
     names = list_internal_names(conn, config)
     if found := find_internal_names(text, names):
         raise ReviewError(
@@ -189,6 +190,42 @@ def record_published_elsewhere(conn: sqlite3.Connection, ref: str, link: str, no
     )
     if cursor.rowcount == 0:
         raise ReviewError(f"{ref} is not in the queue")
+    store_merge_blocks(conn)
+
+
+def record_hold(conn: sqlite3.Connection, config: Config, ref: str, why: str, by: str, now: int) -> None:
+    """Its lead keeps it for the owner's own review: it waits in Open and bridge refuses its merge until the owner
+    reviews it, it is published, or the hold is lifted. Holding it again only changes why."""
+    text = " ".join(why.split())
+    if not text:
+        raise ReviewError(f"say why {config.owner_name} reviews it")
+    if len(text) > HOLD_WHY_MAX_CHARS:
+        raise ReviewError(f"at most {HOLD_WHY_MAX_CHARS} characters; this has {len(text)}")
+    row = conn.execute("SELECT * FROM review_prs WHERE ref = ? AND closed_at IS NULL", (ref,)).fetchone()
+    if row is None:
+        raise ReviewError(f"{ref} is not an open PR in the queue")
+    if row["reviewed_at"] is not None or is_published_elsewhere(row):
+        raise ReviewError(f"already published, so {config.owner_name}'s review is done")
+    if row["draft"]:
+        raise ReviewError(f"a draft waits for {config.owner_name} only once ready: gh pr ready first, then hold it")
+    # Told again once the hold ends, so its lead learns it may merge.
+    conn.execute(
+        """
+        UPDATE review_prs SET held_at = coalesce(held_at, ?), held_by = ?, held_why = ?, merge_told_at = NULL
+        WHERE ref = ?
+        """,
+        (now, by, text, ref),
+    )
+    store_merge_blocks(conn)
+
+
+def record_unhold(conn: sqlite3.Connection, ref: str) -> None:
+    cursor = conn.execute(
+        "UPDATE review_prs SET held_at = NULL, held_by = NULL, held_why = NULL WHERE ref = ? AND held_at IS NOT NULL",
+        (ref,),
+    )
+    if cursor.rowcount == 0:
+        raise ReviewError(f"{ref} is not held")
     store_merge_blocks(conn)
 
 
@@ -222,6 +259,9 @@ def advance_posts(conn: sqlite3.Connection, config: Config, now: int) -> tuple[l
         """
     ).fetchall():
         ref, state = str(row["ref"]), row["post_state"]
+        # Published before it was known as a backport: the post stays where it stopped.
+        if is_backport_base(config.backport_bases, str(row["base"])):
+            continue
         if state == SENDING and now - int(row["post_started_at"] or 0) > SENDING_STALE_MS:
             _set_post(conn, ref, INTERRUPTED, "the sender stopped; look in the channel before posting again")
         elif state in _WAITING:
@@ -248,7 +288,7 @@ def advance_posts(conn: sqlite3.Connection, config: Config, now: int) -> tuple[l
 
 
 def needs_reviewers(row: sqlite3.Row) -> bool:
-    """A person who reviewed may have asked to hold, and GitHub no longer lists them as requested. A post they sent
+    """A person who reviewed may have asked to hold, and GitHub no longer lists them as requested. A post the owner sent
     direct goes to nobody in particular, so it needs none."""
     return not row["post_direct"] and not row["requested"] and not row["others_reviewed"]
 
@@ -277,8 +317,9 @@ def _ask_for_sentence(
         return []
     conn.execute("UPDATE review_prs SET sentence_asked_at = ? WHERE ref = ?", (now, row["ref"]))
     text = (
-        f"{config.owner_name_at_start} is done reviewing {row['url']} ({row['title']}); its review-channel post waits "
-        f"for you. Give its description, at most {DESCRIPTION_MAX_WORDS} words, what it does, not its title and "
+        f"{config.owner_name_at_start} is done reviewing {row['url']} ({row['title']}); its "
+        f"{config.review_channel_name} post waits for you. Give its description, at most {DESCRIPTION_MAX_WORDS} "
+        "words, what it does, not its title and "
         f'with no agent prefix: guild review sentence {row["repo"]}#{row["number"]} "…"'
     )
     return [tell_owner(conn, owner, text, now)]
@@ -310,13 +351,13 @@ def map_row_to_published_text(row: sqlite3.Row, owner_at_start: str) -> str:
     if not row["reviewed_at"]:
         return f"{url} is published ({where}). Now {steps}, right away, because the post already links there."
     if row["post_state"] == DRY_RUN:
-        head = f"{owner_at_start} pressed Publish on {url}. Nothing was posted (a dry run, or no chat set up)."
+        head = f"{owner_at_start} pressed Publish on {url}. This was a dry run: nothing went to Slack."
         return (
             head
             + (f" {owner_at_start}'s click is the permission to {steps}, so do not stop to ask again." if steps else "")
             + direct
         )
-    head = f"{owner_at_start} pressed Publish on {url} and the review post is out ({where})."
+    head = f"{owner_at_start} pressed Publish on {url} and the Slack post is out ({where})."
     if not steps:
         return head + direct
     return (
@@ -341,9 +382,10 @@ def fit_title(text: str, title: str) -> str:
 
 
 DOC_REVIEWS_RULE = (
-    "First run a Codex and a Claude review, read-only, in parallel, and give the doc a section headed Reviews: each "
-    "review, its findings one per line, each outcome (`bridge` skill); until it names both, the PR is not ready."
+    "Give the doc a section headed Reviews: each review that ran, its findings one per line, each outcome (`bridge` "
+    "skill)."
 )
+"""The generic text of the doc-reviews overlay slot, the reviews this install wants before the owner's queue."""
 DOC_UPDATE_EVERY_MS = 15 * 60_000
 
 
@@ -351,6 +393,8 @@ def ask_for_doc_updates(conn: sqlite3.Connection, config: Config, now: int) -> l
     """One request per new head of a PR whose doc is behind it, at most one every 15 minutes, so a run of pushes
     asks once for where it ended."""
     told: list[tuple[int, Recipient]] = []
+    poll = conn.execute("SELECT ok_at FROM review_poll WHERE id = 1").fetchone()
+    read_at = poll["ok_at"] if poll else None
     for row in conn.execute(
         """
         SELECT * FROM review_prs WHERE closed_at IS NULL AND doc_file IS NOT NULL
@@ -360,6 +404,9 @@ def ask_for_doc_updates(conn: sqlite3.Connection, config: Config, now: int) -> l
     ).fetchall():
         at, current = map_row_to_doc_heads(row)
         if current or not is_worth_preparing(row, config, now):
+            continue
+        if read_at is not None and row["doc_at"] is not None and row["doc_at"] > read_at:
+            # Registered after bridge last read GitHub: it may describe a push bridge has not seen yet.
             continue
         owner = find_owner(conn, config, str(row["ref"]), str(row["repo"]), str(row["head"]))
         if owner is None:
@@ -425,9 +472,9 @@ def is_working_time(now: int, config: Config) -> bool:
 
 
 def ask_to_resolve_conflicts(conn: sqlite3.Connection, config: Config, now: int) -> list[tuple[int, Recipient]]:
-    """Every 3 hours of the working week (work_days, work_timezone), the lead owning each PR GitHub calls conflicting,
-    or behind where the base must be merged in, is asked once per head to merge it. GitHub reports BEHIND only where
-    that is required."""
+    """Every 3 hours of the working week (work_days in work_timezone), the lead owning each PR GitHub calls
+    conflicting, or behind where the base must be merged in, is asked once per head to merge it. GitHub reports BEHIND
+    only where that is required."""
     if not is_working_time(now, config):
         return []
     poll = conn.execute("SELECT conflicts_checked_at FROM review_poll WHERE id = 1").fetchone()
@@ -437,7 +484,7 @@ def ask_to_resolve_conflicts(conn: sqlite3.Connection, config: Config, now: int)
     told: list[tuple[int, Recipient]] = []
     for row in conn.execute(
         """
-        SELECT * FROM review_prs p WHERE closed_at IS NULL AND NOT draft AND merge_state IN (?, ?)
+        SELECT * FROM review_prs WHERE closed_at IS NULL AND NOT draft AND merge_state IN (?, ?)
         AND (conflict_asked_oid IS NULL OR conflict_asked_oid != head_oid)
         """,
         (CONFLICTING, BEHIND),
@@ -477,6 +524,8 @@ def ask_to_mark_drafts_ready(conn: sqlite3.Connection, config: Config, now: int)
     for row in conn.execute(
         "SELECT * FROM review_prs WHERE closed_at IS NULL AND draft AND reviewed_at IS NULL AND draft_asked_at IS NULL"
     ).fetchall():
+        if is_backport_base(config.backport_bases, str(row["base"])):
+            continue
         owner = find_owner(conn, config, str(row["ref"]), str(row["repo"]), str(row["head"]))
         if owner is None:
             continue
@@ -506,13 +555,43 @@ def ask_for_docs(conn: sqlite3.Connection, config: Config, now: int) -> list[tup
         text = (
             f"{row['url']} ({TITLE_SLOT}) is large, so {config.owner_name}'s review needs a document. Write a local "
             f"HTML file exactly as {REVIEW_DOC_SPEC} lays it out: essence visible, details folded; its h2 "
-            "sections in order, with diagrams; internal names as click terms, no glossary or legend; every Cost and "
+            "sections in order, with diagrams; it opens with the plain story of what is changed, for a reader who "
+            "never saw this code; full sentences, a concrete scenario per change; every internal name a click term "
+            f"(at least {DOC_MIN_TERMS}), no glossary or legend; every Cost and "
             "Risk clear without guessing; each reason marked observed, reproduced or from-code. It informs, it does "
             "not sell. "
-            f"{DOC_REVIEWS_RULE} "
+            f"{read_overlay(config, 'doc-reviews', DOC_REVIEWS_RULE)} "
             f"Register it: guild review doc {name} /path/file.html. {DOC_HEAD_RULE} "
-            f"Also give its review-channel description now, at most {DESCRIPTION_MAX_WORDS} words, what it does, not "
+            f"Also give its {config.review_channel_name} description now, at most {DESCRIPTION_MAX_WORDS} words, "
+            "what it does, not "
             f'its title: guild review sentence {name} "…"'
+        )
+        told.append(tell_owner(conn, owner, fit_title(text, str(row["title"])), now))
+    return told
+
+
+def ask_for_usage_sections(conn: sqlite3.Connection, config: Config, now: int) -> list[tuple[int, Recipient]]:
+    """Once per PR that says it only enables something and lacks How this will be used, of whoever owns it then; a PR
+    with no owner is asked for when one appears. No reminder follows: the page keeps showing the gap."""
+    told: list[tuple[int, Recipient]] = []
+    for row in conn.execute(
+        "SELECT * FROM review_prs WHERE closed_at IS NULL AND NOT draft AND usage_missing IS NOT NULL "
+        "AND usage_asked_at IS NULL"
+    ).fetchall():
+        if is_backport_base(config.backport_bases, str(row["base"])):
+            continue
+        owner = find_owner(conn, config, str(row["ref"]), str(row["repo"]), str(row["head"]))
+        if owner is None:
+            continue
+        conn.execute("UPDATE review_prs SET usage_asked_at = ? WHERE ref = ?", (now, row["ref"]))
+        text = (
+            f"{row['url']} ({TITLE_SLOT}) says it only enables something ('{row['usage_missing']}'), so it is not "
+            f"ready for {config.owner_name} until its description has a section headed 'How this will be used', near "
+            "the top, in plain sentences: (1) the problem in the product today; (2) where this PR sits in the plan, "
+            "numbered steps linking the sibling PRs and issues, each marked built or not built; (3) what switches it "
+            "on, where, and who decides; (4) what happens if it is never switched on; (5) the named risk of using it "
+            "wrong (`bridge` skill, review-doc.md). If it does not only enable something, add a body line 'Not an "
+            "enabling PR: <reason>' instead."
         )
         told.append(tell_owner(conn, owner, fit_title(text, str(row["title"])), now))
     return told
@@ -560,14 +639,14 @@ def read_event_blocks(stdout: str) -> Iterator[dict[str, Any]]:
                 yield cast(dict[str, Any], block)
 
 
-def build_send_command(config: Config, channel_id: str, text: str) -> list[str]:
+def build_send_command(channel_id: str, text: str) -> list[str]:
     prompt = (
         f"Call {SEND_TOOL} exactly once with exactly this JSON as its input, changing nothing, then stop:\n"
         + json.dumps({"channel_id": channel_id, "message": text}, ensure_ascii=False)
     )
     return [
         shutil.which("claude") or "claude", "-p", prompt,
-        "--model", config.review_post_model,
+        "--model", REVIEW_POST_MODEL,
         "--setting-sources", "user",
         "--settings", '{"disableAllHooks":true}',
         "--tools", "",
@@ -601,7 +680,7 @@ def send_to_slack(config: Config, text: str, still_claimed: Callable[[], bool] =
                 return outcome
         try:
             done = subprocess.run(
-                build_send_command(config, channel, text),
+                build_send_command(channel, text),
                 capture_output=True,
                 encoding="utf-8",
                 errors="replace",
@@ -620,39 +699,6 @@ def send_to_slack(config: Config, text: str, still_claimed: Callable[[], bool] =
         if outcome.state != FAILED or NEVER_CALLED not in (outcome.detail or ""):
             return outcome
     return outcome
-
-
-def send_to_chat(config: Config, text: str, still_claimed: Callable[[], bool] = lambda: True) -> SendOutcome:
-    """The chat adapter: Slack through the claude.ai connector, a JSON-lines file, or an incoming webhook."""
-    if config.chat_adapter == "slack":
-        return send_to_slack(config, text, still_claimed)
-    if config.chat_adapter == "file":
-        path = Path(config.chat_file).expanduser() if config.chat_file else state_dir() / "chat-posts.log"
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as log:
-                log.write(json.dumps({"at": now_ms(), "text": text}, ensure_ascii=False) + "\n")
-        except OSError as exc:
-            return SendOutcome(FAILED, None, f"chat file {path}: {type(exc).__name__}")
-        return SendOutcome(POSTED, None, f"written to {path}")
-    if config.chat_adapter == "webhook":
-        return send_to_webhook(config.chat_webhook_url, text)
-    return SendOutcome(FAILED, None, "no chat is set up (config chat)")
-
-
-def send_to_webhook(url: str, text: str) -> SendOutcome:
-    """Slack, Mattermost and Rocket.Chat read "text", Discord reads "content"; each ignores the other."""
-    body = json.dumps({"text": text, "content": text}).encode()
-    request = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
-    try:
-        with urllib.request.urlopen(request, timeout=WEBHOOK_TIMEOUT_S) as response:
-            status = int(response.status)
-    except urllib.error.HTTPError as exc:
-        return SendOutcome(FAILED, None, f"webhook HTTP {exc.code}")
-    except (OSError, ValueError) as exc:
-        # The URL is a secret: keep only the exception type.
-        return SendOutcome(FAILED, None, f"webhook failed: {type(exc).__name__}")
-    return SendOutcome(POSTED, None, f"webhook HTTP {status}")
 
 
 def run_review_post(conn: sqlite3.Connection, config: Config, ref: str, claim: int | None = None) -> SendOutcome | None:
@@ -678,9 +724,8 @@ def run_review_post(conn: sqlite3.Connection, config: Config, ref: str, claim: i
         bool(row["post_direct"]),
         json.loads(str(row["post_mentions"] or "[]")),
         str(row["post_comment"] or ""),
-        slack=config.chat_adapter not in ("file", "webhook"),
     )
-    if config.review_post_dry_run or config.chat_adapter == "none":
+    if config.review_post_dry_run:
         with (state_dir() / "review-posts.log").open("a") as log:
             log.write(
                 json.dumps({"at": now_ms(), "ref": ref, "channel": config.review_channel_id, "text": text}) + "\n"
@@ -696,7 +741,7 @@ def run_review_post(conn: sqlite3.Connection, config: Config, ref: str, claim: i
 
         if not still_claimed():
             return None
-        outcome = send_to_chat(config, text, still_claimed)
+        outcome = send_to_slack(config, text, still_claimed)
     with transaction(conn):
         conn.execute(
             """
@@ -726,11 +771,15 @@ def map_arg_to_ref(conn: sqlite3.Connection, text: str) -> str:
     if match is None:
         raise ReviewError(f"not a PR: {text}")
     repo, number = match.group(1), int(match.group(2))
-    rows = [
-        str(r["ref"])
-        for r in conn.execute("SELECT ref, repo FROM review_prs WHERE number = ?", (number,))
+    found = [
+        r
+        for r in conn.execute("SELECT ref, repo, closed_at FROM review_prs WHERE number = ?", (number,))
         if repo is None or str(r["repo"]) == repo or str(r["repo"]).endswith(f"/{repo}")
     ]
+    # A bare number once landed on a closed PR in another repo; an open one wins, and two open ones need the repo.
+    open_rows = [r for r in found if r["closed_at"] is None]
+    rows = open_rows or found
     if len(rows) != 1:
-        raise ReviewError(f"{text} names {len(rows)} PRs in the queue")
-    return rows[0]
+        repos = ", ".join(sorted(str(r["repo"]) for r in rows))
+        raise ReviewError(f"{text} names {len(rows)} PRs in the queue ({repos}); give it as owner/repo#{number}")
+    return str(rows[0]["ref"])

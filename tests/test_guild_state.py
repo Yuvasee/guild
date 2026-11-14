@@ -33,7 +33,6 @@ from bridge.guildview import (
 from bridge.procinfo import ProcessArgs
 from bridge.refs import map_text_to_ref
 from bridge.remote import Collected, store
-from bridge.remote_probe import list_runs  # pyright: ignore[reportUnknownVariableType]
 
 IDLE = SessionActivity("idle", (), None)
 SHELL = RunningShell("bash watch.sh", 3_600_000)
@@ -212,12 +211,12 @@ def test_work_chunks_are_declared_updated_finished_and_watched(
     outsider = team.guild("work", "set", "Mine", pid=team.b)
     by_name = team.guild("work", "set", "Seeded", "ABC-8", "--lead", "alex", pid=team.b)
     with bridge_env.connect() as conn:
-        watched = collect_watched_refs(conn, Config())
+        watched = collect_watched_refs(conn)
     listed = team.guild("work", "list", pid=team.a)
     done = team.guild("work", "done", "EXPORT WORKER", pid=team.a)
     again = team.guild("work", "done", "Export worker", pid=team.a)
     with bridge_env.connect() as conn:
-        after = collect_watched_refs(conn, Config())
+        after = collect_watched_refs(conn)
     back = team.guild("work", "set", "Export worker", pid=team.a)
 
     assert first.returncode == renamed.returncode == keep_refs.returncode == by_name.returncode == 0
@@ -248,7 +247,7 @@ def test_lead_without_work_says_so_and_a_retired_lead_takes_none(
     assert retired.returncode == 2
 
 
-def test_a_run_on_the_host_makes_its_driver_working_and_a_silent_host_unknown(
+def test_a_working_agent_on_the_host_makes_its_driver_working_and_a_silent_host_unknown(
     bridge_env: BridgeEnv, spawn_process: SpawnProcess
 ) -> None:
     team = Team(bridge_env, spawn_process)
@@ -257,7 +256,7 @@ def test_a_run_on_the_host_makes_its_driver_working_and_a_silent_host_unknown(
     tab: dict[str, object] = {"id": "TAB-A", "name": "Alex", "status": "completed"}
     tree: dict[str, object] = {"workspaces": [{"name": "Alex · Data", "sessions": [tab]}]}
     activity = {team.a: IDLE}
-    run: dict[str, object] = {"tmux": "load", "tmux_id": "$5", "pane": "0.0", "label": "k6 run"}
+    agent: dict[str, object] = {"tmux": "load", "tmux_id": "$5", "pane": "0.0", "pid": 7, "state": "working"}
 
     def lead_at(at: int) -> dict[str, Any]:
         with bridge_env.connect() as conn:
@@ -270,11 +269,11 @@ def test_a_run_on_the_host_makes_its_driver_working_and_a_silent_host_unknown(
             "VALUES ('conv-a', 'devbox', 'load', ?)",
             (now,),
         )
-        store(conn, POD, Collected(True, None, [], now, [run]), Config(), now)
+        store(conn, POD, Collected(True, None, [agent], now), Config(), now)
     working = lead_at(now)
     silent = lead_at(now + 600_000)
     with bridge_env.connect() as conn:
-        store(conn, POD, Collected(True, None, [], now, []), Config(), now + 1000)
+        store(conn, POD, Collected(True, None, [{**agent, "state": "finished"}], now), Config(), now + 1000)
     finished = lead_at(now + 2000)
 
     assert (working["state"], working["why"]) == ("working", "running on devbox/load")
@@ -282,7 +281,7 @@ def test_a_run_on_the_host_makes_its_driver_working_and_a_silent_host_unknown(
     assert finished["state"] == "rest"
 
 
-def test_remote_link_outlives_a_day_but_not_a_later_run_and_hides_locked_and_keeps_unknown(
+def test_remote_link_outlives_a_day_but_not_a_later_session_and_hides_locked_and_keeps_unknown(
     bridge_env: BridgeEnv, spawn_process: SpawnProcess
 ) -> None:
     team = Team(bridge_env, spawn_process)
@@ -293,9 +292,9 @@ def test_remote_link_outlives_a_day_but_not_a_later_run_and_hides_locked_and_kee
     activity = {team.a: IDLE}
     linked = now - 3 * 86_400_000
 
-    def state_with(runs: list[dict[str, object]], sessions: list[dict[str, object]]) -> str:
+    def state_with(sessions: list[dict[str, object]]) -> str:
         with bridge_env.connect() as conn:
-            store(conn, POD, Collected(True, None, sessions, now, runs), Config(), now)
+            store(conn, POD, Collected(True, None, sessions, now), Config(), now)
             guild = map_db_to_guild(conn, Config(), now, lambda ref: "", tree, now, activity, now)
         return str(cast(list[dict[str, Any]], guild["leads"])[0]["state"])
 
@@ -305,14 +304,14 @@ def test_remote_link_outlives_a_day_but_not_a_later_run_and_hides_locked_and_kee
             "VALUES ('conv-a', 'devbox', '$5', ?)",
             (linked,),
         )
-    run: dict[str, object] = {"tmux": "load", "tmux_id": "$5", "pane": "0.0", "label": "k6", "started_at": linked + 5}
-    agent: dict[str, object] = {"tmux": "load", "tmux_id": "$5", "pane": "0.0", "pid": 7, "started_at": linked}
+    agent: dict[str, object] = {"tmux": "load", "tmux_id": "$5", "pane": "0.0", "pid": 7, "started_at": linked + 5}
 
-    assert state_with([run], []) == "working", "three days after the command that started it"
-    assert state_with([{**run, "started_at": now - 1000}], []) == "rest", "a later run under the same tmux id"
-    assert state_with([{**run, "tmux": "Secret 🔒"}], []) == "rest"
-    assert state_with([], [{**agent, "state": "unknown"}]) == "unknown"
-    assert state_with([], [{**agent, "state": "finished"}]) == "rest"
+    later = {**agent, "state": "working", "started_at": now - 1000}
+    assert state_with([later]) == "rest", "a later session under the same tmux id"
+    assert state_with([{**agent, "state": "working"}]) == "working", "three days after the command that started it"
+    assert state_with([{**agent, "state": "working", "tmux": "Secret 🔒"}]) == "rest"
+    assert state_with([{**agent, "state": "unknown"}]) == "unknown"
+    assert state_with([{**agent, "state": "finished"}]) == "rest"
 
 
 def test_a_live_worker_whose_state_cannot_be_read_stays_however_old_its_tab_status(
@@ -347,28 +346,6 @@ def test_a_locked_tab_cannot_declare_work_for_a_lead(bridge_env: BridgeEnv, spaw
     done = team.guild("work", "set", "Private", "--lead", "alex", pid=team.b)
 
     assert done.returncode == 2 and "locked" in done.stderr
-
-
-def test_probe_lists_panes_running_something_besides_an_agent() -> None:
-    panes = [
-        {"session": "shell", "pane": "0.0", "pid": "1", "session_id": "$1"},
-        {"session": "load", "pane": "0.0", "pid": "2", "session_id": "$2"},
-        {"session": "direct", "pane": "0.0", "pid": "4", "session_id": "$3"},
-        {"session": "agent", "pane": "0.0", "pid": "5", "session_id": "$4"},
-        {"session": "editor", "pane": "1.0", "pid": "6", "session_id": "$5"},
-        {"session": "unreadable", "pane": "0.0", "pid": "8", "session_id": "$6"},
-        {"session": "beside", "pane": "0.0", "pid": "10", "session_id": "$7"},
-    ]
-    argv = {
-        1: ["-zsh"], 2: ["bash"], 3: ["/usr/bin/k6", "run", "--vus=9", "plan.js"], 4: ["./run.sh"], 5: ["claude"],
-        6: ["zsh"], 7: ["nvim", "."], 8: ["bash"], 10: ["zsh"], 11: ["loadgen"],
-    }  # fmt: skip
-
-    runs = cast(
-        list[dict[str, str]], list_runs(panes, {2: [3], 6: [7], 8: [9], 10: [5, 11]}, argv, {"0.0$4": 5, "0.0$7": 5})
-    )
-
-    assert [(r["tmux"], r["label"]) for r in runs] == [("load", "k6 run"), ("direct", "run.sh"), ("beside", "loadgen")]
 
 
 def test_room_levels_separate_messages_from_status_lines_and_keep_locked_out(

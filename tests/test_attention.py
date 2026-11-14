@@ -23,7 +23,7 @@ from bridge.attention import (
 from bridge.config import Config
 from bridge.db import connect
 from bridge.feed import answer_post, deliver_typed, record_failed_delivery
-from bridge.leads import ROLE_TEMPLATE
+from bridge.leads import ROLE_TEMPLATE, Lead, convert_lead_to_role
 from bridge.notify import UrgentNotice, release_urgent_notice, show_notification, take_next_urgent_notice
 from bridge.reviews import COMMENTS_OPEN, FIXED, WAITING_FOR_OWNER, map_db_to_reviews, store_open_prs
 
@@ -55,7 +55,7 @@ def test_ranking_runs_urgent_questions_fixes_then_other_prs_and_marks_only_three
     assert [item.mark for item in ranking] == [1, 2, 3, None, None]
 
 
-def test_a_pr_only_owner_answered_threads_block_comes_first_in_any_group() -> None:
+def test_a_pr_only_owners_answered_threads_block_comes_first_in_any_group() -> None:
     ranking = map_streams_to_ranking(
         [question(1, 100), question(3, 900, urgent=True)],
         [queued("waiting"), queued("published", group="published", state="published", resolve_threads=2)],
@@ -129,17 +129,17 @@ def test_other_prs_go_by_project_then_stack_parent_then_size_then_age() -> None:
 
 
 def test_a_pr_that_merges_after_another_follows_it_and_takes_the_next_number() -> None:
-    code = queued("pr:Acme-Org/widgets#7", label="widgets#7", loc=1572, first_seen_at=1)
-    docs = queued("pr:Acme-Org/widgets-docs#3", label="docs#3", loc=0, first_seen_at=2,
-                  depends_on="pr:acme-org/widgets#7")  # fmt: skip
-    other = queued("pr:Acme-Org/widgets#8", label="widgets#8", loc=546)
+    code = queued("pr:Acme-Org/monorepo#50", label="mono#50", loc=1572, first_seen_at=1)
+    docs = queued("pr:Acme-Org/acme-platform-docs#22", label="plat#22", loc=0, first_seen_at=2,
+                  depends_on="pr:acme-org/monorepo#50")  # fmt: skip
+    other = queued("pr:Acme-Org/monorepo#51", label="mono#51", loc=546)
 
     ranking = map_streams_to_ranking([], [code, docs, other], [])
 
     assert [(item.key, item.mark) for item in ranking] == [
         (other.ref, 1), (code.ref, 2), (docs.ref, 3),
     ]  # fmt: skip
-    assert ranking[2].why.endswith("Merges after widgets#7, so it follows it.")
+    assert ranking[2].why.endswith("Merges after mono#50, so it follows it.")
 
 
 def test_a_stack_follows_its_parents_in_order_and_waits_while_a_parent_is_not_ranked() -> None:
@@ -322,18 +322,26 @@ def test_urgent_is_only_for_questions_and_shows_on_the_card_and_in_the_audit(
     assert "Calm one" not in audit.stdout
 
 
+def render_role(owner: str = "Sam", overlay_dir: str = "") -> str:
+    lead = Lead(
+        name="alex", display_name="Alex", scope="s", linear_refs=(), tint="blue", alias=None, surface=None,
+        previous_handle=None, previous_handle_explicit=False, previous_tab_name=None, previous_workspace=None,
+        previous_context=None, created_at=0, retired_at=None, label=None,
+    )  # fmt: skip
+    config = Config(owner_name=owner, assistant_handle="aide", user_alias="sam", overlay_dir=overlay_dir)
+    return convert_lead_to_role(lead, config)
+
+
 def test_lead_role_says_the_urgent_criteria_and_stays_short() -> None:
-    for words in ("--urgent", "prod or a customer is hurting", "money is leaking", "deadline is today"):
+    for words in ("--urgent", "prod or users are hurting", "money is leaking", "deadline is today"):
         assert words in ROLE_TEMPLATE
-    assert len(ROLE_TEMPLATE) <= ROLE_MAX_CHARS
     for owner in ("the owner", "Sam"):
-        role = ROLE_TEMPLATE.format(display="Alex", scope="s", refs="", assistant="aide", user="sam", owner=owner)
-        assert len(role) <= ROLE_MAX_CHARS
+        assert len(render_role(owner)) <= ROLE_MAX_CHARS
 
 
 def test_lead_role_says_the_claude_prefix_and_the_issue_rule() -> None:
-    role = ROLE_TEMPLATE.format(display="Alex", scope="s", refs="", assistant="aide", user="sam", owner="Sam")
-    assert "on GitHub and the tracker start with '🤖 Claude:' (never in chat)" in role
+    role = render_role()
+    assert "On GitHub and Linear, comments and descriptions start with '🤖 Claude:', never titles (nor Slack)" in role
     assert "name nothing of ours (no lead's or aide's name" in role
     assert "search finds no duplicate; never a sub-issue" in role and "only after Sam confirms through aide" in role
     assert "approves the answers" not in role
@@ -341,9 +349,27 @@ def test_lead_role_says_the_claude_prefix_and_the_issue_rule() -> None:
     assert "reasons OBSERVED, REPRODUCED or FROM CODE" in role
     assert "essence visible, details folded" in role
     assert "Typing in your tab is Sam: answer there; send aide one line per decision." in role
-    assert "run independent pieces in parallel workers, never queued" in role
-    assert "Unprompted, before Sam's queue: Codex and Claude reviews, read-only, in parallel" in role
-    assert "100+ LOC or adding a service, contract, queue or chart" in role and "gets a Reviews section" in role
+    assert "run independent pieces in parallel workers, never queued; inline/subagent only for a quick lookup." in role
+    assert "approved on GitHub (ReviewBot counts)" in role and "- Pages: source in ~/pages/<slug>/" in role
+    assert "\n\n" not in role and "{" not in role
+
+
+def test_overlay_slots_put_the_installs_own_lines_where_the_generic_role_has_none(tmp_path: Path) -> None:
+    (tmp_path / "grooming.md").write_text("Grooming moves are the grooming bot's; ask {owner} through {assistant}.\n")
+    (tmp_path / "lead-heavy-work.md").write_text("; heavy work on the build host\n")
+    (tmp_path / "lead-reviews.md").write_text("- Two reviews before {owner}'s queue.\n- A second house line.\n")
+    generic, house = render_role().splitlines(), render_role(overlay_dir=str(tmp_path)).splitlines()
+    added = [line for line in house if line not in generic]
+    assert added == [
+        "- Grooming moves are the grooming bot's; ask Sam through aide.",
+        "- You coordinate: each task gets a nested tab (`bridge` skill); run independent pieces in parallel workers, "
+        "never queued; inline/subagent only for a quick lookup; heavy work on the build host.",
+        "- Two reviews before Sam's queue.",
+        "- A second house line.",
+    ]
+    assert house.index(added[0]) == generic.index(next(g for g in generic if g.startswith("- Linear, your scope"))) + 1
+    merge = next(i for i, g in enumerate(house) if g.startswith("- Merge your own PR"))
+    assert house[merge - 2 : merge] == added[2:]
 
 
 def seed_urgent(conn: sqlite3.Connection, now: int, conversation: str = "conv-a", item_urgent: int = 1) -> int:
@@ -369,7 +395,7 @@ def test_notice_fires_once_names_only_the_lead_and_survives_a_restart(tmp_path: 
     conn = connect(path)
     add_session(conn, "conv-a", "boris", surface="s-boris")
     add_lead(conn, "Boris", "s-boris")
-    add_session(conn, "conv-w", "customer-acme-outage", surface="s-worker", session="tab-w")
+    add_session(conn, "conv-w", "acme-outage", surface="s-worker", session="tab-w")
     item = seed_urgent(conn, 1000)
     worker_item = seed_urgent(conn, 1001, "conv-w")
     calm = seed_urgent(conn, 1002, item_urgent=0)
@@ -432,7 +458,7 @@ def test_a_restart_during_one_notice_does_not_lose_the_next(tmp_path: Path) -> N
 def test_show_notification_passes_text_as_an_argument_with_no_sound_and_reads_failure() -> None:
     done = mock.Mock(returncode=0, stderr="")
     with mock.patch("bridge.notify.subprocess.run", return_value=done) as run:
-        assert show_notification(Config(), 'a "quote"; do shell script') is True
+        assert show_notification('a "quote"; do shell script') is True
     command = run.call_args.args[0]
     assert command[0] == "osascript"
     assert command[-1] == 'a "quote"; do shell script'
@@ -440,7 +466,7 @@ def test_show_notification_passes_text_as_an_argument_with_no_sound_and_reads_fa
 
     done.returncode = 1
     with mock.patch("bridge.notify.subprocess.run", return_value=done):
-        assert show_notification(Config(), "x") is False
+        assert show_notification("x") is False
 
 
 def test_the_service_notifies_once_without_touching_a_tab(

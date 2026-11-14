@@ -8,6 +8,8 @@ from bridge.leads import is_conversation_locked
 from bridge.reviews import find_lead_of
 
 NOTIFY_TIMEOUT_S = 15
+# agtermctl notify would raise a badge on a tab instead of a macOS notification.
+NOTIFY_COMMAND = "osascript"
 _SHOW_ARGUMENT = ("-e", "on run argv", "-e", "display notification (item 1 of argv)", "-e", "end run", "--")
 
 
@@ -42,9 +44,9 @@ def release_urgent_notice(conn: sqlite3.Connection, item_id: int) -> None:
     conn.execute("UPDATE user_items SET notified_at = NULL WHERE id = ?", (item_id,))
 
 
-def show_notification(config: Config, text: str) -> bool:
+def show_notification(text: str) -> bool:
     """False only when it surely did not show: after a timeout it may have, and once beats twice."""
-    command = [config.notify_command, *_SHOW_ARGUMENT, text]
+    command = [NOTIFY_COMMAND, *_SHOW_ARGUMENT, text]
     try:
         done = subprocess.run(command, capture_output=True, text=True, timeout=NOTIFY_TIMEOUT_S, check=False)
     except subprocess.TimeoutExpired:
@@ -59,7 +61,7 @@ def show_notification(config: Config, text: str) -> bool:
 
 
 def _map_conversation_to_notice_text(conn: sqlite3.Connection, conversation: str) -> str:
-    """Only a lead's name: their screen may be shared, and a worker's tab name can say what the work is."""
+    """Only a lead's name: the owner's screen may be shared, and a worker's tab name can say what the work is."""
     row = conn.execute(
         """
         SELECT i.surface FROM conversations c JOIN instances i ON i.instance_id = c.instance_id

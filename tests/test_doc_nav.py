@@ -7,7 +7,7 @@ DOC = b"""<!doctype html><html><head><title>t</title></head><body>
 <h1>Title</h1>
 <h2>In short</h2><p>x</p>
 <h2 id="names" class="k">Names <code>used</code> below</h2>
-<h3>Codex &amp; Claude</h3>
+<h3>Codex &amp; claude</h3>
 <h3 class="x">In short</h3>
 <!-- <h2>commented out</h2> -->
 <script>var s = "<h2>in a script</h2>";</script>
@@ -23,7 +23,7 @@ def nav_links(doc: bytes) -> list[tuple[str, str]]:
 def test_h2_and_h3_are_listed_in_order_with_their_ids() -> None:
     served = convert_doc_to_viewable(DOC)
     assert nav_links(served) == [("h2", "in-short"), ("h2", "names"), ("h3", "codex-claude"), ("h3", "in-short-2")]
-    assert b">Names used below</a>" in served and b">Codex &amp; Claude</a>" in served
+    assert b">Names used below</a>" in served and b">Codex &amp; claude</a>" in served
     assert b"commented out</a>" not in served and b"in a script</a>" not in served and b"too deep</a>" not in served
 
 

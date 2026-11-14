@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 from unittest import mock
@@ -6,20 +7,21 @@ from unittest import mock
 import pytest
 from conftest import BridgeEnv
 
-from bridge import reviews
-from bridge.board import BODY_MAX_CHARS
+from bridge.board import BODY_MAX_CHARS, SYSTEM_CONVERSATION
 from bridge.config import Config
 from bridge.db import connect, transaction
 from bridge.drivers import scan_transcripts
+from bridge.guildview import post_signals_to_leads
 from bridge.review_github import (
     FetchedComment,
     GitHubError,
+    HisThread,
     OpenPr,
-    OwnerThread,
     ReviewThreads,
     fetch_comments,
     has_review_by_others,
     is_approved_by_review_bot,
+    list_loc_excluded,
     map_files_to_loc,
     map_node_to_open_pr,
     map_reviews_to_approvers,
@@ -28,16 +30,19 @@ from bridge.review_github import (
 from bridge.reviews import (
     AGENT,
     COLLEAGUE,
+    HIS,
     OLD,
-    OWNER,
     READY,
     REVIEWER,
     UNCLEAR,
     Mark,
+    MergeOkRefused,
     classify_comment,
     classify_pending_comments,
     count_commits_since,
+    find_issue_lead,
     find_owner,
+    find_owner_of_ref,
     load_known_loc,
     load_marks,
     map_command_to_branch_writes,
@@ -48,6 +53,8 @@ from bridge.reviews import (
     poll_review_queue,
     record_agent_marks,
     record_branch_writes,
+    record_host_pushes,
+    record_merge_ok,
     record_tab_parents,
     store_comments,
     store_merge_blocks,
@@ -56,17 +63,17 @@ from bridge.reviews import (
     take_comment_wakes,
     tell_ready_to_merge,
 )
+from bridge.serve import list_lead_work_prs
 
-PREFIX_RULE_AT = 1_000_000_000_000_000
-"""A cutover after every fixture's own times, so the tests also cover comments from before the prefix rule."""
-
-
-@pytest.fixture(autouse=True)
-def prefix_rule_cutover(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(reviews, "AGENT_PREFIX_FROM_MS", PREFIX_RULE_AT)
-
-
-CONFIG = Config(review_org="Org", review_author="me", review_bot_logins=("bot",), work_timezone="UTC")
+# An invented cutover for the agent prefix rule; times in these tests fall on both sides of it.
+PREFIX_FROM_MS = 1_790_000_000_000
+CONFIG = Config(
+    review_org="Org",
+    review_author="me",
+    review_bot_logins=("bot",),
+    work_timezone="UTC",
+    agent_prefix_from_ms=PREFIX_FROM_MS,
+)
 REF = "pr:Org/app#7"
 
 
@@ -124,11 +131,11 @@ def add_lead(conn: Any, name: str, surface: str) -> None:
 def test_loc_leaves_out_lockfiles_and_generated_files_by_base_name() -> None:
     files = [
         {"path": "app/uv.lock", "additions": 500, "deletions": 400},
-        {"path": "web/src/api.gen.ts", "additions": 90, "deletions": 0},
+        {"path": "web/src/api-client.ts", "additions": 90, "deletions": 0},
         {"path": "app/main.py", "additions": 7, "deletions": 3},
     ]
-    assert map_files_to_loc(597, 403, files, (*Config().review_loc_excluded, "*.gen.ts")) == 10
-    assert map_files_to_loc(597, 403, files, Config().review_loc_excluded) == 100
+    config = replace(CONFIG, review_generated_files=("api-client.ts",))
+    assert map_files_to_loc(597, 403, files, list_loc_excluded(config)) == 10
 
 
 def test_only_people_approve_and_their_latest_verdict_stands() -> None:
@@ -171,7 +178,7 @@ def test_a_review_once_seen_stays_seen(tmp_path: Path) -> None:
 
 def test_node_maps_to_pr_with_stack_parent_and_head_commit() -> None:
     node: Any = {
-        "number": 7, "title": "T", "url": "u", "isDraft": True, "updatedAt": "U", "headRefName": "h",
+        "number": 7, "title": "🤖 Claude: T", "url": "u", "isDraft": True, "updatedAt": "U", "headRefName": "h",
         "headRefOid": "b2", "baseRefName": "h0", "additions": 5, "deletions": 1,
         "repository": {"nameWithOwner": "Org/app"},
         "baseRef": {"associatedPullRequests": {"nodes": [{"number": 6}]}},
@@ -188,6 +195,7 @@ def test_node_maps_to_pr_with_stack_parent_and_head_commit() -> None:
         "body": "Merge only after #5 is released.",
     }  # fmt: skip
     pr = map_node_to_open_pr(node, CONFIG)
+    assert pr.title == "T", "the queue shows a title without the agents' prefix"
     assert pr.depends_on == "Org/app#5"
     assert pr.others_reviewed and pr.approved_by == () and pr.open_threads == 2
     assert (pr.ref, pr.stack_parent, pr.checks, pr.loc, pr.requested) == (REF, "pr:Org/app#6", "FAILURE", 6, 1)
@@ -204,7 +212,7 @@ def test_the_pr_its_body_merges_after_is_stored_and_listed_with_its_label(tmp_pa
     assert conn.execute("SELECT depends_on FROM review_prs").fetchone()[0] is None
 
 
-def test_a_round_is_owner_comments_then_a_commit_after_them() -> None:
+def test_a_round_is_owners_comments_then_a_commit_after_them() -> None:
     assert map_events_to_rounds([], [5]) == (0, False)
     assert map_events_to_rounds([10], [5]) == (0, True)
     assert map_events_to_rounds([10, 11], [5, 20]) == (1, False)
@@ -228,7 +236,7 @@ def test_real_comment_commands_are_recognised() -> None:
     assert map_command_to_comment_targets('gh api -X POST repos/Org/app/issues/7/comments -f body="x"') == [
         ("Org/app", 7)
     ]
-    assert map_command_to_comment_targets("cd w; gh pr comment 205 --body-file /tmp/r.md") == [(None, 205)]
+    assert map_command_to_comment_targets("cd w; gh pr comment 26 --body-file /tmp/r.md") == [(None, 26)]
     assert map_command_to_comment_targets('gh pr comment https://github.com/Org/app/pull/9 -b "x"') == [("Org/app", 9)]
     assert map_command_to_comment_targets('gh pr review 7 --comment -b "x"') == [(None, 7)]
     assert map_command_to_comment_targets('gh pr comment -b "from the branch"') == [(None, None)]
@@ -253,16 +261,17 @@ def classify(
     parent_verdict: str | None = None,
     remote: bool = False,
 ) -> str:
-    return classify_comment(at, body, parent, parent_author, parent_verdict, "me", marks or [], remote)[0]
+    host = "devbox" if remote else None
+    return classify_comment(at, body, parent, parent_author, parent_verdict, "me", marks or [], host, PREFIX_FROM_MS)[0]
 
 
-def test_a_top_level_comment_with_no_session_near_it_is_owner() -> None:
-    assert classify() == OWNER
+def test_a_top_level_comment_with_no_session_near_it_is_owners() -> None:
+    assert classify() == HIS
     far_earlier = Mark(1_000_000 - 700_000, "gh pr comment 7 --body-file x.md")
-    assert classify(marks=[far_earlier]) == OWNER
+    assert classify(marks=[far_earlier]) == HIS
 
 
-def test_a_workers_reply_never_reads_as_owner() -> None:
+def test_a_workers_reply_never_reads_as_owners() -> None:
     inline = Mark(1_000_000 - 2000, 'gh api repos/O/R/pulls/7/comments/4/replies -f body="Fixed in \\"93e\\" today"')
     assert classify('Fixed in "93e" today', marks=[inline]) == AGENT
     from_file = Mark(1_000_000 - 300_000, "gh pr comment 7 --body-file /tmp/r.md")
@@ -271,16 +280,16 @@ def test_a_workers_reply_never_reads_as_owner() -> None:
     assert classify(marks=[variable]) == AGENT
 
 
-def test_a_session_posting_other_text_right_then_leaves_it_unclear_and_later_owner() -> None:
+def test_a_session_posting_other_text_right_then_leaves_it_unclear_and_later_owners() -> None:
     other = 'gh api repos/O/R/issues/7/comments -f body="something else"'
     assert classify(marks=[Mark(1_000_000 - 30_000, other)]) == UNCLEAR
-    assert classify(marks=[Mark(1_000_000 - 200_000, other)]) == OWNER
+    assert classify(marks=[Mark(1_000_000 - 200_000, other)]) == HIS
 
 
 def test_replies_on_threads_the_owner_did_not_start_stay_unclear() -> None:
     assert classify(parent="p1", parent_author="bot") == UNCLEAR
     assert classify(parent="p1", parent_author="me", parent_verdict=AGENT) == UNCLEAR
-    assert classify(parent="p1", parent_author="me", parent_verdict=OWNER) == OWNER
+    assert classify(parent="p1", parent_author="me", parent_verdict=HIS) == HIS
 
 
 def test_a_devbox_session_on_the_pr_leaves_it_unclear() -> None:
@@ -291,6 +300,14 @@ def setup_pr(tmp_path: Path, **changes: Any) -> Any:
     conn = connect(tmp_path / "t.db")
     with transaction(conn):
         store_open_prs(conn, [make_pr(**changes)], 500)
+    return conn
+
+
+def setup_reviewed_pr(tmp_path: Path, **changes: Any) -> Any:
+    """A PR the owner has reviewed (pressed Publish): only then can an approval make it ready."""
+    conn = setup_pr(tmp_path, **changes)
+    with transaction(conn):
+        conn.execute("UPDATE review_prs SET reviewed_at = 600, reviewed_by = 'theo'")
     return conn
 
 
@@ -347,7 +364,7 @@ def test_no_verdict_before_a_scan_that_began_after_the_comment(tmp_path: Path) -
     assert conn.execute("SELECT verdict FROM review_comments").fetchone()[0] is None
     with transaction(conn):
         classify_pending_comments(conn, CONFIG, 1000 + 40_000)
-    assert conn.execute("SELECT verdict FROM review_comments").fetchone()[0] == OWNER
+    assert conn.execute("SELECT verdict FROM review_comments").fetchone()[0] == HIS
 
 
 def test_comments_from_before_the_queue_saw_the_pr_wake_nobody(tmp_path: Path) -> None:
@@ -364,7 +381,7 @@ def wake(conn: Any, now: int = 200_000) -> list[Any]:
         return take_comment_wakes(conn, CONFIG, now)
 
 
-def test_owner_comment_wakes_the_owner_once_with_text_and_link(tmp_path: Path) -> None:
+def test_owners_comment_wakes_the_owner_once_with_text_and_link(tmp_path: Path) -> None:
     conn = setup_pr(tmp_path)
     with transaction(conn):
         add_session(conn, "c1", "worker", branch="dev/x")
@@ -385,7 +402,7 @@ def test_a_comment_with_no_owner_waits_for_one(tmp_path: Path) -> None:
     assert len(wake(conn)) == 1
 
 
-def test_owner_comments_past_the_cap_wait_out_the_hour_and_go_in_one_message(tmp_path: Path) -> None:
+def test_owners_comments_past_the_cap_wait_out_the_hour_and_go_in_one_message(tmp_path: Path) -> None:
     conn = setup_pr(tmp_path)
     with transaction(conn):
         add_session(conn, "c1", "worker", branch="dev/x")
@@ -411,11 +428,11 @@ def test_owner_prefers_the_live_session_on_the_branch(tmp_path: Path) -> None:
     assert owner is not None and (owner.handle, owner.via) == ("onbranch", "branch")
 
 
-def test_a_session_that_only_reads_the_pr_or_checks_out_its_branch_owns_nothing(tmp_path: Path) -> None:
-    """A worker that only read the PR and checked out its branch owns nothing; the lead whose work names it does."""
+def test_a_session_that_only_reads_the_pr_or_checks_out_its_branch_owns_nothing_as_with_29(tmp_path: Path) -> None:
+    """PROJ-34's worker only looked at #29 on its branch, while Quinn had it in their declared work."""
     conn = setup_pr(tmp_path)
     with transaction(conn):
-        add_session(conn, "reader", "proj-7-worker", branch="dev/x", wrote=False)
+        add_session(conn, "reader", "proj-34-worker", branch="dev/x", wrote=False)
         conn.execute("INSERT INTO refs VALUES ('reader', ?, 'pr-link', 0, 9, 0, 1)", (REF,))
         add_session(conn, "lead-c", "quinn")
         add_lead(conn, "Quinn", "s-quinn")
@@ -433,7 +450,7 @@ def test_a_session_that_only_reads_the_pr_or_checks_out_its_branch_owns_nothing(
 
 
 def test_the_session_holding_the_prs_claim_owns_it_before_a_lead_its_branch_names(tmp_path: Path) -> None:
-    """The session holding the PR's claim owns it, even while the PR's branch names another lead's issue."""
+    """A backport worker claimed the PR while its branch named another lead's issue; notices went to that lead."""
     conn = setup_pr(tmp_path)
     with transaction(conn):
         add_session(conn, "lead-c", "quinn")
@@ -464,6 +481,20 @@ def test_a_leads_declared_work_comes_before_the_session_that_pushed_the_branch(t
     assert owner is not None and owner.handle == "quinn"
 
 
+def test_of_two_leads_whose_work_names_the_prs_issue_the_one_that_declared_it_last_owns_it(tmp_path: Path) -> None:
+    conn = setup_pr(tmp_path, head="theo/proj-7-tests")
+    with transaction(conn):
+        add_session(conn, "alex-c", "alex")
+        add_lead(conn, "Alex", "s-alex")
+        add_session(conn, "quinn-c", "quinn")
+        add_lead(conn, "Quinn", "s-quinn")
+        add_work(conn, "alex", "issue:PROJ-7", "issue:PROJ-8")
+        add_work(conn, "quinn", "issue:PROJ-7")
+        conn.execute("UPDATE lead_work SET updated_at = CASE lead WHEN 'quinn' THEN 9 ELSE 1 END")
+    owner = find_owner(conn, CONFIG, REF, "Org/app", "theo/proj-7-tests")
+    assert owner is not None and owner.handle == "quinn"
+
+
 def test_an_ended_reader_of_the_branch_does_not_route_the_pr_to_its_lead(tmp_path: Path) -> None:
     conn = setup_pr(tmp_path)
     with transaction(conn):
@@ -472,6 +503,149 @@ def test_an_ended_reader_of_the_branch_does_not_route_the_pr_to_its_lead(tmp_pat
         add_session(conn, "w-c", "worker", branch="dev/x", ended=99, session="tab-worker", wrote=False)
         conn.execute("INSERT INTO tab_parents (agterm_session, parent_session) VALUES ('tab-worker', 'tab-lead')")
     assert find_owner(conn, CONFIG, REF, "Org/app", "dev/x") is None
+
+
+def test_an_issue_goes_to_the_lead_whose_work_names_it_or_one_of_its_prs(tmp_path: Path) -> None:
+    conn = setup_pr(tmp_path)
+    with transaction(conn):
+        add_session(conn, "w", "worker", branch="dev/x")
+        add_session(conn, "quinn-c", "quinn")
+        add_lead(conn, "Quinn", "s-quinn")
+        add_session(conn, "alex-c", "alex")
+        add_lead(conn, "Alex", "s-alex")
+        add_work(conn, "alex", "pr:org/APP#3")
+    owner = find_issue_lead(conn, CONFIG, "issue:PROJ-1", ["pr:Org/app#3", REF], [REF], {})
+    assert owner is not None and (owner.handle, owner.surface) == ("alex", "s-alex"), (
+        "a linked PR in the work, any case"
+    )
+    with transaction(conn):
+        add_work(conn, "quinn", "issue:PROJ-1")
+        conn.execute("UPDATE lead_work SET updated_at = 9 WHERE lead = 'quinn'")
+    owner = find_issue_lead(conn, CONFIG, "issue:PROJ-1", [REF], [REF], {})
+    assert owner is not None and owner.handle == "quinn"
+
+
+def test_an_issue_goes_to_the_lead_above_the_worker_that_owns_its_closing_pr(tmp_path: Path) -> None:
+    """A worker's tab is the owner of record for its PR, but only its lead can act on the issue."""
+    conn = setup_pr(tmp_path)
+    with transaction(conn):
+        add_session(conn, "lead-c", "alex", session="tab-lead")
+        add_lead(conn, "Alex", "s-alex")
+        add_session(conn, "w-c", "worker", branch="dev/x", session="tab-worker")
+        conn.execute("INSERT INTO tab_parents (agterm_session, parent_session) VALUES ('tab-worker', 'tab-lead')")
+    owner = find_issue_lead(conn, CONFIG, "issue:PROJ-1", [REF], [REF.lower()], {})
+    assert owner is not None and (owner.handle, owner.surface, owner.via) == ("alex", "s-alex", "lead")
+
+
+def test_an_issue_whose_pr_left_the_queue_is_routed_by_the_branch_github_reported(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "t.db")
+    with transaction(conn):
+        add_session(conn, "lead-c", "alex", session="tab-lead")
+        add_lead(conn, "Alex", "s-alex")
+        add_session(conn, "w-c", "worker", branch="dev/z", session="tab-worker")
+        conn.execute("INSERT INTO tab_parents (agterm_session, parent_session) VALUES ('tab-worker', 'tab-lead')")
+    enrichment: dict[str, dict[str, object]] = {"pr:Org/app#9": {"head": "dev/z"}}
+    owner = find_issue_lead(conn, CONFIG, "issue:PROJ-1", ["pr:Org/app#9"], ["pr:Org/app#9"], enrichment)
+    assert owner is not None and owner.handle == "alex"
+
+
+def test_an_issue_owned_only_by_a_session_with_no_lead_is_left_to_the_fallback(tmp_path: Path) -> None:
+    conn = setup_pr(tmp_path)
+    with transaction(conn):
+        add_session(conn, "w-c", "loner", branch="dev/x")
+    assert find_issue_lead(conn, CONFIG, "issue:PROJ-1", [REF], [REF], {}) is None
+
+
+def test_an_issue_a_lead_only_named_has_no_owner_and_neither_have_its_prs_mentions(tmp_path: Path) -> None:
+    """The PROJ-77 shape: a lead listed the issue in a message and the assistant named one of its closing PRs."""
+    conn = connect(tmp_path / "t.db")
+    closing = "pr:Org/app#970"
+    assistant = Config(assistant_handle="xavi", review_org="Org", review_author="me")
+    with transaction(conn):
+        add_session(conn, "eli-c", "eli")
+        add_lead(conn, "Eli", "s-eli")
+        add_session(conn, "xavi-c", "xavi")
+        conn.execute("INSERT INTO refs VALUES ('eli-c', 'issue:PROJ-77', 'prompt', 0, 9, 0, 1)")
+        conn.execute("INSERT INTO refs VALUES ('eli-c', ?, 'prompt', 0, 9, 0, 1)", (closing,))
+        conn.execute("INSERT INTO refs VALUES ('xavi-c', ?, 'prompt', 0, 9, 0, 1)", (closing,))
+    assert find_owner_of_ref(conn, assistant, closing, "") is not None, "a PR's own notices still find a mentioner"
+    assert find_issue_lead(conn, assistant, "issue:PROJ-77", [closing], [closing], {}) is None
+
+
+def test_an_issue_goes_to_the_lead_above_the_session_on_its_branch_before_its_scope_lead(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "t.db")
+    with transaction(conn):
+        add_session(conn, "alex-c", "alex", session="tab-alex")
+        add_lead(conn, "Alex", "s-alex")
+        add_session(conn, "quinn-c", "quinn")
+        add_lead(conn, "Quinn", "s-quinn")
+        conn.execute("UPDATE leads SET scope = 'Data: PROJ-77' WHERE name = 'quinn'")
+        add_session(conn, "ten-c", "ten", branch="theo/proj-770-x", session="tab-ten")
+        conn.execute("INSERT INTO tab_parents (agterm_session, parent_session) VALUES ('tab-ten', 'tab-alex')")
+    owner = find_issue_lead(conn, CONFIG, "issue:PROJ-77", [], [], {})
+    assert owner is not None and owner.handle == "quinn", "no branch names the whole key, so the scope lead"
+    with transaction(conn):
+        add_session(conn, "w-c", "worker", branch="theo/PROJ-77-cutover", session="tab-worker")
+        conn.execute("INSERT INTO tab_parents (agterm_session, parent_session) VALUES ('tab-worker', 'tab-alex')")
+    owner = find_issue_lead(conn, CONFIG, "issue:PROJ-77", [], [], {})
+    assert owner is not None and (owner.handle, owner.via) == ("alex", "lead")
+    with transaction(conn):
+        add_work(conn, "quinn", "issue:PROJ-77")
+    owner = find_issue_lead(conn, CONFIG, "issue:PROJ-77", [], [], {})
+    assert owner is not None and owner.handle == "quinn", "declared work comes first"
+
+
+def test_an_ended_worker_on_the_issues_branch_hands_it_to_its_lead_before_the_scope_lead(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "t.db")
+    with transaction(conn):
+        add_session(conn, "alex-c", "alex")
+        add_lead(conn, "Alex", "s-alex")
+        add_session(conn, "quinn-c", "quinn")
+        add_lead(conn, "Quinn", "s-quinn")
+        conn.execute("UPDATE leads SET scope = 'Data: PROJ-77' WHERE name = 'quinn'")
+        add_session(conn, "w-c", "worker", branch="theo/proj-77", ended=99, session="tab-gone")
+        conn.execute(
+            "INSERT INTO closed_workers (conversation_id, tab_name, parent_handle, resume_command, closed_at,"
+            " parent_lead) VALUES ('w-c', 'worker', 'alex', 'claude --resume w-c', 99, 'alex')"
+        )
+    owner = find_issue_lead(conn, CONFIG, "issue:PROJ-77", [], [], {})
+    assert owner is not None and owner.handle == "alex"
+
+
+def test_an_unowned_closing_pr_does_not_hand_the_issue_to_the_scope_lead_before_an_ended_worker(
+    tmp_path: Path,
+) -> None:
+    conn = connect(tmp_path / "t.db")
+    closing = "pr:Org/app#99"
+    with transaction(conn):
+        add_session(conn, "alex-c", "alex")
+        add_lead(conn, "Alex", "s-alex")
+        add_session(conn, "quinn-c", "quinn")
+        add_lead(conn, "Quinn", "s-quinn")
+        conn.execute("UPDATE leads SET scope = 'Data: PROJ-77' WHERE name = 'quinn'")
+        add_session(conn, "w-c", "worker", branch="feat/proj-77-part1", ended=99, session="tab-gone")
+        conn.execute(
+            "INSERT INTO closed_workers (conversation_id, tab_name, parent_handle, resume_command, closed_at,"
+            " parent_lead) VALUES ('w-c', 'worker', 'alex', 'claude --resume w-c', 99, 'alex')"
+        )
+    enrichment: dict[str, dict[str, object]] = {closing: {"head": "feat/proj-77-part2"}}
+    owner = find_issue_lead(conn, CONFIG, "issue:PROJ-77", [closing], [closing], enrichment)
+    assert owner is not None and owner.handle == "alex"
+
+
+def test_an_issue_claimed_by_a_worker_goes_to_its_lead(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "t.db")
+    with transaction(conn):
+        add_session(conn, "alex-c", "alex", session="tab-alex")
+        add_lead(conn, "Alex", "s-alex")
+        add_session(conn, "w-c", "worker", session="tab-worker")
+        conn.execute("INSERT INTO tab_parents (agterm_session, parent_session) VALUES ('tab-worker', 'tab-alex')")
+        conn.execute(
+            "INSERT INTO claims (resource, holder_conversation, holder_handle, reason, token, acquired_at, renewed_at,"
+            " expires_at) VALUES ('issue:PROJ-77', 'w-c', 'worker', 'r', 't', 0, 0, 9999999999999)"
+        )
+    owner = find_issue_lead(conn, CONFIG, "issue:PROJ-77", [], [], {})
+    assert owner is not None and owner.handle == "alex"
 
 
 def test_git_commit_and_push_name_the_branches_a_command_writes() -> None:
@@ -518,6 +692,23 @@ def test_owner_is_the_parent_lead_after_the_worker_ended(tmp_path: Path) -> None
     assert owner is not None and (owner.handle, owner.lead, owner.via) == ("alex", "Alex", "lead")
 
 
+def test_a_closed_workers_lead_owns_its_pr_before_a_live_session_that_only_mentions_it(tmp_path: Path) -> None:
+    conn = setup_pr(tmp_path)
+    with transaction(conn):
+        add_session(conn, "lead-c", "alex", session="tab-lead")
+        add_lead(conn, "Alex", "s-alex")
+        add_session(conn, "w-c", "worker", branch="dev/x", ended=99, session="tab-worker", wrote=False)
+        conn.execute("INSERT INTO refs VALUES ('w-c', ?, 'prompt', 0, 5, 0, 1)", (REF,))
+        conn.execute(
+            "INSERT INTO closed_workers (conversation_id, tab_name, parent_handle, resume_command, closed_at,"
+            " parent_lead) VALUES ('w-c', 'worker', 'alex', 'claude --resume w-c', 99, 'alex')"
+        )
+        add_session(conn, "asker-c", "charlie")
+        conn.execute("INSERT INTO refs VALUES ('asker-c', ?, 'prompt', 0, 9, 0, 1)", (REF,))
+    owner = find_owner(conn, CONFIG, REF, "Org/app", "dev/x")
+    assert owner is not None and (owner.handle, owner.via) == ("alex", "lead")
+
+
 def test_a_locked_tab_is_no_owner(tmp_path: Path) -> None:
     conn = setup_pr(tmp_path)
     with transaction(conn):
@@ -526,7 +717,7 @@ def test_a_locked_tab_is_no_owner(tmp_path: Path) -> None:
     assert find_owner(conn, CONFIG, REF, "Org/app", "dev/x") is None
 
 
-def test_the_view_shows_state_and_rounds_from_owner_comments_and_commits(tmp_path: Path) -> None:
+def test_the_view_shows_state_and_rounds_from_owners_comments_and_commits(tmp_path: Path) -> None:
     conn = setup_pr(tmp_path)
     assert map_db_to_reviews(conn, CONFIG, 0)["prs"][0]["state"] == "waiting for you"  # type: ignore[index]
     store(conn, comment(at=2000))
@@ -572,6 +763,18 @@ def test_a_pr_missing_from_search_is_closed_only_when_github_says_so(tmp_path: P
     ):
         poll_review_queue(conn, CONFIG, 900, None, None)
     assert conn.execute("SELECT closed_at FROM review_prs").fetchone()[0] == 900
+
+
+def test_an_excluded_repo_leaves_the_queue_silently_and_never_comes_back(tmp_path: Path) -> None:
+    conn = setup_pr(tmp_path)
+    config = replace(CONFIG, review_excluded_repos=("org/APP",))
+    with (
+        mock.patch("bridge.reviews.fetch_open_prs", return_value=[make_pr()]),
+        mock.patch("bridge.reviews.fetch_prs", return_value={}) as asked,
+    ):
+        poll_review_queue(conn, config, 900, None, None)
+    assert conn.execute("SELECT count(*) FROM review_prs").fetchone()[0] == 0
+    assert asked.call_count == 0, "a dropped repo is not looked up as a closed PR"
 
 
 def test_comments_are_read_only_when_github_says_the_pr_changed(tmp_path: Path) -> None:
@@ -688,12 +891,12 @@ def test_a_command_that_waited_on_ci_leaves_a_later_comment_unclear() -> None:
     late = Mark(1_000_000 - 900_000, "gh pr checks 7 --watch && gh pr comment 7 --body-file r.md")
     assert classify(marks=[late]) == UNCLEAR
     plain = Mark(1_000_000 - 900_000, "gh pr comment 7 --body-file r.md")
-    assert classify(marks=[plain]) == OWNER
+    assert classify(marks=[plain]) == HIS
 
 
 def test_until_in_a_comments_text_is_not_a_command_that_waited() -> None:
     held = Mark(1_000_000 - 4_600_000, 'gh pr comment 7 -b "Held on purpose: until then it would be wrong."')
-    assert classify(marks=[held]) == OWNER
+    assert classify(marks=[held]) == HIS
 
 
 def test_editing_a_comment_is_not_a_mark_and_a_numberless_path_keeps_its_repo() -> None:
@@ -704,7 +907,7 @@ def test_editing_a_comment_is_not_a_mark_and_a_numberless_path_keeps_its_repo() 
     assert map_command_to_comment_targets(reaction) == [("Org/docs", None)]
 
 
-def test_owner_comment_wakes_the_owner_after_a_session_edited_a_comment_elsewhere_with_until_in_it(
+def test_owners_comment_wakes_the_owner_after_a_session_edited_a_comment_elsewhere_with_until_in_it(
     tmp_path: Path,
 ) -> None:
     conn = setup_pr(tmp_path)
@@ -712,28 +915,28 @@ def test_owner_comment_wakes_the_owner_after_a_session_edited_a_comment_elsewher
         add_session(conn, "c1", "worker", branch="dev/x")
     created = 2_000_000_000
     edit = (
-        'guild ack 6 "Nothing for me"\n'
-        'gh api -X PATCH repos/Org/docs/issues/comments/66 -f body="🤖 Claude: Approved, held until it ships." '
-        "--jq .id\n"
+        'guild ack 628 "Nothing for me"\n'
+        'gh api -X PATCH repos/Org/docs/issues/comments/1000000001 -f body="🤖 Claude: Approved and ready, held on '
+        'purpose: it merges once that change is deployed; until then it would describe the wrong thing." --jq .id\n'
         "for n in 6 7; do gh pr view $n --repo Org/app --json body --jq .body | grep -noiE worker; done"
     )
     with transaction(conn):
         record_agent_marks(conn, "c1", [(edit, created - 4_654_000)])
-    store(conn, comment("p44", at=created, body="Why is this value fixed?"))
+    store(conn, comment("p1000000002", at=created, body="Why is this value fixed here?"))
     sent = wake(conn, created + 120_000)
     assert [r.handle for _, r in sent] == ["worker"]
-    assert conn.execute("SELECT verdict FROM review_comments").fetchone()[0] == OWNER
+    assert conn.execute("SELECT verdict FROM review_comments").fetchone()[0] == HIS
 
 
 def test_a_comment_in_the_agents_prefix_is_an_agents_whatever_the_marks() -> None:
     assert classify("🤖 Claude: Fixed in 93e") == AGENT
 
 
-def test_after_the_prefix_rule_a_reply_without_it_or_a_mark_is_owner() -> None:
-    later = PREFIX_RULE_AT + 1000
-    assert classify(at=later, parent="p1", parent_author="bot") == OWNER
-    assert classify(at=later, parent="p1", parent_author="me", parent_verdict=AGENT) == OWNER
-    assert classify(at=PREFIX_RULE_AT - 1000, parent="p1", parent_author="bot") == UNCLEAR
+def test_after_the_prefix_rule_a_reply_without_it_or_a_mark_is_owners() -> None:
+    later = PREFIX_FROM_MS + 1000
+    assert classify(at=later, parent="p1", parent_author="bot") == HIS
+    assert classify(at=later, parent="p1", parent_author="me", parent_verdict=AGENT) == HIS
+    assert classify(at=PREFIX_FROM_MS - 1000, parent="p1", parent_author="bot") == UNCLEAR
 
 
 def test_a_colleagues_comment_wakes_the_owner_with_the_ownership_rule(tmp_path: Path) -> None:
@@ -745,7 +948,8 @@ def test_a_colleagues_comment_wakes_the_owner_with_the_ownership_rule(tmp_path: 
     assert [r.handle for _, r in sent] == ["worker"]
     body = conn.execute("SELECT body FROM messages").fetchone()[0]
     assert "mira commented" in body and "This leaks the token" in body and "mira: https://x/p1" in body
-    assert "Fix what this PR introduced" in body and "The owner commented" not in body
+    assert "guild comment small" in body and "Fix what this PR introduced" not in body
+    assert "The owner commented" not in body
     assert conn.execute("SELECT verdict FROM review_comments").fetchone()[0] == COLLEAGUE
     assert wake(conn) == []
 
@@ -756,12 +960,12 @@ def test_the_review_bots_change_request_wakes_the_owner_and_an_agents_reply_does
         add_session(conn, "c1", "worker", branch="dev/x")
     store(
         conn,
-        comment("r1", author="bot", body="A negative limit skips the check", state="CHANGES_REQUESTED", commit="a1"),
+        comment("r1", author="bot", body="Negative limits skip the check", state="CHANGES_REQUESTED", commit="a1"),
         comment("p2", at=1001, body="🤖 Claude: Fixed in 93e"),
     )
     assert len(wake(conn)) == 1
     body = conn.execute("SELECT body FROM messages").fetchone()[0]
-    assert "bot (review bot) requested changes" in body and "negative limit" in body and "93e" not in body
+    assert "bot (review bot) requested changes" in body and "Negative limits" in body and "93e" not in body
     verdicts = dict(conn.execute("SELECT comment_id, verdict FROM review_comments").fetchall())
     assert verdicts == {"r1": REVIEWER, "p2": AGENT}
 
@@ -772,9 +976,7 @@ def test_a_colleagues_approval_wakes_with_the_merge_rule_once_per_head(tmp_path:
         add_session(conn, "c1", "worker", branch="dev/x")
     store(conn, comment("r1", author="mira", body="", state="APPROVED", commit="a1"))
     assert len(wake(conn, 200_000)) == 1
-    assert (
-        "mira approved: apply the merge rule (bridge skill)" in conn.execute("SELECT body FROM messages").fetchone()[0]
-    )
+    assert "mira approved: apply the merge rule." in conn.execute("SELECT body FROM messages").fetchone()[0]
     store(conn, comment("r2", at=1001, author="mira", body="", state="APPROVED", commit="a1"))
     assert wake(conn, 200_001) == []
     store(conn, comment("r3", at=1002, author="mira", body="", state="APPROVED", commit="b2"))
@@ -833,7 +1035,7 @@ def test_a_long_batch_of_review_bot_findings_still_fits_one_message(tmp_path: Pa
     assert conn.execute("SELECT count(*) FROM review_comments WHERE told_at IS NULL").fetchone()[0] == 0
 
 
-def test_owner_account_is_owner_whatever_the_casing(tmp_path: Path) -> None:
+def test_owners_account_is_owners_whatever_the_casing(tmp_path: Path) -> None:
     conn = setup_pr(tmp_path)
     store(conn, comment("p1", author="ME", body="🤖 Claude: Fixed"))
     assert wake(conn) == []
@@ -862,7 +1064,7 @@ def test_a_wait_inside_a_script_for_bash_still_counts() -> None:
     assert classify(marks=[late]) == UNCLEAR
 
 
-def test_owner_review_with_no_text_is_owner_round_and_adds_nothing_to_the_message(tmp_path: Path) -> None:
+def test_owners_review_with_no_text_is_owners_round_and_adds_nothing_to_the_message(tmp_path: Path) -> None:
     conn = setup_pr(tmp_path, commits=(("a1", 900), ("b2", 1500)))
     with transaction(conn):
         add_session(conn, "c1", "worker", branch="dev/x")
@@ -875,10 +1077,10 @@ def test_owner_review_with_no_text_is_owner_round_and_adds_nothing_to_the_messag
     body = conn.execute("SELECT body FROM messages").fetchone()[0]
     assert "https://x/p1" in body and "https://x/r9" not in body
     verdicts = dict(conn.execute("SELECT comment_id, verdict FROM review_comments").fetchall())
-    assert verdicts == {"p1": OWNER, "r9": OWNER}
+    assert verdicts == {"p1": HIS, "r9": HIS}
     views: Any = map_db_to_reviews(conn, CONFIG, 2000)["prs"]
     view = views[0]
-    assert (view["owner_last_at"], view["commits_after_owner"], view["rounds"], view["state"]) == (1200, 1, 1, "fixed")
+    assert (view["his_last_at"], view["commits_after_his"], view["rounds"], view["state"]) == (1200, 1, 1, "fixed")
 
 
 def test_a_review_wrapping_an_agents_reply_is_the_agents_and_waits_for_its_comments(tmp_path: Path) -> None:
@@ -905,10 +1107,10 @@ def test_a_comment_stored_before_reviews_were_read_learns_its_review(tmp_path: P
         comment("r9", at=1200, body="", state="COMMENTED"),
     )
     wake(conn)
-    assert conn.execute("SELECT verdict FROM review_comments WHERE comment_id = 'r9'").fetchone()[0] == OWNER
+    assert conn.execute("SELECT verdict FROM review_comments WHERE comment_id = 'r9'").fetchone()[0] == HIS
 
 
-def test_comments_reread_after_the_marking_fix_become_owner_without_a_wake(tmp_path: Path) -> None:
+def test_comments_reread_after_the_marking_fix_become_owners_without_a_wake(tmp_path: Path) -> None:
     conn = setup_pr(tmp_path)
     with transaction(conn):
         add_session(conn, "c1", "worker", branch="dev/x")
@@ -917,7 +1119,7 @@ def test_comments_reread_after_the_marking_fix_become_owner_without_a_wake(tmp_p
         conn.execute("UPDATE review_comments SET verdict = NULL, reason = NULL, quiet = 1")
     assert wake(conn) == []
     row = conn.execute("SELECT verdict, told_at FROM review_comments").fetchone()
-    assert row["verdict"] == OWNER and row["told_at"] is not None
+    assert row["verdict"] == HIS and row["told_at"] is not None
     assert map_db_to_reviews(conn, CONFIG, 2000)["prs"][0]["state"] == "comments open"  # type: ignore[index]
 
 
@@ -934,9 +1136,9 @@ def test_comments_reread_after_the_fix_do_not_use_up_the_wake_cap(tmp_path: Path
 
 
 def test_since_the_prefix_rule_the_prefix_alone_decides_and_nothing_shows_as_unclear(tmp_path: Path) -> None:
-    later = PREFIX_RULE_AT + 60_000
+    later = PREFIX_FROM_MS + 60_000
     near = Mark(later - 1000, 'gh pr comment 7 -b "Please rename"')
-    assert classify(at=later, marks=[near], remote=True, parent="p1", parent_author="bot") == OWNER
+    assert classify(at=later, marks=[near], remote=True, parent="p1", parent_author="bot") == HIS
     assert classify("🤖 Claude: Please rename", at=later) == AGENT
     assert classify(marks=[Mark(1_000_000 - 30_000, 'gh pr comment 7 -b "x"')]) == UNCLEAR
     conn = setup_pr(tmp_path)
@@ -948,7 +1150,7 @@ def test_since_the_prefix_rule_the_prefix_alone_decides_and_nothing_shows_as_unc
     assert "unclear" not in (Path(__file__).parent.parent / "src/bridge/web/guild.html").read_text()
 
 
-def test_what_bridge_cannot_place_goes_to_the_owner_once_and_never_to_the_session(tmp_path: Path) -> None:
+def test_what_bridge_cannot_place_goes_to_the_owner_once_and_never_to_the_owner(tmp_path: Path) -> None:
     conn = setup_pr(tmp_path)
     with transaction(conn):
         add_session(conn, "c1", "worker", branch="dev/x")
@@ -974,7 +1176,7 @@ def test_comments_reread_and_still_unplaced_ask_nobody(tmp_path: Path) -> None:
     assert conn.execute("SELECT verdict FROM review_comments").fetchone()[0] == UNCLEAR
 
 
-def test_owner_open_thread_or_unanswered_comment_blocks_the_merge_whatever_the_approvals(tmp_path: Path) -> None:
+def test_owners_open_thread_or_unanswered_comment_blocks_the_merge_whatever_the_approvals(tmp_path: Path) -> None:
     pr = make_pr(approved_by=("bot",), open_threads=1, thread_flags="o")
     conn = setup_pr(tmp_path, **{"approved_by": ("bot",), "open_threads": 1, "thread_flags": "o"})
     with transaction(conn):
@@ -1023,14 +1225,14 @@ def review_thread(
     }
 
 
-def test_owner_unresolved_threads_are_counted_from_who_started_them() -> None:
+def test_owners_unresolved_threads_are_counted_from_who_started_them() -> None:
     threads = map_threads_to_review_threads(
         [review_thread("Me"), review_thread("me", resolved=True), review_thread("bot")], "me"
     )
-    assert (threads.open, len(threads.theirs)) == (2, 1)
+    assert (threads.open, len(threads.his)) == (2, 1)
 
 
-def test_owner_thread_carries_its_link_and_its_last_reply() -> None:
+def test_owners_thread_carries_its_link_and_its_last_reply() -> None:
     threads = map_threads_to_review_threads(
         [
             review_thread("me", url="https://github.com/Org/app/pull/7#r1", replies=[(9, "me", "🤖 Claude: Renamed.")]),
@@ -1038,9 +1240,9 @@ def test_owner_thread_carries_its_link_and_its_last_reply() -> None:
         ],
         "me",
     )
-    assert threads.theirs == (
-        OwnerThread("https://github.com/Org/app/pull/7#r1", 1, "p9", "me", "🤖 Claude: Renamed."),
-        OwnerThread("https://github.com/Org/app/pull/7#r2", 0, None, "me", "first words"),
+    assert threads.his == (
+        HisThread("https://github.com/Org/app/pull/7#r1", 1, "p9", "me", "🤖 Claude: Renamed."),
+        HisThread("https://github.com/Org/app/pull/7#r2", 0, None, "me", "first words"),
     )
 
 
@@ -1053,14 +1255,14 @@ def test_an_unsubmitted_review_stays_out_and_its_words_are_never_kept() -> None:
         "me",
     )
     assert threads.open == 1
-    assert threads.theirs == (OwnerThread("u", 2, None, "me", ""),)
+    assert threads.his == (HisThread("u", 2, None, "me", ""),)
 
 
-def thread(n: int, replies: int = 1, author: str = "me", body: str = "🤖 Claude: Done, renamed.") -> OwnerThread:
-    return OwnerThread(f"https://github.com/Org/app/pull/7#discussion_r{n}", replies, f"p{n}9", author, body)
+def thread(n: int, replies: int = 1, author: str = "me", body: str = "🤖 Claude: Done, renamed.") -> HisThread:
+    return HisThread(f"https://github.com/Org/app/pull/7#discussion_r{n}", replies, f"p{n}9", author, body)
 
 
-def resolve_view(conn: Any, *threads: OwnerThread, **changes: Any) -> Any:
+def resolve_view(conn: Any, *threads: HisThread, **changes: Any) -> Any:
     pr = make_pr(
         **{"approved_by": ("bot",), "open_threads": len(threads), "thread_flags": "o" * len(threads), **changes}
     )
@@ -1099,7 +1301,7 @@ def test_threads_not_read_since_they_changed_block_the_merge_and_offer_nothing_t
     assert view["resolve_threads"] == []  # type: ignore[index]
 
 
-def test_owner_answered_thread_on_an_approved_green_pr_is_owner_to_resolve(tmp_path: Path) -> None:
+def test_owners_answered_thread_on_an_approved_green_pr_is_owners_to_resolve(tmp_path: Path) -> None:
     conn = setup_pr(tmp_path)
     view = resolve_view(conn, thread(1))
     assert view["merge_block"] == "1 review thread is unresolved"
@@ -1121,7 +1323,7 @@ def test_a_thread_still_waiting_on_its_owner_keeps_the_ball_with_the_owner(tmp_p
     assert resolve_view(conn, thread(1))["resolve_threads"] == []
 
 
-def test_a_reply_under_owner_account_before_the_prefix_counts_by_its_verdict(tmp_path: Path) -> None:
+def test_a_reply_under_owners_account_before_the_prefix_counts_by_its_verdict(tmp_path: Path) -> None:
     conn = setup_pr(tmp_path)
     store(conn, comment("p19", at=1500, body="Renamed it."))
     with transaction(conn):
@@ -1149,14 +1351,14 @@ def test_threads_are_read_only_when_the_pr_or_its_open_count_changed(tmp_path: P
     poll(make_pr(open_threads=1, thread_flags="o"))
     poll(make_pr(open_threads=1, thread_flags="o"))
     assert reads == [7]
-    assert conn.execute("SELECT owner_open_threads FROM review_prs").fetchone()[0] == 1
+    assert conn.execute("SELECT his_open_threads FROM review_prs").fetchone()[0] == 1
     poll(make_pr(open_threads=1, thread_flags="o", updated_at="2026-11-02T11:00:00Z"))
     assert reads == [7, 7]
     poll(make_pr(open_threads=1, thread_flags="ro", updated_at="2026-11-02T11:00:00Z"))
     assert reads == [7, 7, 7]
     poll(make_pr(open_threads=0, thread_flags="rr", updated_at="2026-11-02T11:00:00Z"))
     assert reads == [7, 7, 7]
-    assert conn.execute("SELECT owner_open_threads, owner_threads FROM review_prs").fetchone()[:] == (0, "[]")
+    assert conn.execute("SELECT his_open_threads, his_threads FROM review_prs").fetchone()[:] == (0, "[]")
 
 
 def test_marks_outlive_an_outage_until_comments_are_classified(tmp_path: Path) -> None:
@@ -1281,9 +1483,9 @@ def add_work(conn: Any, lead: str, *refs: str) -> None:
 
 def test_the_assistant_owns_no_pr_however_often_it_mentions_one(tmp_path: Path) -> None:
     conn = setup_pr(tmp_path)
-    assistant = Config(assistant_handle="helm", review_org="Org", review_author="me")
+    assistant = Config(assistant_handle="zed", review_org="Org", review_author="me")
     with transaction(conn):
-        add_session(conn, "z", "helm", branch="dev/x")
+        add_session(conn, "z", "zed", branch="dev/x")
         conn.execute("INSERT INTO refs VALUES ('z', ?, 'prompt', 0, 9, 0, 1)", (REF,))
     assert find_owner(conn, assistant, REF, "Org/app", "dev/x") is None
 
@@ -1305,7 +1507,7 @@ def test_an_issue_in_the_title_or_branch_finds_the_lead_by_work_then_scope(tmp_p
     with transaction(conn):
         add_session(conn, "lead-c", "alex")
         add_lead(conn, "Alex", "s-alex")
-        conn.execute("UPDATE leads SET scope = 'Search: indexing, PROJ-33' WHERE name = 'alex'")
+        conn.execute("UPDATE leads SET scope = 'Readiness: load, PROJ-33' WHERE name = 'alex'")
     owner = find_owner(conn, CONFIG, REF, "Org/app", "dev/x")
     assert owner is not None and owner.handle == "alex"
     with transaction(conn):
@@ -1318,11 +1520,11 @@ def test_an_issue_in_the_title_or_branch_finds_the_lead_by_work_then_scope(tmp_p
 
 def test_an_assistant_enrolled_as_a_lead_still_owns_nothing(tmp_path: Path) -> None:
     conn = setup_pr(tmp_path)
-    assistant = Config(assistant_handle="helm", review_org="Org", review_author="me")
+    assistant = Config(assistant_handle="zed", review_org="Org", review_author="me")
     with transaction(conn):
-        add_session(conn, "z", "helm")
-        add_lead(conn, "Helm", "s-helm")
-        add_work(conn, "helm", REF)
+        add_session(conn, "z", "zed")
+        add_lead(conn, "Zed", "s-zed")
+        add_work(conn, "zed", REF)
     assert find_owner(conn, assistant, REF, "Org/app", "dev/x") is None
 
 
@@ -1355,16 +1557,18 @@ def ready_view(conn: Any, now: int = 200_000) -> tuple[dict[str, Any], list[Any]
     return prs[0], sent
 
 
-def test_an_approved_green_pr_is_ready_for_its_lead_without_owner_review_and_its_owner_is_told_once(
-    tmp_path: Path,
-) -> None:
+def test_an_approved_green_pr_waits_for_owners_review_then_is_ready_and_its_owner_is_told_once(tmp_path: Path) -> None:
     conn = setup_pr(tmp_path, approved_by=("mira",))
     with transaction(conn):
         add_session(conn, "c1", "worker", branch="dev/x")
     view, sent = ready_view(conn)
+    assert view["merge_path"] is None and view["group"] == "waiting" and sent == []
+    assert view["approvers"] == ["mira"] and view["approval_left"] == "your review" and view["can_publish"]
+    with transaction(conn):
+        conn.execute("UPDATE review_prs SET reviewed_at = 600, reviewed_by = 'theo'")
+    view, sent = ready_view(conn)
     assert view["merge_path"] == READY and view["group"] == READY and view["state"] == READY
-    assert view["approvers"] == ["mira"] and view["approval_left"] == "ready to merge (lead)"
-    assert view["can_publish"]
+    assert view["approval_left"] == "ready to merge (lead)"
     assert [r.handle for _, r in sent] == ["worker"]
     body = conn.execute("SELECT body FROM messages WHERE id = ?", (sent[0][0],)).fetchone()[0]
     assert "https://github.com/Org/app/pull/7" in body and "is ready to merge: approved" in body
@@ -1372,13 +1576,34 @@ def test_an_approved_green_pr_is_ready_for_its_lead_without_owner_review_and_its
     assert ready_view(conn)[1] == []
 
 
-def test_the_review_bots_approval_counts_and_owner_settled_comments_free_the_merge(tmp_path: Path) -> None:
-    conn = setup_pr(tmp_path, bot_approved=True)
+def test_an_install_names_its_merge_rule_in_the_ready_and_approval_texts(tmp_path: Path) -> None:
+    house = tmp_path / "house"
+    house.mkdir()
+    (house / "ready-to-merge.md").write_text("ready to merge (rule M)\n")
+    (house / "merge-rule.md").write_text("the merge rule (rule M)\n")
+    config = replace(CONFIG, overlay_dir=str(house))
+    conn = setup_pr(tmp_path, approved_by=("mira",))
+    with transaction(conn):
+        add_session(conn, "c1", "worker", branch="dev/x")
+        conn.execute("UPDATE review_prs SET reviewed_at = 600, reviewed_by = 'theo'")
+    store(conn, comment("r1", author="mira", body="", state="APPROVED", commit="a1"))
+    with transaction(conn):
+        classify_pending_comments(conn, config, 200_000)
+        take_comment_wakes(conn, config, 200_000)
+        store_merge_blocks(conn)
+        tell_ready_to_merge(conn, config, 200_000)
+    bodies = [str(r[0]) for r in conn.execute("SELECT body FROM messages ORDER BY id")]
+    assert any("mira approved: apply the merge rule (rule M)." in b for b in bodies)
+    assert any("is ready to merge (rule M): approved" in b for b in bodies)
+
+
+def test_the_review_bots_approval_counts_and_owners_settled_comments_free_the_merge(tmp_path: Path) -> None:
+    conn = setup_reviewed_pr(tmp_path, bot_approved=True)
     with transaction(conn):
         add_session(conn, "c1", "worker", branch="dev/x")
     store(conn, comment("p1", at=2000, body="Too complex, refactor"))
     view, sent = ready_view(conn)
-    assert view["merge_path"] is None and view["group"] == "waiting" and sent == []
+    assert view["merge_path"] is None and view["group"] == "published" and sent == []
     assert view["approvers"] == ["ReviewBot"] and view["approval_left"] == "your comments open"
     store(conn, comment("p2", at=2500, body="🤖 Claude: Refactored."))
     view, sent = ready_view(conn)
@@ -1407,13 +1632,13 @@ def test_the_review_bots_approval_counts_and_owner_settled_comments_free_the_mer
 def test_an_approved_pr_waits_for_green_ci_and_no_conflicts_and_no_ci_counts_as_green(
     tmp_path: Path, changes: dict[str, Any], left: str
 ) -> None:
-    conn = setup_pr(tmp_path, approved_by=("mira",), **changes)
+    conn = setup_reviewed_pr(tmp_path, approved_by=("mira",), **changes)
     view, _ = ready_view(conn)
     assert view["approval_left"] == left
     assert (view["merge_path"] == READY) == (left == "ready to merge (lead)")
 
 
-def test_owner_open_thread_keeps_an_approved_pr_from_merging(tmp_path: Path) -> None:
+def test_owners_open_thread_keeps_an_approved_pr_from_merging(tmp_path: Path) -> None:
     pr = make_pr(bot_approved=True, open_threads=1, thread_flags="o")
     conn = setup_pr(tmp_path, bot_approved=True, open_threads=1, thread_flags="o")
     store(conn, comment("p1", at=2000, body="Rename this"), comment("p2", at=2500, body="🤖 Claude: Renamed."))
@@ -1455,13 +1680,13 @@ def test_only_the_review_bots_latest_verdict_counts_as_its_approval() -> None:
 
 def test_docs_and_images_are_not_lines_of_code_so_a_docs_only_pr_gets_no_document() -> None:
     files = [
-        {"path": "docs/README.md", "additions": 400, "deletions": 50},
-        {"path": "docs/images/prs.PNG", "additions": 0, "deletions": 0},
+        {"path": "guild-docs/README.md", "additions": 400, "deletions": 50},
+        {"path": "guild-docs/images/prs.PNG", "additions": 0, "deletions": 0},
         {"path": "docs/diagram.svg", "additions": 120, "deletions": 0},
     ]
-    assert map_files_to_loc(520, 50, files, Config().review_loc_excluded) == 0
+    assert map_files_to_loc(520, 50, files, list_loc_excluded(CONFIG)) == 0
     code = [*files, {"path": "app/main.py", "additions": 7, "deletions": 3}]
-    assert map_files_to_loc(527, 53, code, Config().review_loc_excluded) == 10
+    assert map_files_to_loc(527, 53, code, list_loc_excluded(CONFIG)) == 10
 
 
 def test_a_line_count_made_under_an_older_rule_is_made_again_for_the_same_head(tmp_path: Path) -> None:
@@ -1470,3 +1695,246 @@ def test_a_line_count_made_under_an_older_rule_is_made_again_for_the_same_head(t
     with transaction(conn):
         conn.execute("UPDATE review_prs SET loc_rule = NULL")
     assert load_known_loc(conn) == {}
+
+
+def merge_ok_view(conn: Any) -> dict[str, Any]:
+    return cast(list[dict[str, Any]], map_db_to_reviews(conn, CONFIG, 600)["prs"])[0]
+
+
+@pytest.mark.parametrize(
+    ("changes", "offered"),
+    [
+        ({"bot_approved": True}, True),
+        ({"bot_approved": True, "checks": None}, True),
+        ({"bot_approved": True, "checks": "FAILURE"}, False),
+        ({"bot_approved": True, "checks": "PENDING"}, False),
+        ({"bot_approved": True, "draft": True}, False),
+        ({"bot_approved": True, "stack_parent": "pr:Org/app#6"}, False),
+        ({"approved_by": ("mira",)}, False),
+        ({}, False),
+    ],
+)
+def test_merge_ok_is_offered_only_for_a_review_bot_approved_green_pr(
+    tmp_path: Path, changes: dict[str, Any], offered: bool
+) -> None:
+    conn = setup_pr(tmp_path, **changes)
+    assert merge_ok_view(conn)["can_ok_merge"] is offered
+    if not offered:
+        with pytest.raises(MergeOkRefused), transaction(conn):
+            record_merge_ok(conn, CONFIG, REF, "a1", "theo", 700)
+
+
+def test_merge_ok_tells_the_owner_once_per_head_and_a_new_commit_voids_it(tmp_path: Path) -> None:
+    conn = setup_pr(tmp_path, bot_approved=True, merge_state="BLOCKED")
+    with transaction(conn):
+        add_session(conn, "c1", "worker", branch="dev/x")
+        message_id, recipient = record_merge_ok(conn, CONFIG, REF, "a1", "theo", 700)
+    assert recipient.handle == "worker"
+    body = conn.execute("SELECT body, from_conversation FROM messages WHERE id = ?", (message_id,)).fetchone()
+    assert "OKs merging https://github.com/Org/app/pull/7 (T) at a1" in body[0]
+    assert "gh pr merge https://github.com/Org/app/pull/7 --match-head-commit a1" in body[0]
+    assert "BLOCKED" in body[0] and body[1] == SYSTEM_CONVERSATION
+    view = merge_ok_view(conn)
+    assert view["merge_ok"] == {
+        "by": "theo", "at": 700, "sent_to": "worker", "no_owner": False, "head": "a1", "current": True,
+    }  # fmt: skip
+    with pytest.raises(MergeOkRefused, match="already sent"), transaction(conn):
+        record_merge_ok(conn, CONFIG, REF, "a1", "theo", 710)
+
+    with transaction(conn):
+        store_open_prs(conn, [make_pr(bot_approved=True, head_oid="b2", commits=(("a1", 1000), ("b2", 2000)))], 800)
+    view = merge_ok_view(conn)
+    assert view["can_ok_merge"] and view["merge_ok"]["current"] is False and view["head_oid"] == "b2"
+    with pytest.raises(MergeOkRefused, match="new commits"), transaction(conn):
+        record_merge_ok(conn, CONFIG, REF, "a1", "theo", 810)
+    with transaction(conn):
+        record_merge_ok(conn, CONFIG, REF, "b2", "theo", 820)
+    assert merge_ok_view(conn)["merge_ok"]["current"] is True
+    assert conn.execute("SELECT count(*) FROM review_merge_oks").fetchone()[0] == 2
+
+    with transaction(conn):
+        store_open_prs(conn, [make_pr(bot_approved=True)], 900)
+    restored = merge_ok_view(conn)
+    assert restored["merge_ok"]["current"] is True and restored["merge_ok"]["head"] == "a1"
+
+
+def test_merge_ok_with_no_owner_goes_to_the_assistant(tmp_path: Path) -> None:
+    conn = setup_pr(tmp_path, bot_approved=True)
+    assert merge_ok_view(conn)["merge_ok_to"] == CONFIG.assistant_handle
+    with pytest.raises(MergeOkRefused, match="cannot be reached"), transaction(conn):
+        record_merge_ok(conn, CONFIG, REF, "a1", "theo", 700)
+    with transaction(conn):
+        add_session(conn, "c-aide", CONFIG.assistant_handle)
+        message_id, recipient = record_merge_ok(conn, CONFIG, REF, "a1", "theo", 700)
+    assert recipient.handle == CONFIG.assistant_handle
+    body = conn.execute("SELECT body FROM messages WHERE id = ?", (message_id,)).fetchone()[0]
+    assert "No session owns it" in body and "--match-head-commit a1" in body
+    assert merge_ok_view(conn)["merge_ok"]["no_owner"] is True
+
+
+def setup_shared_issue_pr(tmp_path: Path) -> Any:
+    """The shape that once misrouted a PR: lead Charlie's work names the PR's issue, lead Alex's worker made the PR."""
+    conn = setup_pr(tmp_path, head="theo/proj-65-retry-budget", title="fix: stop a stuck job")
+    with transaction(conn):
+        add_session(conn, "charlie-c", "charlie", session="tab-charlie")
+        add_lead(conn, "Charlie", "s-charlie")
+        add_work(conn, "charlie", "issue:PROJ-65")
+        add_session(conn, "alex-c", "alex", session="tab-alex")
+        add_lead(conn, "Alex", "s-alex")
+        # A host worker's checkout is detached: its branch reads as a commit.
+        add_session(conn, "w-c", "worker", branch="0a1b2c3d4e5f", session="tab-worker", wrote=False)
+        conn.execute("INSERT INTO tab_parents (agterm_session, parent_session) VALUES ('tab-worker', 'tab-alex')")
+        conn.execute("INSERT INTO refs VALUES ('charlie-c', ?, 'prompt', 0, 9, 0, 1)", (REF,))
+    return conn
+
+
+def test_a_pr_whose_issue_another_lead_owns_goes_to_the_worker_that_pushed_it_then_to_its_lead(tmp_path: Path) -> None:
+    conn = setup_shared_issue_pr(tmp_path)
+    head = "theo/proj-65-retry-budget"
+    owner = find_owner(conn, CONFIG, REF, "Org/app", head)
+    assert owner is not None and owner.handle == "charlie", "no session owns it yet: the issue's lead"
+    with transaction(conn):
+        record_host_pushes(conn, CONFIG, "w-c", [("org/app", head)], 7)
+    owner = find_owner(conn, CONFIG, REF, "Org/app", head)
+    assert owner is not None and (owner.handle, owner.lead, owner.via) == ("worker", "Alex", "branch")
+    with transaction(conn):
+        conn.execute("UPDATE instances SET ended_at = 99 WHERE conversation_id = 'w-c'")
+        conn.execute("DELETE FROM tab_parents")
+        conn.execute(
+            "INSERT INTO closed_workers (conversation_id, tab_name, parent_handle, resume_command, closed_at,"
+            " parent_lead) VALUES ('w-c', 'worker', 'alex', 'claude --resume w-c', 99, 'alex')"
+        )
+    owner = find_owner(conn, CONFIG, REF, "Org/app", head)
+    assert owner is not None and owner.handle == "alex", "a closed worker's PR stays with the lead that ran it"
+
+
+def test_a_comment_on_a_pr_whose_issue_another_lead_owns_wakes_the_worker_that_pushed_it(tmp_path: Path) -> None:
+    conn = setup_shared_issue_pr(tmp_path)
+    with transaction(conn):
+        record_host_pushes(conn, CONFIG, "w-c", [("org/app", "theo/proj-65-retry-budget")], 7)
+    store(conn, comment())
+    assert [r.handle for _, r in wake(conn)] == ["worker"]
+
+
+def test_a_live_worker_on_the_branch_keeps_its_pr_and_names_its_lead(tmp_path: Path) -> None:
+    conn = setup_pr(tmp_path)
+    with transaction(conn):
+        add_session(conn, "w-c", "worker", branch="dev/x", session="tab-worker")
+        add_session(conn, "lead-c", "alex", session="tab-lead")
+        add_lead(conn, "Alex", "s-alex")
+        conn.execute("INSERT INTO tab_parents (agterm_session, parent_session) VALUES ('tab-worker', 'tab-lead')")
+    owner = find_owner(conn, CONFIG, REF, "Org/app", "dev/x")
+    assert owner is not None and (owner.handle, owner.lead, owner.via) == ("worker", "Alex", "branch")
+
+
+def test_the_latest_live_pusher_owns_a_pr_when_no_session_is_on_its_branch(tmp_path: Path) -> None:
+    conn = setup_pr(tmp_path)
+    with transaction(conn):
+        add_session(conn, "a", "first", wrote=False)
+        add_session(conn, "b", "second", wrote=False)
+        record_host_pushes(conn, CONFIG, "a", [("org/app", "dev/x")], 5)
+        record_host_pushes(conn, CONFIG, "b", [("org/app", "dev/x")], 9)
+    owner = find_owner(conn, CONFIG, REF, "Org/app", "dev/x")
+    assert owner is not None and owner.handle == "second"
+    with transaction(conn):
+        add_session(conn, "c", "on-branch", branch="dev/x", wrote=False)
+        record_host_pushes(conn, CONFIG, "c", [("org/app", "dev/x")], 1)
+    owner = find_owner(conn, CONFIG, REF, "Org/app", "dev/x")
+    assert owner is not None and owner.handle == "on-branch"
+
+
+def test_a_red_ci_signal_on_a_workers_pr_reaches_its_lead(tmp_path: Path) -> None:
+    conn = setup_shared_issue_pr(tmp_path)
+    signal: dict[str, object] = {
+        "key": f"{REF}:ci:a1", "kind": "ci", "text": "app#7 T", "url": "https://x/7", "surface": "s-worker",
+    }  # fmt: skip
+    with transaction(conn):
+        posted = post_signals_to_leads(conn, CONFIG, [signal], 1000)
+    assert [r.handle for r in posted] == ["alex"]
+    with transaction(conn):
+        assert post_signals_to_leads(conn, CONFIG, [signal], 2000) == []
+
+
+def test_a_stalled_reviewbot_reaches_the_prs_lead_and_the_assistant_once_each_off_the_board(tmp_path: Path) -> None:
+    conn = setup_shared_issue_pr(tmp_path)
+    with transaction(conn):
+        add_session(conn, "aide-c", CONFIG.assistant_handle)
+    signal: dict[str, object] = {
+        "key": f"{REF}:stall:a1", "kind": "stall", "text": "ReviewBot stalled on app#7: no verdict",
+        "url": "https://x/7", "surface": "s-worker",
+    }  # fmt: skip
+    with transaction(conn):
+        first = post_signals_to_leads(conn, CONFIG, [signal], 1000)
+    with transaction(conn):
+        again = post_signals_to_leads(conn, CONFIG, [signal], 2000)
+    rows = conn.execute(
+        "SELECT r.handle, m.body, m.post_type, m.board FROM messages m JOIN message_recipients r ON r.message_id = m.id"
+    ).fetchall()
+    assert sorted(r.handle for r in first) == ["aide", "alex"] and again == []
+    assert sorted(tuple(r) for r in rows) == [
+        ("aide", "ReviewBot stalled on app#7: no verdict", "report", 0),
+        ("alex", "ReviewBot stalled on app#7: no verdict", "report", 0),
+    ]
+
+
+def test_a_stall_with_no_lead_still_reaches_the_assistant(tmp_path: Path) -> None:
+    conn = setup_pr(tmp_path)
+    with transaction(conn):
+        add_session(conn, "aide-c", CONFIG.assistant_handle)
+    signal: dict[str, object] = {"key": "k:stall:a1", "kind": "stall", "text": "ReviewBot stalled", "surface": None}
+    with transaction(conn):
+        assert [r.handle for r in post_signals_to_leads(conn, CONFIG, [signal], 1000)] == ["aide"]
+
+
+def test_an_ended_reader_on_the_branch_yields_to_the_issues_lead_but_beats_a_live_mentioner(tmp_path: Path) -> None:
+    conn = setup_pr(tmp_path, head="theo/proj-7-fix")
+    with transaction(conn):
+        add_session(conn, "boris-c", "boris", session="tab-boris")
+        add_lead(conn, "Boris", "s-boris")
+        add_session(conn, "r-c", "reviewer", branch="theo/proj-7-fix", ended=99, session="tab-r", wrote=False)
+        conn.execute("INSERT INTO tab_parents (agterm_session, parent_session) VALUES ('tab-r', 'tab-boris')")
+        conn.execute("INSERT INTO refs VALUES ('r-c', ?, 'prompt', 0, 5, 0, 1)", (REF,))
+        add_session(conn, "asker-c", "charlie")
+        conn.execute("INSERT INTO refs VALUES ('asker-c', ?, 'prompt', 0, 9, 0, 1)", (REF,))
+    owner = find_owner(conn, CONFIG, REF, "Org/app", "theo/proj-7-fix")
+    assert owner is not None and owner.handle == "boris"
+    with transaction(conn):
+        add_session(conn, "alex-c", "alex")
+        add_lead(conn, "Alex", "s-alex")
+        add_work(conn, "alex", "issue:PROJ-7")
+    owner = find_owner(conn, CONFIG, REF, "Org/app", "theo/proj-7-fix")
+    assert owner is not None and owner.handle == "alex"
+
+
+def test_a_host_push_to_another_repo_does_not_make_its_branch_ours(tmp_path: Path) -> None:
+    conn = setup_pr(tmp_path)
+    with transaction(conn):
+        add_session(conn, "w", "worker", wrote=False)
+        record_host_pushes(conn, CONFIG, "w", [("org/other", "dev/x"), ("ORG/APP", "dev/y")], 5)
+    assert [r[0] for r in conn.execute("SELECT branch FROM review_branch_writes")] == ["dev/y"]
+    assert find_owner(conn, CONFIG, REF, "Org/app", "dev/x") is None
+
+
+def test_a_leads_declared_prs_are_signal_candidates_after_its_worker_ended(tmp_path: Path) -> None:
+    conn = setup_pr(tmp_path)
+    with transaction(conn):
+        add_session(conn, "lead-c", "alex")
+        add_lead(conn, "Alex", "s-alex")
+        add_work(conn, "alex", REF, "issue:PROJ-1", "pr:Org/app#9")
+        add_lead(conn, "Boris", "s-boris")
+        add_work(conn, "boris", "pr:Org/app#3")
+        conn.execute("UPDATE lead_work SET done_at = 1 WHERE lead = 'boris'")
+    assert list_lead_work_prs(conn) == ["pr:Org/app#7", "pr:Org/app#9"]
+
+
+def test_the_poll_reads_whether_an_enabling_pr_lacks_how_this_will_be_used() -> None:
+    node: Any = {
+        "number": 7, "title": "Opt-in setting for export", "url": "u", "isDraft": False, "updatedAt": "U",
+        "headRefName": "h", "headRefOid": "b2", "baseRefName": "main", "additions": 5, "deletions": 1,
+        "repository": {"nameWithOwner": "Org/app"}, "baseRef": None, "commits": {"nodes": []},
+        "files": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        "reviewRequests": {"nodes": []}, "reviews": {"nodes": []}, "latestReviews": {"nodes": []},
+        "body": "Adds the export.",
+    }  # fmt: skip
+    assert map_node_to_open_pr(node, CONFIG).usage_missing == "Opt-in setting"
+    assert map_node_to_open_pr({**node, "body": "## How this will be used\nPlan."}, CONFIG).usage_missing is None

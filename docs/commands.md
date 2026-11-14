@@ -82,7 +82,7 @@ options:
 </details>
 
 <details>
-<summary><b>Messages between sessions</b>: <code>send</code>, <code>reply</code>, <code>ack</code>, <code>done</code>, <code>decline</code>, <code>cancel</code>, <code>inbox</code>, <code>show</code></summary>
+<summary><b>Messages between sessions</b>: <code>send</code>, <code>reply</code>, <code>ack</code>, <code>done</code>, <code>decline</code>, <code>inbox</code>, <code>show</code></summary>
 
 ### bridge send
 
@@ -159,20 +159,6 @@ options:
   -h, --help  show this help message and exit
 ```
 
-### bridge cancel
-
-withdraw a message you sent
-
-```text
-usage: bridge cancel [-h] id
-
-positional arguments:
-  id
-
-options:
-  -h, --help  show this help message and exit
-```
-
 ### bridge inbox
 
 messages for this session
@@ -202,7 +188,7 @@ options:
 </details>
 
 <details>
-<summary><b>Your feed and the team board</b>: <code>post</code>, <code>tell-user</code>, <code>board</code>, <code>settle-feed</code></summary>
+<summary><b>Your feed and the team board</b>: <code>post</code>, <code>tell-user</code>, <code>board</code></summary>
 
 ### bridge post
 
@@ -221,8 +207,8 @@ options:
   --body BODY           details; '-' reads stdin
   --link LINK           label=https://… (repeatable)
   --option OPTION       an answer button (repeatable; blocked/decision)
-  --urgent              blocked/decision only, when prod or a customer is hurting, money is
-                        leaking, or a deadline is today
+  --urgent              blocked/decision only, when prod or users are hurting, money is leaking,
+                        or a deadline is today
 ```
 
 ### bridge tell-user
@@ -260,18 +246,6 @@ options:
                         what kind of post this is
   --thread THREAD       an issue or PR id; posts with the same id form a thread
   --link LINK           the PR, issue or doc this post points to
-```
-
-### bridge settle-feed
-
-resolve open blocked/decision posts whose one PR has ended, as serve does
-
-```text
-usage: bridge settle-feed [-h] [--dry-run]
-
-options:
-  -h, --help  show this help message and exit
-  --dry-run   list what would resolve; the database is not written
 ```
 
 </details>
@@ -359,7 +333,150 @@ options:
 </details>
 
 <details>
-<summary><b>Dashboard</b>: <code>serve</code>, <code>open</code>, <code>install-service</code>, <code>uninstall-service</code>, <code>restart-service</code></summary>
+<summary><b>Pins and pages</b>: <code>pin</code>, <code>unpin</code>, <code>pins</code>, <code>page</code>, <code>pages</code></summary>
+
+### bridge pin
+
+pin something the owner needs again to the Pinned page (/pinned): a command, a link or a note; never a secret, only where it lives
+
+```text
+usage: bridge pin [-h] (--cmd CMD | --link LINK | --note NOTE) [--source SOURCE] title
+
+positional arguments:
+  title
+
+options:
+  -h, --help       show this help message and exit
+  --cmd CMD        a command; the page gives it a Copy button
+  --link LINK      an http(s) URL
+  --note NOTE      e.g. where a credential lives: "1Password item 'Prod DB admin'"
+  --source SOURCE  which lead or ask it came from, e.g. alex or 'ask #64'
+```
+
+### bridge unpin
+
+take a pin off the Pinned page; it is kept, hidden
+
+```text
+usage: bridge unpin [-h] id
+
+positional arguments:
+  id
+
+options:
+  -h, --help  show this help message and exit
+```
+
+### bridge pins
+
+the pins on the Pinned page, newest first
+
+```text
+usage: bridge pins [-h] [--all] [--json]
+
+options:
+  -h, --help  show this help message and exit
+  --all       unpinned ones too
+  --json
+```
+
+### bridge page
+
+register a page published as a claude.ai artifact under a stable bridge link, /p/<slug>
+
+```text
+usage: bridge page [-h] {add,set-url,share,archive} ...
+
+positional arguments:
+  {add,set-url,share,archive}
+    add                 register a page by its lasting source folder (never /tmp)
+    set-url             the page's claude.ai artifact link, after a (re)publish
+    share               mark the page as shared with colleagues; --off to unmark
+    archive             retire the page: /p/<slug> stops redirecting and the plan skips it
+
+options:
+  -h, --help            show this help message and exit
+```
+
+### bridge page add
+
+register a page by its lasting source folder (never /tmp)
+
+```text
+usage: bridge page add [-h] --title TITLE --source SOURCE [--url URL] [--shared] slug
+
+positional arguments:
+  slug             lowercase letters, digits and dashes, up to 60
+
+options:
+  -h, --help       show this help message and exit
+  --title TITLE
+  --source SOURCE  the folder that holds index.html or a single .html file
+  --url URL        its claude.ai artifact link, when already published
+  --shared         colleagues have the claude.ai link
+```
+
+### bridge page set-url
+
+the page's claude.ai artifact link, after a (re)publish
+
+```text
+usage: bridge page set-url [-h] slug url
+
+positional arguments:
+  slug
+  url
+
+options:
+  -h, --help  show this help message and exit
+```
+
+### bridge page share
+
+mark the page as shared with colleagues; --off to unmark
+
+```text
+usage: bridge page share [-h] [--off] slug
+
+positional arguments:
+  slug
+
+options:
+  -h, --help  show this help message and exit
+  --off
+```
+
+### bridge page archive
+
+retire the page: /p/<slug> stops redirecting and the plan skips it
+
+```text
+usage: bridge page archive [-h] slug
+
+positional arguments:
+  slug
+
+options:
+  -h, --help  show this help message and exit
+```
+
+### bridge pages
+
+the registered pages; --republish-plan after an Anthropic account switch
+
+```text
+usage: bridge pages [-h] [--republish-plan]
+
+options:
+  -h, --help        show this help message and exit
+  --republish-plan  one line per live page, tab-separated: slug, the HTML file to publish, current
+                    url or '-'
+```
+
+</details>
+
+<details>
+<summary><b>Dashboard</b>: <code>serve</code>, <code>install-service</code>, <code>uninstall-service</code>, <code>restart-service</code></summary>
 
 ### bridge serve
 
@@ -371,20 +488,6 @@ usage: bridge serve [-h] [--port PORT]
 options:
   -h, --help   show this help message and exit
   --port PORT
-```
-
-### bridge open
-
-open the dashboard as an agterm overlay (or in the browser)
-
-```text
-usage: bridge open [-h] [--port PORT] [--target TARGET] [--browser]
-
-options:
-  -h, --help       show this help message and exit
-  --port PORT
-  --target TARGET  agterm session id to overlay (default: this tab)
-  --browser
 ```
 
 ### bridge install-service
@@ -424,7 +527,7 @@ options:
 </details>
 
 <details>
-<summary><b>Setup</b>: <code>install-hooks</code>, <code>uninstall-hooks</code>, <code>hook-stats</code></summary>
+<summary><b>Setup and deploys</b>: <code>install-hooks</code>, <code>uninstall-hooks</code>, <code>deploy-check</code></summary>
 
 ### bridge install-hooks
 
@@ -450,44 +553,32 @@ options:
   --settings SETTINGS
 ```
 
-### bridge hook-stats
+### bridge deploy-check
 
-hook latency percentiles
+type a line and its Enter into a throwaway tab, as bridge types into leads' tabs, and wake an idle throwaway Claude through the rewake waiter; run before and after a deploy, exit 1 if either does not work
 
 ```text
-usage: bridge hook-stats [-h] [--last LAST]
+usage: bridge deploy-check [-h]
 
 options:
-  -h, --help   show this help message and exit
-  --last LAST
+  -h, --help  show this help message and exit
 ```
 
 </details>
 
 <details>
-<summary><b>Outside services</b>: <code>enrich</code>, <code>remote-sync</code></summary>
+<summary><b>Outside services</b>: <code>issue-sync</code></summary>
 
-### bridge enrich
+### bridge issue-sync
 
-refresh GitHub PR and tracker issue state for live sessions
+move Linear issues forward to match their PRs and live work
 
 ```text
-usage: bridge enrich [-h] [--force]
+usage: bridge issue-sync [-h] [--dry-run]
 
 options:
   -h, --help  show this help message and exit
-  --force     ignore freshness and refetch everything
-```
-
-### bridge remote-sync
-
-collect sessions from configured remote hosts now
-
-```text
-usage: bridge remote-sync [-h]
-
-options:
-  -h, --help  show this help message and exit
+  --dry-run   print the moves without making them
 ```
 
 </details>
@@ -515,15 +606,20 @@ options:
 enroll, sync or retire a team lead
 
 ```text
-usage: guild lead [-h] {add,label,sync,retire,wake} ...
+usage: guild lead [-h] {add,label,sync,retire,domains,park,wake,model} ...
 
 positional arguments:
-  {add,label,sync,retire,wake}
+  {add,label,sync,retire,domains,park,wake,model}
     add                 make a tab a team lead: name, tint, a place in the TEAM workspace
     label               change a lead's project label and rename its tab
     sync                apply a lead's tab name, tint and place in TEAM again
     retire              undo enrollment; the tab goes back, the name is never reused
+    domains             the projects a lead takes new work from: priority project names or Linear
+                        project refs
+    park                no 'has room' notices for a lead left idle on purpose, until a date
     wake                type a first prompt into a lead's idle tab, so its role arrives
+    model               type /model <model> into lead tabs once each is idle with an empty box;
+                        locked tabs are skipped
 
 options:
   -h, --help            show this help message and exit
@@ -545,9 +641,9 @@ options:
   -h, --help     show this help message and exit
   --tab TAB      handle of the tab that becomes the lead
   --scope SCOPE
-  --ref REF      tracker project or issue; repeat
+  --ref REF      Linear project or issue; repeat
   --label LABEL  short project label; the tab is named '<Name> · <label>'
-  --alias ALIAS  spelling for dictation, e.g. Arlow
+  --alias ALIAS  spelling for dictation, e.g. Sami
   --tint TINT
 ```
 
@@ -595,6 +691,39 @@ options:
   --force     retire even if the tab could not be restored
 ```
 
+### guild lead domains
+
+the projects a lead takes new work from: priority project names or Linear project refs
+
+```text
+usage: guild lead domains [-h] [--clear] name [domains ...]
+
+positional arguments:
+  name
+  domains     none shows them; given ones replace them (the assistant or the lead)
+
+options:
+  -h, --help  show this help message and exit
+  --clear     remove every domain
+```
+
+### guild lead park
+
+no 'has room' notices for a lead left idle on purpose, until a date
+
+```text
+usage: guild lead park [-h] (--until YYYY-MM-DD[THH:MM] | --clear) name
+
+positional arguments:
+  name
+
+options:
+  -h, --help            show this help message and exit
+  --until YYYY-MM-DD[THH:MM]
+                        local time
+  --clear               notices again
+```
+
 ### guild lead wake
 
 type a first prompt into a lead's idle tab, so its role arrives
@@ -609,6 +738,22 @@ options:
   -h, --help  show this help message and exit
 ```
 
+### guild lead model
+
+type /model <model> into lead tabs once each is idle with an empty box; locked tabs are skipped
+
+```text
+usage: guild lead model [-h] [--all] model [names ...]
+
+positional arguments:
+  model       a model id or alias, e.g. claude-opus-5-5
+  names       lead names or the assistant's handle
+
+options:
+  -h, --help  show this help message and exit
+  --all       every active lead and the assistant
+```
+
 </details>
 
 <details>
@@ -616,10 +761,10 @@ options:
 
 ### guild worker
 
-start a task in its own tab nested under yours, and check that it started; `guild worker close <tab>` closes one, `guild worker closed` lists them
+start a task in its own tab nested under yours, and check that it started; `guild worker close <tab>` closes one, `guild worker closed` lists them, `guild worker reopen <id>` resumes one
 
 ```text
-usage: guild worker [-h] --prompt PROMPT [--cwd CWD] name
+usage: guild worker [-h] --prompt PROMPT [--cwd CWD] [--local] name
 
 positional arguments:
   name             the task, in English; the tab's name
@@ -628,6 +773,7 @@ options:
   -h, --help       show this help message and exit
   --prompt PROMPT  the brief; - reads stdin
   --cwd CWD        default: this directory
+  --local          run Claude on this Mac even when a worker host is configured
 ```
 
 ### guild worker close
@@ -647,7 +793,7 @@ options:
 
 ### guild worker closed
 
-closed workers, newest first, with the command that resumes each
+closed workers, newest first, with the command that reopens each
 
 ```text
 usage: guild worker closed [-h] [--limit LIMIT]
@@ -657,10 +803,38 @@ options:
   --limit LIMIT
 ```
 
+### guild worker reopen
+
+resume a closed worker in a tab nested under yours (its lead or the assistant)
+
+```text
+usage: guild worker reopen [-h] worker
+
+positional arguments:
+  worker      its id from guild worker closed, or its tab name
+
+options:
+  -h, --help  show this help message and exit
+```
+
+### guild worker attach
+
+a host worker whose tab was closed: open it again under yours
+
+```text
+usage: guild worker attach [-h] [worker]
+
+positional arguments:
+  worker      its g-... name; none lists host workers without a tab
+
+options:
+  -h, --help  show this help message and exit
+```
+
 </details>
 
 <details>
-<summary><b>What team leads show and keep</b>: <code>work</code>, <code>notes</code>, <code>handover</code>, <code>ack</code>, <code>ack-cost</code></summary>
+<summary><b>What team leads show and keep</b>: <code>work</code>, <code>notes</code>, <code>handover</code>, <code>ack</code>, <code>day</code>, <code>capacity</code></summary>
 
 ### guild work
 
@@ -688,7 +862,7 @@ usage: guild work set [-h] [--lead LEAD] name [refs ...]
 
 positional arguments:
   name         a few plain words, e.g. 'Nightly export worker'
-  refs         PROJ-12, acme/web#34, #34 (your repo), or a URL
+  refs         PROJ-34, Acme-Org/monorepo#45, #45 (your repo), or a URL
 
 options:
   -h, --help   show this help message and exit
@@ -767,17 +941,93 @@ options:
   -h, --help  show this help message and exit
 ```
 
-### guild ack-cost
+### guild day
 
-what board posts reaching every lead cost; tokens are an estimate
+the owner is on again; how loaded each lead is and its next work
 
 ```text
-usage: guild ack-cost [-h] [--hours HOURS] [--json]
+usage: guild day [-h]
 
 options:
-  -h, --help     show this help message and exit
-  --hours HOURS
-  --json
+  -h, --help  show this help message and exit
+```
+
+### guild capacity
+
+a dry run of the capacity signal: who has room for planned work now, why, what to suggest
+
+```text
+usage: guild capacity [-h]
+
+options:
+  -h, --help  show this help message and exit
+```
+
+</details>
+
+<details>
+<summary><b>Comments on PRs and issues</b>: <code>comment</code></summary>
+
+### guild comment
+
+your call on a colleague's comment on our PR; the page shows it
+
+```text
+usage: guild comment [-h] {small,draft,list} ...
+
+positional arguments:
+  {small,draft,list}
+    small             a small one (typo, rename, factual question) you handled
+    draft             a substantive one: your draft reply and plan go to the owner, who chooses;
+                      bridge posts after
+    list              colleague comments still waiting on you or on the owner
+
+options:
+  -h, --help          show this help message and exit
+```
+
+### guild comment small
+
+a small one (typo, rename, factual question) you handled
+
+```text
+usage: guild comment small [-h] comment did
+
+positional arguments:
+  comment     the comment's link or id
+  did         what you did
+
+options:
+  -h, --help  show this help message and exit
+```
+
+### guild comment draft
+
+a substantive one: your draft reply and plan go to the owner, who chooses; bridge posts after
+
+```text
+usage: guild comment draft [-h] --reply-file REPLY_FILE --plan PLAN comment
+
+positional arguments:
+  comment               the comment's link or id
+
+options:
+  -h, --help            show this help message and exit
+  --reply-file REPLY_FILE
+                        the draft reply, as it would go on GitHub
+  --plan PLAN           what you would do about it
+```
+
+### guild comment list
+
+colleague comments still waiting on you or on the owner
+
+```text
+usage: guild comment list [-h] [--all]
+
+options:
+  -h, --help  show this help message and exit
+  --all       every lead's, not only yours
 ```
 
 </details>
@@ -804,7 +1054,7 @@ positional arguments:
     done                claim it done; another session verifies
     verify              done_claimed → verified, with evidence of what the owner would see
     close               verified → closed (the assistant only, relaying the owner)
-    reopen              back to open: the result is not what they asked for
+    reopen              back to open: the result is not what the owner asked for
 
 options:
   -h, --help            show this help message and exit
@@ -822,7 +1072,7 @@ positional arguments:
 
 options:
   -h, --help     show this help message and exit
-  --words WORDS  their words verbatim; default: stdin
+  --words WORDS  the owner's words verbatim; default: stdin
   --from N       quote message N's body as the words
   --ref REF      a PR, issue or page URL; repeat
 ```
@@ -953,7 +1203,7 @@ options:
 
 ### guild ask reopen
 
-back to open: the result is not what they asked for
+back to open: the result is not what the owner asked for
 
 ```text
 usage: guild ask reopen [-h] --why WHY id
@@ -1049,14 +1299,21 @@ options:
 the PR review queue on the page
 
 ```text
-usage: guild review [-h] {list,sentence,doc,published,repost} ...
+usage: guild review [-h] {list,sentence,doc,published,ready,hold,unhold,waive,unwaive,repost} ...
 
 positional arguments:
-  {list,sentence,doc,published,repost}
+  {list,sentence,doc,published,ready,hold,unhold,waive,unwaive,repost}
     list                what the queue shows
-    sentence            the short description of what a PR does, for its review post
+    sentence            the one sentence of project context for a PR's Slack post
     doc                 register a large PR's HTML document; the page serves this copy
-    published           record a post made by hand, so it is never posted again
+    published           record a Slack post made by hand, so it is never posted again
+    ready               retired: mark the draft ready on GitHub with gh pr ready instead
+    hold                keep a PR for the owner's own review, never ready to merge (its lead or
+                        the assistant)
+    unhold              lift a hold before the review ends it (its lead or the assistant)
+    waive               merge without a GitHub approval because the owner said so in an answered
+                        decision (its lead or the assistant)
+    unwaive             take the waiver back: the PR needs a GitHub approval again
     repost              send again a post whose sender stopped (look in the channel first) or that
                         a dry run only logged
 
@@ -1077,7 +1334,7 @@ options:
 
 ### guild review sentence
 
-the short description of what a PR does, for its review post
+the one sentence of project context for a PR's Slack post
 
 ```text
 usage: guild review sentence [-h] pr text
@@ -1107,7 +1364,7 @@ options:
 
 ### guild review published
 
-record a post made by hand, so it is never posted again
+record a Slack post made by hand, so it is never posted again
 
 ```text
 usage: guild review published [-h] pr link
@@ -1115,6 +1372,64 @@ usage: guild review published [-h] pr link
 positional arguments:
   pr
   link
+
+options:
+  -h, --help  show this help message and exit
+```
+
+### guild review hold
+
+keep a PR for the owner's own review, never ready to merge (its lead or the assistant)
+
+```text
+usage: guild review hold [-h] pr why
+
+positional arguments:
+  pr
+  why
+
+options:
+  -h, --help  show this help message and exit
+```
+
+### guild review unhold
+
+lift a hold before the review ends it (its lead or the assistant)
+
+```text
+usage: guild review unhold [-h] pr
+
+positional arguments:
+  pr
+
+options:
+  -h, --help  show this help message and exit
+```
+
+### guild review waive
+
+merge without a GitHub approval because the owner said so in an answered decision (its lead or the assistant)
+
+```text
+usage: guild review waive [-h] --decision DECISION pr
+
+positional arguments:
+  pr
+
+options:
+  -h, --help           show this help message and exit
+  --decision DECISION  the answered decision or blocked post on the page
+```
+
+### guild review unwaive
+
+take the waiver back: the PR needs a GitHub approval again
+
+```text
+usage: guild review unwaive [-h] pr
+
+positional arguments:
+  pr
 
 options:
   -h, --help  show this help message and exit

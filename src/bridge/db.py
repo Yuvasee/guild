@@ -5,7 +5,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 
-from bridge.errlog import log_error
+from bridge.errlog import log_slow
 
 MIGRATIONS: tuple[str, ...] = (
     """
@@ -450,8 +450,25 @@ MIGRATIONS: tuple[str, ...] = (
         set_by TEXT NOT NULL
     );
     """,
-    # Unused steps stay as no-ops, so every later step keeps its number.
-    "SELECT 1;",
+    """
+    CREATE TABLE night_runs (
+        id TEXT PRIMARY KEY,
+        lead TEXT NOT NULL,
+        issue TEXT NOT NULL,
+        branch TEXT NOT NULL,
+        session TEXT NOT NULL,
+        contract TEXT NOT NULL,
+        host TEXT NOT NULL,
+        state TEXT NOT NULL,
+        note TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        lead_message_id INTEGER,
+        board_message_id INTEGER
+    );
+    CREATE UNIQUE INDEX night_runs_open_issue ON night_runs (issue) WHERE state NOT IN ('failed', 'stopped');
+    CREATE UNIQUE INDEX night_runs_open_branch ON night_runs (branch) WHERE state NOT IN ('failed', 'stopped');
+    """,
     """
     ALTER TABLE review_prs ADD COLUMN others_reviewed INTEGER;
     """,
@@ -461,7 +478,9 @@ MIGRATIONS: tuple[str, ...] = (
         conversation_id TEXT NOT NULL
     );
     """,
-    "SELECT 1;",
+    """
+    ALTER TABLE night_runs ADD COLUMN repo TEXT;
+    """,
     """
     ALTER TABLE conversations ADD COLUMN compacted_at INTEGER;
     """,
@@ -537,7 +556,7 @@ MIGRATIONS: tuple[str, ...] = (
     ALTER TABLE slack_read ADD COLUMN failures INTEGER;
     """,
     """
-    ALTER TABLE review_prs ADD COLUMN owner_open_threads INTEGER;
+    ALTER TABLE review_prs ADD COLUMN his_open_threads INTEGER;
     ALTER TABLE review_prs ADD COLUMN merge_block TEXT;
     ALTER TABLE message_recipients ADD COLUMN draft_told_at INTEGER;
     """,
@@ -554,7 +573,7 @@ MIGRATIONS: tuple[str, ...] = (
     );
     """,
     """
-    ALTER TABLE review_prs ADD COLUMN owner_threads TEXT;
+    ALTER TABLE review_prs ADD COLUMN his_threads TEXT;
     ALTER TABLE review_prs ADD COLUMN threads_key TEXT;
     ALTER TABLE review_prs ADD COLUMN threads_read_for TEXT;
     """,
@@ -644,11 +663,168 @@ MIGRATIONS: tuple[str, ...] = (
     ALTER TABLE user_items ADD COLUMN resolved_why TEXT;
     ALTER TABLE user_items ADD COLUMN auto_resolve_off INTEGER NOT NULL DEFAULT 0;
     """,
+    """
+    ALTER TABLE review_prs ADD COLUMN held_at INTEGER;
+    ALTER TABLE review_prs ADD COLUMN held_by TEXT;
+    ALTER TABLE review_prs ADD COLUMN held_why TEXT;
+    """,
+    """
+    ALTER TABLE leads ADD COLUMN domains TEXT NOT NULL DEFAULT '[]';
+    CREATE TABLE owner_presence (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        owner_off_at INTEGER,
+        owner_off_by TEXT,
+        owner_on_at INTEGER,
+        owner_on_by TEXT
+    );
+    CREATE TABLE capacity_signals (
+        lead TEXT PRIMARY KEY,
+        reason_key TEXT NOT NULL,
+        sent_at INTEGER NOT NULL,
+        message_id INTEGER
+    );
+    """,
+    """
+    ALTER TABLE review_prs ADD COLUMN backport_key TEXT;
+    ALTER TABLE review_prs ADD COLUMN backport_waived INTEGER;
+    ALTER TABLE review_prs ADD COLUMN backport_reason TEXT;
+    ALTER TABLE review_prs ADD COLUMN backport_at INTEGER;
+    """,
+    """
+    ALTER TABLE review_prs ADD COLUMN approval_waived_at INTEGER;
+    ALTER TABLE review_prs ADD COLUMN approval_waived_by TEXT;
+    ALTER TABLE review_prs ADD COLUMN approval_waived_decision INTEGER;
+    """,
+    """
+    CREATE TABLE pins (
+        id INTEGER PRIMARY KEY,
+        title TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('cmd', 'link', 'note')),
+        body TEXT NOT NULL,
+        source TEXT,
+        pinned_by TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        archived_at INTEGER,
+        archived_by TEXT
+    );
+    CREATE INDEX pins_live ON pins (created_at) WHERE archived_at IS NULL;
+    """,
+    """
+    CREATE TABLE pages (
+        slug TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        source_dir TEXT NOT NULL,
+        artifact_url TEXT,
+        shared INTEGER NOT NULL DEFAULT 0,
+        created_by TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        archived_at INTEGER
+    );
+    """,
+    """
+    CREATE TABLE stray_workers (
+        agterm_session TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL,
+        parent_session TEXT NOT NULL,
+        notified_at INTEGER
+    );
+    CREATE TABLE closed_workers_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        conversation_id TEXT NOT NULL,
+        tab_name TEXT NOT NULL,
+        parent_handle TEXT NOT NULL,
+        resume_command TEXT NOT NULL,
+        closed_at INTEGER NOT NULL,
+        parent_session TEXT,
+        parent_lead TEXT,
+        reopened_at INTEGER,
+        reopened_tab TEXT
+    );
+    INSERT INTO closed_workers_new (id, conversation_id, tab_name, parent_handle, resume_command, closed_at)
+    SELECT id, conversation_id, tab_name, parent_handle, resume_command, closed_at FROM closed_workers;
+    DROP TABLE closed_workers;
+    ALTER TABLE closed_workers_new RENAME TO closed_workers;
+    """,
+    """
+    CREATE TABLE review_merge_oks (
+        ref TEXT NOT NULL,
+        head_oid TEXT NOT NULL,
+        given_by TEXT NOT NULL,
+        given_at INTEGER NOT NULL,
+        sent_to TEXT NOT NULL,
+        no_owner INTEGER NOT NULL,
+        message_id INTEGER NOT NULL,
+        PRIMARY KEY (ref, head_oid)
+    );
+    """,
+    """
+    ALTER TABLE asks ADD COLUMN nag_count INTEGER NOT NULL DEFAULT 0;
+    UPDATE asks SET nag_count = 1 WHERE last_nag_at IS NOT NULL;
+    """,
+    # The retry pick runs inside serve's maintenance write lock every tick; without this it reads each tab's mail.
+    """
+    CREATE INDEX message_recipients_failed ON message_recipients(conversation_id, message_id)
+        WHERE delivery_failed_at IS NOT NULL AND acked_at IS NULL AND offered_at IS NULL;
+    """,
+    # A colleague's comment on our PR: who was told, the lead's call on it, and the owner's choice on a draft reply.
+    """
+    CREATE TABLE colleague_calls (
+        ref TEXT NOT NULL,
+        comment_id TEXT NOT NULL,
+        owner_handle TEXT,
+        owner_lead TEXT,
+        call TEXT CHECK (call IN ('small', 'draft')),
+        note TEXT,
+        draft TEXT,
+        called_at INTEGER,
+        called_by TEXT,
+        called_conversation TEXT,
+        item_id INTEGER,
+        choice TEXT CHECK (choice IN ('as-is', 'edited', 'himself')),
+        reply TEXT,
+        chosen_at INTEGER,
+        reply_url TEXT,
+        reply_error TEXT,
+        pushed_while_held_at INTEGER,
+        replied_while_held_at INTEGER,
+        PRIMARY KEY (ref, comment_id)
+    );
+    CREATE UNIQUE INDEX colleague_calls_item ON colleague_calls (item_id) WHERE item_id IS NOT NULL;
+    """,
+    """
+    ALTER TABLE conversations ADD COLUMN context_pct INTEGER;
+    ALTER TABLE conversations ADD COLUMN context_pct_at INTEGER;
+    ALTER TABLE conversations ADD COLUMN context_window INTEGER;
+    ALTER TABLE conversations ADD COLUMN context_model TEXT;
+    ALTER TABLE conversations ADD COLUMN compact_requested_at INTEGER;
+    ALTER TABLE conversations ADD COLUMN compact_request_message INTEGER;
+    ALTER TABLE conversations ADD COLUMN context_dead_at INTEGER;
+    ALTER TABLE conversations ADD COLUMN context_dead_why TEXT;
+    ALTER TABLE conversations ADD COLUMN context_unread_from INTEGER;
+    ALTER TABLE conversations ADD COLUMN context_dead_alerted_at INTEGER;
+    UPDATE conversations SET compact_requested_at = CAST(strftime('%s', 'now') AS INTEGER) * 1000
+        WHERE compact_phase = 'requested';
+    """,
+    """
+    ALTER TABLE review_prs ADD COLUMN usage_missing TEXT;
+    ALTER TABLE review_prs ADD COLUMN usage_asked_at INTEGER;
+    """,
+    "ALTER TABLE message_recipients ADD COLUMN stuck_told_at INTEGER;",
+    "ALTER TABLE message_recipients ADD COLUMN failure_logged_at INTEGER;",
+    "ALTER TABLE pins ADD COLUMN updated_at INTEGER;",
+    "ALTER TABLE leads ADD COLUMN room_parked_until INTEGER;",
+    """
+    CREATE INDEX instances_conversation ON instances (conversation_id, last_observed_at);
+    CREATE INDEX user_items_message ON user_items (message_id) WHERE message_id IS NOT NULL;
+    CREATE INDEX messages_kind_due ON messages (kind, respond_by);
+    """,
 )
 
 HOOK_BUSY_TIMEOUT_MS = 200
 HOOK_RETRY_BUSY_TIMEOUT_MS = 1000
 CLI_BUSY_TIMEOUT_MS = 5000
+MIGRATE_BUSY_TIMEOUT_MS = 3000
+"""Right after a deploy every process migrates at once; a hook waits this long for the first one, within its 5 s."""
 SLOW_HOLD_MS = 1000
 
 
@@ -666,19 +842,38 @@ def migrate(conn: sqlite3.Connection) -> None:
     version = int(conn.execute("PRAGMA user_version").fetchone()[0])
     if version >= len(MIGRATIONS):
         return
-    conn.execute("PRAGMA journal_mode = WAL")
-    with transaction(conn):
-        version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-        for script in MIGRATIONS[version:]:
-            for statement in _split_statements(script):
-                conn.execute(statement)
-        conn.execute(f"PRAGMA user_version = {len(MIGRATIONS)}")
+    own = int(conn.execute("PRAGMA busy_timeout").fetchone()[0])
+    conn.execute(f"PRAGMA busy_timeout = {max(own, MIGRATE_BUSY_TIMEOUT_MS)}")
+    try:
+        _ensure_wal(conn)
+        with transaction(conn):
+            # Another process may have migrated while this one waited for the lock.
+            version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+            for script in MIGRATIONS[version:]:
+                for statement in _split_statements(script):
+                    conn.execute(statement)
+            conn.execute(f"PRAGMA user_version = {len(MIGRATIONS)}")
+    finally:
+        conn.execute(f"PRAGMA busy_timeout = {own}")
+
+
+def _ensure_wal(conn: sqlite3.Connection) -> None:
+    """Switching a new database to WAL fails at once, busy wait or not, while another connection holds a lock."""
+    deadline = time.monotonic() + MIGRATE_BUSY_TIMEOUT_MS / 1000
+    while str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower() != "wal":
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc) or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
 
 
 @contextmanager
 def transaction(conn: sqlite3.Connection, retry_busy_timeout_ms: int = 0) -> Generator[sqlite3.Connection]:
     """A write transaction; with retry_busy_timeout_ms, a lock still held after the connection's own wait gets one
-    more wait that long. A lock held past SLOW_HOLD_MS is logged with its caller, as every other writer waits on it."""
+    more wait that long. A lock held past SLOW_HOLD_MS goes to slow.log with its caller, as every other writer waits on
+    it; a writer that fails on it logs its own error."""
     asked_at = time.monotonic()
     retried = _begin_immediate(conn, retry_busy_timeout_ms)
     held_from = time.monotonic()
@@ -698,7 +893,7 @@ def transaction(conn: sqlite3.Connection, retry_busy_timeout_ms: int = 0) -> Gen
         ending_ms = (time.monotonic() - ending_at) * 1000
         if retried or held_ms >= SLOW_HOLD_MS or ending_ms >= SLOW_HOLD_MS:
             waited_ms = (held_from - asked_at) * 1000
-            log_error(
+            log_slow(
                 "db lock" + (" retried" if retried else ""),
                 f"waited {waited_ms:.0f} ms, held {held_ms:.0f} ms, commit {ending_ms:.0f} ms, at {_find_caller()}",
             )

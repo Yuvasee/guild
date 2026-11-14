@@ -92,7 +92,7 @@ go to workers.
 parallel, and the team lead stays free to coordinate and check.
 
 **How:** a team lead opens a worker in a new agterm tab nested under its own, with a brief, and confirms it really
-started. Workers report back over bridge. A team lead runs a bounded number of them (`worker_cap`, default 5) and
+started. Workers report back over bridge. A team lead runs a bounded number of them (five) and
 closes them when their job is done, keeping the line that resumes each.
 </details>
 
@@ -116,7 +116,8 @@ when you answer one in chat instead, Right Hand relays it and the question close
 **Why:** roles, notes and house rules change all the time. A handful of rules should not, and should win when anything
 else conflicts with them.
 
-**How:** four short articles: honesty, the best outcome for the company and its customers, good faith, signal hygiene.
+**How:** five short articles: honesty, the best outcome for the company and its customers, good faith, signal hygiene,
+simplicity.
 Every team lead, Right Hand and every worker loads its full text at start and again after each compaction, ahead of
 its role or brief. It lives in [src/bridge/constitution.md](src/bridge/constitution.md); edit it to make it yours.
 </details>
@@ -208,17 +209,8 @@ Each run is capped at $5.
 **How:** with `review_org` set, every open PR in that GitHub org is on the page, grouped: waiting for you, ready to
 merge, published, drafts. Your comments on GitHub are typed into the tab that owns the PR. A team lead merges its own PR
 when GitHub approves it, CI is green and none of your threads is open; bridge refuses the merge otherwise. Large PRs
-come with a review document and two independent reviews before they reach you.
-</details>
-
-<details>
-<summary><b>The sessions page</b>: every agent on the Mac</summary>
-
-**Why:** not every session belongs to a team; you still want to see all of them.
-
-**How:** `/dashboard` lists every session with its focus, branch and claims, next to your feed and the board.
-
-<img alt="The sessions page: the feed, then every session with its focus, branch and claims" src="docs/images/sessions.png">
+(100+ lines) come with a review document before they reach you, naming each review that ran; `required_reviews`
+lists the ones it must name.
 </details>
 
 ## Adapters
@@ -228,8 +220,8 @@ guide for having your own coding agent write an adapter.
 
 | Adapter | What it does | Default | Built in |
 | --- | --- | --- | --- |
-| Task tracker (`tracker`) | issue titles and states on the page | a local tasks file | `tasks`, `exec` (any executable), `linear`, `none` |
-| Review chat (`chat`) | where Publish posts a PR for review | none | `file`, `webhook`, `slack`, `none` |
+| Task tracker | issue titles and states on the page | none | Linear (`linear_api_key_file`) |
+| Review chat | where Publish posts a PR for review | a log file (`review_post_dry_run`) | Slack, through the claude.ai connector |
 | Code host | PR state, PR claims, the merge guard, the review queue | GitHub, through a signed-in `gh` | GitHub; a guide for GitLab, Gitea or plain git |
 | Remote hosts (`[[remotes]]`) | runs in tmux sessions on other machines | none | ssh + tmux |
 
@@ -244,7 +236,7 @@ macOS terminal built for coding agents, with a control CLI (`agtermctl`). Guild 
 - know which agent runs in which tab, and whether a tab is busy, idle or waiting on a dialog;
 - type a message, an answer or `/compact` into an idle tab without clobbering what you were typing there;
 - give each team lead a named, tinted tab in a `TEAM` workspace, and open workers as tabs nested under their team lead;
-- jump to the tab behind any row on the page, and show the page as an overlay over a tab.
+- jump to the tab behind any row on the page.
 
 Without agterm, sessions still register and appear on the dashboard, but nothing is typed into tabs: messages wait for
 each session's next tool call, and the group features (team lead tabs, workers, automatic compaction) do not work.
@@ -283,43 +275,53 @@ Full usage and flags: [docs/commands.md](docs/commands.md), or `<command> --help
 | [`bridge ack`](docs/commands.md#bridge-ack) | mark message(s): seen, working on it |
 | [`bridge done`](docs/commands.md#bridge-done) | mark message(s): request handled |
 | [`bridge decline`](docs/commands.md#bridge-decline) | mark message(s): will not do it |
-| [`bridge cancel`](docs/commands.md#bridge-cancel) | withdraw a message you sent |
 | [`bridge inbox`](docs/commands.md#bridge-inbox) | messages for this session |
 | [`bridge show`](docs/commands.md#bridge-show) | a message with its thread |
 | **`bridge` · Your feed and the team board** | |
 | [`bridge post`](docs/commands.md#bridge-post) | a post in the user's feed: blocked, decision, done or insight; `post resolve N` withdraws yours |
 | [`bridge tell-user`](docs/commands.md#bridge-tell-user) | one line for the user's feed (older form of post) |
 | [`bridge board`](docs/commands.md#bridge-board) | the team board: post to everyone (no TEXT: read recent posts) |
-| [`bridge settle-feed`](docs/commands.md#bridge-settle-feed) | resolve open blocked/decision posts whose one PR has ended, as serve does |
 | **`bridge` · Claims** | |
 | [`bridge claim`](docs/commands.md#bridge-claim) | reserve a shared resource before mutating it |
 | [`bridge renew`](docs/commands.md#bridge-renew) | extend a claim you hold |
 | [`bridge release`](docs/commands.md#bridge-release) | give a claim back |
 | [`bridge who`](docs/commands.md#bridge-who) | who holds a resource |
 | [`bridge claims`](docs/commands.md#bridge-claims) | all claims, or yours with tokens |
+| **`bridge` · Pins and pages** | |
+| [`bridge pin`](docs/commands.md#bridge-pin) | pin something the owner needs again to the Pinned page (/pinned): a command, a link or a note; never a secret, only where it lives |
+| [`bridge unpin`](docs/commands.md#bridge-unpin) | take a pin off the Pinned page; it is kept, hidden |
+| [`bridge pins`](docs/commands.md#bridge-pins) | the pins on the Pinned page, newest first |
+| [`bridge page add`](docs/commands.md#bridge-page-add) | register a page by its lasting source folder (never /tmp) |
+| [`bridge page set-url`](docs/commands.md#bridge-page-set-url) | the page's claude.ai artifact link, after a (re)publish |
+| [`bridge page share`](docs/commands.md#bridge-page-share) | mark the page as shared with colleagues; --off to unmark |
+| [`bridge page archive`](docs/commands.md#bridge-page-archive) | retire the page: /p/<slug> stops redirecting and the plan skips it |
+| [`bridge pages`](docs/commands.md#bridge-pages) | the registered pages; --republish-plan after an Anthropic account switch |
 | **`bridge` · Dashboard** | |
 | [`bridge serve`](docs/commands.md#bridge-serve) | run the dashboard web server |
-| [`bridge open`](docs/commands.md#bridge-open) | open the dashboard as an agterm overlay (or in the browser) |
 | [`bridge install-service`](docs/commands.md#bridge-install-service) | run the dashboard permanently under launchd |
 | [`bridge uninstall-service`](docs/commands.md#bridge-uninstall-service) | stop and remove the launchd dashboard service |
 | [`bridge restart-service`](docs/commands.md#bridge-restart-service) | restart the dashboard service (after reinstalling bridge) |
-| **`bridge` · Setup** | |
+| **`bridge` · Setup and deploys** | |
 | [`bridge install-hooks`](docs/commands.md#bridge-install-hooks) | add bridge hooks to Claude Code settings |
 | [`bridge uninstall-hooks`](docs/commands.md#bridge-uninstall-hooks) | remove bridge hooks from Claude Code settings |
-| [`bridge hook-stats`](docs/commands.md#bridge-hook-stats) | hook latency percentiles |
+| [`bridge deploy-check`](docs/commands.md#bridge-deploy-check) | type a line and its Enter into a throwaway tab, as bridge types into leads' tabs, and wake an idle throwaway Claude through the rewake waiter; run before and after a deploy, exit 1 if either does not work |
 | **`bridge` · Outside services** | |
-| [`bridge enrich`](docs/commands.md#bridge-enrich) | refresh GitHub PR and tracker issue state for live sessions |
-| [`bridge remote-sync`](docs/commands.md#bridge-remote-sync) | collect sessions from configured remote hosts now |
+| [`bridge issue-sync`](docs/commands.md#bridge-issue-sync) | move Linear issues forward to match their PRs and live work |
 | **`guild` · Team leads** | |
 | [`guild leads`](docs/commands.md#guild-leads) | list team leads |
 | [`guild lead add`](docs/commands.md#guild-lead-add) | make a tab a team lead: name, tint, a place in the TEAM workspace |
 | [`guild lead label`](docs/commands.md#guild-lead-label) | change a lead's project label and rename its tab |
 | [`guild lead sync`](docs/commands.md#guild-lead-sync) | apply a lead's tab name, tint and place in TEAM again |
 | [`guild lead retire`](docs/commands.md#guild-lead-retire) | undo enrollment; the tab goes back, the name is never reused |
+| [`guild lead domains`](docs/commands.md#guild-lead-domains) | the projects a lead takes new work from: priority project names or Linear project refs |
+| [`guild lead park`](docs/commands.md#guild-lead-park) | no 'has room' notices for a lead left idle on purpose, until a date |
 | [`guild lead wake`](docs/commands.md#guild-lead-wake) | type a first prompt into a lead's idle tab, so its role arrives |
+| [`guild lead model`](docs/commands.md#guild-lead-model) | type /model <model> into lead tabs once each is idle with an empty box; locked tabs are skipped |
 | **`guild` · Workers** | |
 | [`guild worker close`](docs/commands.md#guild-worker-close) | close your own nested tab and keep what resumes it |
-| [`guild worker closed`](docs/commands.md#guild-worker-closed) | closed workers, newest first, with the command that resumes each |
+| [`guild worker closed`](docs/commands.md#guild-worker-closed) | closed workers, newest first, with the command that reopens each |
+| [`guild worker reopen`](docs/commands.md#guild-worker-reopen) | resume a closed worker in a tab nested under yours (its lead or the assistant) |
+| [`guild worker attach`](docs/commands.md#guild-worker-attach) | a host worker whose tab was closed: open it again under yours |
 | **`guild` · What team leads show and keep** | |
 | [`guild work set`](docs/commands.md#guild-work-set) | add a chunk, or update it by name; given refs replace its refs |
 | [`guild work done`](docs/commands.md#guild-work-done) | a chunk ended; it leaves the page |
@@ -327,7 +329,12 @@ Full usage and flags: [docs/commands.md](docs/commands.md), or `<command> --help
 | [`guild notes`](docs/commands.md#guild-notes) | a lead's or the assistant's notes that outlive conversations |
 | [`guild handover`](docs/commands.md#guild-handover) | hand your work to a lead, from stdin |
 | [`guild ack`](docs/commands.md#guild-ack) | a lead's one line on a board post; shown faint, delivered to nobody |
-| [`guild ack-cost`](docs/commands.md#guild-ack-cost) | what board posts reaching every lead cost; tokens are an estimate |
+| [`guild day`](docs/commands.md#guild-day) | the owner is on again; how loaded each lead is and its next work |
+| [`guild capacity`](docs/commands.md#guild-capacity) | a dry run of the capacity signal: who has room for planned work now, why, what to suggest |
+| **`guild` · Comments on PRs and issues** | |
+| [`guild comment small`](docs/commands.md#guild-comment-small) | a small one (typo, rename, factual question) you handled |
+| [`guild comment draft`](docs/commands.md#guild-comment-draft) | a substantive one: your draft reply and plan go to the owner, who chooses; bridge posts after |
+| [`guild comment list`](docs/commands.md#guild-comment-list) | colleague comments still waiting on you or on the owner |
 | **`guild` · Your asks** | |
 | [`guild ask add`](docs/commands.md#guild-ask-add) | record an ask in the owner's own words |
 | [`guild ask list`](docs/commands.md#guild-ask-list) | asks not closed, oldest first |
@@ -338,7 +345,7 @@ Full usage and flags: [docs/commands.md](docs/commands.md), or `<command> --help
 | [`guild ask done`](docs/commands.md#guild-ask-done) | claim it done; another session verifies |
 | [`guild ask verify`](docs/commands.md#guild-ask-verify) | done_claimed → verified, with evidence of what the owner would see |
 | [`guild ask close`](docs/commands.md#guild-ask-close) | verified → closed (the assistant only, relaying the owner) |
-| [`guild ask reopen`](docs/commands.md#guild-ask-reopen) | back to open: the result is not what they asked for |
+| [`guild ask reopen`](docs/commands.md#guild-ask-reopen) | back to open: the result is not what the owner asked for |
 | **`guild` · Right Hand** | |
 | [`guild answer`](docs/commands.md#guild-answer) | relay the user's answer to a post in the feed (the assistant only) |
 | [`guild priority set`](docs/commands.md#guild-priority-set) | replace the list, first project first (the assistant only) |
@@ -346,9 +353,13 @@ Full usage and flags: [docs/commands.md](docs/commands.md), or `<command> --help
 | [`guild urgent`](docs/commands.md#guild-urgent) | questions marked urgent, newest first, to audit against the criteria |
 | **`guild` · PR review queue (GitHub)** | |
 | [`guild review list`](docs/commands.md#guild-review-list) | what the queue shows |
-| [`guild review sentence`](docs/commands.md#guild-review-sentence) | the short description of what a PR does, for its review post |
+| [`guild review sentence`](docs/commands.md#guild-review-sentence) | the one sentence of project context for a PR's Slack post |
 | [`guild review doc`](docs/commands.md#guild-review-doc) | register a large PR's HTML document; the page serves this copy |
-| [`guild review published`](docs/commands.md#guild-review-published) | record a post made by hand, so it is never posted again |
+| [`guild review published`](docs/commands.md#guild-review-published) | record a Slack post made by hand, so it is never posted again |
+| [`guild review hold`](docs/commands.md#guild-review-hold) | keep a PR for the owner's own review, never ready to merge (its lead or the assistant) |
+| [`guild review unhold`](docs/commands.md#guild-review-unhold) | lift a hold before the review ends it (its lead or the assistant) |
+| [`guild review waive`](docs/commands.md#guild-review-waive) | merge without a GitHub approval because the owner said so in an answered decision (its lead or the assistant) |
+| [`guild review unwaive`](docs/commands.md#guild-review-unwaive) | take the waiver back: the PR needs a GitHub approval again |
 | [`guild review repost`](docs/commands.md#guild-review-repost) | send again a post whose sender stopped (look in the channel first) or that a dry run only logged |
 | **`guild` · Dreams** | |
 | [`guild dream`](docs/commands.md#guild-dream) | the night's dreams, in parallel and detached; default: config dream_leads |
@@ -369,9 +380,15 @@ git clone https://github.com/Yuvasee/guild ~/.local/share/guild
 uv tool install ~/.local/share/guild    # puts bridge, bridge-hook and guild on your PATH
 bridge install-hooks                    # adds bridge's hooks to ~/.claude/settings.json
 mkdir -p ~/.claude/skills && cp -R ~/.local/share/guild/agent/skills/bridge ~/.claude/skills/
-bridge install-service                  # the dashboard under launchd, on http://127.0.0.1:8780/
+bridge install-service                  # the dashboard under launchd, on http://127.0.0.1:8765/
                                         # or run it in the foreground: bridge serve
 ```
+
+To upgrade, `git -C ~/.local/share/guild pull && ~/.local/share/guild/scripts/deploy.sh`. It installs the new code
+as a release of its own under `~/.local/share/bridge/releases` and switches to it in one step, so a hook that starts
+mid-upgrade runs the old code or the new, never a mix; it checks typing into tabs before and after, backs up the
+database, re-installs the hooks and restarts the dashboard. `scripts/deploy.sh rollback` goes back one release. After
+the first deploy, do not run `uv tool install` again: it points the commands back at uv's own copy.
 
 Settings live in `~/.config/bridge/config.toml`; every key is optional:
 
@@ -380,8 +397,11 @@ owner_name = "Mira"           # how agents refer to you
 assistant_handle = "xavi"     # the tab with this name becomes Right Hand (default "aide")
 night_words = ["Good night"]  # what you say to start the night's dreams
 compact_at_tokens = 150000    # save keep notes and compact at this context size; 0 (default) is off
-worker_cap = 5                # workers per team lead
+work_timezone = "Europe/Lisbon"  # your working hours' zone, for daytime-only nudges (default: this Mac's)
 ```
+
+The rest, including your team's own rules and the keys that keep people's names out of a shared config, are in
+[docs/adapters.md](docs/adapters.md#your-installs-own-values).
 
 Then in agterm: open a tab named after `assistant_handle` and start `claude` there: that is Right Hand. Open a tab in a
 project directory, start `claude`, and ask Right Hand to make it a team lead (`guild lead add`).

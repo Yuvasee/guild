@@ -40,7 +40,7 @@ def test_bare_numbers_need_a_repo() -> None:
 
 
 def test_branch_refs_are_case_insensitive() -> None:
-    assert extract_branch_refs("dev/abc-37-cache-fix", ("ABC",)) == ["issue:ABC-37"]
+    assert extract_branch_refs("dev/abc-37-redis-blob", ("ABC",)) == ["issue:ABC-37"]
 
 
 def test_restore_command_replaces_resume_and_drops_prompt() -> None:
@@ -66,6 +66,14 @@ def test_restore_command_replaces_resume_and_drops_prompt() -> None:
 def test_restore_command_drops_continue_and_positional_prompt() -> None:
     argv = ["/bin/claude", "-c", "--permission-mode=plan", "do things", "--effort", "high"]
     assert build_restore_command(argv, "abc") == ("/bin/claude --permission-mode=plan --effort high --resume abc")
+
+
+def test_restore_command_leaves_out_the_computer_use_tools_claude_code_piled_up() -> None:
+    granted = [
+        arg for tool in ("screenshot", "left_click") for arg in ("--allowed-tools", f"mcp__computer-use__{tool}")
+    ]
+    argv = ["/bin/claude", "--model", "opus", *granted, *granted, "--allowed-tools", "Bash", "--resume", "old"]
+    assert build_restore_command(argv, "x") == "/bin/claude --model opus --allowed-tools Bash --resume x"
 
 
 def test_restore_command_bare_resume_picker() -> None:
@@ -152,8 +160,7 @@ def _git(cwd: Path, *args: str) -> None:
 
 
 def test_repo_labels_are_four_letters_without_the_org_prefix() -> None:
-    assert map_ref_to_label("pr:Acme-Org/acme-infra#21", {}) == "infr#21"
-    assert map_ref_to_label("pr:Acme-Org/acme-helm-charts#12", {}) == "helm#12"
-    assert map_ref_to_label("pr:Acme-Org/monorepo#36", {}) == "mono#36"
-    assert map_ref_to_label("pr:Acme-Org/monorepo#1", {"Acme-Org/monorepo": "core"}) == "core#1"
-    assert map_ref_to_label("issue:PROJ-1", {}) == "PROJ-1"
+    assert map_ref_to_label("pr:Acme-Org/acme-infra#21") == "infr#21"
+    assert map_ref_to_label("pr:Acme-Org/acme-helm-charts#12") == "helm#12"
+    assert map_ref_to_label("pr:Acme-Org/monorepo#36") == "mono#36"
+    assert map_ref_to_label("issue:PROJ-1") == "PROJ-1"

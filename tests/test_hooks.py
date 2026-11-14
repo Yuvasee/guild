@@ -334,7 +334,8 @@ def test_hook_outlasts_a_lock_held_past_its_first_wait(
     blocker.join()
     assert conn.execute("SELECT last_prompt FROM conversations").fetchone()[0] == "second"
     conn.close()
-    assert "db lock retried" in (bridge_env.state_dir / "errors.log").read_text()
+    assert "db lock retried" in (bridge_env.state_dir / "slow.log").read_text()
+    assert not (bridge_env.state_dir / "errors.log").exists()
 
 
 def test_a_lock_held_too_long_is_logged_with_its_caller(bridge_env: BridgeEnv, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -344,13 +345,14 @@ def test_a_lock_held_too_long_is_logged_with_its_caller(bridge_env: BridgeEnv, m
     monkeypatch.setattr(db.time, "monotonic", lambda: next(clock))
     with db.transaction(conn):
         pass
-    assert not (bridge_env.state_dir / "errors.log").exists()
+    assert not (bridge_env.state_dir / "slow.log").exists()
     clock = iter([0.0, 0.0, 1.0, 1.0])
     with db.transaction(conn):
         pass
     monkeypatch.undo()
     conn.close()
-    logged = (bridge_env.state_dir / "errors.log").read_text()
+    assert not (bridge_env.state_dir / "errors.log").exists()
+    logged = (bridge_env.state_dir / "slow.log").read_text()
     assert "db lock\n" in logged and "test_hooks.py" in logged and "test_a_lock_held_too_long" in logged
 
 

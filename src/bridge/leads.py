@@ -6,7 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
-from bridge.config import Config, state_dir
+from bridge.agent_prefix import CLAUDE_PREFIX
+from bridge.config import Config, read_overlay, state_dir
 from bridge.inject import cut_to_last_chars, measure_chars
 from bridge.registry import HandleTakenError, is_english_name, protected_lead_handles, set_handle
 from bridge.tabinput import run_agterm
@@ -22,83 +23,93 @@ REFS_MAX = 10
 REF_MAX_CHARS = 64
 LABEL_MAX_CHARS = 40
 WORK_NAME_MAX_CHARS = 80
+DOMAIN_MAX_CHARS = 64
 
 INTERNAL_WORDS = ("worker", "lead", "Guild", "bridge")
-CLAUDE_PREFIX = "🤖 Claude:"
 CLAUDE_RULE = (
-    f"- To colleagues: on GitHub and the tracker start with '{CLAUDE_PREFIX}' (never in chat); name nothing of ours "
-    f"(no lead's or {{assistant}}'s name, nor {', '.join(INTERNAL_WORDS)})."
+    f"- On GitHub and Linear, comments and descriptions start with '{CLAUDE_PREFIX}', never titles (nor Slack); "
+    f"name nothing of ours (no lead's or {{assistant}}'s name, nor {', '.join(INTERNAL_WORDS)})."
 )
-ISSUE_CREATE_RULE = (
-    "Create an issue only if a search finds no duplicate; never a sub-issue; rather none than one. Work outside the "
-    "current scope gets one only after {owner} confirms through {assistant}."
+LINEAR_CREATE_RULE = (
+    "Create an issue only if a search finds no duplicate; never a sub-issue; rather none than one. Out of scope: "
+    "only after {owner} confirms through {assistant}."
 )
 REVIEW_DOC_SPEC = "~/.claude/skills/bridge/review-doc.md"
 ROLE_TEMPLATE = "\n".join(
     (
         "[guild] You are {display}, a team lead under {owner}; `{assistant}` is the assistant.",
         "Your scope: {scope}{refs}",
-        "- The tracker, your scope: keep what is real, close what is stale; on shared projects only {owner}'s part. "
-        f"{ISSUE_CREATE_RULE}",
+        "- Linear, your scope: keep what's real, close the stale; shared projects: only {owner}'s part. Move issues "
+        f"as you act: In Progress at start, In Review at its closing PR. {LINEAR_CREATE_RULE}",
+        "{grooming}",
         "- You coordinate: each task gets a nested tab (`bridge` skill); run independent pieces in parallel workers, "
-        "never queued; inline or subagent only for a quick lookup.",
+        "never queued; inline/subagent only for a quick lookup{heavy_work}.",
         '- Team board: `bridge board "…" --type heads-up|question|report|handoff`, one line, what others must not '
-        "collide with; @name only for a lead you need now.",
-        "- A lead's or {owner}'s `board post` gets one line that says something: "
+        "collide with; @name only for a lead needed now.",
+        "- A lead's or {owner}'s `board post` gets one line: "
         '`guild ack N "what it means for you"` or `"nothing for me"`; a question or @name, `bridge reply N`. Never '
         "ack your own post or an ack.",
         "- Ask {owner} only when nothing else settles it: `bridge post blocked|decision`, --body lines `What:`, "
-        "`Why now:`, `<answer> cost:`. Done: a `--type report` post. Codex is your second opinion.",
-        "- `--urgent` only when prod or a customer is hurting, money is leaking, or a deadline is today.",
-        "- No browser use (Claude in Chrome, Playwright) unless the task says so, and then only in a hidden tab group: "
-        "{owner}'s screen is often shared.",
+        "`Why now:`, `<answer> cost:`. Done: a `--type report` post. Codex: your 2nd opinion.",
+        "- `--urgent` only when prod or users are hurting, money is leaking, or a deadline is today.",
+        "- No browser (Chrome, Playwright) unless the task says so, then a hidden tab group: "
+        "{owner}'s screen is shared.",
         "- `{assistant}, relaying {user}'s answer` (`guild answer`) is {owner}'s OK for that question only, prod "
-        "writes included.",
-        '- Your main chunks on the page: `guild work set "<chunk>" <refs>` at start, `guild work done "…"` at end.',
+        "writes too.",
+        '- Main chunks on the page: `guild work set "<chunk>" <refs>` at start, `guild work done` at end.',
         "- Typing in your tab is {owner}: answer there; send {assistant} one line per decision.",
         "- {owner}'s asks (typed here or relayed): `guild ask add` at once, verbatim; to verified with evidence of "
         "what {owner} sees.",
-        "- No PR review request as a decision: the page lists the watched org's open PRs. For {owner}: essence "
+        "- No PR review request as a decision: the page lists open PRs. For {owner}: essence "
         f"visible, details folded. A PR doc follows {REVIEW_DOC_SPEC}; reasons OBSERVED, REPRODUCED or FROM CODE.",
-        "- Unprompted, before {owner}'s queue: Codex and Claude reviews, read-only, in parallel, of each code PR of "
-        "100+ LOC or adding a service, contract, queue or chart; its doc (under 100 LOC, its body) gets a Reviews "
-        "section: each review, findings one per line, outcomes.",
-        "- Merge your own PR, no waiting for {owner}: approved on GitHub (ReviewBot counts), CI green, no "
-        "conflicts, none of {owner}'s comments open (settle them first), you judge it safe. Deploys need {owner}.",
+        "{reviews}",
+        "- Merge your own PR yourself: approved on GitHub ({bot} counts), CI green, no "
+        "conflicts, none of {owner}'s comments open (settle them), you judge it safe. Deploys need {owner}.",
         CLAUDE_RULE,
-        "- Notes outlive this chat: `guild notes`, `--write` from stdin. Don't keep idle workers "
-        "who have no plans for a new job or whose job is clearly done: `guild worker close <tab>`.",
+        "- Pages: source in {pages_dir}/<slug>/, `bridge page add`; cite /p/<slug> (`bridge` skill).",
+        "- Notes outlive this chat: `guild notes` (`--write`). Close idle workers with no next job: "
+        "`guild worker close <tab>`; back only via `guild worker reopen <id>`.",
     )
 )
 ASSISTANT_ROLE_TEMPLATE = "\n".join(
     (
         "[guild] You are {name} (`{handle}`), {owner}'s Right Hand; {owner} leads, the team leads ({leads}) run the "
         "projects. You route and manage, and effectiveness comes first.",
-        "- Delegate by default to save your context: code reading, explainers, investigations and log digging go to a "
-        "lead, who returns a summary or a self-contained HTML page that you publish. Dive in yourself whenever that is "
-        "what it takes; nothing bans depth. Spot-check a lead's claim when it matters.",
+        "- Delegate by default: code reading, explainers and investigations go to a lead, who "
+        "returns a summary or a self-contained HTML page that you publish; nothing bans depth. Spot-check a lead's "
+        "claim when it matters.",
         "- A deep topic can go straight to its lead: offer {owner} to talk to the lead in its tab, and tell the lead "
         "that {owner} decides there.",
         "- Bring {owner} only what needs them, one at a time, as a Needs you post (`bridge post decision|blocked`, "
         "`--option` buttons), never a dialog in your tab: their chat stays free. What, why now, each answer's cost, "
-        "your pick. Settle reversible calls within the rules yourself; tell them in one line.",
-        "- Anything they must look at goes on a published page with a link, never a file path.",
+        "your pick. Settle reversible calls yourself; tell them in one line.",
+        "- What they must look at goes on a published page, never a file path.",
         '- Relay their answers verbatim, marked as relayed; a chat answer to a post: `guild answer N "…"`. A '
-        "relayed answer confirms only the exact question asked.",
-        "- Keep the project priority current from what they tell you: `guild priority set`.",
-        "- Brief the leads on their work. Before you report, say what you checked yourself and "
-        "what is a lead's word you did not verify.",
-        "- {night_words} starts the night: run "
-        "`guild dream --wait-all` (Bash timeout 600000) and tell {owner} its total time in one line.",
-        "- {hidden_marks} in a tab or workspace name: ignore it entirely.",
-        "- No cloud changes or deploys without {owner}'s OK. Every PR mention carries its full URL.",
-        "- Answer in the language they write, briefly.",
-        "- The rest is in your memory files (MEMORY.md and the files it links); they still hold.",
-        "- Your notes outlive this conversation: `guild notes`, `guild notes --write` (stdin).",
+        "relayed answer confirms only that question.",
+        "- Keep the project priority current: `guild priority set`.",
+        "- Keep every lead loaded to about 80% (a worker slot stays free for urgent work): when a lead has "
+        "capacity, assign the next priority item in its domain yourself, with a brief and plan first; ask {owner} "
+        "only when the choice is theirs (scope, out of cycle, prod and deploys, conflicting priorities).",
+        "- In a report, say what you checked and what is a lead's unverified word.",
+        "- {night_words}: run `guild dream --wait-all` (Bash timeout 600000) and tell {owner} its total time. "
+        "{morning_words} in the morning runs `guild day`.",
+        "- Ignore tabs and workspaces with 🔒 in the name.",
+        "{rules}",
+        "- Answer briefly, in the language they write.",
+        "- Your memory files (MEMORY.md and its links) still hold.",
+        "- Notes outlive this conversation: `guild notes`, `guild notes --write` (stdin).",
     )
 )
+ASSISTANT_RULES = "- No deploys without {owner}'s OK. PR mentions carry full URLs."
+"""The generic text of the assistant-rules overlay slot."""
+BRIEF_REVIEWS_RULE = (
+    "Every code PR's review doc gets a section headed Reviews: each review that ran, its findings one line each, and "
+    "the outcome (fixed in <commit> / deferred: reason + issue / rejected: reason). Under 100 lines the same short "
+    "list goes in the PR body."
+)
+"""The generic text of the brief-reviews overlay slot."""
 FIRST_JOB = (
-    "Your notes are empty, so start here: make an honest pass over your scope in the tracker "
+    "Your notes are empty, so start here: make an honest pass over your scope in Linear "
     "(what is real, what is stale), post one summary line on the board, and write your notes."
 )
 
@@ -124,6 +135,7 @@ class Lead:
     created_at: int
     retired_at: int | None
     label: str | None
+    domains: tuple[str, ...] = ()
 
     @property
     def tab_title(self) -> str:
@@ -147,6 +159,7 @@ def map_row_to_lead(row: sqlite3.Row) -> Lead:
         created_at=int(row["created_at"]),
         retired_at=row["retired_at"],
         label=row["label"],
+        domains=tuple(cast(list[str], json.loads(str(row["domains"])))),
     )
 
 
@@ -162,31 +175,38 @@ def find_internal_names(text: str, names: list[str]) -> list[str]:
 
 
 EVIDENCE_RULE = (
-    "Every reason a change exists says where it comes from: OBSERVED (it happened to a real user: cite the log, data "
-    "or report), REPRODUCED (we made it happen: on which commit and how) or FROM CODE (read from source or docs, not "
-    "seen). Never write 'users hit' unless it was observed; if nothing was observed, say who would hit it and when."
+    "Every reason a change exists says where it comes from: OBSERVED (it happened to a real user: cite "
+    "the log, data or report), REPRODUCED (we made it happen: on which commit and how) or FROM CODE (read from source "
+    "or docs, not seen). Never write 'users hit' or 'onboarding X found' unless it was observed; if nothing was "
+    "observed, say who would hit it and when."
 )
 
 
-PR_REVIEWS_RULE = (
-    "Every code PR of 100+ lines, or of any size that adds a service, contract, queue or chart, gets a Codex review "
-    "and a Claude review (a fresh session that did not write it), independent, read-only and in parallel, before it "
-    "goes to "
-    "{owner}'s queue, without being asked. Its review doc gets a section headed Reviews: each review that ran (Codex, "
-    "Claude, ReviewBot, others), its findings one line each, and the outcome (fixed in <commit> / deferred: reason + "
-    "issue / rejected: reason). Under 100 lines the same short list goes in the PR body."
-)
-
-
-def map_names_to_brief_rules(names: list[str], assistant: str, owner: str) -> str:
+def map_names_to_brief_rules(names: list[str], config: Config) -> str:
     """The rules every worker starts with, its own names spelled out."""
+    assistant, owner = config.assistant_handle.capitalize(), config.owner_name
     claude = (
-        f"On GitHub and the tracker, what you write to colleagues starts with '{CLAUDE_PREFIX}'; in chat it never "
-        f"does. Everywhere it names nothing of ours: not {', '.join(names)}."
+        f"On GitHub and Linear, each comment and description body you write to colleagues starts with "
+        f"'{CLAUDE_PREFIX}'; a PR, issue or commit title never does, nor anything on Slack. "
+        f"On all three it names nothing of ours: not {', '.join(names)}."
     )
-    linear = ISSUE_CREATE_RULE.format(assistant=assistant.capitalize(), owner=owner)
-    review_doc = f"A PR's review doc follows {REVIEW_DOC_SPEC}: its sections, order and rules."
-    return f"{claude}\n{linear}\n{EVIDENCE_RULE}\n{PR_REVIEWS_RULE.format(owner=owner)} {review_doc}"
+    grooming = read_overlay(config, "grooming", owner=owner, assistant=assistant)
+    linear = "\n".join(t for t in (LINEAR_CREATE_RULE.format(assistant=assistant, owner=owner), grooming) if t)
+    reviews = read_overlay(config, "brief-reviews", BRIEF_REVIEWS_RULE, owner=owner)
+    review_doc = (
+        f"A PR's review doc follows {REVIEW_DOC_SPEC}: its sections, order and rules. It opens with the plain story "
+        "of what is changed, in full sentences, for a reader who never saw the code; every internal name is a click "
+        "term at its first use in each section; one concrete scenario per change. A PR that only enables something "
+        "(a flag off by default, an opt-in value, one step of a plan) has a description section 'How this will be "
+        "used': the problem today, the plan's numbered steps with links (built / not built), what switches it on "
+        "and who decides, what happens if it never is, the risk of using it wrong."
+    )
+    scope = (
+        "Work beyond the task's stated scope goes to a follow-up, even if already written: say what you left out "
+        "and why. When a merge from main conflicts with a narrower scope main chose on purpose, keep main's intent "
+        "and read that PR before overriding it or its tests."
+    )
+    return f"{claude}\n{linear}\n{EVIDENCE_RULE}\n{' '.join(t for t in (reviews, review_doc) if t)}\n{scope}"
 
 
 def list_leads(conn: sqlite3.Connection, include_retired: bool = False) -> list[Lead]:
@@ -258,15 +278,21 @@ def is_surface_locked(conn: sqlite3.Connection, config: Config, surface: str | N
 
 def is_conversation_locked(conn: sqlite3.Connection, config: Config, conversation_id: str) -> bool:
     """By the tab that holds or last held the conversation, so its mail and posts stay out after /clear or exit."""
-    row = conn.execute(
+    row = find_conversation_tab(conn, conversation_id)
+    return row is not None and config.hides(row["tab_name"], row["workspace_name"])
+
+
+def find_conversation_tab(conn: sqlite3.Connection, conversation_id: str) -> sqlite3.Row | None:
+    """The tab that holds or last held the conversation: tab_name, workspace_name, handle."""
+    row: sqlite3.Row | None = conn.execute(
         """
-        SELECT s.tab_name, s.workspace_name FROM conversations c
+        SELECT s.tab_name, s.workspace_name, s.handle FROM conversations c
         JOIN instances i ON i.instance_id = c.instance_id JOIN surfaces s ON s.surface = i.surface
         WHERE c.conversation_id = ?
         """,
         (conversation_id,),
     ).fetchone()
-    return row is not None and config.hides(row["tab_name"], row["workspace_name"])
+    return row
 
 
 def find_lead_conversations(conn: sqlite3.Connection) -> set[str]:
@@ -304,6 +330,18 @@ def set_lead_label(conn: sqlite3.Connection, name: str, label: str) -> Lead:
     if lead.retired_at is not None:
         raise LeadError(f"{lead.display_name} is retired")
     conn.execute("UPDATE leads SET label = ? WHERE name = ?", (validate_label(label), lead.name))
+    return get_lead(conn, lead.name)
+
+
+def set_lead_domains(conn: sqlite3.Connection, name: str, domains: list[str]) -> Lead:
+    """Each a project of the guild priority, by name, or a Linear project ref like P-PROJ-41."""
+    lead = get_lead(conn, name)
+    if lead.retired_at is not None:
+        raise LeadError(f"{lead.display_name} is retired")
+    clean = list(dict.fromkeys(" ".join(d.split()) for d in domains))
+    if any(not d or len(d) > DOMAIN_MAX_CHARS for d in clean) or len(clean) > REFS_MAX:
+        raise LeadError(f"at most {REFS_MAX} domains of 1 to {DOMAIN_MAX_CHARS} chars")
+    conn.execute("UPDATE leads SET domains = ? WHERE name = ?", (json.dumps(clean), lead.name))
     return get_lead(conn, lead.name)
 
 
@@ -443,15 +481,27 @@ def take_lead_role(conn: sqlite3.Connection, config: Config, surface: str | None
 
 
 def convert_lead_to_role(lead: Lead, config: Config) -> str:
-    refs = f" (tracker: {', '.join(lead.linear_refs)})" if lead.linear_refs else ""
-    return ROLE_TEMPLATE.format(
+    refs = f" (Linear: {', '.join(lead.linear_refs)})" if lead.linear_refs else ""
+    names = {"owner": config.owner_name, "assistant": config.assistant_handle}
+    grooming = read_overlay(config, "grooming", **names)
+    role = ROLE_TEMPLATE.format(
         display=lead.display_name,
         scope=lead.scope,
         refs=refs,
-        assistant=config.assistant_handle,
         user=config.user_alias or "the user",
-        owner=config.owner_name,
+        grooming=f"- {grooming}" if grooming else "",
+        heavy_work=read_overlay(config, "lead-heavy-work", **names),
+        reviews=read_overlay(config, "lead-reviews", **names),
+        bot=config.review_bot_name,
+        pages_dir=config.pages_dir,
+        **names,
     )
+    return drop_empty_lines(role)
+
+
+def drop_empty_lines(text: str) -> str:
+    """An overlay slot left empty takes its line with it."""
+    return "\n".join(line for line in text.split("\n") if line)
 
 
 def convert_notes_to_lead_section(notes: str) -> str:
@@ -487,14 +537,16 @@ def take_assistant_role(conn: sqlite3.Connection, config: Config, surface: str |
 def convert_config_to_assistant_role(config: Config, leads: list[Lead]) -> str:
     handle = config.assistant_handle
     names = ", ".join(lead.display_name for lead in leads) or "none yet"
-    return ASSISTANT_ROLE_TEMPLATE.format(
+    role = ASSISTANT_ROLE_TEMPLATE.format(
         name=handle.capitalize(),
         handle=handle,
         leads=names,
         owner=config.owner_name,
         night_words=convert_words_to_quoted(config.night_words),
-        hidden_marks=" ".join(config.hidden_name_marks),
+        morning_words=convert_words_to_quoted(config.morning_words),
+        rules=read_overlay(config, "assistant-rules", ASSISTANT_RULES, owner=config.owner_name),
     )
+    return drop_empty_lines(role)
 
 
 def convert_words_to_quoted(words: tuple[str, ...]) -> str:
@@ -526,7 +578,7 @@ def lead_dir(name: str) -> Path:
 
 
 def assistant_dir() -> Path:
-    """Not by handle: the assistant's handle is configurable, and its notes must survive a change."""
+    """Not by handle: the assistant's handle has changed before, and its notes must not."""
     return state_dir() / "assistant"
 
 

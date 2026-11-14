@@ -113,7 +113,7 @@ def test_overdue_request_escalates_and_resolves(bridge_env: BridgeEnv, spawn_pro
 def test_injection_respects_byte_budget(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:
     pair = Pair(bridge_env, spawn_process)
     for i in range(12):
-        bridge_env.cli("send", "b", f"message {i} " + "é" * 300, pid=pair.a)
+        bridge_env.cli("send", "b", f"message {i} " + "ω" * 300, pid=pair.a)
     first = pair.prompt(pair.b, "conv-b", "one")
     second = pair.prompt(pair.b, "conv-b", "two")
     shown = [line for line in (first + "\n" + second).splitlines() if line.startswith("#")]

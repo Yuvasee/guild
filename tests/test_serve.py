@@ -2,6 +2,10 @@ import json
 import subprocess
 
 from conftest import BridgeEnv, SpawnProcess, http_request
+from test_reviews import REF, add_session, make_pr
+
+from bridge.db import transaction
+from bridge.reviews import store_open_prs
 
 
 def test_state_has_links_attention_and_counts(
@@ -28,9 +32,6 @@ def test_state_has_links_attention_and_counts(
         "https://tracker.example/issue/ABC-7",
         "https://tracker.example/issue/ABC-9",
     }
-    page = http_request(dashboard + "/dashboard")
-    assert "<title>bridge</title>" in page and "innerHTML" not in page
-
     bridge_env.hook("Stop", {"session_id": "conv-s", "cwd": str(repo), "last_assistant_message": "done"}, pid)
     cleared = json.loads(http_request(dashboard + "/api/state"))["sessions"][0]
     assert (cleared["attention"], cleared["status"]) == (None, "idle")
@@ -90,6 +91,7 @@ def test_jump_selects_the_agterm_tab(bridge_env: BridgeEnv, spawn_process: Spawn
 
     assert jumped["ok"] is True
     assert "session select --target TAB-7" in bridge_env.stub_log.read_text()
+    assert (bridge_env.root / "open.log").read_text() == "-a agterm\n"
     assert json.loads(unknown)["ok"] is False
 
 
@@ -98,3 +100,26 @@ def test_foreign_host_origin_and_missing_header_are_refused(dashboard: str) -> N
     http_request(dashboard + "/api/state", headers={"Host": f"evil.example:{port}"}, expect=403)
     http_request(dashboard + "/api/items/1/resolve", post=True, headers={"Origin": "http://evil.example"}, expect=403)
     http_request(dashboard + "/api/items/1/resolve", post=True, headers={"X-Bridge": ""}, expect=403)
+
+
+def test_merge_ok_needs_a_trusted_request_and_the_shown_head(bridge_env: BridgeEnv, dashboard: str) -> None:
+    conn = bridge_env.connect()
+    with transaction(conn):
+        store_open_prs(conn, [make_pr(bot_approved=True)], 500)
+        add_session(conn, "c1", "worker", branch="dev/x")
+    url = dashboard + "/api/reviews/Org/app/7/merge-ok"
+    port = dashboard.rsplit(":", 1)[1]
+
+    http_request(url, post=True, data={"head_oid": "a1"}, headers={"Origin": "http://evil.example"}, expect=403)
+    http_request(url, post=True, data={"head_oid": "a1"}, headers={"X-Bridge": ""}, expect=403)
+    http_request(url, post=True, data={"head_oid": "a1"}, headers={"Host": f"evil.example:{port}"}, expect=403)
+    http_request(url, post=True, data={"head_oid": "<b>"}, expect=400)
+    stale = json.loads(http_request(url, post=True, data={"head_oid": "a0"}, expect=409))
+    assert conn.execute("SELECT count(*) FROM review_merge_oks").fetchone()[0] == 0
+
+    sent = json.loads(http_request(url, post=True, data={"head_oid": "a1"}))
+
+    assert "new commits" in stale["detail"]
+    assert sent == {"ok": True, "detail": "worker"}
+    rows = conn.execute("SELECT ref, head_oid, sent_to FROM review_merge_oks").fetchall()
+    assert [tuple(row) for row in rows] == [(REF, "a1", "worker")]

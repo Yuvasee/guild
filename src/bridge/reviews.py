@@ -1,14 +1,25 @@
 import json
 import re
 import sqlite3
+import time
 import urllib.parse
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from bridge.board import BODY_MAX_CHARS, SYSTEM_CONVERSATION, Party, Recipient, send_message
-from bridge.config import Config
+from bridge.agent_prefix import CLAUDE_PREFIX
+from bridge.backport import BackportVerdict, check_backport, is_backport_base
+from bridge.board import (
+    BODY_MAX_CHARS,
+    SYSTEM_CONVERSATION,
+    AddressError,
+    Party,
+    Recipient,
+    resolve_handle,
+    send_message,
+)
+from bridge.config import Config, read_overlay
 from bridge.db import transaction
 from bridge.enrich import PrStatus, fetch_prs
 from bridge.feed import REVIEW_QUEUE, resolve_tab
@@ -18,6 +29,9 @@ from bridge.guard import (
     CI_RED,
     CONFLICTS,
     GITHUB_STALE_S,
+    HELD,
+    NOT_APPROVED,
+    NOT_OWNER_REVIEWED,
     OWNER_COMMENTS_OPEN,
     READY,
     list_merge_waits,
@@ -35,12 +49,12 @@ from bridge.review_github import (
     fetch_comments,
     fetch_open_prs,
     fetch_review_threads,
+    list_loc_excluded,
 )
-from bridge.review_marks import REQUIRED_REVIEWS, REVIEW_BOT_NAME, convert_reviews_to_text, map_text_to_reviews
-from bridge.review_worktree import DOC_SHA_CHARS, map_row_to_doc_heads, map_worktree_to_workspace
+from bridge.review_marks import convert_reviews_to_text, map_text_to_reviews
+from bridge.review_worktree import DOC_SHA_CHARS, REVIEW_LARGE_LOC, map_row_to_doc_heads, map_worktree_to_workspace
 
 GITHUB_EVERY_S = 90
-CHAT_NAMES = {"slack": "Slack", "file": "the chat file", "webhook": "the chat", "none": "nowhere"}
 PARENT_WALK_MAX = 5
 WAKES_PER_HOUR_MAX = 3
 HOUR_MS = 3_600_000
@@ -56,6 +70,7 @@ MARK_COMMAND_CHARS = 16_000
 BODY_PREFIX_CHARS = 60
 COMMENT_MAX_CHARS = 300
 
+USAGE_GAP = "description lacks How this will be used"
 _ISSUE_KEY_RE = re.compile(r"\b[A-Z]{2,}-\d+\b")
 WAITING_FOR_OWNER = "waiting for you"
 FIXED = "fixed"
@@ -64,23 +79,26 @@ _STATE_ORDER = {WAITING_FOR_OWNER: 0, FIXED: 1, COMMENTS_OPEN: 2, READY: 3, "pub
 WAITING_FOR_YOU = "waiting"
 PUBLISHED = "published"
 DRAFTS = "drafts"
-_GROUP_ORDER = (WAITING_FOR_YOU, READY, PUBLISHED, DRAFTS)
+BACKPORTS = "backports"
+_GROUP_ORDER = (WAITING_FOR_YOU, READY, BACKPORTS, PUBLISHED, DRAFTS)
+BACKPORT_CHECK_BUDGET_S = 20.0
+BACKPORT_CHECKS_PER_POLL = 2
+"""Checks run serially before comments and wakes, so a round waits at most this many budgets for them."""
+BACKPORT_RECHECK_MS = 15 * 60_000
+"""A refused check runs again this often on the same head: a named PR may merge meanwhile."""
 LOC_RULE = 1
 """Raised when what counts as a line changes, so cached counts are made again."""
-OWNER = "owner"
+HIS = "his"
 AGENT = "agent"
 UNCLEAR = "unclear"
 OLD = "old"
 COLLEAGUE = "colleague"
 REVIEWER = "reviewer"
-_WAKING = (OWNER, COLLEAGUE, REVIEWER)
+_WAKING = (HIS, COLLEAGUE, REVIEWER)
 APPROVED = "APPROVED"
 CHANGES_REQUESTED = "CHANGES_REQUESTED"
-AGENT_PREFIX = "🤖 Claude:"
+AGENT_PREFIX = CLAUDE_PREFIX
 QUOTE_MAX_CHARS = 140
-# Agents start what they post with AGENT_PREFIX, so from this instant a reply without it is theirs. 0: always. Comments
-# older than a later cutover are placed by the sessions' commands instead, for an install that adopted the rule late.
-AGENT_PREFIX_FROM_MS = 0
 
 _PERMALINK_TS_RE = re.compile(r"/archives/\w+/p(\d{10})(\d{6})(?:\D|$)")
 _REPO_PATH_RE = re.compile(r"repos/([\w.-]+/[\w.-]+)/(?:pulls|issues)/(\d+)/")
@@ -135,13 +153,14 @@ def store_open_prs(conn: sqlite3.Connection, prs: list[OpenPr], now: int) -> Non
             INSERT INTO review_prs (ref, repo, number, title, url, draft, head, head_oid, base, stack_parent, loc,
                                     checks, requested, approved_by, bot_approved, others_reviewed, merge_state,
                                     in_merge_queue, commit_oids, updated_at, first_seen_at,
-                                    fetched_at, threads_key, loc_rule, body_reviews, depends_on)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    fetched_at, threads_key, loc_rule, body_reviews, depends_on, usage_missing)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (ref) DO UPDATE SET
                 title = excluded.title, url = excluded.url, draft = excluded.draft, head = excluded.head,
                 head_oid = excluded.head_oid, base = excluded.base, stack_parent = excluded.stack_parent,
                 loc = excluded.loc, loc_rule = excluded.loc_rule, checks = excluded.checks,
                 requested = excluded.requested, body_reviews = excluded.body_reviews, depends_on = excluded.depends_on,
+                usage_missing = excluded.usage_missing,
                 approved_by = excluded.approved_by, bot_approved = excluded.bot_approved,
                 others_reviewed = max(coalesce(others_reviewed, 0), excluded.others_reviewed),
                 merge_state = excluded.merge_state, in_merge_queue = excluded.in_merge_queue,
@@ -158,6 +177,7 @@ def store_open_prs(conn: sqlite3.Connection, prs: list[OpenPr], now: int) -> Non
                 int(pr.others_reviewed),
                 pr.merge_state, int(pr.in_merge_queue), json.dumps(pr.commit_oids), pr.updated_at, now, now,
                 map_pr_to_threads_key(pr), LOC_RULE, convert_reviews_to_text(pr.body_reviews), pr.depends_on,
+                pr.usage_missing,
             ),
         )  # fmt: skip
         if not pr.open_threads:
@@ -217,10 +237,10 @@ def list_refs_with_new_threads(conn: sqlite3.Connection) -> list[tuple[str, str,
 def store_review_threads(conn: sqlite3.Connection, ref: str, key: str, threads: ReviewThreads) -> None:
     conn.execute(
         """
-        UPDATE review_prs SET open_threads = ?, owner_open_threads = ?, owner_threads = ?, threads_read_for = ?
+        UPDATE review_prs SET open_threads = ?, his_open_threads = ?, his_threads = ?, threads_read_for = ?
         WHERE ref = ?
         """,
-        (threads.open, len(threads.theirs), json.dumps([asdict(t) for t in threads.theirs]), key, ref),
+        (threads.open, len(threads.his), json.dumps([asdict(t) for t in threads.his]), key, ref),
     )
 
 
@@ -255,11 +275,11 @@ def store_comments(
 
 
 def is_worth_keeping(config: Config, comment: FetchedComment) -> bool:
-    """Their account's words and reviews; the review bot's comments and change requests, not its approvals; a person's
-    words and verdicts. Apps such as CI are nobody's review."""
+    """The owner's account's words and reviews; the review bot's comments and change requests, not its approvals; a
+    person's words and verdicts. Apps such as CI are nobody's review."""
     if not comment.author or comment.state in ("DISMISSED", "PENDING"):
         return False
-    if is_owner_account(config, comment.author):
+    if is_his_account(config, comment.author):
         return True
     # Theirs with no text and no verdict only wraps inline comments, which are read one by one.
     if comment.state == "COMMENTED" and not comment.body.strip():
@@ -269,7 +289,7 @@ def is_worth_keeping(config: Config, comment: FetchedComment) -> bool:
     return not comment.by_app
 
 
-def is_owner_account(config: Config, login: str) -> bool:
+def is_his_account(config: Config, login: str) -> bool:
     return login.casefold() == config.review_author.casefold()
 
 
@@ -343,6 +363,28 @@ def record_branch_writes(conn: sqlite3.Connection, conversation_id: str, command
                 )
 
 
+def record_host_pushes(
+    conn: sqlite3.Connection, config: Config, conversation_id: str, pushes: list[tuple[str, str]], at: int
+) -> None:
+    """A host worker's transcript stays on its host: the push the guard passed is what tells bridge it wrote there.
+    Only pushes to the session's own repo count, as the table names a branch that find_owner reads as in that repo."""
+    row = conn.execute(
+        "SELECT repo FROM instances WHERE conversation_id = ? ORDER BY last_observed_at DESC LIMIT 1",
+        (conversation_id,),
+    ).fetchone()
+    own = {str(r).lower() for r in (row["repo"], config.pr_repo_for(row["repo"])) if r} if row else set[str]()
+    for repo, branch in pushes:
+        if repo.lower() not in own:
+            continue
+        conn.execute(
+            """
+            INSERT INTO review_branch_writes (conversation_id, branch, at) VALUES (?, ?, ?)
+            ON CONFLICT (conversation_id, branch) DO UPDATE SET at = max(at, excluded.at)
+            """,
+            (conversation_id, branch, at),
+        )
+
+
 def load_marks(conn: sqlite3.Connection, repo: str, number: int) -> list[Mark]:
     rows = conn.execute(
         """
@@ -378,15 +420,16 @@ def classify_comment(
     parent_verdict: str | None,
     author: str,
     marks: list[Mark],
-    remote_active: bool,
+    remote_active: str | None,
+    prefix_from_ms: int = 0,
 ) -> tuple[str, str | None]:
-    """Whose words these are, under an account the agents share. Agents start what they post with the prefix, and they
-    never do, so since that rule the prefix decides. Before it, the sessions' commands were the only clue, and every
-    doubt landed short of a wake: a false OWNER verdict would wake a worker for its own reply."""
+    """Whose words these are, under an account the agents share. Agents start what they post with the prefix, and the
+    owner never does, so since that rule the prefix decides. Before it, the sessions' commands were the only clue, and
+    every doubt landed short of a wake: a false "owner's" would wake a worker for its own reply."""
     if body.lstrip().startswith(AGENT_PREFIX):
         return AGENT, f"it starts with {AGENT_PREFIX}"
-    if created_at >= AGENT_PREFIX_FROM_MS:
-        return OWNER, None
+    if created_at >= prefix_from_ms:
+        return HIS, None
     wanted = _convert_text_to_comparable(body)[:BODY_PREFIX_CHARS]
     near_visible = False
     for mark in marks:
@@ -406,17 +449,18 @@ def classify_comment(
             near_visible = True
     if near_visible:
         return UNCLEAR, "a session posted a comment here at that time"
-    if parent_id is not None and (parent_author != author or parent_verdict != OWNER):
-        return UNCLEAR, "a reply on a thread they did not start; agents answer those under their account"
+    if parent_id is not None and (parent_author != author or parent_verdict != HIS):
+        return UNCLEAR, "a reply on a thread the owner did not start; agents answer those under the owner's account"
     if remote_active:
-        return UNCLEAR, "a remote session was active on this PR; bridge cannot see its commands"
-    return OWNER, None
+        return UNCLEAR, f"a {remote_active} session was active on this PR; bridge cannot see its commands"
+    return HIS, None
 
 
-def is_remote_active(conn: sqlite3.Connection, ref: str, head: str, at: int) -> bool:
+def find_remote_active(conn: sqlite3.Connection, ref: str, head: str, at: int) -> str | None:
+    """The host of a remote session active on the PR around that time."""
     for row in conn.execute(
         """
-        SELECT s.data, s.activity_at, EXISTS (
+        SELECT s.host, s.data, s.activity_at, EXISTS (
             SELECT 1 FROM remote_refs r WHERE r.host = s.host AND r.key = s.key AND r.ref = ?) AS on_ref
         FROM remote_sessions s
         """,
@@ -426,8 +470,8 @@ def is_remote_active(conn: sqlite3.Connection, ref: str, head: str, at: int) -> 
         if activity is None or abs(at - int(activity)) > REMOTE_ACTIVE_WINDOW_MS:
             continue
         if row["on_ref"] or f'"branch": {json.dumps(head)}' in str(row["data"]):
-            return True
-    return False
+            return str(row["host"])
+    return None
 
 
 def classify_pending_comments(conn: sqlite3.Connection, config: Config, scanned_from: int) -> None:
@@ -446,7 +490,7 @@ def classify_pending_comments(conn: sqlite3.Connection, config: Config, scanned_
     for row in rows:
         ref = str(row["ref"])
         created_at = int(row["created_at"])
-        if row["author"] is not None and not is_owner_account(config, str(row["author"])):
+        if row["author"] is not None and not is_his_account(config, str(row["author"])):
             verdict, reason = classify_others_comment(conn, config, row)
         elif created_at < int(row["first_seen_at"]):
             verdict, reason = OLD, None
@@ -467,9 +511,10 @@ def classify_pending_comments(conn: sqlite3.Connection, config: Config, scanned_
                 parent["verdict"] if parent else None,
                 config.review_author,
                 load_marks(conn, str(row["repo"]), int(row["number"])),
-                is_remote_active(conn, ref, str(row["head"]), created_at),
+                find_remote_active(conn, ref, str(row["head"]), created_at),
+                config.agent_prefix_from_ms,
             )
-        # Reread once after the marking fix: what turns out theirs is older than the fix, and an agent answered it.
+        # Reread once after the marking fix: what turns out the owner's is older than the fix, and an agent answered it.
         told_at = created_at if row["quiet"] and verdict in _WAKING else None
         owner_asked_at = created_at if row["quiet"] and verdict == UNCLEAR else None
         conn.execute(
@@ -494,8 +539,8 @@ def classify_review_by_its_comments(
         return OLD, "a review with no text and no comments"
     if None in verdicts:
         return None
-    if OWNER in verdicts:
-        return OWNER, None
+    if HIS in verdicts:
+        return HIS, None
     if all(v in (AGENT, OLD) for v in verdicts):
         return AGENT, "its comments are an agent's"
     return UNCLEAR, "its comments are unclear"
@@ -541,11 +586,12 @@ def take_comment_wakes(conn: sqlite3.Connection, config: Config, now: int) -> li
             WHERE ref = ? AND told_at > ? AND quiet IS NULL
               AND NOT (verdict = ? AND state IS NOT NULL AND trim(body) = '')
             """,
-            (ref, now - HOUR_MS, OWNER),
+            (ref, now - HOUR_MS, HIS),
         ).fetchone()[0]
         if int(recent) >= WAKES_PER_HOUR_MAX:
-            # A review bot answering every push ends here. Their words and colleagues' are what this is for, so they
-            # wait for the hour to pass and go out in one message; a misread agent reply then wakes at most 3 an hour.
+            # A review bot answering every push ends here. The owner's and colleagues' words are what this is for, so
+            # they wait for the hour to pass and go out in one message; a misread agent reply then wakes at most 3 an
+            # hour.
             conn.execute(
                 "UPDATE review_comments SET verdict = ?, reason = ? WHERE ref = ? AND verdict = ? AND told_at IS NULL",
                 (UNCLEAR, f"more than {WAKES_PER_HOUR_MAX} wakes on this PR in an hour", ref, REVIEWER),
@@ -569,8 +615,8 @@ def take_comment_wakes(conn: sqlite3.Connection, config: Config, now: int) -> li
             [(OLD, "no longer approved", ref, comment_id) for comment_id in withdrawn],
         )
         rows = [r for r in rows if r["comment_id"] not in withdrawn]
-        # Their review with no text only wraps comments already in the message, or told before.
-        silent = [r for r in rows if r["verdict"] == OWNER and r["state"] is not None and not str(r["body"]).strip()]
+        # The owner's review with no text only wraps comments already in the message, or told before.
+        silent = [r for r in rows if r["verdict"] == HIS and r["state"] is not None and not str(r["body"]).strip()]
         conn.executemany(
             "UPDATE review_comments SET told_at = ? WHERE ref = ? AND comment_id = ?",
             [(now, ref, r["comment_id"]) for r in silent],
@@ -584,6 +630,14 @@ def take_comment_wakes(conn: sqlite3.Connection, config: Config, now: int) -> li
         wake = map_items_to_wake(str(pr["url"]), str(pr["title"]), items, config)
         sent.append(tell_owner(conn, owner, wake, now))
         conn.executemany(
+            """
+            INSERT INTO colleague_calls (ref, comment_id, owner_handle, owner_lead) VALUES (?, ?, ?, ?)
+            ON CONFLICT (ref, comment_id) DO UPDATE SET owner_handle = excluded.owner_handle,
+                                                        owner_lead = excluded.owner_lead
+            """,
+            [(ref, r["comment_id"], owner.handle, owner.lead) for r in rows if r["verdict"] == COLLEAGUE],
+        )
+        conn.executemany(
             "UPDATE review_comments SET told_at = ? WHERE ref = ? AND comment_id = ?",
             [(now, ref, r["comment_id"]) for r in rows],
         )
@@ -591,7 +645,7 @@ def take_comment_wakes(conn: sqlite3.Connection, config: Config, now: int) -> li
 
 
 def ask_owners_about_unplaced(conn: sqlite3.Connection, config: Config, now: int) -> list[tuple[int, Recipient]]:
-    """What bridge cannot place under their account is not shown to them: its owner looks, once per comment."""
+    """What bridge cannot place under the owner's account is not shown to them: its owner looks, once per comment."""
     sent: list[tuple[int, Recipient]] = []
     rows = conn.execute(
         """
@@ -602,7 +656,7 @@ def ask_owners_about_unplaced(conn: sqlite3.Connection, config: Config, now: int
     ).fetchall()
     by_ref: dict[str, list[sqlite3.Row]] = {}
     for row in rows:
-        if row["author"] is None or is_owner_account(config, str(row["author"])):
+        if row["author"] is None or is_his_account(config, str(row["author"])):
             by_ref.setdefault(str(row["ref"]), []).append(row)
     for ref, comments in by_ref.items():
         pr = conn.execute("SELECT * FROM review_prs WHERE ref = ?", (ref,)).fetchone()
@@ -614,7 +668,7 @@ def ask_owners_about_unplaced(conn: sqlite3.Connection, config: Config, now: int
             f"account are {config.owner_name}'s or an agent's, so {config.owner_name} does not see them. Check each: "
             f"if it is {config.owner_name}'s, act on it; if a session of ours wrote it, nothing to do."
         )
-        items = [WakeItem(OWNER, "", None, str(c["url"]), str(c["body"])) for c in comments]
+        items = [WakeItem(HIS, "", None, str(c["url"]), str(c["body"])) for c in comments]
         sent.append(tell_owner(conn, owner, map_items_to_text(head, str(pr["url"]), items), now))
         conn.executemany(
             "UPDATE review_comments SET owner_asked_at = ? WHERE ref = ? AND comment_id = ?",
@@ -624,12 +678,15 @@ def ask_owners_about_unplaced(conn: sqlite3.Connection, config: Config, now: int
 
 
 def map_items_to_wake(url: str, title: str, items: list[WakeItem], config: Config) -> str:
-    others = [i for i in items if i.verdict != OWNER]
+    others = [i for i in items if i.verdict != HIS]
     approvers = sorted({i.author for i in others if i.state == APPROVED})
     requesters = sorted({_map_item_to_name(i) for i in others if i.state == CHANGES_REQUESTED})
     commenters = sorted({_map_item_to_name(i) for i in others if i.state not in (APPROVED, CHANGES_REQUESTED)})
+    bot_words = any(i.verdict == REVIEWER and i.state != APPROVED for i in others)
+    colleague_words = [i for i in others if i.verdict == COLLEAGUE and (i.state != APPROVED or i.body.strip())]
+    colleague_requesters = sorted({i.author for i in colleague_words if i.state == CHANGES_REQUESTED})
     lines = [f"New on {url} ({title}):"]
-    if any(i.verdict == OWNER for i in items):
+    if any(i.verdict == HIS for i in items):
         lines.append(
             f"{config.owner_name_at_start} commented. Read it, fix what it asks and push; bridge shows the fixes on "
             f"{config.owner_name}'s queue."
@@ -638,18 +695,41 @@ def map_items_to_wake(url: str, title: str, items: list[WakeItem], config: Confi
         lines.append(f"{', '.join(requesters)} requested changes.")
     if commenters:
         lines.append(f"{', '.join(commenters)} commented.")
-    if requesters or commenters:
+    if bot_words:
         lines.append(
             "Fix what this PR introduced, defer the rest with a reason in a reply, and ask "
             f"{config.owner_name} only for decisions."
         )
+    if colleague_words:
+        lines.append(map_config_to_colleague_rule(config))
+    if colleague_requesters:
+        lines.append(
+            f"{', '.join(colleague_requesters)} requested changes: substantive, so reply and push for it are held "
+            f"until {config.owner_name} chooses."
+        )
     if approvers:
-        lines.append(f"{', '.join(approvers)} approved: apply the merge rule (bridge skill).")
+        rule = read_overlay(config, "merge-rule", "the merge rule")
+        lines.append(f"{', '.join(approvers)} approved: apply {rule}.")
     lines.append(
-        f"Anything you post on GitHub starts with '{AGENT_PREFIX}'. Run gh in plain sight in a Bash command, not "
+        f"Each comment or description body you post on GitHub starts with '{AGENT_PREFIX}' (a title never does). "
+        "Run gh in plain sight in a Bash command, not "
         f"from a script, so bridge can tell your words from {config.owner_name}'s."
     )
     return map_items_to_text(" ".join(lines), url, items)
+
+
+def map_config_to_colleague_rule(config: Config) -> str:
+    owner, start = config.owner_name, config.owner_name_at_start
+    return (
+        f"{start} decides what we say to colleagues. Each colleague comment is yours to call: a small one (a typo, a "
+        'rename, a factual question) you handle, then run `guild comment small <link> "what you did"`. A substantive '
+        "one (a design change, changes requested, anything you would decline or argue with, anything that grows "
+        f"scope; unsure = substantive) gets no reply and no push until {owner} chooses: run "
+        f'`guild comment draft <link> --reply-file <path> --plan "…"`. {start} sees the comment, your draft and plan, '
+        "and picks Send as is, Edit or I'll answer myself; bridge posts the reply after that and tells you. A draft "
+        "says what happens to the PR (merge, keep, close), not only the facts. The page "
+        f"shows {owner} each call."
+    )
 
 
 def map_items_to_text(head: str, url: str, items: list[WakeItem]) -> str:
@@ -659,7 +739,7 @@ def map_items_to_text(head: str, url: str, items: list[WakeItem]) -> str:
     budget = BODY_MAX_CHARS - len(head) - len(more) - 2
     shown: list[tuple[str, WakeItem]] = []
     for item in items:
-        label = item.url if item.verdict == OWNER else f"{_map_item_to_name(item)}: {item.url}"
+        label = item.url if item.verdict == HIS else f"{_map_item_to_name(item)}: {item.url}"
         if sum(len(lbl) + 7 for lbl, _ in shown) + len(label) + 7 > budget:
             break
         shown.append((label, item))
@@ -716,36 +796,52 @@ def find_lead_of(conn: sqlite3.Connection, surface: str | None) -> tuple[str | N
     return None, None
 
 
-def find_owner(conn: sqlite3.Connection, config: Config, ref: str, repo: str, head: str) -> Owner | None:
-    """The lead whose declared work or scope names it; else the live session on the PR's branch that committed or
-    pushed to it; else the live session with the PR in its refs, most recent; once that has ended, its lead. A session
-    that only read the PR or checked out its branch owns nothing by that. A locked tab is never an owner, and neither
-    is the assistant, who mentions every PR and owns none."""
+def find_owner(
+    conn: sqlite3.Connection, config: Config, ref: str, repo: str, head: str, owned_only: bool = False
+) -> Owner | None:
+    """Who every notice about the PR goes to. The session that owns it: the live one holding its claim, a lead whose
+    declared work names the PR, the live one that committed or pushed to its branch (on it first, else the latest
+    writer), an ended one that did. Only when no session owns it, and not owned_only: a lead whose work or scope names
+    its issue, then an ended session that sat on its branch and named it, the live session that mentioned it last, an
+    ended one. A live worker keeps its PR's notices, since it fixes what they ask; an ended one hands them to the lead
+    that ran it. A locked tab is never an owner, and neither is the assistant, who mentions every PR and owns none."""
 
     def may_own(row: sqlite3.Row) -> bool:
         return row["handle"] != config.assistant_handle and not is_conversation_locked(
             conn, config, str(row["conversation_id"])
         )
 
+    def from_session(row: sqlite3.Row, via: str) -> Owner:
+        display = find_lead_of(conn, row["surface"])[0]
+        return Owner(str(row["handle"]), str(row["conversation_id"]), row["surface"], display, via)
+
     claimed = _find_owner_from_claim(conn, ref, may_own)
     if claimed is not None:
-        return claimed
-    declared = _find_owner_from_lead_work(conn, config, ref, head)
+        return from_session(*claimed)
+    declared = _find_lead_from_work(conn, config, ref, head, by_issue=False)
     if declared is not None:
         return declared
     for row in conn.execute(
         """
-        SELECT i.conversation_id, i.surface, i.repo, s.handle FROM instances i JOIN surfaces s ON s.surface = i.surface
-        WHERE i.ended_at IS NULL AND i.branch = ?1 AND i.conversation_id IS NOT NULL AND s.handle IS NOT NULL
-          AND EXISTS (SELECT 1 FROM review_branch_writes w
-                      WHERE w.conversation_id = i.conversation_id AND w.branch = ?1)
-        ORDER BY coalesce(i.last_activity_at, 0) DESC
+        SELECT i.conversation_id, i.surface, i.repo, s.handle FROM review_branch_writes w
+        JOIN instances i ON i.conversation_id = w.conversation_id AND i.ended_at IS NULL
+        JOIN surfaces s ON s.surface = i.surface
+        WHERE w.branch = ?1 AND s.handle IS NOT NULL
+        ORDER BY i.branch IS ?1 DESC, w.at DESC, coalesce(i.last_activity_at, 0) DESC
         """,
         (head,),
     ):
         if config.pr_repo_for(row["repo"]) == repo and may_own(row):
-            display = find_lead_of(conn, row["surface"])[0]
-            return Owner(str(row["handle"]), str(row["conversation_id"]), row["surface"], display, "branch")
+            return from_session(row, "branch")
+    ended = _find_lead_of_ended_writer(conn, config, ref, repo, head, wrote=True)
+    if ended is not None or owned_only:
+        return ended
+    by_issue = _find_lead_from_work(conn, config, ref, head, by_issue=True)
+    if by_issue is not None:
+        return by_issue
+    on_branch = _find_lead_of_ended_writer(conn, config, ref, repo, head, wrote=False)
+    if on_branch is not None:
+        return on_branch
     for row in conn.execute(
         """
         SELECT i.conversation_id, i.surface, s.handle FROM refs r
@@ -757,29 +853,20 @@ def find_owner(conn: sqlite3.Connection, config: Config, ref: str, repo: str, he
         (ref,),
     ):
         if may_own(row):
-            display = find_lead_of(conn, row["surface"])[0]
-            return Owner(str(row["handle"]), str(row["conversation_id"]), row["surface"], display, "ref")
+            return from_session(row, "ref")
     for row in conn.execute(
         """
-        SELECT surface, conversation_id, repo, seen FROM (
-            SELECT i.surface, i.conversation_id, i.repo, coalesce(i.last_activity_at, i.last_observed_at) AS seen
-            FROM instances i WHERE i.branch = ?1 AND i.ended_at IS NOT NULL AND i.surface IS NOT NULL
-              AND EXISTS (SELECT 1 FROM review_branch_writes w WHERE w.conversation_id = i.conversation_id
-                          AND w.branch = ?1)
-            UNION ALL
-            SELECT i.surface, r.conversation_id, NULL, r.last_seen_at
-            FROM refs r JOIN conversations c ON c.conversation_id = r.conversation_id
-            JOIN instances i ON i.instance_id = c.instance_id
-            WHERE r.ref = ?2 AND i.surface IS NOT NULL
-        ) ORDER BY seen DESC
+        SELECT i.surface, r.conversation_id FROM refs r
+        JOIN conversations c ON c.conversation_id = r.conversation_id
+        JOIN instances i ON i.instance_id = c.instance_id
+        WHERE r.ref = ? AND i.surface IS NOT NULL
+        ORDER BY r.last_seen_at DESC
         """,
-        (head, ref),
+        (ref,),
     ):
-        if row["repo"] is not None and config.pr_repo_for(row["repo"]) != repo:
-            continue
         if row["conversation_id"] and is_conversation_locked(conn, config, str(row["conversation_id"])):
             continue
-        display, lead_surface = find_lead_of(conn, row["surface"])
+        display, lead_surface = find_lead_of_ended(conn, row["surface"], row["conversation_id"])
         if lead_surface is None:
             continue
         owner = map_lead_to_owner(conn, config, lead_surface, display)
@@ -788,7 +875,143 @@ def find_owner(conn: sqlite3.Connection, config: Config, ref: str, repo: str, he
     return None
 
 
-def _find_owner_from_claim(conn: sqlite3.Connection, ref: str, may_own: Callable[[sqlite3.Row], bool]) -> Owner | None:
+def _find_lead_of_ended_writer(
+    conn: sqlite3.Connection, config: Config, ref: str, repo: str, head: str, wrote: bool
+) -> Owner | None:
+    """By its lead, an ended session that wrote to the PR's branch; else (not wrote) one that sat on the branch and
+    named the PR, which is less: a reviewer does that too."""
+    query = (
+        """
+        SELECT i.conversation_id, i.surface, i.repo FROM review_branch_writes w
+        JOIN instances i ON i.conversation_id = w.conversation_id
+        WHERE w.branch = ?1 AND i.ended_at IS NOT NULL AND i.surface IS NOT NULL
+        ORDER BY w.at DESC, coalesce(i.last_activity_at, i.last_observed_at, 0) DESC
+        """
+        if wrote
+        else """
+        SELECT i.conversation_id, i.surface, i.repo FROM refs r
+        JOIN instances i ON i.conversation_id = r.conversation_id
+        WHERE r.ref = ?2 AND i.branch = ?1 AND i.ended_at IS NOT NULL AND i.surface IS NOT NULL
+        ORDER BY coalesce(i.last_activity_at, i.last_observed_at, 0) DESC
+        """
+    )
+    for row in conn.execute(query, (head,) if wrote else (head, ref)):
+        if row["repo"] is not None and config.pr_repo_for(row["repo"]) != repo:
+            continue
+        if is_conversation_locked(conn, config, str(row["conversation_id"])):
+            continue
+        display, lead_surface = find_lead_of_ended(conn, row["surface"], str(row["conversation_id"]))
+        owner = map_lead_to_owner(conn, config, lead_surface, display) if lead_surface else None
+        if owner is not None:
+            return owner
+    return None
+
+
+def find_owner_of_ref(
+    conn: sqlite3.Connection, config: Config, ref: str, github_head: str, owned_only: bool = False
+) -> Owner | None:
+    """find_owner for a PR known by its ref alone: the queue's row names its repo and branch, else GitHub's head."""
+    row = conn.execute("SELECT ref, repo, head FROM review_prs WHERE lower(ref) = lower(?)", (ref,)).fetchone()
+    if row is not None:
+        return find_owner(conn, config, str(row["ref"]), str(row["repo"]), str(row["head"]), owned_only)
+    return find_owner(conn, config, ref, ref.removeprefix("pr:").partition("#")[0], github_head, owned_only)
+
+
+def find_lead_of_ended(
+    conn: sqlite3.Connection, surface: str | None, conversation_id: str | None
+) -> tuple[str | None, str | None]:
+    """As find_lead_of; a closed worker's tab and its parent link are gone, but its close recorded the lead."""
+    display, lead_surface = find_lead_of(conn, surface)
+    if lead_surface is not None or conversation_id is None:
+        return display, lead_surface
+    row = conn.execute(
+        """
+        SELECT l.display_name, l.surface FROM closed_workers c JOIN leads l ON l.name = c.parent_lead
+        WHERE c.conversation_id = ? AND l.retired_at IS NULL ORDER BY c.closed_at DESC LIMIT 1
+        """,
+        (conversation_id,),
+    ).fetchone()
+    return (str(row["display_name"]), row["surface"]) if row is not None else (None, None)
+
+
+def find_issue_lead(
+    conn: sqlite3.Connection,
+    config: Config,
+    issue_ref: str,
+    linked: list[str],
+    closing: list[str],
+    enrichment: Mapping[str, Mapping[str, object]],
+) -> Owner | None:
+    """The lead an issue's notices go to, in a PR's owner order: the lead above the live session holding the issue's
+    claim; a lead whose declared work names the issue or one of its linked PRs; the lead above a live session on a
+    branch named after the issue, else above the owner of a closing PR; the lead of an ended session on such a branch;
+    a lead whose scope names the issue. Only a lead can act on an issue, so a worker hands it up. Naming an issue in a
+    prompt or a message makes no one its owner. None when no live lead is found."""
+    key = issue_ref.removeprefix("issue:")
+    wanted = {r.lower() for r in (issue_ref, *linked)}
+    leads = list_leads(conn)
+
+    def lead_above(surface: str | None, conversation_id: str | None = None) -> Owner | None:
+        display, lead_surface = find_lead_of_ended(conn, surface, conversation_id)
+        return map_lead_to_owner(conn, config, lead_surface, display) if lead_surface else None
+
+    def may_own(row: sqlite3.Row) -> bool:
+        return row["handle"] != config.assistant_handle and not is_conversation_locked(
+            conn, config, str(row["conversation_id"])
+        )
+
+    claimed = _find_owner_from_claim(conn, issue_ref, may_own)
+    if claimed is not None and (owner := lead_above(claimed[0]["surface"])) is not None:
+        return owner
+    by_name = {lead.name: lead for lead in leads}
+    for chunk in conn.execute("SELECT lead, refs FROM lead_work WHERE done_at IS NULL ORDER BY updated_at DESC"):
+        lead = by_name.get(str(chunk["lead"]))
+        if lead is None or not wanted & {str(r).lower() for r in json.loads(str(chunk["refs"]))}:
+            continue
+        owner = map_lead_to_owner(conn, config, lead.surface, lead.display_name)
+        if owner is not None:
+            return owner
+    on_branch = _list_sessions_on_issue_branch(conn, key)
+    for row in on_branch:
+        if row["ended_at"] is None and may_own(row) and (owner := lead_above(row["surface"])) is not None:
+            return owner
+    for ref in closing:
+        head = str((enrichment.get(ref) or {}).get("head") or "")
+        found = find_owner_of_ref(conn, config, ref, head, owned_only=True)
+        owner = lead_above(found.surface) if found else None
+        if owner is not None:
+            return owner
+    for row in on_branch:
+        if row["ended_at"] is None or is_conversation_locked(conn, config, str(row["conversation_id"])):
+            continue
+        if (owner := lead_above(row["surface"], str(row["conversation_id"]))) is not None:
+            return owner
+    for lead in leads:
+        if key.upper() in _ISSUE_KEY_RE.findall(f"{lead.scope} {lead.linear_refs}".upper()):
+            owner = map_lead_to_owner(conn, config, lead.surface, lead.display_name)
+            if owner is not None:
+                return owner
+    return None
+
+
+def _list_sessions_on_issue_branch(conn: sqlite3.Connection, key: str) -> list[sqlite3.Row]:
+    """Sessions whose branch names the whole issue key (PROJ-1 is not PROJ-10), live first, the latest active first."""
+    pattern = re.compile(rf"(?<![a-z0-9]){re.escape(key.lower())}(?![0-9])")
+    rows = conn.execute(
+        """
+        SELECT i.conversation_id, i.surface, i.branch, i.ended_at, s.handle FROM instances i
+        LEFT JOIN surfaces s ON s.surface = i.surface
+        WHERE instr(lower(i.branch), ?) > 0 AND i.surface IS NOT NULL AND i.conversation_id IS NOT NULL
+        ORDER BY i.ended_at IS NOT NULL, coalesce(i.last_activity_at, i.last_observed_at, 0) DESC
+        """,
+        (key.lower(),),
+    )
+    return [r for r in rows if pattern.search(str(r["branch"]).lower())]
+
+
+def _find_owner_from_claim(
+    conn: sqlite3.Connection, ref: str, may_own: Callable[[sqlite3.Row], bool]
+) -> tuple[sqlite3.Row, str] | None:
     """A live session holding the PR's claim is working on it right now, whatever the branch name says."""
     for row in conn.execute(
         """
@@ -801,25 +1024,28 @@ def _find_owner_from_claim(conn: sqlite3.Connection, ref: str, may_own: Callable
         (ref,),
     ):
         if may_own(row):
-            display = find_lead_of(conn, row["surface"])[0]
-            return Owner(str(row["handle"]), str(row["conversation_id"]), row["surface"], display, "claim")
+            return row, "claim"
     return None
 
 
-def _find_owner_from_lead_work(conn: sqlite3.Connection, config: Config, ref: str, head: str) -> Owner | None:
-    """The PR in a lead's live work; else an issue its title or branch names, in that work or the lead's scope."""
+def _find_lead_from_work(conn: sqlite3.Connection, config: Config, ref: str, head: str, by_issue: bool) -> Owner | None:
+    """The lead whose live work names the PR; by_issue, the lead whose work, else scope, names an issue its title or
+    branch names."""
     row = conn.execute("SELECT title FROM review_prs WHERE ref = ?", (ref,)).fetchone()
-    keys = set(_ISSUE_KEY_RE.findall(f"{row['title'] if row else ''} {head}".upper()))
-    work_refs: dict[str, set[str]] = {}
-    for chunk in conn.execute("SELECT lead, refs FROM lead_work WHERE done_at IS NULL"):
-        work_refs.setdefault(str(chunk["lead"]), set()).update(str(r) for r in json.loads(str(chunk["refs"])))
+    keys = set(_ISSUE_KEY_RE.findall(f"{row['title'] if row else ''} {head}".upper())) if by_issue else set[str]()
+    wanted = {f"issue:{key}" for key in keys} if by_issue else {ref}
+    # Of two leads whose work names the same PR or issue, the one that declared it last is the one on it now.
+    named: dict[str, int] = {}
+    for chunk in conn.execute("SELECT lead, refs, updated_at FROM lead_work WHERE done_at IS NULL"):
+        if wanted & {str(r) for r in json.loads(str(chunk["refs"]))}:
+            lead_name, updated = str(chunk["lead"]), int(chunk["updated_at"] or 0)
+            named[lead_name] = max(named.get(lead_name, 0), updated)
     leads = list_leads(conn)
-    wanted_issues = {f"issue:{key}" for key in keys}
-    matches = (
-        [lead for lead in leads if ref in work_refs.get(lead.name, set())],
-        [lead for lead in leads if wanted_issues & work_refs.get(lead.name, set())],
-        [lead for lead in leads if keys & set(_ISSUE_KEY_RE.findall(f"{lead.scope} {lead.linear_refs}".upper()))],
-    )
+    matches = [sorted((lead for lead in leads if lead.name in named), key=lambda lead: -named[lead.name])]
+    if by_issue:
+        matches.append(
+            [lead for lead in leads if keys & set(_ISSUE_KEY_RE.findall(f"{lead.scope} {lead.linear_refs}".upper()))]
+        )
     for found in matches:
         for lead in found:
             owner = map_lead_to_owner(conn, config, lead.surface, lead.display_name)
@@ -847,8 +1073,8 @@ def map_lead_to_owner(
 
 
 def map_events_to_rounds(comment_times: list[int], head_times: list[int]) -> tuple[int, bool]:
-    """(finished rounds, comments still open). A head committed before their comment is not a fix for it, whenever it
-    was pushed."""
+    """(finished rounds, comments still open). A head committed before the owner's comment is not a fix for it, whenever
+    it was pushed."""
     events = sorted([(t, 0) for t in comment_times] + [(t, 1) for t in head_times])
     rounds = 0
     open_comments = False
@@ -880,6 +1106,11 @@ def poll_review_queue(
             record_poll_error(conn, str(exc), now)
         prs = None
     if prs is not None:
+        excluded = {r.casefold() for r in config.review_excluded_repos}
+        prs = [pr for pr in prs if pr.repo.casefold() not in excluded]
+        if excluded:
+            with transaction(conn):
+                drop_excluded_repos(conn, excluded)
         missing = list_missing_refs(conn, prs)
         gone = [
             ref
@@ -889,6 +1120,10 @@ def poll_review_queue(
         with transaction(conn):
             store_open_prs(conn, prs, now)
             mark_closed(conn, gone, now)
+    for ref, repo, number, key in list_backports_to_check(conn, config, now)[:BACKPORT_CHECKS_PER_POLL]:
+        verdict = check_backport(repo, number, config.backport_bases, time.monotonic() + BACKPORT_CHECK_BUDGET_S)
+        with transaction(conn):
+            store_backport_check(conn, ref, key, verdict, now)
     for ref, repo, number, updated_at in list_refs_with_new_activity(conn):
         try:
             comments = fetch_comments(repo, number)
@@ -914,6 +1149,51 @@ def poll_review_queue(
         return [*take_comment_wakes(conn, config, now), *tell_ready_to_merge(conn, config, now)]
 
 
+def drop_excluded_repos(conn: sqlite3.Connection, excluded: set[str]) -> None:
+    """Rows of a repo taken out of the queue go silently: dropping them is not the PR closing."""
+    for row in conn.execute("SELECT ref, repo FROM review_prs").fetchall():
+        if str(row["repo"]).casefold() in excluded:
+            conn.execute("DELETE FROM review_prs WHERE ref = ?", (row["ref"],))
+
+
+def list_backports_to_check(conn: sqlite3.Connection, config: Config, now: int) -> list[tuple[str, str, int, str]]:
+    """(ref, repo, number, check key) of open backports whose diff check is for another head or base, or refused a
+    while ago; never checked first, then the oldest check."""
+    if not config.backport_bases:
+        return []
+    return [
+        (str(r["ref"]), str(r["repo"]), int(r["number"]), map_row_to_backport_key(r))
+        for r in conn.execute(
+            """
+            SELECT ref, repo, number, head_oid, base, backport_key, backport_waived, backport_at FROM review_prs
+            WHERE closed_at IS NULL ORDER BY backport_at IS NOT NULL, backport_at
+            """
+        )
+        if is_backport_base(config.backport_bases, str(r["base"]))
+        and (
+            r["backport_key"] != map_row_to_backport_key(r)
+            or (not r["backport_waived"] and int(r["backport_at"] or 0) <= now - BACKPORT_RECHECK_MS)
+        )
+    ]
+
+
+def map_row_to_backport_key(row: sqlite3.Row) -> str:
+    """What a check's verdict holds for: its head and its base."""
+    return f"{row['head_oid']} {row['base']}"
+
+
+def store_backport_check(
+    conn: sqlite3.Connection, ref: str, key: str, verdict: BackportVerdict | None, now: int
+) -> None:
+    conn.execute(
+        """
+        UPDATE review_prs SET backport_key = ?, backport_waived = ?, backport_reason = ?, backport_at = ?
+        WHERE ref = ?
+        """,
+        (key, bool(verdict and verdict.waived), verdict.reason if verdict else None, now, ref),
+    )
+
+
 def map_row_to_merge_block(conn: sqlite3.Connection, row: sqlite3.Row) -> str | None:
     """Why the owner's rule forbids merging, whatever the approvals: a thread they started is unresolved, or their last
     word has neither an answer nor a commit after it. None when nothing of theirs is open. Stored without a name: the
@@ -921,10 +1201,10 @@ def map_row_to_merge_block(conn: sqlite3.Connection, row: sqlite3.Row) -> str | 
     reasons: list[str] = []
     if not _are_threads_current(row):
         reasons.append("review threads could not be read yet")
-    threads = int(row["owner_open_threads"] or 0)
+    threads = int(row["his_open_threads"] or 0)
     if threads:
         reasons.append(f"{threads} review thread{'s are' if threads > 1 else ' is'} unresolved")
-    if _is_owner_last_word_unanswered(conn, str(row["ref"])):
+    if _is_his_last_word_unanswered(conn, str(row["ref"])):
         reasons.append("the last comment has no answer and no commit after it")
     return "; ".join(reasons) or None
 
@@ -933,11 +1213,11 @@ def _are_threads_current(row: sqlite3.Row) -> bool:
     return row["threads_key"] is None or row["threads_key"] == row["threads_read_for"]
 
 
-def _is_owner_last_word_unanswered(conn: sqlite3.Connection, ref: str) -> bool:
-    owner_last = conn.execute(
-        "SELECT max(created_at) FROM review_comments WHERE ref = ? AND verdict = ?", (ref, OWNER)
+def _is_his_last_word_unanswered(conn: sqlite3.Connection, ref: str) -> bool:
+    his_last = conn.execute(
+        "SELECT max(created_at) FROM review_comments WHERE ref = ? AND verdict = ?", (ref, HIS)
     ).fetchone()[0]
-    if owner_last is None:
+    if his_last is None:
         return False
     answered = conn.execute(
         """
@@ -947,38 +1227,39 @@ def _is_owner_last_word_unanswered(conn: sqlite3.Connection, ref: str) -> bool:
         """,
         (ref, AGENT, COLLEAGUE, REVIEWER),
     ).fetchone()[0]
-    return answered is None or int(answered) < int(owner_last)
+    return answered is None or int(answered) < int(his_last)
 
 
 def map_row_to_threads_to_resolve(conn: sqlite3.Connection, config: Config, row: sqlite3.Row) -> list[dict[str, str]]:
-    """Their open threads, each with its reply quoted, when they are all answered and nothing else of theirs blocks the
-    merge: only resolving them is left, and that is their move. Empty while any of them still waits on its owner."""
-    threads: list[dict[str, Any]] = json.loads(str(row["owner_threads"] or "[]"))
-    if not _are_threads_current(row) or not threads or len(threads) != int(row["owner_open_threads"] or 0):
+    """The owner's open threads, each with its reply quoted, when they are all answered and nothing else of theirs
+    blocks the merge: only resolving them is left, and that is their move. Empty while any of them still waits on its
+    owner."""
+    threads: list[dict[str, Any]] = json.loads(str(row["his_threads"] or "[]"))
+    if not _are_threads_current(row) or not threads or len(threads) != int(row["his_open_threads"] or 0):
         return []
     if not all(_is_thread_answered(conn, config, str(row["ref"]), thread) for thread in threads):
         return []
-    if _is_owner_last_word_unanswered(conn, str(row["ref"])):
+    if _is_his_last_word_unanswered(conn, str(row["ref"])):
         return []
     return [{"url": str(t["url"]), "quote": map_reply_to_quote(str(t["last_body"]))} for t in threads]
 
 
 def is_resolving_all_that_is_left(row: sqlite3.Row) -> bool:
-    """Nothing but their threads stands between the PR and a merge: ready, approved, green, no conflicts, and no thread
-    of anyone else's open."""
+    """Nothing but the owner's threads stands between the PR and a merge: ready, approved, green, no conflicts, and no
+    thread of anyone else's open."""
     return (
         not row["draft"]
         and row["checks"] in (None, "SUCCESS")
         and bool(json.loads(str(row["approved_by"] or "[]")))
         and row["merge_state"] != "DIRTY"
-        and int(row["open_threads"] or 0) == int(row["owner_open_threads"] or 0)
+        and int(row["open_threads"] or 0) == int(row["his_open_threads"] or 0)
     )
 
 
 def _is_thread_answered(conn: sqlite3.Connection, config: Config, ref: str, thread: dict[str, Any]) -> bool:
     if not thread["replies"]:
         return False
-    if not is_owner_account(config, str(thread["last_author"])):
+    if not is_his_account(config, str(thread["last_author"])):
         return True
     if str(thread["last_body"]).lstrip().startswith(AGENT_PREFIX):
         return True
@@ -994,9 +1275,10 @@ def map_reply_to_quote(body: str) -> str:
 
 
 def store_merge_blocks(conn: sqlite3.Connection) -> None:
+    end_reviewed_holds(conn)
     for row in conn.execute("SELECT * FROM review_prs WHERE closed_at IS NULL").fetchall():
         block = map_row_to_merge_block(conn, row)
-        # Their comments reopen the telling, so once they are settled the lead hears it is ready again.
+        # The owner's comments reopen the telling, so once they are settled the lead hears it is ready again.
         conn.execute(
             """
             UPDATE review_prs SET merge_block = ?1, merge_path = ?2,
@@ -1009,24 +1291,45 @@ def store_merge_blocks(conn: sqlite3.Connection) -> None:
     sync_claims_flag(conn)
 
 
+def end_reviewed_holds(conn: sqlite3.Connection) -> None:
+    """A hold waits for the owner's review: their comment or review on GitHub after it, or the PR published."""
+    conn.execute(
+        """
+        UPDATE review_prs SET held_at = NULL, held_by = NULL, held_why = NULL
+        WHERE held_at IS NOT NULL AND (
+            reviewed_at IS NOT NULL OR post_state = 'external'
+            OR EXISTS (SELECT 1 FROM review_comments c
+                       WHERE c.ref = review_prs.ref AND c.verdict = ? AND c.created_at >= review_prs.held_at)
+        )
+        """,
+        (HIS,),
+    )
+
+
 def map_row_to_merge_path(row: sqlite3.Row, merge_block: str | None) -> str | None:
-    """READY when the owner's rule lets the PR's lead merge it: approved, CI green, not a draft, no conflicts and
-    nothing of the owner's open. Neither their review nor a review post is needed."""
+    """READY when the owner's rule lets the PR's lead merge it: reviewed by the owner, approved, CI green, not a draft,
+    no conflicts and nothing of the owner's open. A Slack post alone is no review."""
     return None if list_merge_waits(map_row_to_merge_facts(row, merge_block)) else READY
 
 
 def is_approved(row: sqlite3.Row) -> bool:
-    """GitHub-approved: by a colleague, or by the review bot alone."""
-    return bool(row["bot_approved"]) or bool(json.loads(str(row["approved_by"] or "[]")))
+    """GitHub-approved, by a colleague or by the review bot alone, or the owner's answered decision stands in."""
+    return (
+        bool(row["bot_approved"])
+        or bool(json.loads(str(row["approved_by"] or "[]")))
+        or row["approval_waived_at"] is not None
+    )
 
 
-def map_row_to_approvers(row: sqlite3.Row) -> list[str]:
+def map_row_to_approvers(row: sqlite3.Row, config: Config) -> list[str]:
     """Whose standing verdict on GitHub is APPROVED: colleagues by login, the review bot by its name."""
     people: list[str] = json.loads(str(row["approved_by"] or "[]"))
-    return [*people, REVIEW_BOT_NAME] if row["bot_approved"] else people
+    return [*people, config.review_bot_name] if row["bot_approved"] else people
 
 
 _APPROVAL_LEFT = {
+    NOT_OWNER_REVIEWED: "your review",
+    HELD: "held for your review",
     OWNER_COMMENTS_OPEN: "your comments open",
     CI_RED: "CI red",
     CI_PENDING: "CI pending",
@@ -1055,15 +1358,112 @@ def tell_ready_to_merge(conn: sqlite3.Connection, config: Config, now: int) -> l
         owner = find_owner(conn, config, str(row["ref"]), str(row["repo"]), str(row["head"]))
         if owner is None:
             continue
+        ready = read_overlay(config, "ready-to-merge", "ready to merge")
         text = (
-            f"{row['url']} ({row['title']}) is ready to merge: approved on GitHub by "
-            f"{', '.join(map_row_to_approvers(row))}, CI green or none, no conflicts, and no comment of "
+            f"{row['url']} ({row['title']}) is {ready}: approved on GitHub by "
+            f"{', '.join(map_row_to_approvers(row, config))}, CI green or none, no conflicts, and no comment of "
             f"{config.owner_name}'s open. Merge it once you judge it safe: gh pr merge {row['url']}. "
             f"Deploys still need {config.owner_name}."
         )
         sent.append(tell_owner(conn, owner, text, now))
         conn.execute("UPDATE review_prs SET merge_told_at = ? WHERE ref = ?", (now, row["ref"]))
     return sent
+
+
+class MergeOkRefused(Exception):
+    pass
+
+
+def can_ok_merge(config: Config, row: sqlite3.Row) -> bool:
+    """The owner may OK its merge from the page: in their queue (open, not a draft, not a backport), approved by the
+    review bot, and CI green or none. A PR stacked on another PR's branch merges only after that one, so it gets no
+    button of its own."""
+    return (
+        row["closed_at"] is None
+        and not row["draft"]
+        and row["stack_parent"] is None
+        and bool(row["bot_approved"])
+        and row["checks"] in (None, "SUCCESS")
+        and not is_backport_base(config.backport_bases, str(row["base"]))
+    )
+
+
+def load_merge_ok(conn: sqlite3.Connection, ref: str, head_oid: str) -> dict[str, object] | None:
+    """The owner's OK for the PR's head, else their latest; `current` is false when it was given for another head.
+    A head force-pushed back to one already OKed has its OK again."""
+    row = conn.execute(
+        "SELECT * FROM review_merge_oks WHERE ref = ? ORDER BY head_oid = ? DESC, given_at DESC LIMIT 1",
+        (ref, head_oid),
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "by": row["given_by"],
+        "at": row["given_at"],
+        "sent_to": row["sent_to"],
+        "no_owner": bool(row["no_owner"]),
+        "head": str(row["head_oid"])[:DOC_SHA_CHARS],
+        "current": row["head_oid"] == head_oid,
+    }
+
+
+def record_merge_ok(
+    conn: sqlite3.Connection, config: Config, ref: str, head_oid: str, by: str, now: int
+) -> tuple[int, Recipient]:
+    """The owner OKs merging the PR at this head: its owning session is told to merge it, or, with none, the assistant
+    is asked to find one. Bridge itself never merges."""
+    row = conn.execute("SELECT * FROM review_prs WHERE ref = ?", (ref,)).fetchone()
+    if row is None or row["closed_at"] is not None:
+        raise MergeOkRefused(f"{ref} is not an open PR in the queue")
+    if not can_ok_merge(config, row):
+        raise MergeOkRefused(
+            f"{ref} is not approved by {config.review_bot_name} with CI green, or is a draft or a backport"
+        )
+    if head_oid != row["head_oid"]:
+        raise MergeOkRefused(f"{ref} has new commits since the page showed it; look at them first")
+    if conn.execute("SELECT 1 FROM review_merge_oks WHERE ref = ? AND head_oid = ?", (ref, head_oid)).fetchone():
+        raise MergeOkRefused(f"the merge OK for {ref} at this commit was already sent")
+    owner = find_owner(conn, config, ref, str(row["repo"]), str(row["head"]))
+    try:
+        recipient = (
+            resolve_tab(conn, owner.conversation_id, owner.handle)
+            if owner is not None
+            else resolve_handle(conn, config.assistant_handle)
+        )
+    except AddressError as exc:
+        raise MergeOkRefused(f"no session owns {ref}, and {config.assistant_handle} cannot be reached: {exc}") from exc
+    text = map_merge_ok_to_text(config, row, owner is None)
+    result = send_message(conn, Party(SYSTEM_CONVERSATION, "bridge"), [recipient], "info", text, now)
+    conn.execute("UPDATE messages SET post_type = ? WHERE id = ?", (REVIEW_QUEUE, result.message_id))
+    conn.execute(
+        "INSERT INTO review_merge_oks (ref, head_oid, given_by, given_at, sent_to, no_owner, message_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (ref, head_oid, by, now, recipient.handle, int(owner is None), result.message_id),
+    )
+    return result.message_id, recipient
+
+
+def map_merge_ok_to_text(config: Config, row: sqlite3.Row, no_owner: bool) -> str:
+    url, oid = row["url"], row["head_oid"]
+    command = f"gh pr merge {url} --match-head-commit {oid}"
+    given = (
+        f"{config.owner_name_at_start} OKs merging {url} ({row['title']}) at {oid}: they pressed Merge on the Guild "
+        f"page, as {config.review_bot_name} approved it and CI is green. A new commit voids this OK."
+    )
+    blocked = (
+        " GitHub reports its merge BLOCKED (branch protection may want a person's review), so the guard or GitHub may "
+        f"refuse it; if so, tell {config.owner_name} why through {config.assistant_handle}."
+        if row["merge_state"] == "BLOCKED"
+        else ""
+    )
+    if no_owner:
+        return (
+            f"{given} No session owns it, so it came to you: find its lead and pass this on, to merge it now through "
+            f"the guard as usual ({command}).{blocked}"
+        )
+    return (
+        f"{given} Merge it now, through the guard as usual: {command}.{blocked} Deploys still need {config.owner_name}."
+    )
 
 
 def map_db_to_reviews(conn: sqlite3.Connection, config: Config, now: int) -> dict[str, object]:
@@ -1075,44 +1475,56 @@ def map_db_to_reviews(conn: sqlite3.Connection, config: Config, now: int) -> dic
         "ok_at": poll["ok_at"] if poll else None,
         "github": {"ok_at": poll["ok_at"] if poll else None, "every_s": GITHUB_EVERY_S, "stale_s": GITHUB_STALE_S},
         "error": poll["error"] if poll else None,
-        "large_loc": config.review_large_loc,
-        "loc_excluded": list(config.review_loc_excluded),
+        "large_loc": REVIEW_LARGE_LOC,
+        "loc_excluded": list(list_loc_excluded(config)),
         "dry_run": config.review_post_dry_run,
-        "chat": config.chat_adapter,
-        "chat_name": CHAT_NAMES[config.chat_adapter],
         "mention_people": [name for name, _ in config.review_mention_people],
         "comment_max_chars": COMMENT_MAX_CHARS,
         "rules": [
             f"Lines are additions plus deletions of code, leaving out docs, images and "
-            f"{', '.join(config.review_loc_excluded)}.",
-            f"At {config.review_large_loc} lines or more a PR gets a document and a worktree: non-draft, not yet "
+            f"{', '.join(list_loc_excluded(config))}.",
+            f"At {REVIEW_LARGE_LOC} lines or more a PR gets a document and a worktree: non-draft, not yet "
             "published, updated in the last 14 days.",
-            f"Agents post under your account too, and start with '{AGENT_PREFIX}'; every other comment under it is "
-            "yours.",
+            f"Agents post under your account too, and start each comment and description with '{AGENT_PREFIX}' "
+            "(never a title); every other comment under it is yours.",
             "Your comments, the comments and change requests of colleagues and the review bot, and a PR a "
             f"colleague approved wake the PR's owner; at most {WAKES_PER_HOUR_MAX} wakes a PR an hour.",
-            "Open: not a draft on GitHub, not published and not ready to merge. Ready to merge "
-            "(lead): approved on GitHub (a colleague or ReviewBot), CI green or none, not a draft, no conflicts, and "
+            "Open: not a draft on GitHub, not published and not ready to merge, or held by its lead for your own "
+            "review until you comment or review on GitHub or it is published. Ready to merge "
+            f"(lead): approved on GitHub (a colleague or {config.review_bot_name}), CI green or none, not a draft, no "
+            "conflicts, and "
             "no comment of yours open; its lead merges it without your review or a post, and is told once. Published: "
             "you pressed Publish, or a post is on record. Drafts in progress: drafts on GitHub, whose owners are "
             "asked once to mark them ready there when they are.",
+            *(
+                [
+                    f"Backports (lead merges): PRs onto {', '.join(config.backport_bases)}. They never enter your "
+                    "queue: no number, no Slack post, no doc or worktree. Each is checked against the merged "
+                    "default-branch PRs it names (per-hunk git patch-id); an identical one needs no colleague's "
+                    "sign-off, and the rest of the merge rule still applies."
+                ]
+                if config.backport_bases
+                else []
+            ),
             f"GitHub is read every {GITHUB_EVERY_S} s: one GraphQL search per 50 PRs at 4 of the account's 5,000 "
             "points an hour, so about 160 an hour, plus REST reads of comments and a 2-point read of review threads "
             "only for PRs whose time or open threads changed.",
-            (
-                "The review channel is read every minute with a Slack token in ~/.secrets/slack, else every 5 minutes "
-                "through the Slack connector. Any post there with a PR's link, by anyone, publishes the PR, and nobody "
-                "is told to request reviewers for it."
-            )
-            if config.chat_adapter == "slack"
-            else f"Publish posts to {CHAT_NAMES[config.chat_adapter]} (config chat); nothing reads posts back.",
+            f"{convert_to_sentence_start(config.review_channel_name)} is read every minute with a Slack token in "
+            "~/.secrets/slack, else every 5 minutes through "
+            "the Slack connector. Any post there with a PR's link, by anyone, publishes the PR, and nobody is told to "
+            "request reviewers for it.",
             "Numbers 1 to 3 run across questions and PRs: first PRs where only your own answered threads block the "
             "merge, so resolving them is all that is left; then urgent questions, other questions oldest first, PRs "
             "with fixes after your comments, then other PRs waiting for you by project priority, stacked parents "
             "first, smaller, older. PRs with your comments still open wait on their owner and get no number, and so "
             "do PRs ready to merge: their leads merge them.",
-            f"A PR of {config.review_large_loc} lines or more is ready for you once its doc has a Reviews section "
-            "naming a Codex and a Claude review; until then it gets no number. Under that, the PR body lists them.",
+            f"A PR of {REVIEW_LARGE_LOC} lines or more is ready for you once its doc has a Reviews section"
+            f"{convert_reviews_to_naming(config.required_reviews)}; until then it gets no number. Under that, the PR "
+            "body lists them.",
+            "A PR whose title or description says it only enables something (off by default, an opt-in flag, behind a "
+            "flag, step N of M, …) is ready for you once its description has a section headed How this will be used; "
+            "its owner is told once. A line 'Not an enabling PR: <reason>' turns the check off; drafts are not "
+            "checked.",
         ],
         "prs": sorted((map_row_to_review(conn, config, row, now) for row in rows), key=map_review_to_sort_key),
     }
@@ -1123,57 +1535,78 @@ def map_review_to_sort_key(pr: dict[str, object]) -> tuple[int, int]:
     return _GROUP_ORDER.index(str(pr["group"])), _STATE_ORDER.get(str(pr["state"]), len(_STATE_ORDER))
 
 
-def map_row_to_group(row: sqlite3.Row) -> tuple[str, str]:
-    """(group, why, in words). A draft waits for them only once GitHub says it is ready for review."""
+def map_row_to_group(row: sqlite3.Row, config: Config) -> tuple[str, str]:
+    """(group, why, in words). A draft waits for the owner only once GitHub says it is ready for review. A backport
+    never enters their queue."""
+    if is_backport_base(config.backport_bases, str(row["base"])):
+        return BACKPORTS, f"a backport onto {row['base']}: its lead merges it once the merge rule holds"
     if row["merge_path"] == READY:
         return READY, "approved, CI green or none, nothing of yours open: its lead may merge it"
     if row["reviewed_at"]:
         return PUBLISHED, "you pressed Publish"
     if row["post_state"] == "external":
         return PUBLISHED, "a post is on record"
+    if row["held_at"] is not None and not row["draft"]:
+        return WAITING_FOR_YOU, "its lead holds it for your own review"
     if row["draft"]:
         return DRAFTS, "a draft on GitHub; it joins Open once its owner marks it ready there"
     return WAITING_FOR_YOU, "open and not published"
 
 
-def map_row_to_reviews_ran(config: Config, row: sqlite3.Row) -> tuple[str, ...] | None:
+def map_row_to_reviews_ran(row: sqlite3.Row) -> tuple[str, ...] | None:
     """The reviews its Reviews section names: the doc's for a large PR, the body's under that. None: no section."""
-    if int(row["loc"]) >= config.review_large_loc:
+    if int(row["loc"]) >= REVIEW_LARGE_LOC:
         return map_text_to_reviews(row["doc_reviews"]) if row["doc_file"] else None
     return map_text_to_reviews(row["body_reviews"])
 
 
-def map_row_to_reviews_gap(config: Config, row: sqlite3.Row) -> str | None:
-    """Why a large PR is not ready for the owner: its doc must list a Codex and a Claude review in a Reviews section.
+def convert_to_sentence_start(text: str) -> str:
+    return text[:1].upper() + text[1:]
+
+
+def convert_reviews_to_naming(required: tuple[str, ...]) -> str:
+    """' naming a Codex and a Claude review', or nothing when no review is required by name."""
+    return f" naming {' and '.join(f'a {name}' for name in required)} review" if required else ""
+
+
+def map_row_to_reviews_gap(row: sqlite3.Row, config: Config) -> str | None:
+    """Why a large PR is not ready for the owner: its doc must have a Reviews section naming each required review.
     None when it is ready, or small: a small PR's list goes in its body, unchecked."""
-    if int(row["loc"]) < config.review_large_loc:
+    if int(row["loc"]) < REVIEW_LARGE_LOC:
         return None
     if not row["doc_file"]:
         return "no doc yet"
-    ran = map_row_to_reviews_ran(config, row)
+    ran = map_row_to_reviews_ran(row)
     if ran is None:
         return "doc lacks Reviews section"
-    missing = [name for name in REQUIRED_REVIEWS if name not in ran]
+    missing = [name for name in config.required_reviews if name not in ran]
     return f"{' / '.join(missing)} review missing" if missing else None
+
+
+def map_row_to_usage_gap(row: sqlite3.Row) -> str | None:
+    """Why a PR that says it only enables something is not ready for the owner; a draft is not checked yet."""
+    return None if row["draft"] or not row["usage_missing"] else USAGE_GAP
 
 
 def map_row_to_review(conn: sqlite3.Connection, config: Config, row: sqlite3.Row, now: int) -> dict[str, object]:
     ref = str(row["ref"])
-    theirs = [
+    his = [
         int(r[0])
-        for r in conn.execute("SELECT created_at FROM review_comments WHERE ref = ? AND verdict = ?", (ref, OWNER))
+        for r in conn.execute("SELECT created_at FROM review_comments WHERE ref = ? AND verdict = ?", (ref, HIS))
     ]
     heads = [int(r[0]) for r in conn.execute("SELECT committed_at FROM review_heads WHERE ref = ?", (ref,))]
-    rounds, comments_open = map_events_to_rounds(theirs, heads)
-    owner_last_at = max(theirs, default=None)
+    rounds, comments_open = map_events_to_rounds(his, heads)
+    his_last_at = max(his, default=None)
     doc_at, doc_current = map_row_to_doc_heads(row)
     owner = find_owner(conn, config, ref, str(row["repo"]), str(row["head"]))
-    # Reviewers on a PR do not make it published: they decide, and only a known post counts.
-    group, group_why = map_row_to_group(row)
+    # Reviewers on a PR do not make it published: the owner decides, and only a known post counts.
+    group, group_why = map_row_to_group(row, config)
     resolve_threads = map_row_to_threads_to_resolve(conn, config, row)
     published = group == PUBLISHED
     if published:
         state = "published"
+    elif group == BACKPORTS:
+        state = map_row_to_backport_state(row)
     elif comments_open:
         state = COMMENTS_OPEN
     elif group == READY:
@@ -1182,14 +1615,14 @@ def map_row_to_review(conn: sqlite3.Connection, config: Config, row: sqlite3.Row
         state = FIXED if rounds else WAITING_FOR_OWNER
     return {
         "ref": ref,
-        "label": map_ref_to_label(ref, config.repo_labels),
+        "label": map_ref_to_label(ref),
         "repo": row["repo"],
         "number": row["number"],
         "title": row["title"],
         "url": row["url"],
         "draft": bool(row["draft"]),
         "loc": row["loc"],
-        "large": int(row["loc"]) >= config.review_large_loc,
+        "large": int(row["loc"]) >= REVIEW_LARGE_LOC,
         "checks": row["checks"],
         "state": state,
         "rounds": rounds,
@@ -1197,16 +1630,16 @@ def map_row_to_review(conn: sqlite3.Connection, config: Config, row: sqlite3.Row
         "first_seen_at": row["first_seen_at"],
         "issue_keys": _load_issue_keys_of_pr(conn, ref, str(row["title"]), owner),
         "open_threads": int(row["open_threads"] or 0),
-        "owner_open_threads": int(row["owner_open_threads"] or 0),
-        "owner_last_at": owner_last_at,
-        "commits_after_owner": sum(1 for t in heads if owner_last_at is not None and t > owner_last_at),
+        "his_open_threads": int(row["his_open_threads"] or 0),
+        "his_last_at": his_last_at,
+        "commits_after_his": sum(1 for t in heads if his_last_at is not None and t > his_last_at),
         "owner": owner.handle if owner else None,
         "owner_surface": owner.surface if owner else None,
         "lead": owner.lead if owner else None,
         "group": group,
         "group_why": group_why,
         "approved_by": json.loads(str(row["approved_by"])),
-        "approvers": map_row_to_approvers(row),
+        "approvers": map_row_to_approvers(row, config),
         "approval_left": map_row_to_approval_left(row, len(resolve_threads)),
         "merge_state": "in queue" if row["in_merge_queue"] else row["merge_state"],
         "conflict_asked_at": row["conflict_asked_at"] if row["conflict_asked_oid"] == row["head_oid"] else None,
@@ -1216,9 +1649,25 @@ def map_row_to_review(conn: sqlite3.Connection, config: Config, row: sqlite3.Row
         "resolve_is_last": is_resolving_all_that_is_left(row),
         "can_publish": group in (WAITING_FOR_YOU, READY) and not row["reviewed_at"] and row["post_state"] != "external",
         "merge_path": row["merge_path"],
+        "head_oid": row["head_oid"],
+        "can_ok_merge": can_ok_merge(config, row),
+        "merge_ok": load_merge_ok(conn, ref, str(row["head_oid"])),
+        "merge_ok_to": owner.handle if owner else config.assistant_handle,
+        "approval_waived": (
+            f"waived by {config.owner_name} (decision #{row['approval_waived_decision']})"
+            if row["approval_waived_at"] is not None
+            else None
+        ),
+        "held": f"held for {config.owner_name}" if row["held_at"] is not None else None,
+        "held_why": row["held_why"],
+        "held_by": row["held_by"],
+        "held_at": row["held_at"],
+        "backport_check": map_row_to_backport_check(row) if group == BACKPORTS else None,
         "bot_approved": bool(row["bot_approved"]),
-        "reviews_ran": list(map_row_to_reviews_ran(config, row) or ()),
-        "reviews_gap": map_row_to_reviews_gap(config, row),
+        "reviews_ran": list(map_row_to_reviews_ran(row) or ()),
+        "reviews_gap": None
+        if group == BACKPORTS
+        else "; ".join(g for g in (map_row_to_reviews_gap(row, config), map_row_to_usage_gap(row)) if g) or None,
         "reviewed_at": row["reviewed_at"],
         "reviewed_by": row["reviewed_by"],
         "reviewed_oid": row["reviewed_oid"],
@@ -1227,19 +1676,17 @@ def map_row_to_review(conn: sqlite3.Connection, config: Config, row: sqlite3.Row
         "description": row["sentence"],
         "stack_parent": row["stack_parent"],
         "depends_on": f"pr:{row['depends_on']}" if row["depends_on"] else None,
-        "depends_on_label": map_ref_to_label(f"pr:{row['depends_on']}", config.repo_labels)
-        if row["depends_on"]
-        else None,
+        "depends_on_label": map_ref_to_label(f"pr:{row['depends_on']}") if row["depends_on"] else None,
         "post_state": row["post_state"],
         "post_detail": row["post_detail"],
         "post_link": row["post_link"],
         "post_at": row["post_at"],
         "posted_at": map_row_to_posted_ms(row),
-        "can_retry": row["post_state"] == "failed",
-        "can_repost": row["post_state"] == "interrupted"
-        or (row["post_state"] == "dry-run" and not config.review_post_dry_run),
+        "can_retry": row["post_state"] == "failed" and group != BACKPORTS,
+        "can_repost": group != BACKPORTS
+        and (row["post_state"] == "interrupted" or (row["post_state"] == "dry-run" and not config.review_post_dry_run)),
         "has_doc": bool(row["doc_file"]),
-        "doc_url": f"/reviews/{row['repo']}/{row['number']}/doc" if row["doc_file"] else None,
+        "doc_url": f"/reviews/{row['repo']}/{row['number']}/doc" if row["doc_file"] and group != BACKPORTS else None,
         "doc_stale": bool(row["doc_file"]) and not doc_current,
         "doc_at": doc_at[:DOC_SHA_CHARS] if row["doc_file"] else None,
         "pr_at": str(row["head_oid"])[:DOC_SHA_CHARS],
@@ -1249,6 +1696,18 @@ def map_row_to_review(conn: sqlite3.Connection, config: Config, row: sqlite3.Row
         "worktree_state": row["wt_state"],
         "worktree_detail": row["wt_detail"],
         "worktree_stale": bool(row["wt_path"]) and row["wt_oid"] != row["head_oid"],
+    }
+
+
+def map_row_to_backport_check(row: sqlite3.Row) -> dict[str, object] | None:
+    """The identical-diff check's last verdict, when one was made; `current` is false once the head moved past it."""
+    if row["backport_reason"] is None:
+        return None
+    return {
+        "waived": bool(row["backport_waived"]),
+        "reason": row["backport_reason"],
+        "current": row["backport_key"] == map_row_to_backport_key(row),
+        "at": row["backport_at"],
     }
 
 
@@ -1272,7 +1731,7 @@ def _load_issue_keys_of_pr(conn: sqlite3.Connection, ref: str, title: str, owner
 
 
 def map_row_to_posted_ms(row: sqlite3.Row) -> int | None:
-    """When the review post went out: its permalink's ts, else bridge's own send time; a dry run posted nothing."""
+    """When the Slack message went out: its permalink's ts, else bridge's own send time; a dry run posted nothing."""
     match = _PERMALINK_TS_RE.search(str(row["post_link"] or ""))
     if match:
         return int(match.group(1)) * 1000 + int(match.group(2)) // 1000
@@ -1287,3 +1746,43 @@ def count_commits_since(commit_oids: str, oid: str | None) -> int | None:
     if oid is None or oid not in oids:
         return None
     return len(oids) - 1 - oids.index(oid)
+
+
+def record_approval_waiver(conn: sqlite3.Connection, ref: str, decision: int, by: str, now: int) -> str:
+    """The owner's answered decision stands in for an approving GitHub review; returns their answer, quoted back."""
+    item = conn.execute("SELECT kind, answer FROM user_items WHERE id = ?", (decision,)).fetchone()
+    if item is None or item["kind"] not in ("decision", "blocked"):
+        raise ValueError(f"#{decision} is not a decision or blocked post on the page")
+    if not str(item["answer"] or "").strip():
+        raise ValueError(f"#{decision} has no answer from the owner yet")
+    row = conn.execute("SELECT closed_at FROM review_prs WHERE ref = ?", (ref,)).fetchone()
+    if row is None or row["closed_at"] is not None:
+        raise ValueError(f"{ref} is not an open PR in the queue")
+    conn.execute(
+        "UPDATE review_prs SET approval_waived_at = ?, approval_waived_by = ?, approval_waived_decision = ? "
+        "WHERE ref = ?",
+        (now, by, decision, ref),
+    )
+    return str(item["answer"])
+
+
+def clear_approval_waiver(conn: sqlite3.Connection, ref: str) -> None:
+    conn.execute(
+        "UPDATE review_prs SET approval_waived_at = NULL, approval_waived_by = NULL, approval_waived_decision = NULL "
+        "WHERE ref = ?",
+        (ref,),
+    )
+
+
+_BACKPORT_WAIT_WORDS = {
+    NOT_APPROVED: "an approving review or a waiver",
+    NOT_OWNER_REVIEWED: "the owner's word",
+}
+
+
+def map_row_to_backport_state(row: sqlite3.Row) -> str:
+    """A backport is its lead's to merge, never the owner's to review: its state says what the lead waits on."""
+    waits = list_merge_waits(map_row_to_merge_facts(row, row["merge_block"]))
+    if not waits:
+        return "lead merges: ready"
+    return "lead merges: waiting on " + ", ".join(_BACKPORT_WAIT_WORDS.get(w, w) for w in waits)

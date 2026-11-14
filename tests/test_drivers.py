@@ -84,7 +84,7 @@ def test_pr_links_from_early_turns_stay_on_the_session(bridge_env: BridgeEnv, sp
     links = [
         {"type": "pr-link", "prNumber": n, "prRepository": "acme/infra", "timestamp": "2026-10-15T14:36:16Z",
          "sessionId": session}
-        for n, session in ((36, "conv-p"), (35, "conv-p"), (34, "conv-other"))
+        for n, session in ((21, "conv-p"), (20, "conv-p"), (19, "conv-other"))
     ]  # fmt: skip
     filler = _bash("echo filler " + "x" * 6_000_000, "2026-10-16T00:00:00Z")
     transcript.write_text("".join(json.dumps(link) + "\n" for link in links) + filler)
@@ -99,11 +99,11 @@ def test_pr_links_from_early_turns_stay_on_the_session(bridge_env: BridgeEnv, sp
         # Once merged, an old PR link is history, not something the session is working on.
         conn.execute(
             "INSERT INTO enrichment (ref, data, fetched_at, ok_at) VALUES (?, ?, 0, 0)",
-            ("pr:acme/infra#36", json.dumps({"state": "MERGED"})),
+            ("pr:acme/infra#20", json.dumps({"state": "MERGED"})),
         )
         conn.commit()
     sessions = json.loads(bridge_env.cli("sessions", "--json").stdout)
-    assert [r for r in sessions[0]["refs"] if r.startswith("pr:")] == ["pr:acme/infra#35"]
+    assert [r for r in sessions[0]["refs"] if r.startswith("pr:")] == ["pr:acme/infra#21"]
 
 
 def test_signals_go_to_the_latest_driver() -> None:

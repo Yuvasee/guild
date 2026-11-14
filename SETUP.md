@@ -8,7 +8,7 @@ do not work around it silently.
 Ask the user only what you cannot find out, all at once at step 3: their name, what to call Right Hand, and the first
 team lead's project. Everything else has a default below.
 
-The dashboard's port is 8780 unless step 1 finds it taken and the user picks another. Below it is `PORT`: use the same
+The dashboard's port is 8765 unless step 1 finds it taken and the user picks another. Below it is `PORT`: use the same
 value in every command.
 
 ## 1. Check what is there
@@ -20,24 +20,28 @@ uv --version                              # needed; Python 3.12+ comes through u
 claude --version
 gh auth status                            # optional: only the PR features need it
 command -v bridge guild bridge-hook       # anything found here that is not Guild is a name clash
-lsof -nP -iTCP:8780 -sTCP:LISTEN          # the dashboard's default port must be free
+lsof -nP -iTCP:8765 -sTCP:LISTEN          # the dashboard's default port must be free
 ls ~/.claude/skills/bridge 2>/dev/null    # an existing skill of that name would be replaced
 ```
 
 - Not macOS, or not inside agterm: stop. Guild needs both; point the user to https://github.com/umputun/agterm.
 - No `uv`: ask before installing it (`brew install uv`, or the installer at https://docs.astral.sh/uv/).
-- `bridge`, `guild` or `bridge-hook` already exist and are not from this repo, port 8780 is taken, or
+- `bridge`, `guild` or `bridge-hook` already exist and are not from this repo, port 8765 is taken, or
   `~/.claude/skills/bridge` exists: tell the user what you found and ask how to proceed before going on.
 - No signed-in `gh`: fine. Say that PR states, PR claims and the review queue stay off until it is signed in.
 
 ## 2. Install
 
 ```sh
-git clone https://github.com/Yuvasee/guild ~/.local/share/guild    # or git -C ~/.local/share/guild pull if present
+git clone https://github.com/Yuvasee/guild ~/.local/share/guild
 uv tool install ~/.local/share/guild
 bridge install-hooks          # adds bridge's hooks to ~/.claude/settings.json; other hooks stay
 mkdir -p ~/.claude/skills && cp -R ~/.local/share/guild/agent/skills/bridge ~/.claude/skills/
 ```
+
+If `~/.local/share/guild` is already a Guild checkout, upgrade it instead of the clone and `uv tool install`:
+`git -C ~/.local/share/guild pull && ~/.local/share/guild/scripts/deploy.sh` (it re-installs the hooks and restarts
+the dashboard itself).
 
 Check: `command -v bridge guild bridge-hook` prints three paths; `grep -c bridge-hook ~/.claude/settings.json` is not
 0; `ls ~/.claude/skills/bridge/SKILL.md` exists.
@@ -132,7 +136,7 @@ Check: `guild leads` lists the team lead; the dashboard shows it under **Team Le
 ## 7. Open the dashboard and hand over
 
 ```sh
-bridge open --browser --port PORT    # or without --browser, to show it as an overlay over this tab
+open http://127.0.0.1:PORT/
 ```
 
 Tell the user, in a few lines:
@@ -143,6 +147,7 @@ Tell the user, in a few lines:
 - that team leads use the connectors of their Claude account: if it is connected to a tracker or chat, the first team
   lead may start by reading it to learn its scope;
 - how to undo everything: `bridge uninstall-service`, `bridge uninstall-hooks`, `uv tool uninstall bridge`,
-  and removing `~/.claude/skills/bridge`, `~/.config/bridge` and `~/.local/state/bridge`.
+  and removing `~/.local/bin/{bridge,bridge-hook,guild}`, `~/.claude/skills/bridge`, `~/.config/bridge`,
+  `~/.local/share/bridge` (releases made by upgrades) and `~/.local/state/bridge`.
 
 Finish with one summary line of what was installed and where.

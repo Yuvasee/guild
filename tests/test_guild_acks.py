@@ -1,4 +1,3 @@
-import json
 import time
 from typing import Any, cast
 
@@ -277,35 +276,3 @@ def test_four_hop_pause_counts_real_replies_only_however_many_acks_come_between(
 
     assert [r[0] for r in rows] == list(range(1, MAX_AGENT_HOPS + 2))
     assert [r[1] for r in rows] == [0] * MAX_AGENT_HOPS + [1], "the pause stays, and an ack did not bring it closer"
-
-
-def test_ack_cost_charges_what_was_delivered_at_its_own_length(
-    bridge_env: BridgeEnv, spawn_process: SpawnProcess, dashboard: str
-) -> None:
-    team = two_leads(bridge_env, spawn_process)
-    http_request(dashboard + "/api/room", post=True, data={"text": "z" * 800})
-    untouched = json.loads(team.guild("ack-cost", "--json").stdout)
-    team.prompt(team.a, "conv-a", "next")
-    post = room_of(bridge_env)[-1]["id"]
-    team.guild("ack", str(post), "seen before its hook", pid=team.b)
-    after = json.loads(team.guild("ack-cost", "--json").stdout)
-
-    assert (untouched["addressed"], untouched["not_yet_seen"], untouched["estimated_tokens"]) == (2, 2, 0)
-    assert after["not_yet_seen"] == 0, "an ack before the hook counts as seen"
-    assert after["estimated_tokens"] == (800 + 40 + len("seen before its hook")) // 4 + 150
-
-
-def test_ack_cost_counts_posts_deliveries_and_acks(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:
-    team = two_leads(bridge_env, spawn_process)
-    bridge_env.cli("board", "x" * 400, pid=team.a)
-    bridge_env.cli("board", "Second", pid=team.a)
-    post = room_of(bridge_env)[-1]["id"]
-    team.prompt(team.b, "conv-b", "next")
-    team.guild("ack", str(post), "y" * 40, pid=team.b)
-
-    cost = json.loads(team.guild("ack-cost", "--json").stdout)
-    human = team.guild("ack-cost", "--hours", "1").stdout
-
-    assert (cost["posts"], cost["addressed"], cost["not_yet_seen"], cost["acks"]) == (2, 2, 0, 1)
-    assert cost["estimated_tokens"] == (240 + 46 + 40) // 4 + 150
-    assert "not counted" in human

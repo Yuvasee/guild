@@ -56,7 +56,7 @@ def test_duplicate_tab_names_get_unique_handles_and_explicit_handle_sticks(
     assert sorted(s["handle"] for s in listed) == ["captain", "work", "work-2"]
 
 
-def test_whoami_outside_claude(bridge_env: BridgeEnv) -> None:
+def test_whoami_and_focus_outside_claude(bridge_env: BridgeEnv) -> None:
     result = bridge_env.cli("whoami")
     assert result.returncode == 2
     assert "not inside a Claude Code session" in result.stderr

@@ -13,7 +13,7 @@ from test_reviews import REF, add_session, make_pr, setup_pr
 
 from bridge.board import BODY_MAX_CHARS
 from bridge.config import Config
-from bridge.db import transaction
+from bridge.db import connect, transaction
 from bridge.doc_nav import convert_doc_to_viewable
 from bridge.review_post import ask_for_doc_updates, ask_for_docs
 from bridge.review_worktree import (
@@ -24,13 +24,16 @@ from bridge.review_worktree import (
     SSH_KEY_NOT_LOADED,
     DocError,
     StepFailed,
+    count_doc_terms,
     fill_doc_heads,
     fill_doc_reviews,
     find_requirement_files,
+    find_service_roots,
     is_rebuilt_by_tools,
     is_worth_preparing,
     link_worktrees_to_prs,
     map_doc_to_served,
+    map_pyright_config_to_service_envs,
     map_requirements_to_consolidated,
     map_ssh_remote_to_https,
     pick_worktree_job,
@@ -47,12 +50,16 @@ UPDATED = "2026-10-26T00:00:00+00:00"
 LONG_AGO = "2026-01-01T00:00:00+00:00"
 
 
+REVIEWS_CONFIG = Config(required_reviews=("Codex", "Claude"))
+
+
 def config_for(root: Path) -> Config:
     return Config(
         review_org="Org",
         review_author="me",
         review_checkouts_dir=str(root / "checkouts"),
         review_worktrees_dir=str(root / "wt"),
+        required_reviews=REVIEWS_CONFIG.required_reviews,
     )
 
 
@@ -185,7 +192,7 @@ def test_a_refresh_fast_forwards_its_branch_so_a_pull_there_works(tmp_path: Path
     git("pull", "-q", "--ff-only", cwd=path)
 
 
-def test_after_a_force_push_a_clean_worktree_is_reset_and_one_with_owner_commit_is_left(tmp_path: Path) -> None:
+def test_after_a_force_push_a_clean_worktree_is_reset_and_one_with_owners_commit_is_left(tmp_path: Path) -> None:
     conn, config, path, first, _ = worktree_at(tmp_path)
     rewritten = force_push(tmp_path / "origin", first)
     refresh_to(conn, config, rewritten)
@@ -221,7 +228,7 @@ def test_a_detached_worktree_from_before_is_put_on_its_branch(tmp_path: Path) ->
     assert pick_worktree_job(conn, config, NOW) is None
 
 
-def test_env_editor_and_ignored_files_do_not_hold_a_refresh_back_and_owner_new_file_does(tmp_path: Path) -> None:
+def test_env_editor_and_ignored_files_do_not_hold_a_refresh_back_and_owners_new_file_does(tmp_path: Path) -> None:
     conn, config, path, _, second = worktree_at(tmp_path)
     vendored = path / ".venv" / "lib" / "setuptools"
     vendored.mkdir(parents=True)
@@ -262,20 +269,20 @@ def commit_on_pr(origin: Path, name: str, text: str) -> str:
     return oid
 
 
-def test_a_new_head_that_would_overwrite_owner_ignored_file_is_not_applied(tmp_path: Path) -> None:
+def test_a_new_head_that_would_overwrite_owners_ignored_file_is_not_applied(tmp_path: Path) -> None:
     conn, config, path, _, second = worktree_at(tmp_path)
     refresh_to(conn, config, second)
     exclude = Path(git("rev-parse", "--git-path", "info/exclude", cwd=path))
     exclude = exclude if exclude.is_absolute() else path / exclude
     exclude.write_text(".env\n")
-    (path / ".env").write_text("local secret\n")
+    (path / ".env").write_text("my secret\n")
     third = commit_on_pr(tmp_path / "origin", ".env", "from the PR\n")
     refresh_to(conn, config, third, NOW + 1)
-    assert (path / ".env").read_text() == "local secret\n" and git("rev-parse", "HEAD", cwd=path) == second
+    assert (path / ".env").read_text() == "my secret\n" and git("rev-parse", "HEAD", cwd=path) == second
     assert ".env" in conn.execute("SELECT wt_detail FROM review_prs").fetchone()[0]
 
 
-def test_its_branch_holding_owner_commit_is_never_reset_while_the_worktree_is_detached(tmp_path: Path) -> None:
+def test_its_branch_holding_owners_commit_is_never_reset_while_the_worktree_is_detached(tmp_path: Path) -> None:
     conn, config, path, first, second = worktree_at(tmp_path)
     git("config", "user.email", "t@e", cwd=path)
     git("config", "user.name", "t", cwd=path)
@@ -289,7 +296,7 @@ def test_its_branch_holding_owner_commit_is_never_reset_while_the_worktree_is_de
     assert "local commits on review/7" in conn.execute("SELECT wt_detail FROM review_prs").fetchone()[0]
 
 
-def test_switching_to_owner_branch_during_the_fetch_stops_the_refresh(tmp_path: Path) -> None:
+def test_switching_to_owners_branch_during_the_fetch_stops_the_refresh(tmp_path: Path) -> None:
     conn, config, path, first, second = worktree_at(tmp_path)
     from bridge import review_worktree
 
@@ -316,11 +323,11 @@ def test_a_same_named_branch_that_is_not_the_prs_head_is_refused(tmp_path: Path)
 
 def test_a_dirty_worktree_is_left_and_says_so(tmp_path: Path) -> None:
     conn, config, path, first, _ = worktree_at(tmp_path)
-    (path / "a.txt").write_text("local edit\n")
+    (path / "a.txt").write_text("my edit\n")
     job = pick_worktree_job(conn, config, NOW)
     assert job is not None
     run_worktree_job(conn, config, job, NOW)
-    assert git("rev-parse", "HEAD", cwd=path) == first and (path / "a.txt").read_text() == "local edit\n"
+    assert git("rev-parse", "HEAD", cwd=path) == first and (path / "a.txt").read_text() == "my edit\n"
     views: Any = map_db_to_reviews(conn, config, NOW)["prs"]
     view = views[0]
     assert view["worktree_state"] == DIRTY and "a.txt" in str(view["worktree_detail"])
@@ -428,7 +435,7 @@ def test_git_config_cannot_hide_an_untracked_file_from_the_guard(tmp_path: Path)
     assert (path / "scratch.py").exists()
 
 
-def test_owner_editor_files_count_as_local_work_and_ours_do_not(tmp_path: Path) -> None:
+def test_owners_editor_files_count_as_local_work_and_ours_do_not(tmp_path: Path) -> None:
     _, _, path, _, _ = worktree_at(tmp_path)
     (path / ".venv").mkdir()
     python = path / ".venv" / "bin" / "python"
@@ -731,7 +738,7 @@ def test_a_doc_is_copied_in_and_goes_stale_with_new_commits(tmp_path: Path, monk
     source = tmp_path / "doc.html"
     source.write_text("<h1>v1</h1>")
     with transaction(conn):
-        register_doc(conn, REF, source, NOW)
+        register_doc(conn, REVIEWS_CONFIG, REF, source, NOW)
     source.write_text("<h1>changed after</h1>")
     assert read_registered_doc(conn, "Org/app", 7) == b"<h1>v1</h1>"
     view = map_db_to_reviews(conn, config, NOW)["prs"][0]  # type: ignore[index]
@@ -752,7 +759,7 @@ def test_a_doc_whose_head_marker_matches_the_pr_is_current_however_it_was_regist
     source = tmp_path / "doc.html"
     source.write_text(f'<html><head><meta content="{head}" name="pr-head"></head><body><h1>v2</h1></body></html>')
     with transaction(conn):
-        register_doc(conn, REF, source, NOW)
+        register_doc(conn, REVIEWS_CONFIG, REF, source, NOW)
     views: Any = map_db_to_reviews(conn, config, NOW)["prs"]
     assert (views[0]["doc_stale"], views[0]["doc_at"], views[0]["pr_at"]) == (True, "c0ffee123", "a1")
     served = map_doc_to_served(conn, "Org/app", 7)
@@ -773,7 +780,7 @@ def test_a_served_doc_gets_its_contents_bar_under_the_stale_line(
     original = b'<html><head><meta name="pr-head" content="c0ffee123"></head><body><h2>In short</h2><h2>Reviews</h2>'
     source.write_bytes(original)
     with transaction(conn):
-        register_doc(conn, REF, source, NOW)
+        register_doc(conn, REVIEWS_CONFIG, REF, source, NOW)
     served = map_doc_to_served(conn, "Org/app", 7)
     assert served is not None and source.read_bytes() == original
     assert served.index(b"PR at a1</div>") < served.index(b'<nav id="bridge-doc-nav"') < served.index(b"<h2 id=")
@@ -789,7 +796,7 @@ def test_a_doc_registered_before_markers_were_read_gets_its_marker_once(
     source = tmp_path / "doc.html"
     source.write_text(f'<meta name="pr-head" content="{"c3" * 20}"><h1>doc</h1>')
     with transaction(conn):
-        register_doc(conn, REF, source, NOW)
+        register_doc(conn, REVIEWS_CONFIG, REF, source, NOW)
         conn.execute("UPDATE review_prs SET doc_head = NULL, doc_oid = 'old'")
         fill_doc_heads(conn)
     views: Any = map_db_to_reviews(conn, config, NOW)["prs"]
@@ -807,7 +814,7 @@ def test_each_new_head_asks_the_owner_once_to_update_the_doc_and_the_row_says_up
     with transaction(conn):
         add_session(conn, "c1", "worker", branch="dev/x")
         conn.execute("UPDATE review_prs SET head_oid = 'a1a1a1a1a1'")
-        register_doc(conn, REF, source, NOW)
+        register_doc(conn, REVIEWS_CONFIG, REF, source, NOW)
         assert ask_for_doc_updates(conn, config, NOW) == []
         store_open_prs(conn, [make_pr(head_oid="b2b2b2b2b2", **large())], NOW)
         assert len(ask_for_doc_updates(conn, config, NOW)) == 1
@@ -824,15 +831,35 @@ def test_each_new_head_asks_the_owner_once_to_update_the_doc_and_the_row_says_up
         assert len(ask_for_doc_updates(conn, config, NOW + 16 * 60_000)) == 1
 
 
+def test_a_doc_registered_for_a_push_bridge_has_not_read_yet_is_not_called_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The doc named the new head two minutes before the poll did, and its lead was asked to update it."""
+    monkeypatch.setenv("BRIDGE_STATE_DIR", str(tmp_path / "state"))
+    config = config_for(tmp_path)
+    conn = setup_pr(tmp_path, **large())
+    source = tmp_path / "doc.html"
+    source.write_text('<meta name="pr-head" content="b2b2b2b2b2">')
+    with transaction(conn):
+        add_session(conn, "c1", "worker", branch="dev/x")
+        conn.execute("UPDATE review_prs SET head_oid = 'a1a1a1a1a1'")
+        conn.execute("INSERT OR REPLACE INTO review_poll (id, ok_at) VALUES (1, ?)", (NOW - 60_000,))
+        register_doc(conn, REVIEWS_CONFIG, REF, source, NOW)
+        assert ask_for_doc_updates(conn, config, NOW + 1000) == []
+        # The next read still shows the old head: now the doc really is at another commit.
+        conn.execute("UPDATE review_poll SET ok_at = ?", (NOW + 30_000,))
+        assert len(ask_for_doc_updates(conn, config, NOW + 31_000)) == 1
+
+
 def test_only_html_files_register(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BRIDGE_STATE_DIR", str(tmp_path / "state"))
     conn = setup_pr(tmp_path)
     secret = tmp_path / "secret.txt"
     secret.write_text("x")
     with pytest.raises(DocError), transaction(conn):
-        register_doc(conn, REF, secret, NOW)
+        register_doc(conn, REVIEWS_CONFIG, REF, secret, NOW)
     with pytest.raises(DocError), transaction(conn):
-        register_doc(conn, REF, tmp_path / "missing.html", NOW)
+        register_doc(conn, REVIEWS_CONFIG, REF, tmp_path / "missing.html", NOW)
 
 
 def test_the_page_serves_registered_docs_only_and_sandboxed(
@@ -850,7 +877,7 @@ def test_the_page_serves_registered_docs_only_and_sandboxed(
     assert done.returncode == 0
     env = bridge_env.env
     with mock.patch.dict("os.environ", {"BRIDGE_STATE_DIR": env["BRIDGE_STATE_DIR"]}), transaction(conn):
-        register_doc(conn, REF, source, NOW)
+        register_doc(conn, REVIEWS_CONFIG, REF, source, NOW)
     import urllib.request
 
     with urllib.request.urlopen(f"{dashboard}/reviews/Org/app/7/doc", timeout=5) as response:
@@ -867,7 +894,7 @@ def test_a_worktree_gets_a_workspace_beside_it_that_opens_on_its_pr(tmp_path: Pa
     job = pick_worktree_job(conn, config, NOW)
     assert job is not None
 
-    def make_env(root: Path, setup_script: str) -> None:
+    def make_env(root: Path, setup_script: str, python_paths: tuple[str, ...]) -> None:
         (root / ".venv" / "bin").mkdir(parents=True)
         (root / ".venv" / "bin" / "python").write_text("")
         (root / ".venv" / ".gitignore").write_text("*\n")
@@ -1031,12 +1058,12 @@ def test_a_large_pr_is_ready_for_the_owner_only_once_its_doc_names_codex_and_cla
     ):
         source.write_text(html)
         with transaction(conn):
-            register_doc(conn, REF, source, NOW)
+            register_doc(conn, REVIEWS_CONFIG, REF, source, NOW)
         pr, ranking = view()
         assert (pr["reviews_gap"], pr["reviews_ran"]) == (gap, ran) and REF not in ranking
     source.write_text("<h2>Reviews</h2><p>Codex: fixed in abc. Claude: deferred, PROJ-1</p>")
     with transaction(conn):
-        register_doc(conn, REF, source, NOW)
+        register_doc(conn, REVIEWS_CONFIG, REF, source, NOW)
     pr, ranking = view()
     assert pr["reviews_gap"] is None and pr["reviews_ran"] == ["Codex", "Claude"] and ranking[REF]["mark"] == 1
 
@@ -1056,9 +1083,9 @@ def test_a_doc_registered_before_reviews_were_read_gets_them_once(
     source = tmp_path / "doc.html"
     source.write_text("<h2>Reviews</h2><p>Codex, Claude</p>")
     with transaction(conn):
-        register_doc(conn, REF, source, NOW)
+        register_doc(conn, REVIEWS_CONFIG, REF, source, NOW)
         conn.execute("UPDATE review_prs SET doc_reviews = NULL")
-        fill_doc_reviews(conn)
+        fill_doc_reviews(conn, REVIEWS_CONFIG)
     assert conn.execute("SELECT doc_reviews FROM review_prs").fetchone()[0] == '["Codex", "Claude"]'
 
 
@@ -1069,11 +1096,11 @@ def test_a_long_title_keeps_the_doc_request_under_the_message_limit(tmp_path: Pa
         add_session(conn, "c1", "worker", branch="dev/x")
         assert len(ask_for_docs(conn, config, NOW)) == 1
     body = conn.execute("SELECT body FROM messages").fetchone()[0]
-    assert "a Codex and a Claude review" in body and "section headed Reviews" in body and len(body) <= BODY_MAX_CHARS
+    assert "section headed Reviews" in body and len(body) <= BODY_MAX_CHARS
 
 
 def test_a_long_repo_and_title_still_fit_the_doc_request(tmp_path: Path) -> None:
-    repo = "acme-co/customer-onboarding-service-infrastructure-with-a-very-long-name-indeed"
+    repo = "acme-co/billing-onboarding-service-infrastructure-with-a-very-long-name-indeed"
     config = Config(review_org="Org", review_author="me", owner_name="Theo")
     conn = setup_pr(tmp_path, ref=f"pr:{repo}#1234", repo=repo, number=1234, url=f"https://github.com/{repo}/pull/1234",
                     title="T" * 300, **large())  # fmt: skip
@@ -1123,7 +1150,7 @@ def test_a_repos_own_setup_replaces_the_generic_env_and_its_settings(tmp_path: P
     assert (tmp_path / "runs.log").read_text() == "run\nrun\nrun\n"
 
 
-def test_settings_of_owner_survive_the_repos_setup(tmp_path: Path) -> None:
+def test_settings_of_owners_survive_the_repos_setup(tmp_path: Path) -> None:
     from bridge import review_worktree
 
     script = make_setup_script(tmp_path)
@@ -1242,14 +1269,11 @@ def test_an_outdated_workspace_is_rewritten_without_a_refresh(tmp_path: Path) ->
     settings = json.loads(workspace.read_text())["settings"]
     assert settings["python.useEnvironmentsExtension"] is False
 
-    theirs = {
-        "folders": [{"path": str(job.path)}, {"path": "/x"}],
-        "settings": {"python.useEnvironmentsExtension": True},
-    }
-    workspace.write_text(json.dumps({**theirs, "launch": {"configurations": []}}))
+    his = {"folders": [{"path": str(job.path)}, {"path": "/x"}], "settings": {"python.useEnvironmentsExtension": True}}
+    workspace.write_text(json.dumps({**his, "launch": {"configurations": []}}))
     link_worktrees_to_prs(conn)
     kept = json.loads(workspace.read_text())
-    assert kept["folders"] == theirs["folders"] and kept["launch"] == {"configurations": []}
+    assert kept["folders"] == his["folders"] and kept["launch"] == {"configurations": []}
     assert kept["settings"]["python.useEnvironmentsExtension"] is True
     assert kept["settings"]["githubPullRequests.focusedMode"] == "overview"
     workspace.write_text("// mine\n{}")
@@ -1285,3 +1309,271 @@ def test_setup_scripts_must_name_a_repo_and_a_path_inside_it() -> None:
     for bad in ({"app": "x.sh"}, {"Org/app": "/abs.sh"}, {"Org/app": "../x.sh"}, {"Org/app": ""}):
         with pytest.raises(ValueError, match="review_setup_scripts"):
             map_toml_to_config({"review_setup_scripts": bad})
+
+
+PYRIGHT_BASE = {"venv": ".venv", "extraPaths": ["svc_b", "common/python", "shared"]}
+
+
+def write_two_services(root: Path) -> None:
+    """Two services that each run from their own dir and each have a top-level observability package."""
+    for name in ("svc_a", "svc_b", "svc_a/infra"):
+        (root / name / "observability").mkdir(parents=True)
+        (root / name / "observability" / "__init__.py").write_text(f"WHO = {name!r}\n")
+        (root / name / "requirements.txt").write_text("")
+    (root / "requirements.txt").write_text("")
+    (root / "pyrightconfig.json").write_text(json.dumps(PYRIGHT_BASE, indent=2) + "\n")
+
+
+def test_each_service_gets_an_environment_that_finds_its_own_packages_first(tmp_path: Path) -> None:
+    write_two_services(tmp_path)
+    roots = find_service_roots(tmp_path)
+    assert roots == ["svc_a", "svc_a/infra", "svc_b"]
+    text = map_pyright_config_to_service_envs((tmp_path / "pyrightconfig.json").read_text(), roots, ("common/python",))
+    assert text is not None
+    config = json.loads(text)
+    assert {k: v for k, v in config.items() if k != "executionEnvironments"} == PYRIGHT_BASE
+    assert config["executionEnvironments"] == [
+        {"root": "svc_a/infra", "extraPaths": ["svc_a/infra", "common/python", "svc_b", "shared", "."]},
+        {"root": "svc_a", "extraPaths": ["svc_a", "common/python", "svc_b", "shared", "."]},
+        {"root": "svc_b", "extraPaths": ["svc_b", "common/python", "shared", "."]},
+    ]
+
+
+def test_a_shared_source_root_the_config_does_not_list_is_not_added() -> None:
+    text = map_pyright_config_to_service_envs(json.dumps({"extraPaths": ["lib"]}), ["svc"], ("common/python",))
+    assert text is not None
+    assert json.loads(text)["executionEnvironments"] == [{"root": "svc", "extraPaths": ["svc", "lib", "."]}]
+
+
+def test_a_config_with_its_own_environments_or_comments_or_no_services_is_left_alone() -> None:
+    assert map_pyright_config_to_service_envs(json.dumps({"executionEnvironments": []}), ["svc"]) is None
+    assert map_pyright_config_to_service_envs('{"venv": ".venv", // mine\n}', ["svc"]) is None
+    assert map_pyright_config_to_service_envs("{}", []) is None
+    assert map_pyright_config_to_service_envs(json.dumps({"extends": "base.json"}), ["svc"]) is None
+
+
+def pyright_worktree(tmp_path: Path) -> tuple[sqlite3.Connection, Config, Path, Path]:
+    origin, _, _ = make_origin(tmp_path)
+    git("checkout", "-q", "dev/x", cwd=origin)
+    write_two_services(origin)
+    git("add", ".", cwd=origin)
+    git("commit", "-qm", "services", cwd=origin)
+    oid = git("rev-parse", "HEAD", cwd=origin)
+    git("checkout", "-q", "main", cwd=origin)
+    move_pr(origin, oid)
+    config = config_for(tmp_path)
+    conn = setup_pr(tmp_path, head_oid=oid, commits=((oid, 1000),), **large())
+    job = pick_worktree_job(conn, config, NOW)
+    assert job is not None
+    with mock.patch("bridge.review_worktree.prepare_python_env"):
+        run_worktree_job(conn, config, job, NOW)
+    return conn, config, origin, job.path
+
+
+def environments_of(path: Path) -> list[str]:
+    return [
+        env["root"] for env in json.loads((path / "pyrightconfig.json").read_text()).get("executionEnvironments", [])
+    ]
+
+
+def test_a_worktree_gets_the_environments_without_a_change_in_its_diff(tmp_path: Path) -> None:
+    _, _, _, path = pyright_worktree(tmp_path)
+    assert environments_of(path) == ["svc_a/infra", "svc_a", "svc_b"]
+    assert git("status", "--porcelain", cwd=path) == ""
+    assert git("diff", "HEAD", cwd=path) == ""
+
+
+def test_a_refresh_takes_the_new_heads_config_and_adds_the_environments_again(tmp_path: Path) -> None:
+    conn, config, origin, path = pyright_worktree(tmp_path)
+    changed = {**PYRIGHT_BASE, "pythonVersion": "3.12"}
+    oid = commit_on_pr(origin, "pyrightconfig.json", json.dumps(changed))
+    with mock.patch("bridge.review_worktree.prepare_python_env"):
+        refresh_to(conn, config, oid)
+    assert git("rev-parse", "HEAD", cwd=path) == oid
+    assert json.loads((path / "pyrightconfig.json").read_text())["pythonVersion"] == "3.12"
+    assert environments_of(path) == ["svc_a/infra", "svc_a", "svc_b"]
+    assert git("status", "--porcelain", cwd=path) == ""
+
+
+def test_a_head_that_brings_its_own_environments_gets_no_shim(tmp_path: Path) -> None:
+    conn, config, origin, path = pyright_worktree(tmp_path)
+    own = {**PYRIGHT_BASE, "executionEnvironments": [{"root": "svc_a"}]}
+    oid = commit_on_pr(origin, "pyrightconfig.json", json.dumps(own))
+    with mock.patch("bridge.review_worktree.prepare_python_env"):
+        refresh_to(conn, config, oid)
+    assert json.loads((path / "pyrightconfig.json").read_text()) == own
+    assert git("ls-files", "-v", "pyrightconfig.json", cwd=path).startswith("H ")
+
+
+def test_owners_edit_of_the_config_holds_a_refresh_back_and_is_kept(tmp_path: Path) -> None:
+    conn, config, origin, path = pyright_worktree(tmp_path)
+    (path / "pyrightconfig.json").write_text('{"mine": true}\n')
+    oid = commit_on_pr(origin, "b.txt", "next\n")
+    with mock.patch("bridge.review_worktree.prepare_python_env"):
+        refresh_to(conn, config, oid)
+    assert (path / "pyrightconfig.json").read_text() == '{"mine": true}\n'
+    assert "pyrightconfig.json" in conn.execute("SELECT wt_detail FROM review_prs").fetchone()[0]
+
+
+def test_a_closed_prs_worktree_with_our_config_is_removed(tmp_path: Path) -> None:
+    conn, config, _, path = pyright_worktree(tmp_path)
+    close_pr(conn)
+    job = pick_worktree_job(conn, config, NOW)
+    assert job is not None and job.action == "remove"
+    run_worktree_job(conn, config, job, NOW)
+    assert not path.exists()
+
+
+def test_a_worktree_from_before_gets_the_environments_without_a_refresh(tmp_path: Path) -> None:
+    conn, _, _, path = pyright_worktree(tmp_path)
+    git("update-index", "--no-skip-worktree", "pyrightconfig.json", cwd=path)
+    git("checkout", "-q", "--", "pyrightconfig.json", cwd=path)
+    Path(git("rev-parse", "--path-format=absolute", "--git-path", "review-pyright.sha256", cwd=path)).unlink()
+    assert environments_of(path) == []
+    link_worktrees_to_prs(conn)
+    assert environments_of(path) == ["svc_a/infra", "svc_a", "svc_b"]
+    assert git("status", "--porcelain", cwd=path) == ""
+
+
+def test_a_closed_prs_worktree_with_owners_edit_of_the_config_stays(tmp_path: Path) -> None:
+    conn, config, _, path = pyright_worktree(tmp_path)
+    (path / "pyrightconfig.json").write_text('{"mine": true}\n')
+    close_pr(conn)
+    job = pick_worktree_job(conn, config, NOW)
+    assert job is not None and job.action == "remove"
+    run_worktree_job(conn, config, job, NOW)
+    assert (path / "pyrightconfig.json").read_text() == '{"mine": true}\n'
+    assert "pyrightconfig.json" in conn.execute("SELECT wt_detail FROM review_prs").fetchone()[0]
+
+
+def stamp_of(path: Path) -> Path:
+    return Path(git("rev-parse", "--path-format=absolute", "--git-path", "review-pyright.sha256", cwd=path))
+
+
+def test_owners_staged_edit_of_the_config_is_never_taken_for_ours(tmp_path: Path) -> None:
+    conn, config, _, path = pyright_worktree(tmp_path)
+    git("update-index", "--no-skip-worktree", "pyrightconfig.json", cwd=path)
+    git("checkout", "-q", "--", "pyrightconfig.json", cwd=path)
+    stamp_of(path).unlink()
+    tracked = (path / "pyrightconfig.json").read_text()
+    (path / "pyrightconfig.json").write_text('{"mine": true}\n')
+    git("add", "pyrightconfig.json", cwd=path)
+    (path / "pyrightconfig.json").write_text(tracked)
+    link_worktrees_to_prs(conn)
+    assert environments_of(path) == []
+    close_pr(conn)
+    job = pick_worktree_job(conn, config, NOW)
+    assert job is not None
+    run_worktree_job(conn, config, job, NOW)
+    assert path.exists() and git("diff", "--cached", "--name-only", cwd=path) == "pyrightconfig.json"
+
+
+def test_a_write_cut_short_is_finished_at_the_next_pass_and_never_taken_for_owners(tmp_path: Path) -> None:
+    conn, config, origin, path = pyright_worktree(tmp_path)
+    git("update-index", "--no-skip-worktree", "pyrightconfig.json", cwd=path)
+    stamp = stamp_of(path)
+    stamp.write_text(stamp.read_text().split()[0] + "\n")
+    assert git("status", "--porcelain", cwd=path) == "M pyrightconfig.json"
+    link_worktrees_to_prs(conn)
+    assert git("status", "--porcelain", cwd=path) == ""
+    assert environments_of(path) == ["svc_a/infra", "svc_a", "svc_b"]
+
+    git("update-index", "--no-skip-worktree", "pyrightconfig.json", cwd=path)
+    stamp.write_text(stamp.read_text().split()[0] + "\n")
+    lock = Path(git("rev-parse", "--path-format=absolute", "--git-path", "index.lock", cwd=path))
+    lock.write_text("")
+    link_worktrees_to_prs(conn)
+    assert git("ls-files", "-v", "pyrightconfig.json", cwd=path).startswith("H ")
+    lock.unlink()
+    link_worktrees_to_prs(conn)
+    assert git("ls-files", "-v", "pyrightconfig.json", cwd=path).startswith("S ")
+    oid = commit_on_pr(origin, "b.txt", "next\n")
+    with mock.patch("bridge.review_worktree.prepare_python_env"):
+        refresh_to(conn, config, oid)
+    assert git("rev-parse", "HEAD", cwd=path) == oid
+
+
+def test_a_restore_cut_short_leaves_the_tracked_config_free_to_refresh(tmp_path: Path) -> None:
+    conn, config, origin, path = pyright_worktree(tmp_path)
+    git("update-index", "--no-skip-worktree", "pyrightconfig.json", cwd=path)
+    git("checkout", "-q", "--", "pyrightconfig.json", cwd=path)
+    oid = commit_on_pr(origin, "b.txt", "next\n")
+    with mock.patch("bridge.review_worktree.prepare_python_env"):
+        refresh_to(conn, config, oid)
+    assert git("rev-parse", "HEAD", cwd=path) == oid
+    assert environments_of(path) == ["svc_a/infra", "svc_a", "svc_b"]
+
+
+def test_an_edit_the_owner_drops_lets_the_next_pass_add_the_environments(tmp_path: Path) -> None:
+    conn, _, _, path = pyright_worktree(tmp_path)
+    git("update-index", "--no-skip-worktree", "pyrightconfig.json", cwd=path)
+    git("checkout", "-q", "--", "pyrightconfig.json", cwd=path)
+    stamp_of(path).unlink()
+    (path / "pyrightconfig.json").write_text('{"mine": true}\n')
+    link_worktrees_to_prs(conn)
+    assert (path / "pyrightconfig.json").read_text() == '{"mine": true}\n'
+    git("checkout", "-q", "--", "pyrightconfig.json", cwd=path)
+    link_worktrees_to_prs(conn)
+    assert environments_of(path) == ["svc_a/infra", "svc_a", "svc_b"]
+
+
+def test_an_edit_saved_while_services_are_looked_for_is_never_restored_over(tmp_path: Path) -> None:
+    _, _, _, path = pyright_worktree(tmp_path)
+
+    def save_his_edit(root: Path) -> list[str]:
+        (path / "pyrightconfig.json").write_text('{"mine": true}\n')
+        return []
+
+    from bridge import review_worktree
+
+    with mock.patch("bridge.review_worktree.find_service_roots", side_effect=save_his_edit):
+        review_worktree.write_pyright_config(path)
+    assert (path / "pyrightconfig.json").read_text() == '{"mine": true}\n'
+
+
+def test_a_clean_config_with_crlf_line_ends_gets_the_environments(tmp_path: Path) -> None:
+    conn, _, _, path = pyright_worktree(tmp_path)
+    git("update-index", "--no-skip-worktree", "pyrightconfig.json", cwd=path)
+    git("checkout", "-q", "--", "pyrightconfig.json", cwd=path)
+    stamp_of(path).unlink()
+    tracked = (path / "pyrightconfig.json").read_bytes()
+    (path / "pyrightconfig.json").write_bytes(tracked.replace(b"\n", b"\r\n"))
+    link_worktrees_to_prs(conn)
+    assert environments_of(path) == ["svc_a/infra", "svc_a", "svc_b"]
+
+
+def test_the_longest_waiting_stale_checkout_is_refreshed_first_and_a_try_moves_it_back(tmp_path: Path) -> None:
+    config = config_for(tmp_path)
+    conn = connect(tmp_path / "t.db")
+    newer = make_pr(ref="pr:Org/app#8", number=8, url="https://github.com/Org/app/pull/8", head_oid="n2", **large())
+    older = make_pr(head_oid="o2", **large(updated_at="2026-11-01T10:00:00Z"))
+    with transaction(conn):
+        store_open_prs(conn, [newer, older], NOW)
+        for ref, at in (("pr:Org/app#8", 5000), (REF, 1000)):
+            conn.execute(
+                "UPDATE review_prs SET wt_path = ?, wt_oid = 'x1', wt_state = 'ready', wt_at = ? WHERE ref = ?",
+                (str(tmp_path / ref.replace(":", "_")), at, ref),
+            )
+    first = pick_worktree_job(conn, config, NOW)
+    assert first is not None and (first.ref, first.action) == (REF, "refresh")
+    with transaction(conn):
+        conn.execute("UPDATE review_prs SET wt_at = ? WHERE ref = ?", (NOW, REF))
+    second = pick_worktree_job(conn, config, NOW)
+    assert second is not None and second.ref == "pr:Org/app#8"
+
+
+def test_doc_terms_are_counted_by_their_class_alone() -> None:
+    html = (
+        b'<span class="term" data-def="x">a</span><span data-def="y" class="x term">b</span>'
+        b"<b class='term'>c</b><span class=\"terms\">not one</span><p>term</p>"
+    )
+    assert count_doc_terms(html) == 3
+
+
+def test_editor_settings_add_the_configured_shared_source_roots_that_exist(tmp_path: Path) -> None:
+    (tmp_path / "common" / "python").mkdir(parents=True)
+    (tmp_path / ".venv").mkdir()
+    paths = ("common/python", "missing/python")
+    write_editor_settings(tmp_path, tmp_path / ".venv" / "bin" / "python", [], paths)
+    settings = json.loads((tmp_path / ".vscode" / "settings.json").read_text())
+    assert settings["python.analysis.extraPaths"] == [str(tmp_path), str(tmp_path / "common" / "python")]

@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import sqlite3
 import subprocess
@@ -6,7 +7,8 @@ from typing import Any
 from unittest import mock
 
 import pytest
-from conftest import VENV_BIN, BridgeEnv, free_port, http_request, wait_up
+from conftest import VENV_BIN, BridgeEnv, SpawnProcess, free_port, http_request, wait_up
+from test_leads import Team
 from test_reviews import CONFIG, REF, add_lead, add_session, make_pr, setup_pr
 
 from bridge.config import Config
@@ -26,6 +28,7 @@ from bridge.review_post import (
     WAITING_STACK,
     ReviewError,
     advance_posts,
+    ask_for_usage_sections,
     build_send_command,
     build_send_env,
     map_arg_to_ref,
@@ -40,7 +43,8 @@ from bridge.review_post import (
     run_review_post,
     send_to_slack,
 )
-from bridge.reviews import map_db_to_reviews, store_open_prs
+from bridge.review_worktree import REVIEW_LARGE_LOC
+from bridge.reviews import map_db_to_reviews, store_merge_blocks, store_open_prs
 
 TEXT = "https://github.com/Org/app/pull/7 - Part of the export project."
 LIVE = Config(review_post_dry_run=False, review_channel_id="C1")
@@ -68,7 +72,7 @@ def test_post_text_is_the_link_the_description_direct_and_the_people_the_owner_p
     )
 
 
-def test_owner_comment_follows_the_mentions_and_needs_someone_mentioned() -> None:
+def test_owners_comment_follows_the_mentions_and_needs_someone_mentioned() -> None:
     assert (
         map_pr_to_slack_text("http://u", "Exports run", True, ["U1", "U2"], "please look at\nthe retry")
         == "http://u - Exports run - direct <@U1> <@U2> please look at\nthe retry"
@@ -77,7 +81,7 @@ def test_owner_comment_follows_the_mentions_and_needs_someone_mentioned() -> Non
     assert map_pr_to_slack_text("http://u", "Exports run", True, [], "ignored") == "http://u - Exports run - direct"
 
 
-def test_owner_comment_goes_out_as_typed_with_picker_names_made_mentions() -> None:
+def test_owners_comment_goes_out_as_typed_with_picker_names_made_mentions() -> None:
     people = {"Kai": "U01AAAA0001", "Nina": "U01BBBB0002"}
     typed = "  @kai & @Nina: see <https://x.test|the log>, <@U77> and a@x.test; @Kaira @Bob\r\nthanks \n"
     assert map_typed_comment_to_slack(typed, people) == (
@@ -89,7 +93,7 @@ def test_owner_comment_goes_out_as_typed_with_picker_names_made_mentions() -> No
     )
 
 
-def test_owner_comment_is_capped_after_trimming_the_ends() -> None:
+def test_owners_comment_is_capped_after_trimming_the_ends() -> None:
     assert len(map_typed_comment_to_slack(" " + "x" * COMMENT_MAX_CHARS + "\n", {})) == COMMENT_MAX_CHARS
     with pytest.raises(ReviewError, match=f"301 characters; at most {COMMENT_MAX_CHARS}"):
         map_typed_comment_to_slack("x" * (COMMENT_MAX_CHARS + 1), {})
@@ -127,7 +131,7 @@ def test_what_the_owner_picked_in_the_form_shapes_the_post(tmp_path: Path) -> No
     assert logged["text"] == f"{TEXT} - direct <@U01AAAA0001>"
 
 
-def test_owner_comment_is_stored_and_logged_with_the_post(tmp_path: Path) -> None:
+def test_owners_comment_is_stored_and_logged_with_the_post(tmp_path: Path) -> None:
     conn = setup_pr(tmp_path)
     add_sentence(conn)
     with transaction(conn):
@@ -190,7 +194,7 @@ def test_a_changed_text_or_channel_is_said_on_the_row() -> None:
 
 
 def test_the_send_allows_only_the_send_tool_with_hooks_off_and_user_settings() -> None:
-    command = build_send_command(LIVE, "C1", TEXT)
+    command = build_send_command("C1", TEXT)
     assert command[command.index("--allowedTools") + 1] == SEND_TOOL
     assert command[command.index("--tools") + 1] == ""
     assert command[command.index("--permission-mode") + 1] == "dontAsk"
@@ -340,7 +344,7 @@ def test_the_lead_hears_that_the_owners_click_is_permission_to_act_right_away(tm
 
 def test_dry_run_wording_claims_no_post(tmp_path: Path) -> None:
     text = told_text(tmp_path, "dry", DRY_RUN, draft=True)
-    assert "Nothing was posted" in text and "mark it ready on GitHub and request its reviewers" in text
+    assert "nothing went to Slack" in text and "mark it ready on GitHub and request its reviewers" in text
     assert "The owner's click is the permission" in text and "right away" not in text
     assert "the Slack post is out" not in text and "already links" not in text and "slack.com" not in text
 
@@ -365,10 +369,21 @@ def test_a_direct_post_asks_for_no_reviewers_and_says_none_are_needed(tmp_path: 
     )
 
 
-def test_a_post_by_hand_claims_no_click_of_owner(tmp_path: Path) -> None:
+def test_a_post_by_hand_claims_no_click_of_owners(tmp_path: Path) -> None:
     text = told_text(tmp_path, "hand", "by hand")
     assert "request its reviewers" in text and "slack.com" in text and "already links there" in text
     assert "permission" not in text and "pressed Publish" not in text
+
+
+def test_guild_review_ready_is_retired_and_says_what_to_do(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:
+    team = Team(bridge_env, spawn_process)
+    team.enroll()
+    conn = bridge_env.connect()
+    with transaction(conn):
+        store_open_prs(conn, [make_pr(draft=True)], 500)
+    done = team.guild("review", "ready", "Org/app#7", pid=team.a)
+    assert done.returncode == 2 and "retired" in done.stderr and "gh pr ready Org/app#7" in done.stderr
+    assert group_of(conn) == ("drafts", False)
 
 
 def test_the_owner_can_publish_a_pr_that_already_has_reviewers(tmp_path: Path) -> None:
@@ -536,8 +551,8 @@ def test_a_post_recorded_by_hand_also_tells_the_owner_to_request_reviewers(tmp_p
     assert "request its reviewers" in conn.execute("SELECT body FROM messages").fetchone()[0]
 
 
-def test_no_reviewers_are_asked_for_once_someone_reviewed(tmp_path: Path) -> None:
-    """GitHub drops a review request once that reviewer comments, and they may have asked to hold."""
+def test_no_reviewers_are_asked_for_once_someone_reviewed_as_on_47(tmp_path: Path) -> None:
+    """GitHub had dropped the request when Kai commented; Kai had asked to hold."""
     conn = setup_pr(tmp_path, requested=0, others_reviewed=True)
     with transaction(conn):
         add_session(conn, "c1", "worker", branch="dev/x")
@@ -673,13 +688,22 @@ def test_guild_commands_and_the_publish_route(bridge_env: BridgeEnv, dashboard: 
     assert guild["reviews"]["dry_run"] is True
 
 
+def test_the_reviewed_route_is_gone_so_an_old_page_cannot_publish_by_it(bridge_env: BridgeEnv, dashboard: str) -> None:
+    conn = bridge_env.connect()
+    with transaction(conn):
+        store_open_prs(conn, [make_pr()], 500)
+    http_request(f"{dashboard}/api/reviews/Org/app/7/reviewed", post=True, expect=404)
+    pr = json.loads(http_request(dashboard + "/api/guild"))["reviews"]["prs"][0]
+    assert pr["reviewed_at"] is None and pr["post_state"] is None
+
+
 def test_mention_people_come_from_config_in_order_and_need_slack_ids() -> None:
     from bridge.config import map_toml_to_config
 
     config = map_toml_to_config({"review_mention_people": {"Kai": "U01AAAA0001", "Nina": "U01BBBB0002"}})
     assert config.review_mention_people == (("Kai", "U01AAAA0001"), ("Nina", "U01BBBB0002"))
     with pytest.raises(ValueError, match="Slack user id"):
-        map_toml_to_config({"review_channel_id": "C1", "review_mention_people": {"Kai": "@kai"}})
+        map_toml_to_config({"review_mention_people": {"Kai": "@kai"}})
 
 
 def test_the_publish_form_sends_direct_and_names() -> None:
@@ -718,7 +742,7 @@ def test_the_publish_route_keeps_a_comment_only_with_someone_mentioned_and_caps_
     assert stored == {7: "look, <@U01AAAA0001>", 8: None}
 
 
-def test_a_closed_pr_asks_its_owner_once_to_clean_up_and_says_why_owner_worktree_was_kept(tmp_path: Path) -> None:
+def test_a_closed_pr_asks_its_owner_once_to_clean_up_and_says_why_owners_worktree_was_kept(tmp_path: Path) -> None:
     from bridge.review_post import ask_to_clean_up
 
     conn = setup_pr(tmp_path)
@@ -779,10 +803,11 @@ def test_working_time_is_the_configured_days_nine_to_seven_in_the_configured_zon
     assert is_working_time(TUESDAY_10 + 3 * 24 * hour, CONFIG)
     assert not is_working_time(TUESDAY_10 + 4 * 24 * hour, CONFIG)
     assert is_working_time(TUESDAY_10 + 6 * 24 * hour, CONFIG)
-    week = Config(work_timezone="Etc/GMT-9", work_days=(1, 2))
+    week = dataclasses.replace(CONFIG, work_timezone="Etc/GMT-9", work_days=(1, 2, 3, 4, 5))
     assert not is_working_time(TUESDAY_10, week)
     assert is_working_time(TUESDAY_10 - 8 * hour, week)
-    assert not is_working_time(TUESDAY_10 + 3 * 24 * hour - 8 * hour, week)
+    assert not is_working_time(TUESDAY_10 - 25 * hour, week)
+    assert is_working_time(TUESDAY_10 + 4 * 24 * hour - 8 * hour, week)
 
 
 def test_a_conflicting_pr_asks_its_lead_once_per_head_every_three_hours_of_work(tmp_path: Path) -> None:
@@ -830,14 +855,73 @@ def test_behind_asks_too_and_drafts_and_clean_prs_do_not(tmp_path: Path) -> None
             assert ask_to_resolve_conflicts(conn, CONFIG, TUESDAY_10) == []
 
 
-def test_publishing_neither_frees_nor_blocks_the_merge(tmp_path: Path) -> None:
+def test_owners_publish_frees_an_approved_merge_and_a_post_elsewhere_does_not(tmp_path: Path) -> None:
     conn = setup_pr(tmp_path)
     with transaction(conn):
         record_publish(conn, REF, "theo", 1000)
-    assert conn.execute("SELECT merge_path FROM review_prs").fetchone()[0] is None
-    other = setup_pr(tmp_path / "other") if (tmp_path / "other").mkdir() is None else None
-    assert other is not None
+    assert conn.execute("SELECT merge_path FROM review_prs").fetchone()[0] is None, "still needs an approval"
+    with transaction(conn):
+        conn.execute("""UPDATE review_prs SET approved_by = '["mira"]'""")
+        store_merge_blocks(conn)
+    assert conn.execute("SELECT merge_path FROM review_prs").fetchone()[0] == "ready"
+    (tmp_path / "other").mkdir()
+    other = setup_pr(tmp_path / "other")
     with transaction(other):
         other.execute("""UPDATE review_prs SET approved_by = '["mira"]'""")
         record_published_elsewhere(other, REF, "https://x/post", 1000)
-    assert other.execute("SELECT merge_path FROM review_prs").fetchone()[0] == "ready"
+    assert other.execute("SELECT merge_path FROM review_prs").fetchone()[0] is None
+
+
+def test_a_bare_number_names_the_open_pr_and_two_open_ones_need_the_repo(tmp_path: Path) -> None:
+    from test_reviews import make_pr
+
+    from bridge.db import connect, transaction
+    from bridge.review_post import ReviewError, map_arg_to_ref
+    from bridge.reviews import store_open_prs
+
+    conn = connect(tmp_path / "t.db")
+    docs = make_pr(ref="pr:Org/docs#19", repo="Org/docs", number=19, url="https://github.com/Org/docs/pull/19")
+    tool = make_pr(ref="pr:Org/tool#19", repo="Org/tool", number=19, url="https://github.com/Org/tool/pull/19")
+    with transaction(conn):
+        store_open_prs(conn, [docs, tool], 1_000)
+        conn.execute("UPDATE review_prs SET closed_at = 2000 WHERE ref = 'pr:Org/docs#19'")
+    assert map_arg_to_ref(conn, "19") == "pr:Org/tool#19"
+    with transaction(conn):
+        conn.execute("UPDATE review_prs SET closed_at = NULL WHERE ref = 'pr:Org/docs#19'")
+    with pytest.raises(ReviewError, match=r"Org/docs, Org/tool\); give it as owner/repo#19"):
+        map_arg_to_ref(conn, "19")
+    assert map_arg_to_ref(conn, "Org/docs#19") == "pr:Org/docs#19"
+
+
+def first_review(conn: Any) -> Any:
+    view: Any = map_db_to_reviews(conn, CONFIG, 0)
+    return view["prs"][0]
+
+
+def test_an_enabling_pr_without_how_this_will_be_used_is_not_ready_and_its_owner_is_told_once(tmp_path: Path) -> None:
+    conn = setup_pr(tmp_path, usage_missing="off by default", draft=True)
+    with transaction(conn):
+        add_session(conn, "c1", "worker", branch="dev/x")
+    pr = first_review(conn)
+    with transaction(conn):
+        assert ask_for_usage_sections(conn, CONFIG, 1000) == [], "a draft is not checked"
+    assert pr["reviews_gap"] is None
+    with transaction(conn):
+        store_open_prs(conn, [make_pr(usage_missing="off by default")], 600)
+        sent = ask_for_usage_sections(conn, CONFIG, 2000)
+        again = ask_for_usage_sections(conn, CONFIG, 3000)
+    pr = first_review(conn)
+    assert pr["reviews_gap"] == "description lacks How this will be used"
+    assert [r.handle for _, r in sent] == ["worker"] and again == []
+    body, post_type, board = conn.execute("SELECT body, post_type, board FROM messages").fetchone()
+    assert "'off by default'" in body and "How this will be used" in body and "Not an enabling PR:" in body
+    assert (post_type, board) == ("review-queue", 0)
+    with transaction(conn):
+        store_open_prs(conn, [make_pr()], 700)
+    assert first_review(conn)["reviews_gap"] is None, "the heading was added"
+
+
+def test_an_enabling_prs_gap_joins_a_large_prs_reviews_gap(tmp_path: Path) -> None:
+    conn = setup_pr(tmp_path, usage_missing="opt-in flag", loc=REVIEW_LARGE_LOC)
+    pr = first_review(conn)
+    assert pr["reviews_gap"] == "no doc yet; description lacks How this will be used"

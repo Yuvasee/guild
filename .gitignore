@@ -5,3 +5,7 @@ __pycache__/
 .ruff_cache/
 dist/
 *.egg-info/
+.reviews/
+# This install's own skill rules, linked in from its overlay (SKILL.md reads it when present).
+agent/skills/bridge/house.md
+_private/

@@ -1,4 +1,5 @@
 import fcntl
+import html
 import json
 import os
 import pwd
@@ -13,6 +14,7 @@ from collections.abc import Generator
 from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
+from importlib.resources import files
 from pathlib import Path
 from typing import Any, cast
 
@@ -53,7 +55,7 @@ PARALLEL_MAX = 6
 STOP_GRACE_S = 30
 """A dream process gets this long past its own limit to log the cut before the night stops it."""
 INPUT_MAX_CHARS = 400_000
-"""Well under the model's context window, with room for the prompt; a busy day of transcripts fits."""
+"""About 190k tokens at the trial's 0.48 tokens per character; the busiest lead-day seen was 328k characters."""
 MAX_BUDGET_USD = 5.0
 FIRST_WINDOW_MS = 24 * 3600 * 1000
 STALE_AFTER_MS = 36 * 3600 * 1000
@@ -218,6 +220,35 @@ def convert_dream_to_context(directory: Path, at_ms: int | None = None) -> str |
         night = datetime.fromtimestamp(written_ms / 1000).strftime("%Y-%m-%d")
         frame = DREAM_FRAME.replace("from last night", f"from the night of {night}")
     return f"[guild] {frame}\n{text[:DREAM_MAX_CHARS]}"
+
+
+DREAMS_PLACEHOLDER = "<!--DREAMS-->"
+
+
+def map_dreamers_to_page(dreamers: list[Dreamer]) -> str:
+    """The /dreams page: each dreamer's latest dream, newest night first; one without a dream is left out."""
+    shown: list[tuple[int, str]] = []
+    for dreamer in dreamers:
+        path = dream_path(dreamer.directory)
+        try:
+            text = path.read_text().strip()
+            written_ms = int(path.stat().st_mtime * 1000)
+        except OSError:
+            continue
+        if text:
+            shown.append((written_ms, map_dream_to_html(dreamer.display, text, written_ms)))
+    template = files("bridge").joinpath("web/dreams.html").read_text()
+    sections = "\n".join(part for _, part in sorted(shown, reverse=True))
+    return template.replace(DREAMS_PLACEHOLDER, sections or '<p class="empty">No dreams yet.</p>', 1)
+
+
+def map_dream_to_html(display: str, text: str, written_ms: int) -> str:
+    night = datetime.fromtimestamp(written_ms / 1000).strftime("%a %d %b, %H:%M")
+    paragraphs = "".join(f"<p>{html.escape(p.strip())}</p>" for p in text.split("\n\n") if p.strip())
+    return (
+        f'<section class="dream"><h2>{html.escape(display)}</h2>'
+        f'<p class="meta">written {html.escape(night)}</p>{paragraphs}</section>'
+    )
 
 
 def resolve_dreamers(conn: sqlite3.Connection, config: Config, names: list[str]) -> list[Dreamer]:
@@ -841,7 +872,7 @@ def _leads_root() -> Path:
 
 
 def build_dream_env() -> dict[str, str]:
-    """Started from a session's Bash, it must not look like part of that session."""
+    """Started from a session's Bash, it must not look like part of that session; launchd sets no USER or LOGNAME."""
     env = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE", "AGTERM_"))}
     user = pwd.getpwuid(os.getuid()).pw_name
     return {**env, "USER": user, "LOGNAME": user}

@@ -7,43 +7,95 @@ import time
 from pathlib import Path
 from typing import cast
 
+from bridge.agent_prefix import LINEAR_ISSUE_TOOLS, ROBOT
+from bridge.artifacts import ARTIFACT_TOOL
 from bridge.config import state_dir
-from bridge.guard import DEFAULT_TRIGGERS
-from bridge.hooks import HOOK_EVENTS
+from bridge.guard import DEFAULT_TRIGGERS, convert_trigger_to_glob
+from bridge.hooks import ARTIFACT_HOOK, HOOK_EVENTS
+from bridge.rewake_marks import WAITER_SCRIPT
 
 HOOK_TIMEOUT_S = 5
-_OURS_RE = re.compile(r"bridge-hook['\"]?\s+[A-Za-z]+")
+# A waiter lives as long as its idle tab; Claude Code ends it with the session.
+REWAKE_TIMEOUT_S = 2_000_000
+REWAKE_SUMMARY = "bridge mail"
+REWAKE_EVENTS = ("SessionStart", "Stop")
+BUSY_MARK_COMMAND = ': > "${BRIDGE_STATE_DIR:-$HOME/.local/state/bridge}/rewake/$CLAUDE_PID.busy" 2>/dev/null; exit 0'
+_OURS_RE = re.compile(
+    r"bridge-hook['\"]?\s+[A-Za-z]+|" + "|".join(re.escape(mark) for mark in (WAITER_SCRIPT, BUSY_MARK_COMMAND))
+)
 _GUARDED_EVENTS = frozenset({"PostToolUse", "PostToolUseFailure"})
-_MATCHERS = {"Notification": "permission_prompt", "PreToolUse": "Bash"}
+_MATCHERS = {"Notification": "permission_prompt", "PreToolUse": "|".join(("Bash", *LINEAR_ISSUE_TOOLS))}
+# A robot-prefixed title reaches Python with no claim; a payload may carry the robot raw or JSON-escaped.
+_ROBOT_GLOBS = f"*{ROBOT}*|*\\\\ud83e\\\\udd16*"
 
 type JsonObject = dict[str, object]
 
 
-def install_hooks(settings_path: Path, executable: str, triggers: tuple[str, ...] = DEFAULT_TRIGGERS) -> list[str]:
+def install_hooks(
+    settings_path: Path,
+    executable: str,
+    waiter_script: Path | None = None,
+) -> list[str]:
+    """waiter_script, the installed copy of rewake.sh, adds the hooks that deliver mail to an idle tab as a new turn."""
     settings = _load(settings_path)
     hooks = _strip_ours(settings)
     for event in HOOK_EVENTS:
         groups = _groups(hooks, event)
-        command = convert_event_to_command(executable, event, triggers)
+        command = convert_event_to_command(executable, event)
         group: JsonObject = {"hooks": [{"type": "command", "command": command, "timeout": HOOK_TIMEOUT_S}]}
         if event in _MATCHERS:
             group["matcher"] = _MATCHERS[event]
         groups.append(group)
         hooks[event] = groups
+    artifact: JsonObject = {
+        "matcher": ARTIFACT_TOOL,
+        "hooks": [
+            {"type": "command", "command": f"{shlex.quote(executable)} {ARTIFACT_HOOK}", "timeout": HOOK_TIMEOUT_S}
+        ],
+    }
+    hooks["PostToolUse"] = [*_groups(hooks, "PostToolUse"), artifact]
+    if waiter_script is not None:
+        for event, group in map_waiter_to_hook_groups(waiter_script, executable).items():
+            hooks[event] = [*_groups(hooks, event), group]
     settings["hooks"] = hooks
     _save(settings_path, settings)
     return list(HOOK_EVENTS)
 
 
-def convert_event_to_command(executable: str, event: str, triggers: tuple[str, ...] = DEFAULT_TRIGGERS) -> str:
+def map_waiter_to_hook_groups(waiter_script: Path, executable: str) -> dict[str, JsonObject]:
+    """A waiter starts with the session and at each turn's end; a prompt marks the tab busy, in the shell alone."""
+    groups: dict[str, JsonObject] = {
+        event: {
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": f"sh {shlex.quote(str(waiter_script))} {shlex.quote(executable)} {event}",
+                    "asyncRewake": True,
+                    "rewakeSummary": REWAKE_SUMMARY,
+                    "timeout": REWAKE_TIMEOUT_S,
+                }
+            ]
+        }
+        for event in REWAKE_EVENTS
+    }
+    groups["UserPromptSubmit"] = {
+        "hooks": [{"type": "command", "command": BUSY_MARK_COMMAND, "timeout": HOOK_TIMEOUT_S}]
+    }
+    return groups
+
+
+def convert_event_to_command(executable: str, event: str) -> str:
     direct = f"{shlex.quote(executable)} {event}"
     if event == "PreToolUse":
-        # Every shell command passes through here; Python starts only if a claim or a held PR exists and the
-        # text could match.
-        cases = "|".join(convert_trigger_to_glob(t) for t in dict.fromkeys(triggers))
+        # Every shell command passes through here; Python starts only for a robot (a title to check) or, if a claim
+        # exists, for text that could match a trigger.
+        cases = "|".join(convert_trigger_to_glob(t) for t in DEFAULT_TRIGGERS)
+        # exec in a pipeline replaces only its subshell, so exit before the claims gate runs the hook again.
+        run = f"printf '%s' \"$p\" | {direct}; exit 0;;"
         return (
-            '[ -f "${BRIDGE_STATE_DIR:-$HOME/.local/state/bridge}/claims-active" ] || exit 0; p=$(cat); '
-            f'case "$p" in {cases}) printf \'%s\' "$p" | exec {direct};; esac; exit 0'
+            f'p=$(cat); case "$p" in {_ROBOT_GLOBS}) {run} esac; '
+            '[ -f "${BRIDGE_STATE_DIR:-$HOME/.local/state/bridge}/claims-active" ] || exit 0; '
+            f'case "$p" in {cases}) {run} esac; exit 0'
         )
     if event not in _GUARDED_EVENTS:
         return direct
@@ -55,11 +107,9 @@ def convert_event_to_command(executable: str, event: str, triggers: tuple[str, .
     )
 
 
-def convert_trigger_to_glob(trigger: str) -> str:
-    """An unquoted case pattern: `*` stays a wildcard, spaces match any run of characters."""
-    if not re.fullmatch(r"[A-Za-z0-9 *_./-]+", trigger):
-        raise ValueError(f"guard trigger {trigger!r} may only use letters, digits, spaces and * _ . / -")
-    return "*" + "*".join(trigger.split()) + "*"
+def list_guard_globs() -> list[str]:
+    """The shell guard's gate: a command matching none of these cannot push, merge or set a robot-prefixed title."""
+    return [*(convert_trigger_to_glob(t) for t in DEFAULT_TRIGGERS), f"*{ROBOT}*"]
 
 
 def uninstall_hooks(settings_path: Path) -> None:

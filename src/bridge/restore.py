@@ -26,6 +26,10 @@ _VARIADIC = frozenset(
 )  # fmt: skip
 
 
+_ALLOWED_TOOLS = frozenset({"--allowedTools", "--allowed-tools"})
+_SELF_GRANTED_TOOLS = "mcp__computer-use__"
+
+
 @dataclass(frozen=True)
 class PinResult:
     command: str
@@ -58,11 +62,12 @@ def build_restore_command(argv: list[str], conversation_id: str) -> str:
             kept.extend(args[i : i + (2 if takes_next else 1)])
             i += 2 if takes_next else 1
         elif flag in _VARIADIC:
-            kept.append(token)
-            i += 1
-            while "=" not in token and i < len(args) and not args[i].startswith("-"):
-                kept.append(args[i])
-                i += 1
+            end = i + 1
+            while "=" not in token and end < len(args) and not args[end].startswith("-"):
+                end += 1
+            if not _is_self_granted(flag, args[i:end]):
+                kept.extend(args[i:end])
+            i = end
         elif token.startswith("-"):
             kept.append(token)
             i += 1
@@ -70,6 +75,12 @@ def build_restore_command(argv: list[str], conversation_id: str) -> str:
             i += 1
     kept.extend(["--resume", conversation_id])
     return shlex.join(kept)
+
+
+def _is_self_granted(flag: str, group: list[str]) -> bool:
+    # Claude Code adds these to its own argv at every in-place restart, so they pile up past agterm's 1024-byte limit.
+    values = [group[0].split("=", 1)[1]] if "=" in group[0] else group[1:]
+    return flag in _ALLOWED_TOOLS and bool(values) and all(v.startswith(_SELF_GRANTED_TOOLS) for v in values)
 
 
 def pin_restore_command(command: str, env: Mapping[str, str], agtermctl: str) -> PinResult:

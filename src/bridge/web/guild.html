@@ -53,6 +53,8 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 .watch .dot { margin-top: 5.5px; }
 .watch b { font-weight: 600; color: var(--ink); }
 .watch.bad { background: color-mix(in srgb, var(--stuck) 9%, transparent); color: var(--ink); }
+a.watch.link { cursor: pointer; color: var(--ink); text-decoration: none; font-weight: 600; }
+a.watch.link:hover { text-decoration: underline; text-underline-offset: 2px; }
 
 .section { margin-bottom: 44px; }
 #needs, #chat { max-width: 90ch; margin-left: auto; margin-right: auto; }
@@ -63,6 +65,8 @@ header .note.end { margin-left: auto; }
 
 .dot { display: inline-block; flex: none; width: 10px; height: 10px; border-radius: 50%; vertical-align: middle; }
 .dot.tiny { width: 7px; height: 7px; }
+/* A worker whose Claude runs on a remote host: a ring, so the laptop's own load reads apart. */
+.dot.tiny.host { box-shadow: 0 0 0 1.5px var(--bg), 0 0 0 2.5px currentColor; }
 .dot.working { background: var(--working); }
 .dot.waiting { background: var(--waiting); }
 .dot.stuck { background: var(--stuck); }
@@ -98,6 +102,9 @@ header .note.end { margin-left: auto; }
 .card .actions button:hover { background: var(--you); color: var(--raise); }
 .card .actions button.dismiss { border-color: transparent; color: var(--soft); }
 .card .actions button.dismiss:hover { background: none; color: var(--ink); }
+.card textarea { display: block; width: 100%; min-height: 9em; margin-top: 4px; font: inherit; color: inherit; background: var(--raise); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; resize: vertical; }
+.card .part.bad .label, .card .part.bad .text { color: var(--stuck); }
+.card .actions button.armed { background: var(--you); color: var(--raise); }
 .card input { flex: 1 1 200px; min-width: 0; font: inherit; color: inherit; background: var(--raise); border: 1px solid var(--line); border-radius: 8px; padding: 3px 10px; }
 
 /* Asks: quiet rows under what needs you; red only when one has waited past its limit. */
@@ -110,7 +117,6 @@ header .note.end { margin-left: auto; }
 .ask:not(.open) .words { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 400; }
 .ask:not(.open) .meta { margin-top: 0; white-space: nowrap; }
 .ask:not(.open) .part, .ask:not(.open) .actions { display: none; }
-.ask .meta.late { color: var(--stuck); }
 .ask .part { font-size: 13px; color: var(--soft); margin-top: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .ask .part .label { font-size: 12px; color: var(--faint); margin-right: 6px; }
 .ask .part .text { display: inline; }
@@ -124,7 +130,7 @@ header .note.end { margin-left: auto; }
 .lead .asks { font-size: 12px; color: var(--soft); white-space: nowrap; cursor: help; }
 .lead .asks.late { color: var(--stuck); font-weight: 600; }
 
-/* A lead: its name line, then one row per work chunk, with its issues and PRs in columns of their own. */
+/* A lead: its name line, then one row per work chunk, with Linear issues and PRs in columns of their own. */
 .lead + .lead { margin-top: 22px; }
 .lead .head, .chunk { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 26%) minmax(0, 32%); gap: 0 18px; padding: 0 12px; }
 .lead .head { align-items: baseline; margin-bottom: 4px; }
@@ -150,11 +156,15 @@ table.pipeline { width: 100%; min-width: 1120px; table-layout: fixed; border-col
 .pipeline col.who { width: 150px; }
 .pipeline col.lines { width: 52px; }
 .pipeline col.ci { width: 34px; }
-.pipeline col.review { width: 200px; }
+.pipeline col.review { width: 150px; }
 .pipeline .threads { color: var(--faint); }
+/* A doc or checkout made for an earlier commit than the PR's head: the same link, grey, with a mark that says why. */
+.pipeline a.stale { color: var(--faint); }
+.pipeline .stale-mark { margin-left: 2px; cursor: help; font-size: 11px; }
 .pipeline col.approved { width: 96px; }
 .pipeline col.merge { width: 112px; }
-.pipeline col.folder { width: 88px; }
+.pipeline col.doc { width: 62px; }
+.pipeline col.folder { width: 140px; }
 .pipeline col.action { width: 150px; }
 .pipeline th.num { text-align: right; padding-right: 14px; }
 .pipeline th.ci, .pipeline td.ci { text-align: center; padding-left: 0; padding-right: 0; overflow: visible; }
@@ -191,6 +201,11 @@ table.pipeline { width: 100%; min-width: 1120px; table-layout: fixed; border-col
 .pipeline tr.resolve td { padding: 0 8px 8px 0; color: var(--soft); }
 .pipeline tr.resolve .thread { display: block; overflow-wrap: anywhere; }
 .pipeline tr.resolve .thread .label { color: var(--you); font-weight: 600; }
+.pipeline tr.mergeok td { padding: 0 8px 8px 0; color: var(--soft); }
+.pipeline tr.mergeok .sent { color: var(--working); font-weight: 600; }
+.pipeline tr.mergeok .older, .pipeline tr.mergeok .orphan { color: var(--waiting); font-weight: 600; }
+.pipeline button.act.merge { color: var(--you); border-color: var(--you); }
+.pipeline button.act.merge:hover { color: var(--you); background: var(--you-wash); }
 .pipeline button.plain { color: inherit; font: inherit; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .pipeline button.plain:hover { color: var(--ink); text-decoration: underline; text-underline-offset: 2px; }
 .pipeline button.act { font: inherit; color: var(--soft); background: var(--raise); border: 1px solid var(--line); border-radius: 7px; padding: 0 8px; white-space: nowrap; }
@@ -281,7 +296,7 @@ details td.what { color: var(--faint); font-weight: 400; }
   .lead .head, .chunk { grid-template-columns: minmax(0, 1fr); }
   .lead .colhead { display: none; }
   th.what { width: 40%; } th.why, td.why { display: none; }
-  /* Each PR is a card: number and title; who, size, CI, review and merge; then review checkout (with the doc) and the review post. */
+  /* Each PR is a card: number and title; who, size, CI, review and merge; then doc, review checkout and Slack. */
   .tablewrap { overflow: visible; }
   table.pipeline, .pipeline tbody { display: block; min-width: 0; width: 100%; }
   .pipeline colgroup, .pipeline thead { display: none; }
@@ -304,11 +319,31 @@ details td.what { color: var(--faint); font-weight: 400; }
   .pipeline td.c-lines::after { content: " lines"; }
   .pipeline td.c-lines::before, .pipeline td.c-ci::before, .pipeline td.c-review::before, .pipeline td.c-approved::before, .pipeline td.c-merge::before { content: "·"; margin: 0 6px; color: var(--faint); }
   .pipeline td.c-ci .dot { vertical-align: 0; }
-  .pipeline td.c-folder, .pipeline td.c-action { order: 4; margin-top: 3px; }
-  .pipeline td.c-folder { margin-right: 14px; }
+  .pipeline td.c-doc, .pipeline td.c-folder, .pipeline td.c-action { order: 4; margin-top: 3px; }
+  .pipeline td.c-doc, .pipeline td.c-folder { margin-right: 14px; }
+  .pipeline td.c-doc::before { content: "Doc "; color: var(--faint); }
   .pipeline td.c-folder::before { content: "Review "; color: var(--faint); }
   .pipeline td.c-action { margin-left: auto; }
 }
+/* Colleague comments: one quiet row each; the ones still waiting on a lead or on you carry a colored edge. */
+#colleagues .body { max-width: 110ch; }
+.cc { margin: 0 0 4px; padding: 5px 12px; border-radius: 10px; background: var(--row); font-size: 14px; color: var(--ink); }
+.cc.open { box-shadow: inset 3px 0 0 var(--waiting); }
+.cc.yours { box-shadow: inset 3px 0 0 var(--you); }
+.cc.breach { box-shadow: inset 3px 0 0 var(--stuck); }
+.cc > summary { list-style: none; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; }
+.cc > summary::-webkit-details-marker { display: none; }
+.cc .call { font-size: 12px; font-weight: 600; color: var(--soft); white-space: nowrap; }
+.cc.open .call { color: var(--waiting); }
+.cc.yours .call { color: var(--you); }
+.cc .call.bad, .cc .breaches { color: var(--stuck); font-size: 12px; font-weight: 600; }
+.cc .who { font-weight: 600; }
+.cc .meta { font-size: 12px; color: var(--soft); }
+.cc .quote { flex-basis: 100%; min-width: 0; color: var(--soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cc[open] .quote { white-space: pre-wrap; overflow-wrap: anywhere; }
+.cc .part { margin-top: 6px; font-size: 13px; color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; }
+.cc .part .label { font-size: 12px; color: var(--faint); margin-right: 6px; }
+.cc.closed { opacity: .7; }
 </style>
 </head>
 <body>
@@ -321,6 +356,7 @@ details td.what { color: var(--faint); font-weight: 400; }
   -->
   <section id="needs" class="section" hidden><header><h2>Needs you</h2></header><div class="body"></div></section>
   <section id="queue" class="section" hidden><header><h2>PRs</h2><span class="note" id="priority"></span><span class="note end" id="queue-fresh"></span></header><div class="body"></div></section>
+  <section id="colleagues" class="section" hidden><header><h2>Colleague comments</h2><span class="note">on our PRs, only what waits for a reply, a draft or your choice</span></header><div class="body"></div></section>
   <section id="leads" class="section"><header>
     <h2>Team Leads</h2>
   </header><div class="body"></div></section>
@@ -353,7 +389,7 @@ const drafts = new Map();
 const lastRendered = new Map();
 let replyTo = null;
 let chatLead = null;
-let state = { now: 0, needs: [], leads: [], room: [], claims: [], asks: { on_you: [], waiting: [], verified: [] } };
+let state = { now: 0, needs: [], leads: [], room: [], claims: [], colleague_comments: [], asks: { on_you: [], waiting: [], verified: [] } };
 let lastUpdate = 0;
 let offline = false;
 let mismatch = false;
@@ -511,6 +547,7 @@ function renderNeedCard(need) {
     return card;
   }
   if (need.delivering) return renderDeliveringCard(need);
+  if (need.colleague) return renderColleagueDraftCard(need);
   const card = el("div", "card" + (need.urgent ? " stuck" : ""));
   const title = el("div", "title");
   title.append(el("span", "attention-slot"));
@@ -552,6 +589,93 @@ function renderNeedCard(need) {
   };
   actions.append(dismiss);
   card.append(actions);
+  return card;
+}
+
+function colleagueCardPart(label, text, cls) {
+  const part = el("div", "part" + (cls ? " " + cls : ""));
+  part.append(el("span", "label", label), el("div", "text", text));
+  return part;
+}
+
+// Posting to GitHub takes a second click on the same button, so a stray click posts nothing.
+function armedButton(label, armedLabel, act) {
+  const button = el("button", "", label);
+  let timer = null;
+  button.onclick = () => {
+    if (!button.classList.contains("armed")) {
+      button.classList.add("armed");
+      button.textContent = armedLabel;
+      timer = setTimeout(() => { button.classList.remove("armed"); button.textContent = label; }, 4000);
+      return;
+    }
+    clearTimeout(timer);
+    button.disabled = true;
+    Promise.resolve(act()).then((ok) => {
+      if (ok) return;
+      button.disabled = false;
+      button.classList.remove("armed");
+      button.textContent = label;
+    });
+  };
+  return button;
+}
+
+function renderColleagueDraftCard(need) {
+  const c = need.colleague;
+  const key = "cc:" + need.id;
+  const card = el("div", "card");
+  const title = el("div", "title");
+  title.append(el("span", "attention-slot"), need.text);
+  card.append(title);
+  const meta = el("div", "meta");
+  meta.append(need.from + " drafted this " + age(state.now - need.at) + " ago · reply and push wait for your choice · ");
+  meta.append(linkTo(c.url, "open on GitHub"));
+  meta.title = "drafted " + fullTime(need.at);
+  card.append(meta);
+  card.append(colleagueCardPart(c.author + " " + (COLLEAGUE_REVIEWS[c.review] || "commented") + " on " + c.label, c.quote || "(no text)"));
+  const view = colleagueCardPart("Draft reply", c.draft);
+  const editor = el("div", "part");
+  const box = el("textarea");
+  box.value = drafts.has(key) ? drafts.get(key) : c.draft;
+  box.oninput = () => drafts.set(key, box.value);
+  editor.append(el("span", "label", "Your reply (posted after “🤖 Claude:”)"), box);
+  card.append(view, editor);
+  card.append(colleagueCardPart("Plan", c.note));
+  if (c.reply_error) card.append(colleagueCardPart("Not posted", c.reply_error, "bad"));
+  if (c.status === "posting") {
+    card.append(el("div", "delivery", "Your choice is in. bridge finishes it, or looks the reply up on GitHub within minutes; it never posts it twice."));
+    return card;
+  }
+  const send = async (choice, text) => {
+    let done;
+    try {
+      done = await post("/api/colleague-replies/" + need.id, { choice, text: text || "" });
+    } catch (error) {
+      done = { ok: false, detail: "bridge did not answer: " + error.message };
+    }
+    if (done.ok) drafts.delete(key); else setStatus(done.detail || "not sent");
+    refresh();
+    return done.ok;
+  };
+  const choose = el("div", "actions");
+  const edit = el("button", "", "Edit");
+  const himself = el("button", "dismiss", "I'll answer myself");
+  himself.onclick = () => send("himself");
+  choose.append(armedButton("Send as is", "Post to GitHub?", () => send("as-is")), edit, himself);
+  const editing = el("div", "actions");
+  const cancel = el("button", "dismiss", "Cancel");
+  editing.append(armedButton("Send edited", "Post to GitHub?", () => send("edited", box.value)), cancel);
+  const setEditing = (on) => {
+    view.hidden = choose.hidden = on;
+    editor.hidden = editing.hidden = !on;
+    if (on && !drafts.has(key)) drafts.set(key, box.value);
+    if (!on) { drafts.delete(key); box.value = c.draft; }
+  };
+  edit.onclick = () => { setEditing(true); box.focus(); };
+  cancel.onclick = () => setEditing(false);
+  setEditing(drafts.has(key));
+  card.append(choose, editing);
   return card;
 }
 
@@ -639,9 +763,10 @@ function renderLeadRow(lead) {
     const dots = el("span", "dots");
     for (const worker of lead.workers) {
       const button = el("button");
-      button.title = worker.task + ": " + (worker.why || worker.state);
+      const where = worker.host ? " (on " + worker.host + ")" : "";
+      button.title = worker.task + where + ": " + (worker.why || worker.state);
       button.setAttribute("aria-label", button.title);
-      button.append(el("span", "dot tiny " + worker.state));
+      button.append(el("span", "dot tiny " + worker.state + (worker.host ? " host" : "")));
       button.onclick = () => jump(worker.surface);
       dots.append(button);
     }
@@ -656,7 +781,7 @@ function renderLeadRow(lead) {
     who.append(cap);
   }
   const head = el("div", "head");
-  head.append(who, el("span", "colhead", "Issues"), el("span", "colhead", "PRs"));
+  head.append(who, el("span", "colhead", "Linear"), el("span", "colhead", "PRs"));
   const block = el("div", "lead");
   block.append(head);
   if (lead.work.length) block.append(...lead.work.map(renderChunk));
@@ -678,7 +803,8 @@ function renderLeadAsks(asks) {
 
 function leadAskLine(item) {
   const wait = item.wait ? " (" + askWaitText(item.wait) + ": " + item.wait.why + ")" : "";
-  return "#" + item.id + " " + item.state.replace("_", " ") + (item.overdue ? " (late)" : "") + wait + ": " + item.words;
+  const state = item.state === "done_claimed" ? "to verify" : item.state.replace("_", " ");
+  return "#" + item.id + " " + state + (item.overdue ? " (late)" : "") + wait + ": " + item.words;
 }
 
 const ASK_WAIT_ON = { owner: "you", approval: "an approval", release: "a release", verifier: "a verifier" };
@@ -735,7 +861,7 @@ function renderAskCard(ask, verified) {
     if (card.classList.contains("open")) askOpen.add(ask.id); else askOpen.delete(ask.id);
   };
   card.append(el("div", "words", ask.words));
-  const line = el("div", "meta" + (ask.overdue ? " late" : ""));
+  const line = el("div", "meta");
   line.title = fullTime(ask.at);
   card.append(line);
   if (ask.claim) card.append(renderAskPart("Claim", ask.claim));
@@ -783,9 +909,8 @@ function renderAsks() {
         renderAsks();
       };
     }
-    const late = items.filter((ask) => ask.overdue).length;
     const folded = askFolded.has(title);
-    const text = (folded ? "▸ " : "▾ ") + title + " · " + items.length + (late ? " (" + late + " late)" : "");
+    const text = (folded ? "▸ " : "▾ ") + title + " · " + items.length;
     if (head.textContent !== text) head.textContent = text;
     wanted.push(head);
     if (folded) return;
@@ -1080,7 +1205,7 @@ function stuckList() {
   return stuck;
 }
 
-// No verdict line: what needs them and what is stuck show where they live. The top says only what the page itself
+// No verdict line: what needs the owner and what is stuck show where they live. The top says only what the page itself
 // cannot be trusted with, and the tab icon and title keep the counts.
 function renderVerdict() {
   const warn = document.getElementById("warn");
@@ -1208,10 +1333,11 @@ const QUEUE_POSTS = {
 };
 const QUEUE_COLUMNS = [
   ["place", ""], ["pr", "PR"], ["who", "Who"], ["lines", "Lines"], ["ci", "CI"], ["review", "Your review"],
-  ["approved", "Approved"], ["merge", "Merge"], ["folder", "Review"], ["action", "Post"],
+  ["approved", "Approved"], ["merge", "Merge"], ["folder", "Review"], ["action", "Slack"],
 ];
 const QUEUE_GROUPS = [
-  ["waiting", "Open"], ["ready", "Ready to merge (lead)"], ["published", "Published"], ["drafts", "Drafts in progress"],
+  ["waiting", "Open"], ["ready", "Ready to merge (lead)"], ["backports", "Backports (lead merges)"], ["published", "Published"],
+  ["drafts", "Drafts in progress"],
 ];
 const queueOpenFolds = new Set();
 let queueArmed = null;
@@ -1224,13 +1350,14 @@ const QUEUE_SORTS = {
   who: (pr) => pr.lead || pr.owner || null,
   lines: (pr) => pr.loc,
   ci: (pr) => queueStage(["FAILURE", "ERROR", "PENDING", "EXPECTED", "SUCCESS"], pr.checks),
-  review: (pr) => pr.resolve_threads.length + pr.owner_open_threads + (pr.merge_block ? 1 : 0) || null,
+  review: (pr) => pr.resolve_threads.length + pr.his_open_threads + (pr.merge_block ? 1 : 0) || null,
   action: (pr) => queueStage(
     ["waits for sentence", "waits for stack", "waits: draft again", "failed", "stopped", "posting", "dry run", "sent?", "published"],
     queueSlackWord(pr),
   ),
   approved: (pr) => pr.approvers.length || null,
   merge: (pr) => queueStage(["draft", "conflicts", "behind", "blocked", "checking", "ready, CI red", "ready", "in queue"], QUEUE_MERGE[pr.merge_state]),
+  doc: (pr) => queueStage(["none yet", "older", "open"], queueDocWord(pr)),
   folder: (pr) => queueStage(["no-checkout", "failed", "preparing", "has changes", "older", "open"], queueFolderWord(pr)),
 };
 const QUEUE_SORT_STORE = "guild.prSort";
@@ -1281,11 +1408,12 @@ function sortQueueGroup(prs, sort) {
 
 const QUEUE_HEAD_WHY = {
   place: "the number shows where it stands in what needs you, across questions and PRs",
-  lines: "lines changed: additions plus deletions, leaving out docs, images and the excluded files (lockfiles by default)",
+  lines: "lines changed: additions plus deletions, without lockfiles and generated files",
   ci: "GitHub checks on the newest commit: green, red, or running",
   review: "your comments and review on GitHub",
   approved: "a colleague approved it on GitHub",
   merge: "what GitHub says about merging it",
+  doc: "the review document its owner wrote for you",
   folder: "open a local checkout of the PR in the editor to review it",
   action: "its post in the review channel",
 };
@@ -1333,13 +1461,8 @@ function queueAction(pr, label, path, armed = "Really post?") {
   return button;
 }
 
-function queuePublishLabel() {
-  const chat = state.reviews && state.reviews.chat;
-  return chat && chat !== "none" ? "Publish to " + (chat === "slack" ? "Slack" : "chat") : "Publish";
-}
-
 // Publish opens a form under the row: whether the post says "direct", which colleagues it mentions, and a comment to them.
-function queuePublishButton(pr, label = queuePublishLabel(), path = "publish") {
+function queuePublishButton(pr, label = "Publish to Slack", path = "publish") {
   const open = queueForm && queueForm.ref === pr.ref && queueForm.path === path;
   const button = el("button", "act", open ? "Close" : label);
   button.onclick = () => {
@@ -1398,7 +1521,7 @@ function renderPublishComment(pr, preview) {
   return box;
 }
 
-// The reply quoted under the row, so they can tell from the page whether it settles their point.
+// The reply quoted under the row, so the owner can tell from the page whether it settles their point.
 function renderResolveRow(pr) {
   const row = el("tr", "resolve");
   row.append(el("td"));
@@ -1411,6 +1534,65 @@ function renderResolveRow(pr) {
     line.firstChild.classList.add("label");
     cell.append(line);
   });
+  row.append(cell);
+  return row;
+}
+
+function hasCurrentMergeOk(pr) {
+  return Boolean(pr.merge_ok && pr.merge_ok.current);
+}
+
+function wantsMergeOkRow(pr) {
+  return pr.can_ok_merge && (Boolean(pr.merge_ok) || !pr.owner);
+}
+
+// The OK is not GitHub's approval: the page records it and the PR's owner merges, never bridge.
+function queueMergeOkButton(pr) {
+  // A new head polled in while armed must be confirmed again, or the second click would OK a commit never shown.
+  const key = pr.ref + "@" + pr.head_oid + " merge-ok";
+  const button = el("button", "act merge", queueArmed === key ? "Really OK?" : "Merge");
+  button.title = "OK its merge at " + pr.pr_at + ": " + (pr.owner ? pr.merge_ok_to + " is told to merge it now" : "no session owns it, so " + pr.merge_ok_to + " is asked to find its lead");
+  button.onclick = async () => {
+    if (queueArmed !== key) {
+      queueArmed = key;
+      button.textContent = "Really OK?";
+      setTimeout(() => {
+        if (queueArmed !== key) return;
+        queueArmed = null;
+        rerenderQueue();
+      }, 4000);
+      return;
+    }
+    queueArmed = null;
+    button.disabled = true;
+    const done = await post("/api/reviews/" + pr.repo + "/" + pr.number + "/merge-ok", { head_oid: pr.head_oid });
+    setStatus(done.ok ? pr.label + ": merge OK sent to " + done.detail : done.detail || "not sent");
+    refresh();
+  };
+  return button;
+}
+
+function renderMergeOkRow(pr) {
+  const row = el("tr", "mergeok");
+  row.append(el("td"));
+  const cell = el("td");
+  cell.colSpan = QUEUE_COLUMNS.length - 1;
+  const ok = pr.merge_ok;
+  if (ok && ok.current) {
+    cell.append(el("span", "sent", "Merge OK sent to " + ok.sent_to + " " + clock(ok.at)));
+    const then = ok.no_owner ? ": no session owns it, so " + ok.sent_to + " finds its lead" : ": " + ok.sent_to + " merges it through the guard";
+    cell.append(" at " + ok.head + then);
+    cell.title = "given by " + ok.by + " " + fullTime(ok.at);
+  } else {
+    if (ok) {
+      cell.append(el("span", "older", "OK was for an earlier commit"));
+      cell.append(" (" + ok.head + ", sent to " + ok.sent_to + " " + fullTime(ok.at) + "); the PR is at " + pr.pr_at + ", so Merge asks again" + (pr.owner ? "" : " · "));
+    }
+    if (!pr.owner) {
+      cell.append(el("span", "orphan", "no owner: tell " + pr.merge_ok_to));
+      cell.append(", Merge sends the OK to " + pr.merge_ok_to);
+    }
+  }
   row.append(cell);
   return row;
 }
@@ -1481,14 +1663,14 @@ function queueFold(key, summary) {
 // Only what of the owner's is still open; the rest of their review history is in the tooltip.
 function queueReviewWord(pr) {
   if (pr.resolve_threads.length) return "resolve " + pr.resolve_threads.length;
-  if (pr.owner_open_threads) return pr.owner_open_threads + " open";
+  if (pr.his_open_threads) return pr.his_open_threads + " open";
   return pr.merge_block ? "comment open" : "–";
 }
 
 function queueReviewWhy(pr) {
   const history = queueReviewHistory(pr);
   const blocked = pr.merge_block && !pr.resolve_threads.length ? "Your comments: " + pr.merge_block + ". " : "";
-  const others = pr.open_threads > pr.owner_open_threads ? "; " + plural(pr.open_threads, "unresolved review thread") + " in all" : "";
+  const others = pr.open_threads > pr.his_open_threads ? "; " + plural(pr.open_threads, "unresolved review thread") + " in all" : "";
   return blocked + history + others;
 }
 
@@ -1501,15 +1683,16 @@ function queueReviewHistory(pr) {
     return "pushed since your review at " + fullTime(pr.reviewed_at) + ", " + (pr.reviewed_oid || "").slice(0, 9);
   }
   if (pr.reviewed_at) return "you pressed Publish " + fullTime(pr.reviewed_at) + " (" + pr.reviewed_by + ")";
-  if (pr.owner_last_at) {
-    const since = pr.commits_after_owner ? ", " + plural(pr.commits_after_owner, "commit") + " since" : "";
-    return "your last comment or review: " + fullTime(pr.owner_last_at) + since;
+  if (pr.his_last_at) {
+    const since = pr.commits_after_his ? ", " + plural(pr.commits_after_his, "commit") + " since" : "";
+    return "your last comment or review: " + fullTime(pr.his_last_at) + since;
   }
   if (pr.state === "published") return "published without your review here";
   return "you have not commented on it yet";
 }
 
 const QUEUE_APPROVAL_LEFT = {
+  "held for your review": "its lead holds it for your own review, so it waits in Open until you comment or review on GitHub or it is published",
   "ready to merge (lead)": "CI green, no conflicts, nothing of yours open: its lead may merge it without your review or a post, and is told so",
   "your comments open": "its lead settles your comments first, then it may merge",
   "resolve your threads": "every thread you started has a reply; resolving them is yours",
@@ -1519,19 +1702,30 @@ const QUEUE_APPROVAL_LEFT = {
   "blocked on GitHub": "GitHub blocks the merge: branch protection wants more, usually a person's review or a required check",
 };
 
-const QUEUE_APPROVAL_WORD = { "ready to merge (lead)": "ready (lead)", "your comments open": "your comments", "resolve your threads": "your threads" };
+const QUEUE_APPROVAL_WORD = { "held for your review": "held", "ready to merge (lead)": "ready (lead)", "your comments open": "your comments", "resolve your threads": "your threads" };
 
 function queueApprovalWord(pr) {
+  if (!pr.approvers.length && pr.approval_waived) return "waived";
+  if (!pr.approvers.length && pr.backport_check) {
+    const word = pr.backport_check.waived ? "identical diff" : "not proven";
+    return pr.backport_check.current ? word : word + " (older head)";
+  }
   return pr.approvers.length ? QUEUE_APPROVAL_WORD[pr.approval_left] || "approved" : "–";
 }
 
 function queueApprovalWhy(pr) {
+  if (!pr.approvers.length && pr.approval_waived) return "approving review " + pr.approval_waived;
+  if (!pr.approvers.length && pr.backport_check) {
+    const head = pr.backport_check.current ? "" : "; checked on an older head, it runs again for the new one";
+    return pr.backport_check.reason + " (checked " + fullTime(pr.backport_check.at) + head + ")";
+  }
   if (!pr.approvers.length) return null;
   const by = "approved by " + pr.approvers.join(", ") + (pr.approval_left ? " · " + pr.approval_left : "") + ": ";
   const bot = pr.bot_approved && !pr.approved_by.length
-    ? "only the review bot approved, no person yet" + (pr.merge_state === "BLOCKED" ? ", and branch protection may not count the review bot" : "") + "; "
+    ? "only the review bot approved, no person yet" + (pr.merge_state === "BLOCKED" ? ", and " + state.review_bot + " doesn't count for this repo's branch protection" : "") + "; "
     : "";
-  return by + bot + (QUEUE_APPROVAL_LEFT[pr.approval_left] || "a draft, its owner marks it ready first");
+  const check = pr.backport_check ? "; diff check: " + pr.backport_check.reason + (pr.backport_check.current ? "" : " (older head)") : "";
+  return by + bot + (QUEUE_APPROVAL_LEFT[pr.approval_left] || "a draft, its owner marks it ready first") + check;
 }
 
 function queueMergeWord(pr) {
@@ -1543,9 +1737,11 @@ function queueMergeWord(pr) {
 function queueMergeWhy(pr) {
   if (pr.merge_block) return "Your comments: " + pr.merge_block + "; whatever the approvals, it is not merged until they are settled";
   const botOnly = pr.merge_state === "BLOCKED" && pr.bot_approved && !pr.approved_by.length;
-  const why = botOnly ? "branch protection wants a person's review; the review bot's may not count" : QUEUE_MERGE_WHY[pr.merge_state] || null;
+  const why = botOnly ? "branch protection needs a person's review; " + state.review_bot + " doesn't count here" : QUEUE_MERGE_WHY[pr.merge_state] || null;
   const asked = why && pr.conflict_asked_at ? "; its owner was asked to merge " + pr.base + " into it at " + fullTime(pr.conflict_asked_at) : "";
-  const refused = pr.merge_path === "ready" ? "" : (why ? "; " : "") + "bridge refuses its merge until it is approved, CI is green and nothing of yours is open";
+  const cleared = pr.group === "backports" ? "it is approved or its diff is identical to the merged PRs it names" : "it is approved";
+  const rule = pr.held ? "bridge refuses its merge while it is held for your review" : "bridge refuses its merge until " + cleared + ", CI is green and nothing of yours is open";
+  const refused = pr.merge_path === "ready" ? "" : (why ? "; " : "") + rule;
   return why || refused ? (why || "") + asked + refused : null;
 }
 
@@ -1560,7 +1756,7 @@ function queueSlackWord(pr) {
 
 function queueDocWord(pr) {
   if (pr.doc_url) return pr.doc_stale ? (pr.doc_updating ? "updating" : "older") : "open";
-  return pr.large && pr.group !== "drafts" ? "none yet" : "–";
+  return pr.large && pr.group !== "drafts" && pr.group !== "backports" ? "none yet" : "–";
 }
 
 // Review detail lives in the doc link's tooltip only: rows stay one line.
@@ -1585,6 +1781,16 @@ function queueLink(url, label, title) {
   return a;
 }
 
+// The link reads the same whether or not it is current; a stale one is grey with a ⏳ that says why.
+function queueStaleLink(url, label, title, stale, why) {
+  const a = queueLink(url, label, title);
+  if (!stale) return [a];
+  a.classList.add("stale");
+  const mark = el("span", "stale-mark", "⏳");
+  mark.title = why;
+  return [a, mark];
+}
+
 function queueCell(row, content, cls, title) {
   const cell = el("td", cls);
   if (title) cell.title = title;
@@ -1593,7 +1799,7 @@ function queueCell(row, content, cls, title) {
   return cell;
 }
 
-// One cell for the review post: the button until they publish, then where the post stands, and only a send in flight, stuck or
+// One cell for Slack: the button until the owner publishes, then where the post stands, and only a send in flight, stuck or
 // dry run says more.
 function renderQueueSlackCell(pr) {
   const stopped = pr.post_state === "failed" || pr.post_state === "interrupted";
@@ -1626,6 +1832,11 @@ function renderQueueTableRow(pr) {
     mark.title = "a draft on GitHub";
     name.append(mark);
   }
+  if (pr.held) {
+    const mark = el("span", "mark", pr.held);
+    mark.title = pr.held_why + " (" + pr.held_by + ", " + fullTime(pr.held_at) + ")";
+    name.append(mark);
+  }
   name.append(" ", el("span", "title", pr.title));
   const stackedOn = pr.stack_parent && state.reviews.prs.find((other) => other.ref === pr.stack_parent);
   name.title = pr.repo + "#" + pr.number + ": " + pr.title + " · " + pr.group_why
@@ -1654,16 +1865,28 @@ function renderQueueTableRow(pr) {
   queueCell(row, queueReviewWord(pr), pr.resolve_threads.length ? "review yours" : "review", queueReviewWhy(pr));
 
   queueCell(row, queueApprovalWord(pr), "", queueApprovalWhy(pr));
-  queueCell(row, queueMergeWord(pr), "", queueMergeWhy(pr));
+  if (pr.can_ok_merge && !hasCurrentMergeOk(pr)) {
+    queueCell(row, queueMergeOkButton(pr), "", queueMergeWhy(pr));
+  } else {
+    queueCell(row, hasCurrentMergeOk(pr) ? "OK sent" : queueMergeWord(pr), "", queueMergeWhy(pr));
+  }
   const docBehind = pr.doc_stale
     ? "doc at " + (pr.doc_at || "unknown") + ", PR at " + pr.pr_at + (pr.doc_updating ? "; its owner was asked to update it" : "")
     : pr.doc_url ? "the doc matches the PR's newest commit" : pr.large ? "its owner has not registered a doc yet" : null;
   const folder = queueFolderWord(pr);
   const folderWhy = pr.worktree_detail || (pr.worktree_path ? pr.worktree_path + (pr.worktree_stale ? ", behind the PR" : "") : null);
-  const reviewCell = queueCell(row, pr.worktree_url ? queueLink(pr.worktree_url, folder, folderWhy) : folder, "", folderWhy);
+  const folderLink = pr.worktree_url
+    ? queueStaleLink(pr.worktree_url, folder === "older" ? "open" : folder, folderWhy, folder === "older",
+        "made for an earlier commit than the PR's newest; a refresh is queued")
+    : [folder];
+  const reviewCell = queueCell(row, el("span"), "", folderWhy);
+  reviewCell.replaceChildren(...folderLink);
   if (pr.doc_url) {
     const docWhy = [docBehind, queueReviewMarksWhy(pr)].filter(Boolean).join("; ");
-    reviewCell.prepend(queueLink(pr.doc_url, pr.doc_stale ? "doc (older)" : "doc", docWhy), " · ");
+    const docMark = pr.doc_updating
+      ? "made for an earlier commit; its owner is updating it"
+      : "made for an earlier commit; refresh pending";
+    reviewCell.prepend(...queueStaleLink(pr.doc_url, "doc", docWhy, pr.doc_stale, docMark), " · ");
   }
 
   row.append(renderQueueSlackCell(pr));
@@ -1699,6 +1922,7 @@ function renderQueueGroup(title, prs, first) {
   prs.forEach((pr, index) => {
     const rows = [renderQueueTableRow(pr)];
     if (pr.resolve_threads.length) rows.push(renderResolveRow(pr));
+    if (wantsMergeOkRow(pr)) rows.push(renderMergeOkRow(pr));
     if (queueForm && queueForm.ref === pr.ref && (pr.can_publish || pr.can_repost)) rows.push(renderPublishForm(pr));
     rows.forEach((row, at) => {
       if (index % 2 === 0) row.classList.add("tint");
@@ -1732,7 +1956,7 @@ function mapQueueToFreshness(queue, now) {
   }
   const slack = queue.slack;
   if (slack && slack.enabled) {
-    // One failed read is noise the next read fixes; only a run of them, or a long silence, is worth their eye.
+    // One failed read is noise the next read fixes; only a run of them, or a long silence, is worth the owner's eye.
     const read = slack.ok_at ? agoWords(now - slack.ok_at) : null;
     const failing = (slack.failures || 0) >= SLACK_FAILURES_SHOWN || (Boolean(slack.ok_at) && now - slack.ok_at > SLACK_SILENCE_MS);
     const how = slack.mode === "connector" ? "read through the Slack connector every " + slack.every_s / 60 + " min, as there is no token" : "read with the token every minute";
@@ -1808,7 +2032,7 @@ function renderQueue() {
     box.append(el("div", "quiet", "No open PRs."));
   }
   if (queue.error) box.append(el("div", "quiet", "GitHub is not answering: " + queue.error));
-  const rules = queueFold("rules", queue.dry_run || queue.chat === "none" ? "How this list works · Publish posts nothing" : "How this list works");
+  const rules = queueFold("rules", queue.dry_run ? "How this list works · dry run: Publish sends nothing to Slack" : "How this list works");
   for (const rule of queue.rules) rules.append(el("div", "quiet", rule));
   box.append(rules);
 }
@@ -1841,9 +2065,18 @@ function mapWatcherToLine(watcher, now) {
 function renderWatchers() {
   const minute = Math.floor(state.now / 60_000) * 60_000;
   const lines = (state.watchers || []).map((watcher) => mapWatcherToLine(watcher, minute));
+  const configured = state.links || [];
+  const links = [
+    ...configured.filter((link) => !link.last), PINNED_LINK, laptopLoadCount(state.agents), diskFree(state.disk), DREAMS_LINK,
+    ...configured.filter((link) => link.last),
+  ].filter(Boolean);
   const box = document.getElementById("watchers");
-  box.hidden = lines.length === 0;
-  if (box.children.length !== lines.length) box.replaceChildren(...lines.map(() => el("span", "watch")));
+  box.hidden = false;
+  const signature = JSON.stringify([lines.length, links]);
+  if (box.dataset.shape !== signature) {
+    box.dataset.shape = signature;
+    box.replaceChildren(...lines.map(() => el("span", "watch")), ...links.map(renderPageLink));
+  }
   lines.forEach((line, index) => {
     const pill = box.children[index];
     const signature = JSON.stringify(line);
@@ -1857,7 +2090,122 @@ function renderWatchers() {
   });
 }
 
-const RENDERERS = [renderNeeds, renderAsks, renderQueue, renderLeads, renderRoom, renderResources, renderWatchers, renderVerdict];
+// Served by this same bridge, so it opens in place, unlike the configured links to other sites.
+const PINNED_LINK = { name: "Pinned", url: "/pinned", local: true };
+const DREAMS_LINK = { name: "Dreams", url: "/dreams", local: true };
+
+// The laptop cap counts every agent working on this Mac; over it, new workers wait in a queue.
+function laptopLoadCount(agents) {
+  if (!agents || !agents.cap) return null;
+  const queued = agents.queued ? " · " + agents.queued + " queued" : "";
+  const hosts = Object.entries(agents.hosts || {}).map(([host, n]) => " · " + n + " on " + host).join("");
+  const label = agents.busy + "/" + agents.cap + " agents working" + hosts + queued;
+  return { name: "Laptop load · " + label, tip: "Over the cap, new workers wait in a queue." };
+}
+
+// Checked hourly by bridge serve; folder sizes come from du in the background, so they can lag the free figure.
+function diskFree(disk) {
+  if (!disk) return null;
+  const gb = (bytes) => (bytes / 1e9).toFixed(bytes >= 1e9 ? 0 : 1) + " GB";
+  const tip = [gb(disk.free) + " free of " + gb(disk.total) + ", " + disk.used_pct + "% used; checked " + fullTime(disk.at)];
+  if (!disk.folders) tip.push("Folder sizes: still measuring");
+  else disk.folders.forEach((f) => tip.push(f.path + ": " + (f.bytes == null ? "du timed out" : gb(f.bytes))));
+  if (disk.folders) tip.push("Docker: " + (disk.docker || "did not answer"));
+  tip.push("Under 40 GB free or over 90% used, the assistant hears once.");
+  return { name: "Disk · " + gb(disk.free) + " free", tip: tip.join("\n"), bad: disk.low };
+}
+
+function renderPageLink(link) {
+  if (!link.url) {
+    const pill = el("span", link.bad ? "watch bad" : "watch", link.name);
+    pill.title = link.tip;
+    return pill;
+  }
+  const a = el("a", "watch link", link.local ? link.name : link.name + " ↗");
+  a.href = link.url;
+  if (!link.local) {
+    a.target = "_blank";
+    a.rel = "noopener";
+  }
+  return a;
+}
+
+const COLLEAGUE_CALLS = {
+  undecided: "Not decided yet",
+  substantive: "Changes requested: draft due",
+  small: "Small, handled",
+  draft: "Draft waits for you",
+  posting: "Chosen: bridge checks GitHub",
+  failed: "Reply failed",
+  "as-is": "Replied as drafted",
+  edited: "Replied with your edit",
+  himself: "You answer it yourself",
+  approved: "Approved",
+};
+const COLLEAGUE_REVIEWS = { APPROVED: "approved", CHANGES_REQUESTED: "requested changes", COMMENTED: "reviewed" };
+const colleagueOpen = new Set();
+
+function colleaguePart(label, text, link) {
+  const part = el("div", "part");
+  part.append(el("span", "label", label));
+  part.append(link ? linkTo(link, text) : el("span", "", text));
+  return part;
+}
+
+function renderColleagueRow(entry) {
+  const key = entry.ref + "/" + entry.comment_id;
+  const row = el("details", "cc");
+  if (entry.breaches.length) row.classList.add("breach");
+  else if (entry.needs_attention) row.classList.add(entry.status === "draft" ? "yours" : "open");
+  if (!entry.pr_open) row.classList.add("closed");
+  row.open = colleagueOpen.has(key);
+  row.ontoggle = () => {
+    if (row.open) colleagueOpen.add(key);
+    else colleagueOpen.delete(key);
+  };
+  const summary = el("summary");
+  summary.append(el("span", "call" + (entry.status === "failed" ? " bad" : ""), COLLEAGUE_CALLS[entry.status] || entry.status));
+  if (entry.breaches.length) summary.append(el("span", "breaches", entry.breaches.join(", ")));
+  summary.append(el("span", "who", entry.author));
+  const what = el("span", "meta");
+  what.append((COLLEAGUE_REVIEWS[entry.review] || "commented") + " on ");
+  const link = linkTo(entry.url, entry.label);
+  link.title = entry.pr_title || "";
+  link.onclick = (event) => event.stopPropagation();
+  what.append(link);
+  what.append(" · " + age(state.now - entry.at) + " ago" + (entry.lead ? " · " + entry.lead : "") + (entry.pr_open ? "" : " · PR closed"));
+  what.title = fullTime(entry.at);
+  summary.append(what);
+  if (entry.quote) summary.append(el("span", "quote", entry.quote));
+  row.append(summary);
+  if (entry.status === "small" && entry.note) row.append(colleaguePart("What " + (entry.by || "the lead") + " did", entry.note));
+  if (entry.draft) row.append(colleaguePart("Draft reply", entry.draft));
+  if (entry.status !== "small" && entry.note) row.append(colleaguePart("Plan", entry.note));
+  if (entry.reply && ["as-is", "edited", "posting"].includes(entry.status)) row.append(colleaguePart("Sent", entry.reply));
+  if (entry.reply_url) row.append(colleaguePart("On GitHub", shortUrl(entry.reply_url), entry.reply_url));
+  if (entry.reply_error) row.append(colleaguePart("GitHub said", entry.reply_error));
+  if (entry.status === "undecided" || entry.status === "substantive") {
+    row.append(colleaguePart("Waiting on", (entry.lead || "its lead, once bridge finds one") + " to call it small or draft a reply for you"));
+  }
+  return row;
+}
+
+function renderColleagueComments() {
+  const entries = state.colleague_comments || [];
+  if (!changed("colleagues", [entries, Math.floor(state.now / 60000)])) return;
+  const shown = entries.filter((entry) => entry.needs_attention);
+  const box = showSection("colleagues", shown.length);
+  const rest = entries.filter((entry) => !entry.needs_attention);
+  const nodes = shown.map(renderColleagueRow);
+  if (rest.length) {
+    const fold = queueFold("colleagues-rest", rest.length + " settled");
+    fold.append(...rest.map(renderColleagueRow));
+    nodes.push(fold);
+  }
+  box.replaceChildren(...nodes);
+}
+
+const RENDERERS = [renderNeeds, renderAsks, renderQueue, renderColleagueComments, renderLeads, renderRoom, renderResources, renderWatchers, renderVerdict];
 
 async function refresh() {
   try {
@@ -1867,6 +2215,7 @@ async function refresh() {
     lastUpdate = Date.now();
     offline = false;
     mismatch = false;
+    if (isPageOutdated()) return;
   } catch (error) {
     offline = true;
     renderVerdict();
@@ -1880,6 +2229,23 @@ async function refresh() {
     mismatch = true;
     renderVerdict();
   }
+}
+
+// A page left open across a deploy keeps its old script and shows what that script knew, such as retired wording.
+let pageVersion = null;
+function isPageOutdated() {
+  if (!state.page_version) return false;
+  if (pageVersion === null) pageVersion = state.page_version;
+  if (pageVersion === state.page_version) return false;
+  const typing = [...document.querySelectorAll("input, textarea")].some((field) => field.value.trim());
+  if (!typing) {
+    location.reload();
+    return true;
+  }
+  // Text someone is typing would be lost: they reload when it is sent.
+  mismatch = true;
+  renderVerdict();
+  return true;
 }
 
 document.getElementById("compose").addEventListener("submit", async (event) => {

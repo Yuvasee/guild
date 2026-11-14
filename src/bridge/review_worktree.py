@@ -1,4 +1,5 @@
 import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -7,17 +8,21 @@ import shutil
 import signal
 import sqlite3
 import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import cast
 
+from bridge.backport import is_backport_base
 from bridge.config import Config, state_dir
-from bridge.db import transaction
+from bridge.db import now_ms, transaction
 from bridge.doc_nav import convert_doc_to_viewable
 from bridge.review_marks import convert_reviews_to_text, map_html_to_reviews
 
 FRESH_FOR_PREPARING_MS = 14 * 24 * 3_600_000
+REVIEW_LARGE_LOC = 100
+"""At this many lines a PR gets a review document and a worktree."""
 FAILED_RETRY_MS = 3_600_000
 GIT_TIMEOUT_S = 600
 ENV_TIMEOUT_S = 1800
@@ -37,6 +42,10 @@ _SETTINGS_FILE = ".vscode/settings.json"
 _SETTINGS_STAMP = "review-settings.sha256"
 _REQUIREMENTS_STAMP = "review-requirements.sha256"
 _SETUP_STAMP = "review-setup.sha256"
+_PYRIGHT_FILE = "pyrightconfig.json"
+_PYRIGHT_STAMP = "review-pyright.sha256"
+_STAMP_DONE = "indexed"
+_NOTHING_WRITTEN = "none"
 _SETUP_INPUTS = frozenset({
     "setup.py", "setup.cfg", "pyproject.toml", ".python-version", "uv.lock", "poetry.lock", "pdm.lock", "Pipfile",
     "Pipfile.lock",
@@ -49,6 +58,7 @@ _SAFE_NAME_RE = re.compile(r"[\w.-]+")
 _VERSION_PART_RE = re.compile(r"\s*[<>=!~].*$")
 _REQUIREMENT_NAME_RE = re.compile(r"[A-Za-z0-9][\w.-]*")
 _META_RE = re.compile(rb"<meta\b[^>]*>", re.I)
+_TERM_RE = re.compile(rb"""<[a-z]+\b[^>]*\bclass\s*=\s*["'](?:[^"']*\s)?term(?:\s[^"']*)?["']""", re.I)
 _PR_HEAD_NAME_RE = re.compile(rb"""\bname\s*=\s*["']?pr-head\b""", re.I)
 _CONTENT_SHA_RE = re.compile(rb"""\bcontent\s*=\s*["']?([0-9a-fA-F]{7,40})\b""")
 _BODY_TAG_RE = re.compile(rb"<body\b[^>]*>", re.I)
@@ -57,6 +67,7 @@ _SSH_REMOTE_RE = re.compile(r"(?:ssh://git@([\w.-]+)(?::\d+)?/|git@([\w.-]+):/*)
 SSH_KEY_NOT_LOADED = "GitHub SSH key not loaded: run ssh-add"
 _WORKSPACE_SUFFIX = ".code-workspace"
 DOC_SHA_CHARS = 9
+DOC_MIN_TERMS = 8
 
 
 class DocError(Exception):
@@ -84,6 +95,8 @@ class WorktreeJob:
     """Where bridge last left the worktree; a HEAD elsewhere holds commits made by hand."""
     setup_script: str = ""
     """The repo's own env setup, relative to its root; empty for bridge's generic env."""
+    python_paths: tuple[str, ...] = ()
+    """review_python_paths: shared source roots added to the editor's and each service's import paths."""
 
     @property
     def branch(self) -> str:
@@ -100,8 +113,11 @@ def map_number_to_branch(number: int) -> str:
 
 
 def is_worth_preparing(row: sqlite3.Row, config: Config, now: int) -> bool:
-    """Old stacks must not eat the disk, and what they have finished with needs no worktree."""
-    if row["draft"] or row["closed_at"] is not None or int(row["loc"]) < config.review_large_loc:
+    """Old stacks must not eat the disk, and what the owner has finished with needs no worktree. A backport is its
+    lead's to merge, so it gets no worktree and no doc."""
+    if is_backport_base(config.backport_bases, str(row["base"])):
+        return False
+    if row["draft"] or row["closed_at"] is not None or int(row["loc"]) < REVIEW_LARGE_LOC:
         return False
     if row["reviewed_at"] or row["owner_reviewed_at"] or row["post_state"] == "external":
         return False
@@ -120,7 +136,7 @@ def map_ref_to_worktree_path(config: Config, repo: str, number: int) -> Path | N
 
 
 def map_worktree_to_workspace(path: Path) -> Path:
-    """Beside the worktree, not in it, where an untracked file would read as their change."""
+    """Beside the worktree, not in it, where an untracked file would read as the owner's change."""
     return path.parent / f"{path.name}{_WORKSPACE_SUFFIX}"
 
 
@@ -147,7 +163,9 @@ def pick_worktree_job(conn: sqlite3.Connection, config: Config, now: int) -> Wor
         return row["wt_state"] in _LOOKED_AT_HOURLY and now - int(row["wt_at"] or 0) < FAILED_RETRY_MS
 
     for row in rows:
-        if row["closed_at"] is not None and row["wt_path"] and not cooling(row):
+        # A backport is its lead's to merge, so the owner's review checkout of it goes like a closed PR's.
+        done = row["closed_at"] is not None or is_backport_base(config.backport_bases, str(row["base"]))
+        if done and row["wt_path"] and not cooling(row):
             return _map_row_to_job(row, "remove", Path(str(row["wt_path"])), config)
     for row in rows:
         if row["wt_path"] or cooling(row) or not is_worth_preparing(row, config, now):
@@ -155,14 +173,63 @@ def pick_worktree_job(conn: sqlite3.Connection, config: Config, now: int) -> Wor
         path = map_ref_to_worktree_path(config, str(row["repo"]), int(row["number"]))
         if path is not None:
             return _map_row_to_job(row, "create", path, config)
-    for row in rows:
+    # The longest-waiting refresh goes first: newest-PR-first let one slow install, cut by each serve restart, starve
+    # every other checkout for a day.
+    for row in sorted(rows, key=lambda r: int(r["wt_at"] or 0)):
         if row["closed_at"] is not None or not row["wt_path"] or cooling(row):
             continue
+        if is_backport_base(config.backport_bases, str(row["base"])):
+            continue
         # Also with the head unchanged: a failed install or a cleaned-up worktree has to settle.
-        stale = row["wt_oid"] != row["head_oid"] or row["wt_state"] in (*_LOOKED_AT_HOURLY, DETACHED)
+        stale = row["wt_oid"] != row["head_oid"] or row["wt_state"] in (*_LOOKED_AT_HOURLY, DETACHED, PREPARING)
         if stale or _has_outdated_env(row, config):
             return _map_row_to_job(row, "refresh", Path(str(row["wt_path"])), config)
     return None
+
+
+def run_next_worktree_job(conn: sqlite3.Connection, config: Config) -> bool:
+    """The one job runner: a process of its own, apart from serve, so a restart neither kills its install nor starts
+    it again; a second runner leaves at once. Every row still preparing was cut off by a runner that died."""
+    lock_path = worktree_job_lock()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        job = pick_worktree_job(conn, config, now_ms())
+        if job is not None:
+            run_worktree_job(conn, config, job, now_ms())
+        return job is not None
+
+
+def is_worktree_job_running() -> bool:
+    try:
+        with worktree_job_lock().open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def spawn_worktree_job() -> None:
+    """Detached, with its output in a file: a pipe to a restarted serve would end the install at its next line."""
+    log = worktree_job_lock().with_name("worktree-job.log")
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open("a") as out:
+        subprocess.Popen(
+            [sys.executable, "-m", "bridge", "_worktree-job"],
+            stdin=subprocess.DEVNULL,
+            stdout=out,
+            stderr=out,
+            start_new_session=True,
+        )
+
+
+def worktree_job_lock() -> Path:
+    return state_dir() / "locks" / "worktree-job.lock"
 
 
 def _has_outdated_env(row: sqlite3.Row, config: Config) -> bool:
@@ -189,6 +256,7 @@ def _map_row_to_job(row: sqlite3.Row, action: str, path: Path, config: Config) -
         path,
         row["wt_oid"],
         map_repo_to_setup_script(config, str(row["repo"])),
+        config.review_python_paths,
     )
 
 
@@ -205,6 +273,11 @@ def run_worktree_job(conn: sqlite3.Connection, config: Config, job: WorktreeJob,
     """Git and the installer run with no transaction open; the row is written when they are done."""
     row = conn.execute("SELECT wt_path, wt_oid FROM review_prs WHERE ref = ?", (job.ref,)).fetchone()
     kept_path = Path(str(row["wt_path"])) if row["wt_path"] else None
+    if job.action in ("refresh", "create"):
+        # Preparing until its result is written: one killed midway, its install half done, never reads as ready, and
+        # it goes to the back of the line.
+        with transaction(conn):
+            record_worktree(conn, job.ref, kept_path, row["wt_oid"], PREPARING, f"{job.action} started", now)
     try:
         if job.action == "remove":
             result = _remove_worktree(job, map_repo_to_checkout(config, job.repo))
@@ -222,7 +295,7 @@ def run_worktree_job(conn: sqlite3.Connection, config: Config, job: WorktreeJob,
         record_worktree(conn, job.ref, result[0], result[1], result[2], result[3], now)
 
 
-def link_worktrees_to_prs(conn: sqlite3.Connection) -> None:
+def link_worktrees_to_prs(conn: sqlite3.Connection, python_paths: tuple[str, ...] = ()) -> None:
     """Worktrees made before they had a workspace, or before its current settings, get it here, without waiting for
     their head to move."""
     for row in conn.execute("SELECT repo, number, wt_path FROM review_prs WHERE wt_path IS NOT NULL"):
@@ -234,6 +307,12 @@ def link_worktrees_to_prs(conn: sqlite3.Connection) -> None:
                 write_workspace(path)
             except OSError as exc:
                 print(f"review workspace for {row['repo']}#{row['number']} failed: {exc}", flush=True)
+        stamp = _map_worktree_to_pyright_stamp(path)
+        if stamp is not None and not _read_pyright_stamp(path)[1]:
+            try:
+                write_pyright_config(path, python_paths)
+            except (StepFailed, OSError) as exc:
+                print(f"review pyright config for {row['repo']}#{row['number']} failed: {exc}", flush=True)
 
 
 def _link_worktree_to_pr(repo: str, number: int, path: Path) -> None:
@@ -251,8 +330,8 @@ def _link_worktree_to_pr(repo: str, number: int, path: Path) -> None:
 
 
 def write_workspace(path: Path) -> None:
-    """Bridge's settings go in where missing; their folders, settings and anything else they added stay. A file that is
-    not plain JSON is left alone, as rewriting it would drop their comments."""
+    """Bridge's settings go in where missing; the owner's folders, settings and anything else they added stay. A file
+    that is not plain JSON is left alone, as rewriting it would drop their comments."""
     ours: dict[str, object] = {
         "workbench.secondarySideBar.defaultVisibility": "hidden",
         "githubPullRequests.focusedMode": "overview",
@@ -274,11 +353,11 @@ def write_workspace(path: Path) -> None:
         return
     current = cast(dict[str, object], current)
     settings = current.get("settings")
-    theirs = cast(dict[str, object], settings) if isinstance(settings, dict) else {}
+    his = cast(dict[str, object], settings) if isinstance(settings, dict) else {}
     merged = {
         "folders": current.get("folders") or [{"path": str(path)}],
         **{key: value for key, value in current.items() if key not in ("folders", "settings")},
-        "settings": {**ours, **theirs},
+        "settings": {**ours, **his},
     }
     if merged == current:
         return
@@ -296,7 +375,7 @@ def _create_worktree(job: WorktreeJob, checkout: Path | None) -> Result:
     if (job.path / ".git").exists():
         # Left by a run that stopped before recording it; it may hold work by now.
         return _refresh_worktree(job, checkout)
-    if _branch_holds_owner_commits(checkout, job):
+    if _branch_holds_his_commits(checkout, job):
         return None, None, DIRTY, f"local commits on {job.branch}, no worktree made"
     _fetch_head_branch(checkout, job)
     job.path.parent.mkdir(parents=True, exist_ok=True)
@@ -310,20 +389,21 @@ def _create_worktree(job: WorktreeJob, checkout: Path | None) -> Result:
 
 def _refresh_worktree(job: WorktreeJob, checkout: Path | None) -> Result:
     """Fetch, then fast-forward its branch, so a plain git pull there works too. After a force-push only a worktree
-    with nothing of theirs is reset to the new head."""
-    problem = _find_owner_work_in_the_way(job, fetched=False)
+    with nothing of the owner's is reset to the new head."""
+    problem = _find_his_work_in_the_way(job, fetched=False)
     if problem:
         return job.path, job.recorded_oid, DIRTY, problem
     if checkout is None:
         return job.path, job.recorded_oid, NO_CHECKOUT, f"no main checkout of {job.repo} on this machine"
     _fetch_head_branch(checkout, job)
-    # A fetch can take minutes, and they may have committed, edited or switched branch during it.
-    problem = _find_owner_work_in_the_way(job, fetched=True)
+    # A fetch can take minutes, and the owner may have committed, edited or switched branch during it.
+    problem = _find_his_work_in_the_way(job, fetched=True)
     if problem:
         return job.path, job.recorded_oid, DIRTY, problem
     if _read_branch(job.path) is None:
         _run(["git", "-C", str(job.path), "checkout", "-q", "-B", job.branch], GIT_TIMEOUT_S)
     _run(["git", "-C", str(job.path), "branch", "-q", f"--set-upstream-to={job.upstream}"], GIT_TIMEOUT_S)
+    restore_pyright_config(job.path)
     if _is_ancestor(job.path, "HEAD", job.upstream):
         _run(["git", "-C", str(job.path), "merge", "-q", "--ff-only", job.upstream], GIT_TIMEOUT_S)
     else:
@@ -331,15 +411,15 @@ def _refresh_worktree(job: WorktreeJob, checkout: Path | None) -> Result:
     return _finish_with_env(job)
 
 
-def _find_owner_work_in_the_way(job: WorktreeJob, fetched: bool) -> str | None:
-    """What a refresh could lose; None when nothing. Once fetched, also a file of theirs that the new head would write
-    over: env, editor and ignored files pass the status check but must not be clobbered."""
+def _find_his_work_in_the_way(job: WorktreeJob, fetched: bool) -> str | None:
+    """What a refresh could lose; None when nothing. Once fetched, also a file of the owner's that the new head would
+    write over: env, editor and ignored files pass the status check but must not be clobbered."""
     if _has_local_commits(job):
         return "local commits, not refreshed"
     branch = _read_branch(job.path)
     if branch not in (None, job.branch):
         return f"on another branch, {branch}, not refreshed"
-    if branch is None and _branch_holds_owner_commits(job.path, job):
+    if branch is None and _branch_holds_his_commits(job.path, job):
         return f"local commits on {job.branch}, not refreshed"
     changes = _find_changes_in_the_way(job.path)
     if changes:
@@ -356,7 +436,7 @@ def _find_owner_work_in_the_way(job: WorktreeJob, fetched: bool) -> str | None:
     return None
 
 
-def _branch_holds_owner_commits(repo: Path, job: WorktreeJob) -> bool:
+def _branch_holds_his_commits(repo: Path, job: WorktreeJob) -> bool:
     """Its own branch, kept when the worktree went detached or was removed, with a tip outside the PR."""
     try:
         tip = _run(
@@ -375,7 +455,8 @@ def _finish_with_env(job: WorktreeJob) -> Result:
     the last poll; what is recorded is where it stands."""
     oid = _read_head(job.path)
     try:
-        prepare_python_env(job.path, job.setup_script)
+        prepare_python_env(job.path, job.setup_script, job.python_paths)
+        write_pyright_config(job.path, job.python_paths)
     except (StepFailed, OSError) as exc:
         return job.path, oid, WT_FAILED, f"Python env: {str(exc)[:280]}"
     return job.path, oid, READY, None
@@ -399,8 +480,8 @@ def _fetch_head_branch(checkout: Path, job: WorktreeJob) -> None:
 
 
 def _fetch_over_https(checkout: Path, refspecs: list[str]) -> None:
-    """When the SSH agent holds no key, once more with gh's token. Only for this fetch: the remote's URL and their git
-    config stay as they are, and other credential helpers are off so none can show a dialog."""
+    """When the SSH agent holds no key, once more with gh's token. Only for this fetch: the remote's URL and the owner's
+    git config stay as they are, and other credential helpers are off so none can show a dialog."""
     remote = _run(["git", "-C", str(checkout), "remote", "get-url", "origin"], GIT_TIMEOUT_S).strip()
     url = map_ssh_remote_to_https(remote)
     if url is None:
@@ -436,9 +517,9 @@ def _is_ancestor(path: Path, older: str, newer: str) -> bool:
 
 
 def _remove_worktree(job: WorktreeJob, checkout: Path | None) -> Result:
-    """Only through git, and only what holds nothing of theirs; its branch goes with it on the same terms."""
+    """Only through git, and only what holds nothing of the owner's; its branch goes with it on the same terms."""
     if not job.path.exists():
-        if checkout is not None and not _branch_holds_owner_commits(checkout, job):
+        if checkout is not None and not _branch_holds_his_commits(checkout, job):
             with contextlib.suppress(StepFailed):
                 # A folder deleted by hand stays registered, and a registered worktree keeps its branch.
                 _run(["git", "-C", str(checkout), "worktree", "prune"], GIT_TIMEOUT_S)
@@ -449,7 +530,7 @@ def _remove_worktree(job: WorktreeJob, checkout: Path | None) -> Result:
         return job.path, job.recorded_oid, DIRTY, f"PR closed; kept because it has {problem}"
     if checkout is None:
         return job.path, job.recorded_oid, NO_CHECKOUT, f"no main checkout of {job.repo} on this machine"
-    keep_branch = _branch_holds_owner_commits(checkout, job)
+    keep_branch = _branch_holds_his_commits(checkout, job)
     _run(["git", "-C", str(checkout), "worktree", "remove", "--force", str(job.path)], GIT_TIMEOUT_S)
     if keep_branch:
         return None, None, "removed", f"kept the branch {job.branch}: it has local commits"
@@ -477,23 +558,38 @@ def _has_local_commits(job: WorktreeJob) -> bool:
 
 def _find_changes_in_the_way(path: Path) -> str | None:
     """What a fast-forward could clash with or a reset lose. Ignored files and the env and editor folders bridge made
-    stay where they are, so only their tracked edits and their other new files hold a refresh back."""
-    dirty = [
-        name for code, name in _read_status(path) if code != "!!" and not (code == "??" and name.startswith(_OURS_DIRS))
+    stay where they are, so only the owner's tracked edits and other new files hold a refresh back."""
+    entries = [
+        (code, name)
+        for code, name in _read_status(path)
+        if code != "!!" and not (code == "??" and name.startswith(_OURS_DIRS))
     ]
+    dirty = _map_status_to_his_files(path, entries)
     return f"local changes: {', '.join(dirty[:5])}" if dirty else None
 
 
 def _list_dirty_files(path: Path) -> list[str]:
-    # An ignored file can be theirs too (an ignored .vscode/launch.json), and removing the worktree deletes it, so of
-    # those only what tools rebuild is left out; a tracked one never.
-    dirty: list[str] = []
+    # An ignored file can be the owner's too (an ignored .vscode/launch.json), and removing the worktree deletes it,
+    # so of those only what tools rebuild is left out; a tracked one never.
+    entries: list[tuple[str, str]] = []
     for code, name in _read_status(path):
         if name.startswith(".venv/") or (code == "!!" and is_rebuilt_by_tools(name)):
             continue
         if not (name == _SETTINGS_FILE and _is_our_settings(path)):
-            dirty.append(name)
-    return dirty
+            entries.append((code, name))
+    return _map_status_to_his_files(path, entries)
+
+
+def _map_status_to_his_files(root: Path, entries: list[tuple[str, str]]) -> list[str]:
+    """Our pyright config never counts; the owner's edit of it always does, staged too, though skip-worktree hides an
+    unstaged one from git status."""
+    rest = [name for _, name in entries if name != _PYRIGHT_FILE]
+    codes = [code for code, name in entries if name == _PYRIGHT_FILE]
+    if any(code[0] not in " ?" for code in codes) or (codes and codes[0] == "??"):
+        return [*rest, _PYRIGHT_FILE]
+    if not codes and not _read_pyright_stamp(root)[0]:
+        return rest
+    return [*rest, _PYRIGHT_FILE] if _is_his_pyright_edit(root, _read_tracked_pyright(root)) else rest
 
 
 def _read_status(path: Path) -> list[tuple[str, str]]:
@@ -562,7 +658,7 @@ def _run(command: list[str], timeout_s: int, env: dict[str, str] | None = None, 
 
 
 def find_requirement_files(root: Path) -> list[Path]:
-    """Services nest them at any depth, so every level is read, as one env for the whole repo needs."""
+    """Services nest them at any depth, so every level is read, as the workspace's own consolidated env does."""
     found: list[Path] = []
     for directory, names, files in os.walk(root):
         names[:] = [n for n in names if n not in _NOT_SOURCE_DIRS]
@@ -584,7 +680,7 @@ def map_requirements_to_consolidated(files: list[Path]) -> list[str]:
     return [chosen[name] for name in sorted(chosen)]
 
 
-def prepare_python_env(root: Path, setup_script: str = "") -> None:
+def prepare_python_env(root: Path, setup_script: str = "", python_paths: tuple[str, ...] = ()) -> None:
     """The repo's own setup when it has one in this worktree, else a generic env; a repo with no Python gets neither
     env nor editor settings. Either is skipped when what it is built from did not change."""
     if setup_script and (root / setup_script).is_file():
@@ -597,7 +693,7 @@ def prepare_python_env(root: Path, setup_script: str = "") -> None:
     python = venv / "bin" / "python"
     pinned = read_pinned_python(root)
     if python.exists() and pinned and _is_bridge_venv(venv) and not _venv_runs(venv, pinned):
-        # The settings stamp lives in the env; without it the settings would pass for theirs.
+        # The settings stamp lives in the env; without it the settings would pass for the owner's.
         if _is_our_settings(root):
             (root / _SETTINGS_FILE).unlink()
         shutil.rmtree(venv)
@@ -609,13 +705,13 @@ def prepare_python_env(root: Path, setup_script: str = "") -> None:
     if not stamp.exists() or stamp.read_text().strip() != wanted:
         _install_requirements(venv, python, lines)
         stamp.write_text(wanted)
-    write_editor_settings(root, python, files)
+    write_editor_settings(root, python, files, python_paths)
 
 
 def _run_setup_script(root: Path, script: Path) -> None:
     """Its env replaces bridge's generic one, which has another Python and lacks the repo's own packages, and its
-    editor settings replace bridge's, which it would otherwise keep; theirs stay as they were, whatever it writes. The
-    settings it writes are stamped as bridge's, so removing the worktree does not take them for theirs."""
+    editor settings replace bridge's, which it would otherwise keep; the owner's stay as they were, whatever it writes.
+    The settings it writes are stamped as bridge's, so removing the worktree does not take them for the owner's."""
     venv = root / ".venv"
     stamp = venv / _SETUP_STAMP
     wanted = _hash_setup_inputs(root, script)
@@ -627,14 +723,14 @@ def _run_setup_script(root: Path, script: Path) -> None:
         settings.unlink()
     if (venv / _REQUIREMENTS_STAMP).exists():
         shutil.rmtree(venv)
-    theirs = settings.read_bytes() if settings.exists() else None
+    his = settings.read_bytes() if settings.exists() else None
     try:
         _run([str(script)], ENV_TIMEOUT_S, cwd=root)
     finally:
-        if theirs is not None and (not settings.is_file() or settings.read_bytes() != theirs):
+        if his is not None and (not settings.is_file() or settings.read_bytes() != his):
             settings.parent.mkdir(exist_ok=True)
-            settings.write_bytes(theirs)
-    if theirs is None and settings.exists():
+            settings.write_bytes(his)
+    if his is None and settings.exists():
         (venv / _SETTINGS_STAMP).write_text(hashlib.sha256(settings.read_bytes()).hexdigest())
     stamp.write_text(wanted)
 
@@ -699,9 +795,12 @@ def map_requirement_to_name(line: str) -> str:
     return f"{name}; {condition.strip()}" if separator else name
 
 
-def write_editor_settings(root: Path, python: Path, requirement_files: list[Path]) -> None:
+def write_editor_settings(
+    root: Path, python: Path, requirement_files: list[Path], python_paths: tuple[str, ...] = ()
+) -> None:
     top_level = dict.fromkeys(f.relative_to(root).parts[0] for f in requirement_files if f.parent != root)
     extra = [str(root), *(str(root / name) for name in top_level)]
+    extra += [str(root / p) for p in python_paths if (root / p).is_dir()]
     settings_path = root / _SETTINGS_FILE
     if settings_path.exists():
         return
@@ -712,11 +811,154 @@ def write_editor_settings(root: Path, python: Path, requirement_files: list[Path
     (root / ".venv" / _SETTINGS_STAMP).write_text(hashlib.sha256(text.encode()).hexdigest())
 
 
+def write_pyright_config(root: Path, python_paths: tuple[str, ...] = ()) -> None:
+    """The repo's own pyrightconfig.json plus one execution environment per service directory, as each service runs
+    from its own directory and several have a top-level package of the same name (say, utils) that a flat
+    extraPaths list resolves to the wrong one. Only over a tracked config, so editor settings never lose to a config
+    of ours; marked skip-worktree so the review's diff stays the PR's. Each step leaves a state the next pass reads
+    right: the stamp names the new config before the file changes, and says done only once git skips it; both are
+    replaced whole, never left half-written."""
+    stamp = _map_worktree_to_pyright_stamp(root)
+    if stamp is None:
+        return
+    tracked = _read_tracked_pyright(root)
+    if _is_his_pyright_edit(root, tracked) or _has_staged_pyright(root):
+        return
+    wanted = (
+        map_pyright_config_to_service_envs(tracked, find_service_roots(root), python_paths)
+        if tracked is not None
+        else None
+    )
+    # Again: the owner may have saved an edit while the services were looked for.
+    if _is_his_pyright_edit(root, tracked):
+        return
+    if wanted is None:
+        restore_pyright_config(root)
+        _write_whole(stamp, f"{_NOTHING_WRITTEN}\n{_STAMP_DONE}\n", stamp.parent)
+        return
+    digest = hashlib.sha256(wanted.encode()).hexdigest()
+    config_path = root / _PYRIGHT_FILE
+    if _read_text(config_path) != wanted:
+        _write_whole(stamp, "\n".join([digest, *_read_pyright_stamp(root)[0]]) + "\n", stamp.parent)
+        _write_whole(config_path, wanted, stamp.parent)
+    _run(["git", "-C", str(root), "update-index", "--skip-worktree", _PYRIGHT_FILE], GIT_TIMEOUT_S)
+    _write_whole(stamp, f"{digest}\n{_STAMP_DONE}\n", stamp.parent)
+
+
+def _write_whole(path: Path, text: str, scratch: Path) -> None:
+    """Through a file in the worktree's git dir, where one left behind is no new file of the owner's."""
+    temporary = scratch / f"{path.name}.tmp"
+    temporary.write_text(text)
+    temporary.replace(path)
+
+
+def restore_pyright_config(root: Path) -> None:
+    """The tracked one back, before git moves the branch, so a new head's own change to it applies. The caller has
+    made sure no edit of the owner's is there."""
+    stamp = _map_worktree_to_pyright_stamp(root)
+    if stamp is None or not stamp.exists():
+        return
+    if _read_pyright_stamp(root)[0]:
+        _run(["git", "-C", str(root), "update-index", "--no-skip-worktree", _PYRIGHT_FILE], GIT_TIMEOUT_S)
+        tracked = _read_tracked_pyright(root)
+        if tracked is not None and _read_text(root / _PYRIGHT_FILE) != tracked:
+            _run(["git", "-C", str(root), "checkout", "-q", "--", _PYRIGHT_FILE], GIT_TIMEOUT_S)
+    stamp.unlink()
+
+
+def map_pyright_config_to_service_envs(
+    text: str, service_roots: list[str], python_paths: tuple[str, ...] = ()
+) -> str | None:
+    """None when there is nothing to add: no services, a config that is not plain JSON, extends another, or has its
+    own environments. An environment's extraPaths replace the top-level ones and its root replaces the repo's, so each
+    repeats them after its own dir and the shared source roots the config already lists, and ends with the repo's
+    root."""
+    try:
+        config: object = json.loads(text)
+    except ValueError:
+        return None
+    if not service_roots or not isinstance(config, dict):
+        return None
+    config = cast(dict[str, object], config)
+    if "executionEnvironments" in config or "extends" in config:
+        return None
+    extra = config.get("extraPaths")
+    shared = [str(p) for p in cast(list[object], extra)] if isinstance(extra, list) else []
+    envs: list[dict[str, object]] = []
+    # Pyright takes the first environment whose root holds the file, so a nested service comes before its parent.
+    for name in sorted(service_roots, key=lambda n: (-n.count("/"), n)):
+        listed = [p for p in python_paths if p in shared]
+        envs.append({"root": name, "extraPaths": list(dict.fromkeys([name, *listed, *shared, "."]))})
+    return json.dumps({**config, "executionEnvironments": envs}, indent=2) + "\n"
+
+
+def find_service_roots(root: Path) -> list[str]:
+    """Each directory with its own requirements.txt runs as a service from that directory; relative to the repo."""
+    return sorted({f.parent.relative_to(root).as_posix() for f in find_requirement_files(root) if f.parent != root})
+
+
+def _read_text(path: Path) -> str | None:
+    try:
+        return path.read_text()
+    except OSError:
+        return None
+
+
+def _read_tracked_pyright(root: Path) -> str | None:
+    """None when HEAD has none; a failing git raises, so a passing error is never taken for no config."""
+    listed = _run(["git", "-C", str(root), "ls-tree", "--name-only", "HEAD", "--", _PYRIGHT_FILE], GIT_TIMEOUT_S)
+    if not listed.strip():
+        return None
+    return _run(["git", "-C", str(root), "show", f"HEAD:{_PYRIGHT_FILE}"], GIT_TIMEOUT_S)
+
+
+def _has_staged_pyright(root: Path) -> bool:
+    try:
+        _run(["git", "-C", str(root), "diff", "--cached", "--quiet", "HEAD", "--", _PYRIGHT_FILE], GIT_TIMEOUT_S)
+    except StepFailed:
+        return True
+    return False
+
+
+def _map_worktree_to_pyright_stamp(root: Path) -> Path | None:
+    """In the worktree's own git dir, which outlives a rebuilt .venv; read from .git, not git: it runs each pass."""
+    dot_git = root / ".git"
+    if dot_git.is_dir():
+        return dot_git / _PYRIGHT_STAMP
+    text = _read_text(dot_git)
+    if text is None or not text.startswith("gitdir:"):
+        return None
+    git_dir = Path(text.partition(":")[2].strip())
+    return (git_dir if git_dir.is_absolute() else root / git_dir) / _PYRIGHT_STAMP
+
+
+def _read_pyright_stamp(root: Path) -> tuple[list[str], bool]:
+    """(hashes of the configs bridge may have left there, the newest first; whether its last write finished)."""
+    stamp = _map_worktree_to_pyright_stamp(root)
+    lines = (_read_text(stamp) or "").split() if stamp is not None else []
+    return [line for line in lines if line not in (_NOTHING_WRITTEN, _STAMP_DONE)], _STAMP_DONE in lines
+
+
+def _is_his_pyright_edit(root: Path, tracked: str | None) -> bool:
+    """Neither the tracked config nor the one bridge stamped; an untracked config is never bridge's, so git status
+    alone tells about it."""
+    if tracked is None:
+        return False
+    try:
+        current = (root / _PYRIGHT_FILE).read_bytes()
+    except OSError:
+        return True
+    # git show hands the config over with LF line ends, whatever the file on disk has.
+    if current.replace(b"\r\n", b"\n") == tracked.encode():
+        return False
+    return hashlib.sha256(current).hexdigest() not in _read_pyright_stamp(root)[0]
+
+
 def review_docs_dir() -> Path:
     return state_dir() / "review-docs"
 
 
-def register_doc(conn: sqlite3.Connection, ref: str, source: Path, now: int) -> None:
+def register_doc(conn: sqlite3.Connection, config: Config, ref: str, source: Path, now: int) -> None:
     """Copied in, so the page serves what was registered and never follows a path it was handed later."""
     row = conn.execute("SELECT repo, number, head_oid FROM review_prs WHERE ref = ?", (ref,)).fetchone()
     if row is None:
@@ -734,8 +976,19 @@ def register_doc(conn: sqlite3.Connection, ref: str, source: Path, now: int) -> 
     html = target.read_bytes()
     conn.execute(
         "UPDATE review_prs SET doc_file = ?, doc_oid = ?, doc_at = ?, doc_head = ?, doc_reviews = ? WHERE ref = ?",
-        (name, row["head_oid"], now, read_doc_head(html), convert_reviews_to_text(map_html_to_reviews(html)), ref),
+        (
+            name,
+            row["head_oid"],
+            now,
+            read_doc_head(html),
+            convert_reviews_to_text(map_html_to_reviews(html, config.review_names)),
+            ref,
+        ),
     )
+
+
+def count_doc_terms(html: bytes) -> int:
+    return len(_TERM_RE.findall(html))
 
 
 def read_doc_head(html: bytes) -> str:
@@ -757,14 +1010,14 @@ def fill_doc_heads(conn: sqlite3.Connection) -> None:
         conn.execute("UPDATE review_prs SET doc_head = ? WHERE ref = ?", (read_doc_head(html), row["ref"]))
 
 
-def fill_doc_reviews(conn: sqlite3.Connection) -> None:
+def fill_doc_reviews(conn: sqlite3.Connection, config: Config) -> None:
     """Docs registered before bridge read their Reviews section: read once."""
     for row in conn.execute("SELECT ref, doc_file FROM review_prs WHERE doc_file IS NOT NULL AND doc_reviews IS NULL"):
         try:
             html = (review_docs_dir() / Path(str(row["doc_file"])).name).read_bytes()
         except OSError:
             html = b""
-        reviews = convert_reviews_to_text(map_html_to_reviews(html))
+        reviews = convert_reviews_to_text(map_html_to_reviews(html, config.review_names))
         conn.execute("UPDATE review_prs SET doc_reviews = ? WHERE ref = ?", (reviews, row["ref"]))
 
 

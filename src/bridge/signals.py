@@ -1,16 +1,23 @@
 import re
-from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, field, replace
 from typing import cast
 
 from bridge.refs import map_ref_to_label
 
-_DONE_ISSUE_TYPES = frozenset({"completed", "canceled"})
+_DONE_ISSUE_TYPES = frozenset({"completed", "canceled", "duplicate"})
 _READY_MERGE_STATES = frozenset({"CLEAN", "HAS_HOOKS"})
 _RED = frozenset({"FAILURE", "ERROR"})
 _FINISHED_PR_STATUSES = frozenset({"merged", "closed"})
 ISSUE_QUIET_MS = 2 * 3_600_000
-DEFAULT_REVIEW_STATES = ("review", "qa", "test", "staging", "verif")
+_PRS_NAMED_MAX = 5
+
+STALL = "stall"
+
+IssueRouter = Callable[[str, list[str], list[str]], tuple[str | None, str | None] | None]
+"""(issue ref, linked PR refs, merged PR refs meant to close it) to the (surface, handle) of the lead it is for."""
+PrRouter = Callable[[str, dict[str, object]], tuple[str | None, str | None] | None]
+"""(PR ref, its enrichment) to the (surface, handle) of the session that owns the PR."""
 
 
 @dataclass(frozen=True)
@@ -100,11 +107,15 @@ def map_pr_to_status(data: dict[str, object]) -> RefStatus:
 def find_signals(
     sessions: list[SessionRefs],
     enrichment: dict[str, dict[str, object]],
-    repo_labels: Mapping[str, str] | None = None,
     at_ms: int | None = None,
-    review_states: tuple[str, ...] = DEFAULT_REVIEW_STATES,
+    route_issue: IssueRouter | None = None,
+    route_pr: PrRouter | None = None,
+    stall_context: str = "",
+    bot_name: str = "The review bot",
 ) -> list[Signal]:
-    """PR states that ask for the user's hand (ready to merge, red CI, changes), then issues that look finished."""
+    """PR states that ask for the user's hand (ready to merge, red CI, changes, a stalled review bot), then issues
+    that look finished. A PR's signals go to its owner by route_pr; with none found, to the session pick_owner picks.
+    stall_context is the commit status the bot's stall watch sets on a PR's head (review_stall_status)."""
     signals: dict[str, Signal] = {}
     pr_refs = sorted({r for s in sessions for r in s.refs if r.startswith("pr:")})
     for ref in pr_refs:
@@ -112,10 +123,14 @@ def find_signals(
         if not data or "state" not in data:
             continue
         session = pick_owner(ref, data, sessions)
-        for signal in _pr_signals(ref, data, session, map_ref_to_label(ref, repo_labels or {})):
+        found = _pr_signals(ref, data, session, map_ref_to_label(ref), stall_context, bot_name)
+        routed = route_pr(ref, data) if found and route_pr else None
+        for signal in found:
+            if routed is not None:
+                signal = replace(signal, surface=routed[0], handle=routed[1])
             signals.setdefault(signal.key, signal)
     for ref in sorted({r for s in sessions for r in s.refs if r.startswith("issue:")}):
-        signal = _issue_done_signal(ref, enrichment.get(ref), sessions, at_ms, enrichment, review_states)
+        signal = _issue_done_signal(ref, enrichment.get(ref), sessions, at_ms, enrichment, route_issue)
         if signal:
             signals.setdefault(signal.key, signal)
     return list(signals.values())
@@ -127,26 +142,28 @@ def _issue_done_signal(
     sessions: list[SessionRefs],
     at_ms: int | None,
     enrichment: dict[str, dict[str, object]],
-    review_states: tuple[str, ...],
+    route_issue: IssueRouter | None,
 ) -> Signal | None:
-    """An issue still open although every PR its tracker links to it is finished and at least one was meant to close it.
+    """An issue not Done, Canceled or Duplicate although every PR Linear links to it is finished and at least one was
+    meant to close it. In Review, QA or Backlog count too: with nothing left open, the lead checks it is still true.
 
-    One merged PR proves little: issues often take several. A quiet period leaves room for the next PR.
+    One merged PR proves little: issues often take several. A quiet period leaves room for the next PR. An issue
+    assigned to a colleague is theirs to move, so it raises nothing; nor does one no owner is found for.
     """
     if not data or data.get("stale") or "error" in data or not data.get("linked_complete"):
+        return None
+    # Data cached before assignee_is_me was read counts as a colleague's until the next refresh.
+    if data.get("assignee") and data.get("assignee_is_me") is not True:
         return None
     if data.get("state_type") in _DONE_ISSUE_TYPES:
         return None
     state = str(data.get("state") or "")
-    # States like In Review or QA are where a merged PR is expected to wait; not bookkeeping debt.
-    if any(word.lower() in state.lower() for word in review_states):
-        return None
     linked = [
         cast(dict[str, object], p) for p in cast(list[object], data.get("linked_prs") or []) if isinstance(p, dict)
     ]
     if not linked or any(p.get("status") not in _FINISHED_PR_STATUSES for p in linked):
         return None
-    # The tracker's copy of a PR can lag GitHub: our own fresh GitHub data wins when it says a PR is open.
+    # Linear's copy of a PR can lag GitHub: our own fresh GitHub data wins when it says a PR is open.
     for p in linked:
         github = enrichment.get(str(p.get("ref")))
         if github and not github.get("stale") and github.get("state") == "OPEN":
@@ -160,23 +177,37 @@ def _issue_done_signal(
     if at_ms is not None and at_ms - last_merge < ISSUE_QUIET_MS:
         return None
     key = ref.removeprefix("issue:")
-    merged = sum(1 for p in linked if p.get("status") == "merged")
-    text = f"{key} {data.get('title', '')}: {merged} of {len(linked)} linked PRs merged, none open; still {state}"
-    owner = pick_issue_owner(ref, sessions)
-    # Keyed by issue and state only: a dismissal holds until the issue moves, whatever PRs merge meanwhile.
-    return Signal(
-        f"{ref}:done?:{state}", "info", "drift", text, str(data.get("url") or ""), owner.surface, owner.handle
+    merged = [str(p.get("ref")) for p in linked if p.get("status") == "merged"]
+    unmerged = len(linked) - len(merged)
+    # A message to a lead has a size cap, and a long-running issue can collect dozens of PRs.
+    labels = ", ".join(map_ref_to_label(r) for r in merged[:_PRS_NAMED_MAX])
+    if len(merged) > _PRS_NAMED_MAX:
+        labels += f" and {len(merged) - _PRS_NAMED_MAX} more"
+    text = (
+        f"{key} {data.get('title', '')}: still {state}, though {labels} merged and no linked PR is open"
+        + (f" ({unmerged} closed unmerged)" if unmerged else "")
+        + ". Move it to Done if the work is done, or give it a truthful status."
     )
+    routed = (
+        route_issue(ref, [str(p.get("ref")) for p in linked], [str(p.get("ref")) for p in closing])
+        if route_issue
+        else None
+    )
+    if routed is None and route_issue is None:
+        on_branch = pick_issue_owner(ref, sessions)
+        routed = (on_branch.surface, on_branch.handle) if on_branch else None
+    if routed is None:
+        return None
+    # Keyed by issue and state only: a dismissal holds until the issue moves, whatever PRs merge meanwhile.
+    return Signal(f"{ref}:done?:{state}", "info", "drift", text, str(data.get("url") or ""), *routed)
 
 
-def pick_issue_owner(ref: str, sessions: list[SessionRefs]) -> SessionRefs:
-    """The session on a branch named after the issue, else the one that mentioned it first."""
+def pick_issue_owner(ref: str, sessions: list[SessionRefs]) -> SessionRefs | None:
+    """The session on a branch named after the issue; one that only mentioned it is no owner."""
     key = re.escape(ref.removeprefix("issue:").lower())
-    touching = [s for s in sessions if ref in s.refs]
-    on_branch = [s for s in touching if s.branch and re.search(rf"(?<![a-z0-9]){key}(?![0-9])", s.branch.lower())]
-    if on_branch:
-        return on_branch[0]
-    return min(touching, key=lambda s: s.first_seen.get(ref, 1 << 62))
+    return next(
+        (s for s in sessions if s.branch and re.search(rf"(?<![a-z0-9]){key}(?![0-9])", s.branch.lower())), None
+    )
 
 
 def pick_owner(ref: str, data: dict[str, object], sessions: list[SessionRefs]) -> SessionRefs:
@@ -193,7 +224,14 @@ def map_signal_to_dict(signal: Signal) -> dict[str, object]:
     return asdict(signal)
 
 
-def _pr_signals(ref: str, data: dict[str, object], session: SessionRefs, number: str) -> list[Signal]:
+def _pr_signals(
+    ref: str,
+    data: dict[str, object],
+    session: SessionRefs,
+    number: str,
+    stall_context: str = "",
+    bot_name: str = "The review bot",
+) -> list[Signal]:
     title = str(data.get("title") or "")
     url = str(data.get("url") or "")
     # Keys follow the head commit, so a dismissed alert comes back for a new push.
@@ -204,8 +242,13 @@ def _pr_signals(ref: str, data: dict[str, object], session: SessionRefs, number:
         found.append(Signal(key, severity, kind, text, link, session.surface, session.handle))
 
     if data.get("state") == "OPEN" and data.get("mine") is True:
+        stall = find_red_status(data, stall_context) if stall_context else None
+        if stall is not None:
+            why = str(stall.get("description") or "").strip() or "the status gives no reason"
+            add(STALL, "action", f"{bot_name} stalled on {number}: {why}", f"{ref}:{STALL}:{oid}")
         if data.get("checks") in _RED:
-            add("ci", "info" if data.get("draft") else "action", f"{number} {title}", f"{ref}:ci:{oid}")
+            if stall is None or not is_only_red_status(data, stall_context):
+                add("ci", "info" if data.get("draft") else "action", f"{number} {title}", f"{ref}:ci:{oid}")
         elif (
             not data.get("stale")
             and not data.get("draft")
@@ -218,3 +261,24 @@ def _pr_signals(ref: str, data: dict[str, object], session: SessionRefs, number:
         elif data.get("review") == "CHANGES_REQUESTED" and not data.get("draft"):
             add("changes", "info", f"{number} {title}", f"{ref}:changes:{oid}")
     return found
+
+
+def _list_statuses(data: dict[str, object]) -> list[dict[str, object]]:
+    raw = data.get("statuses")
+    return (
+        [cast(dict[str, object], s) for s in cast(list[object], raw) if isinstance(s, dict)]
+        if isinstance(raw, list)
+        else []
+    )
+
+
+def find_red_status(data: dict[str, object], context: str) -> dict[str, object] | None:
+    """The head commit's status of exactly that name, when it is red."""
+    return next((s for s in _list_statuses(data) if s.get("context") == context and s.get("state") in _RED), None)
+
+
+def is_only_red_status(data: dict[str, object], context: str) -> bool:
+    """Data cached before failing check runs were counted cannot tell, so it is never the only one."""
+    red_runs = data.get("red_check_runs")
+    others = [s for s in _list_statuses(data) if s.get("context") != context and s.get("state") in _RED]
+    return isinstance(red_runs, int) and red_runs == 0 and not others
