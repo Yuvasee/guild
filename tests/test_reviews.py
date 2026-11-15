@@ -28,8 +28,10 @@ from bridge.review_github import (
     map_reviews_to_approvers,
     map_threads_to_review_threads,
 )
+from bridge.review_worktree import has_owner_reviewed
 from bridge.reviews import (
     AGENT,
+    AGENT_PREFIX,
     COLLEAGUE,
     HIS,
     OLD,
@@ -374,6 +376,31 @@ def test_comments_from_before_the_queue_saw_the_pr_wake_nobody(tmp_path: Path) -
     with transaction(conn):
         classify_pending_comments(conn, CONFIG, 100_000)
     assert conn.execute("SELECT verdict FROM review_comments").fetchone()[0] == OLD
+
+
+def test_the_owners_own_words_on_github_count_as_their_review_and_an_agents_do_not(tmp_path: Path) -> None:
+    conn = setup_pr(tmp_path)
+    store(conn, comment("p1", at=1000, body=f"{AGENT_PREFIX} fixed in abc"), comment("p0", at=100))
+    with transaction(conn):
+        classify_pending_comments(conn, CONFIG, 100_000)
+    reviewed = "SELECT owner_reviewed_at, owner_reviewed_by FROM review_prs"
+    assert tuple(conn.execute(reviewed).fetchone()) == (None, None), "an agent's reply, and one older than the queue"
+    store(conn, comment("r2", at=2000, body="", state="COMMENTED"), comment("p3", at=1500, review="r2"))
+    with transaction(conn):
+        classify_pending_comments(conn, CONFIG, 100_000)
+    assert tuple(conn.execute(reviewed).fetchone()) == (2000, "me"), "his latest: the review wrapping his comment"
+    row = conn.execute("SELECT * FROM review_prs").fetchone()
+    assert has_owner_reviewed(row) and row["reviewed_at"] is None, "not a review sent from the page"
+
+
+def test_his_comments_classified_before_bridge_kept_his_review_count_at_the_next_pass(tmp_path: Path) -> None:
+    conn = setup_pr(tmp_path)
+    store(conn, comment("p1", at=1000))
+    with transaction(conn):
+        classify_pending_comments(conn, CONFIG, 100_000)
+        conn.execute("UPDATE review_prs SET owner_reviewed_at = NULL, owner_reviewed_by = NULL")
+        classify_pending_comments(conn, CONFIG, 200_000)
+    assert conn.execute("SELECT owner_reviewed_at FROM review_prs").fetchone()[0] == 1000
 
 
 def wake(conn: Any, now: int = 200_000) -> list[Any]:
