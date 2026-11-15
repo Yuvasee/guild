@@ -199,7 +199,8 @@ def map_names_to_brief_rules(names: list[str], config: Config) -> str:
         "term at its first use in each section; one concrete scenario per change. A PR that only enables something "
         "(a flag off by default, an opt-in value, one step of a plan) has a description section 'How this will be "
         "used': the problem today, the plan's numbered steps with links (built / not built), what switches it on "
-        "and who decides, what happens if it never is, the risk of using it wrong."
+        "and who decides, what happens if it never is, the risk of using it wrong. Before writing, read the reference "
+        "example house.md names, if any; before registering, pass the spec's first-reader check."
     )
     scope = (
         "Work beyond the task's stated scope goes to a follow-up, even if already written: say what you left out "

@@ -9,6 +9,16 @@ the full version, so change it here first.
 **Reader:** the owner, on the Guild page, on a laptop or a phone. They read **In short**, skim the headings and the
 one-line summaries, and open only what they want to check.
 
+## Before you write, and before you register
+
+1. **Read the reference example first**, if this install keeps one (`house.md` names it): a doc the owner called
+   clear. Match its plainness and length, not its subject.
+2. **First reader.** Before `guild review doc`, give a fresh subagent with no context only the doc's **In short**
+   and **What changes and why**, and ask it to explain back in its own words what changes, why and how, and to list
+   every term it did not understand. A wrong or vague explain-back, or any term on that list not explained in the
+   doc, means rewrite and ask a new fresh reader; register only once one gets it right with an empty list. Say in
+   **Verified and not verified** that it passed.
+
 ## Essence visible, details folded
 
 This holds for everything made for the owner (review docs, pages, reports), not only this doc. The owner reads the
