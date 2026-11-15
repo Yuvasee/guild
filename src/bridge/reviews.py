@@ -164,15 +164,16 @@ def store_open_prs(conn: sqlite3.Connection, prs: list[OpenPr], now: int) -> Non
             INSERT INTO review_prs (ref, repo, number, title, url, draft, head, head_oid, base, stack_parent, loc,
                                     checks, requested, approved_by, bot_approved, others_reviewed, merge_state,
                                     in_merge_queue, commit_oids, updated_at, first_seen_at,
-                                    fetched_at, threads_key, loc_rule, body_reviews, depends_on, usage_missing)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    fetched_at, threads_key, loc_rule, body_reviews, depends_on, usage_missing,
+                                    bot_cleared)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (ref) DO UPDATE SET
                 title = excluded.title, url = excluded.url, draft = excluded.draft, head = excluded.head,
                 head_oid = excluded.head_oid, base = excluded.base, stack_parent = excluded.stack_parent,
                 loc = excluded.loc, loc_rule = excluded.loc_rule, checks = excluded.checks,
                 requested = excluded.requested, body_reviews = excluded.body_reviews, depends_on = excluded.depends_on,
                 usage_missing = excluded.usage_missing,
-                approved_by = excluded.approved_by, bot_approved = excluded.bot_approved,
+                approved_by = excluded.approved_by, bot_approved = excluded.bot_approved, bot_cleared = excluded.bot_cleared,
                 others_reviewed = max(coalesce(others_reviewed, 0), excluded.others_reviewed),
                 merge_state = excluded.merge_state, in_merge_queue = excluded.in_merge_queue,
                 commit_oids = excluded.commit_oids,
@@ -188,7 +189,7 @@ def store_open_prs(conn: sqlite3.Connection, prs: list[OpenPr], now: int) -> Non
                 int(pr.others_reviewed),
                 pr.merge_state, int(pr.in_merge_queue), json.dumps(pr.commit_oids), pr.updated_at, now, now,
                 map_pr_to_threads_key(pr), LOC_RULE, convert_reviews_to_text(pr.body_reviews), pr.depends_on,
-                pr.usage_missing,
+                pr.usage_missing, int(pr.bot_cleared),
             ),
         )  # fmt: skip
         if not pr.open_threads:
@@ -1461,16 +1462,16 @@ class MergeOkRefused(Exception):
 
 
 def can_ok_merge(config: Config, row: sqlite3.Row) -> bool:
-    """The owner may OK its merge from the page: in their queue (open, not a draft, not a backport), approved by the
-    review bot, and CI green or none. A PR stacked on another PR's branch merges only after that one, so it gets no
+    """The owner may OK its merge from the page: open, not a draft, reviewed by the review bot at its head without a
+    request for changes (no approval needed), and CI green or none. A backport gets the button too: the press is the
+    owner's word for it at that head. A PR stacked on another PR's branch merges only after that one, so it gets no
     button of its own."""
     return (
         row["closed_at"] is None
         and not row["draft"]
         and row["stack_parent"] is None
-        and bool(row["bot_approved"])
+        and bool(row["bot_cleared"])
         and row["checks"] in (None, "SUCCESS")
-        and not is_backport_base(config.backport_bases, str(row["base"]))
     )
 
 
@@ -1503,7 +1504,8 @@ def record_merge_ok(
         raise MergeOkRefused(f"{ref} is not an open PR in the queue")
     if not can_ok_merge(config, row):
         raise MergeOkRefused(
-            f"{ref} is not approved by {config.review_bot_name} with CI green, or is a draft or a backport"
+            f"{ref} is not reviewed at its head by {config.review_bot_name} without a request for changes with CI green, "
+            "or is a draft or stacked"
         )
     if head_oid != row["head_oid"]:
         raise MergeOkRefused(f"{ref} has new commits since the page showed it; look at them first")
@@ -1536,7 +1538,7 @@ def map_merge_ok_to_text(config: Config, row: sqlite3.Row, no_owner: bool) -> st
     command = f"gh pr merge {url} --match-head-commit {oid}"
     given = (
         f"{config.owner_name_at_start} OKs merging {url} ({row['title']}) at {oid}: they pressed Merge on the Guild "
-        f"page, as {config.review_bot_name} approved it and CI is green. A new commit voids this OK."
+        f"page, as {config.review_bot_name} reviewed this commit without asking for changes and CI is green. A new commit voids this OK."
     )
     blocked = (
         " GitHub reports its merge BLOCKED (branch protection may want a person's review), so the guard or GitHub may "

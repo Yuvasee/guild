@@ -829,6 +829,7 @@ MIGRATIONS: tuple[str, ...] = (
     ALTER TABLE review_prs ADD COLUMN doc_escalated_at INTEGER;
     UPDATE review_prs SET doc_update_for = NULL WHERE closed_at IS NULL;
     """,
+    "ALTER TABLE review_prs ADD COLUMN bot_cleared INTEGER NOT NULL DEFAULT 0;",
 )
 
 HOOK_BUSY_TIMEOUT_MS = 200

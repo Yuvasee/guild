@@ -26,7 +26,7 @@ query($q: String!, $after: String) {
       files(first: 100) { pageInfo { hasNextPage } nodes { path additions deletions } }
       reviewRequests(first: 20) { nodes { requestedReviewer {
         __typename ... on User { login } ... on Team { slug } ... on Bot { login } } } }
-      reviews(last: 100) { nodes { state author { __typename login } } }
+      reviews(last: 100) { nodes { state commit { oid } author { __typename login } } }
       latestReviews(first: 100) { nodes { author { __typename login } } }
       reviewThreads(first: 100) { nodes { isResolved } }
     } }
@@ -109,6 +109,8 @@ class OpenPr:
     requested: int
     approved_by: tuple[str, ...] = ()
     bot_approved: bool = False
+    bot_cleared: bool = False
+    """The review bot's latest review is of the head commit and does not request changes: reviewed, not blocked."""
     body_reviews: tuple[str, ...] | None = None
     """The reviews its body's Reviews section names; None without one."""
     usage_missing: str | None = None
@@ -227,6 +229,7 @@ def map_node_to_open_pr(node: Any, config: Config, known_loc: dict[tuple[str, st
         requested=count_real_review_requests(node["reviewRequests"]["nodes"], config),
         approved_by=map_reviews_to_approvers(node["reviews"]["nodes"], config),
         bot_approved=is_approved_by_review_bot(node["reviews"]["nodes"], config),
+        bot_cleared=is_cleared_by_review_bot(node["reviews"]["nodes"], head_oid, config),
         body_reviews=map_markdown_to_reviews(str(node.get("body") or ""), config.review_names),
         usage_missing=find_missing_usage_section(strip_agent_prefix(str(node["title"])), str(node.get("body") or "")),
         depends_on=map_markdown_to_dependency(str(node.get("body") or ""), repo, number),
@@ -463,6 +466,20 @@ def is_approved_by_review_bot(nodes: list[Any], config: Config) -> bool:
         if login in bots and node.get("state") != "COMMENTED":
             verdicts[login] = str(node.get("state"))
     return APPROVED_STATE in verdicts.values()
+
+
+def is_cleared_by_review_bot(nodes: list[Any], head_oid: str, config: Config) -> bool:
+    """Whether a review bot's latest review, of any kind, is of the head commit and does not request changes."""
+    bots = {login.casefold() for login in config.review_bot_logins}
+    latest: Any = None
+    for node in nodes:
+        author: Any = node.get("author") or {}
+        if str(author.get("login") or "").casefold() in bots:
+            latest = node
+    if latest is None:
+        return False
+    commit: Any = latest.get("commit") or {}
+    return commit.get("oid") == head_oid and latest.get("state") != "CHANGES_REQUESTED"
 
 
 def map_reviews_to_approvers(nodes: list[Any], config: Config) -> tuple[str, ...]:
