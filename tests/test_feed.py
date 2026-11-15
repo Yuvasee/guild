@@ -59,7 +59,7 @@ def test_decision_answer_is_typed_into_the_idle_tab(
     http_request(dashboard + f"/api/items/{item['id']}/answer", post=True, data={"answer": "Ship"})
     http_request(dashboard + f"/api/items/{item['id']}/answer", post=True, data={"answer": "Wait"}, expect=409)
 
-    typed = '[bridge] user on the dashboard (#1): Answer to your decision "Ship v2 behind a flag?": Ship'
+    typed = '[bridge] user on the dashboard (#1): Answer to your decision Q#1 "Ship v2 behind a flag?": Ship'
     assert wait_for(lambda: bridge_env.stub_log.exists() and typed in bridge_env.stub_log.read_text(), 15)
     assert "--target TAB-A --pane-id PANE-A" in bridge_env.stub_log.read_text()
     assert wait_for(lambda: prompt(bridge_env, pids["a"], "conv-a", "next", True) == "", 5), "typed means delivered"
@@ -170,3 +170,54 @@ def test_a_long_user_message_is_typed_as_its_start_and_where_to_read_it_all() ->
     long = typed("word " * 400)
     assert len(long) < TYPED_USER_MAX_CHARS and long.endswith("with bridge show 7 before you act)")
     assert long.startswith("[bridge] user on the dashboard (#7): word word")
+
+
+def guild_needs(base: str) -> list[dict[str, object]]:
+    return json.loads(http_request(base + "/api/guild"))["needs"]
+
+
+def answer_on_page(base: str, item_id: object, answer: str) -> str:
+    sent = json.loads(http_request(base + f"/api/items/{item_id}/answer", post=True, data={"answer": answer}))
+    return str(sent["detail"])
+
+
+def test_a_question_on_the_card_reaches_the_session_and_keeps_the_card_open(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess, dashboard: str
+) -> None:
+    pids = start(bridge_env, spawn_process, agterm_tabs=False)
+    bridge_env.cli("post", "decision", "Ship v2?", "--option", "Ship", "--option", "Wait", pid=pids["a"])
+    [item] = state(dashboard)["items"]  # type: ignore[misc]
+
+    asked = answer_on_page(dashboard, item["id"], "Why does it happen? Keep it simple.")
+    context = prompt(bridge_env, pids["a"], "conv-a", "next")
+    [card] = guild_needs(dashboard)
+
+    assert asked == "asked"
+    assert 'Question on your decision Q#1 "Ship v2?"' in context
+    assert "Why does it happen? Keep it simple." in context
+    assert (card["id"], card["question_ref"], "delivering" in card) == (1, "Q#1", False)
+    [still_open] = state(dashboard)["items"]  # type: ignore[misc]
+    assert still_open["answer"] is None and still_open["resolved_at"] is None
+
+    [thread] = [p for p in json.loads(http_request(dashboard + "/api/guild"))["room"] if p["kind"] == "post"]
+    replied = bridge_env.cli("reply", str(thread["id"]), "A retiring worker hangs.", pid=pids["a"])
+    assert replied.returncode == 0, replied.stderr
+    [thread] = [p for p in json.loads(http_request(dashboard + "/api/guild"))["room"] if p["kind"] == "post"]
+    assert "Question on your decision Q#1" in thread["body"]
+    assert [r["body"] for r in thread["replies"]] == ["A retiring worker hangs."], "the page shows the answer"
+
+    assert answer_on_page(dashboard, item["id"], "Ship") == "sent"
+    assert 'Answer to your decision Q#1 "Ship v2?": Ship' in prompt(bridge_env, pids["a"], "conv-a", "again")
+    [answered] = state(dashboard)["items"]  # type: ignore[misc]
+    assert answered["answer"] == "Ship" and answered["resolved_at"]
+
+
+def test_an_option_with_a_question_mark_still_answers(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess, dashboard: str
+) -> None:
+    pids = start(bridge_env, spawn_process, agterm_tabs=False)
+    bridge_env.cli("post", "blocked", "Token?", "--option", "Use the staging token?", pid=pids["a"])
+
+    assert answer_on_page(dashboard, 1, "Use the staging token?") == "sent"
+    [answered] = state(dashboard)["items"]  # type: ignore[misc]
+    assert answered["answer"] == "Use the staging token?" and answered["resolved_at"]

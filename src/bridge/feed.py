@@ -23,6 +23,7 @@ from bridge.board import (
     Recipient,
     SendResult,
     add_user_item,
+    convert_item_id_to_question_ref,
     convert_text_to_preview,
     is_delivery_owner,
     resolve_handle,
@@ -170,22 +171,11 @@ def add_post(
 def answer_post(
     conn: sqlite3.Connection, item_id: int, answer: str, user: str, at_ms: int, relayed_by: Party | None = None
 ) -> SendResult:
-    """Sent as the user only for the user's own click; a relayed answer stays the relay's message and says so."""
-    """Closes a blocked or decision post with the user's answer and queues the answer for the session."""
-    answer = answer.strip()
-    if not answer:
-        raise MessageStateError("empty answer")
-    if len(answer) > ANSWER_MAX_CHARS:
-        raise MessageStateError(f"answer is {len(answer)} chars; keep it under {ANSWER_MAX_CHARS}")
-    row = conn.execute(
-        "SELECT kind, text, from_conversation, from_handle, answered_at FROM user_items WHERE id = ?", (item_id,)
-    ).fetchone()
-    if row is None or row["from_conversation"] is None:
-        raise MessageStateError(f"no post #{item_id} from a session")
-    if row["answered_at"] is not None:
-        raise MessageStateError(f"post #{item_id} is already answered")
-    if conn.execute("SELECT 1 FROM colleague_calls WHERE item_id = ?", (item_id,)).fetchone():
-        raise MessageStateError(f"post #{item_id} is a draft reply to a colleague; {user} chooses on the page")
+    """Closes a blocked or decision post with the user's answer and queues the answer for the session.
+
+    Sent as the user only for the user's own click; a relayed answer stays the relay's message and says so."""
+    answer = _check_answer(answer)
+    row = _load_answerable_post(conn, item_id, user)
     conn.execute(
         """
         UPDATE user_items SET answer = ?, answered_at = ?, answered_by = ?, resolved_at = coalesce(resolved_at, ?)
@@ -194,17 +184,60 @@ def answer_post(
         (answer, at_ms, relayed_by.handle if relayed_by else None, at_ms, item_id),
     )
     recipient = resolve_tab(conn, str(row["from_conversation"]), str(row["from_handle"]))
-    kind = row["kind"] or "post"
+    about = f'{row["kind"] or "post"} {convert_item_id_to_question_ref(item_id)} "{row["text"]}"'
     if relayed_by is not None:
-        body = f'{relayed_by.handle}, relaying {user}\'s answer to your {kind} "{row["text"]}": {answer}'
+        body = f"{relayed_by.handle}, relaying {user}'s answer to your {about}: {answer}"
         relayed = send_message(conn, relayed_by, [recipient], "info", body, at_ms)
         conn.execute("UPDATE messages SET post_type = ? WHERE id = ?", (RELAYED_ANSWER, relayed.message_id))
         conn.execute("UPDATE user_items SET answer_message_id = ? WHERE id = ?", (relayed.message_id, item_id))
         return relayed
-    body = f'Answer to your {kind} "{row["text"]}": {answer}'
-    sent = send_message(conn, Party(USER_CONVERSATION, user), [recipient], "info", body, at_ms)
+    sent = send_message(
+        conn, Party(USER_CONVERSATION, user), [recipient], "info", f"Answer to your {about}: {answer}", at_ms
+    )
     conn.execute("UPDATE user_items SET answer_message_id = ? WHERE id = ?", (sent.message_id, item_id))
     return sent
+
+
+def reply_on_card(conn: sqlite3.Connection, item_id: int, text: str, user: str, at_ms: int) -> tuple[SendResult, bool]:
+    """True when the reply was a question: it reaches the session and the post stays open. Any '?' typed counts, as
+    the owner's questions often end in a sentence and a post closed without a choice costs more than one left open.
+    It goes on the board so the page's room shows it and the session's reply."""
+    text = _check_answer(text)
+    row = _load_answerable_post(conn, item_id, user)
+    if "?" not in text or text in (json.loads(row["options"]) if row["options"] else []):
+        return answer_post(conn, item_id, text, user, at_ms), False
+    recipient = resolve_tab(conn, str(row["from_conversation"]), str(row["from_handle"]))
+    body = (
+        f'Question on your {row["kind"] or "post"} {convert_item_id_to_question_ref(item_id)} "{row["text"]}", '
+        f"which stays open until {user} chooses: {text}"
+    )
+    sent = send_message(conn, Party(USER_CONVERSATION, user), [recipient], "info", body, at_ms)
+    conn.execute("UPDATE messages SET board = 1 WHERE id = ?", (sent.message_id,))
+    return sent, True
+
+
+def _check_answer(answer: str) -> str:
+    answer = answer.strip()
+    if not answer:
+        raise MessageStateError("empty answer")
+    if len(answer) > ANSWER_MAX_CHARS:
+        raise MessageStateError(f"answer is {len(answer)} chars; keep it under {ANSWER_MAX_CHARS}")
+    return answer
+
+
+def _load_answerable_post(conn: sqlite3.Connection, item_id: int, user: str) -> sqlite3.Row:
+    row = conn.execute(
+        "SELECT kind, text, options, from_conversation, from_handle, answered_at FROM user_items WHERE id = ?",
+        (item_id,),
+    ).fetchone()
+    ref = convert_item_id_to_question_ref(item_id)
+    if row is None or row["from_conversation"] is None:
+        raise MessageStateError(f"no post {ref} from a session")
+    if row["answered_at"] is not None:
+        raise MessageStateError(f"{ref} is already answered")
+    if conn.execute("SELECT 1 FROM colleague_calls WHERE item_id = ?", (item_id,)).fetchone():
+        raise MessageStateError(f"{ref} is a draft reply to a colleague; {user} chooses on the page")
+    return row
 
 
 def withdraw_post(conn: sqlite3.Connection, sender: Party, item_id: int, at_ms: int) -> None:

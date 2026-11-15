@@ -73,7 +73,9 @@ bridge post decision "Ship the export worker behind a flag, or wait for the load
   instructions). `decision`: you need the user to choose. Both wait in the feed with answer buttons
   (`--option`, up to 6) and a free-text box. The answer comes back to you as "[bridge] <user> on the
   dashboard (#N): Answer to your …", typed into your tab when it is idle, or in your context at the
-  next tool call. Keep working on anything that does not depend on it.
+  next tool call. Keep working on anything that does not depend on it. A reply with a question mark
+  comes as "Question on your … Q#N" and leaves the post open: answer with `bridge reply` (the page
+  shows that thread), or withdraw it and post again. The user names posts Q#N, so write Q#N to them, never a bare #N.
 - `done`: a task the user gave you reached its end: PR opened or merged, deploy finished, question
   answered with a result. One post per task, with the outcome and links, not the steps.
 - `insight`: something the user or other sessions must know and would not find out otherwise (a

@@ -281,6 +281,11 @@ def flag_overdue(conn: sqlite3.Connection, at_ms: int) -> int:
     return len(rows)
 
 
+def convert_item_id_to_question_ref(item_id: int) -> str:
+    """How the owner names a feed post; a bare #N reads as a PR."""
+    return f"Q#{item_id}"
+
+
 def add_user_item(conn: sqlite3.Connection, sender: Party, severity: str, text: str, at_ms: int) -> int:
     if len(text) > USER_ITEM_MAX_CHARS:
         raise MessageStateError(f"keep it to one line under {USER_ITEM_MAX_CHARS} chars (got {len(text)})")

@@ -16,6 +16,7 @@ from bridge.board import (
     AddressError,
     Party,
     Recipient,
+    convert_item_id_to_question_ref,
     resolve_handle,
     send_message,
 )
@@ -1741,7 +1742,7 @@ def map_row_to_review(conn: sqlite3.Connection, config: Config, row: sqlite3.Row
         "merge_ok": load_merge_ok(conn, ref, str(row["head_oid"])),
         "merge_ok_to": owner.handle if owner else config.assistant_handle,
         "approval_waived": (
-            f"waived by {config.owner_name} (decision #{row['approval_waived_decision']})"
+            f"waived by {config.owner_name} ({convert_item_id_to_question_ref(row['approval_waived_decision'])})"
             if row["approval_waived_at"] is not None
             else None
         ),

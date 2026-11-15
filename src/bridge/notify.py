@@ -2,6 +2,7 @@ import sqlite3
 import subprocess
 from dataclasses import dataclass
 
+from bridge.board import convert_item_id_to_question_ref
 from bridge.config import Config
 from bridge.guildview import STALE_QUESTION_MS
 from bridge.leads import is_conversation_locked
@@ -36,7 +37,7 @@ def take_next_urgent_notice(
         if int(row["id"]) in skipping or is_conversation_locked(conn, config, conversation):
             continue
         conn.execute("UPDATE user_items SET notified_at = ? WHERE id = ?", (now, row["id"]))
-        return UrgentNotice(int(row["id"]), _map_conversation_to_notice_text(conn, conversation))
+        return UrgentNotice(int(row["id"]), _map_post_to_notice_text(conn, int(row["id"]), conversation))
     return None
 
 
@@ -60,8 +61,9 @@ def show_notification(text: str) -> bool:
     return done.returncode == 0
 
 
-def _map_conversation_to_notice_text(conn: sqlite3.Connection, conversation: str) -> str:
-    """Only a lead's name: the owner's screen may be shared, and a worker's tab name can say what the work is."""
+def _map_post_to_notice_text(conn: sqlite3.Connection, item_id: int, conversation: str) -> str:
+    """Only the post's number and a lead's name: the owner's screen may be shared, and a worker's tab name can say
+    what the work is."""
     row = conn.execute(
         """
         SELECT i.surface FROM conversations c JOIN instances i ON i.instance_id = c.instance_id
@@ -70,4 +72,5 @@ def _map_conversation_to_notice_text(conn: sqlite3.Connection, conversation: str
         (conversation,),
     ).fetchone()
     lead = find_lead_of(conn, row["surface"])[0] if row else None
-    return f"Urgent question from {lead}" if lead else "Urgent question"
+    ref = convert_item_id_to_question_ref(item_id)
+    return f"Urgent question {ref} from {lead}" if lead else f"Urgent question {ref}"

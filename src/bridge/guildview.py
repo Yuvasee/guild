@@ -7,7 +7,16 @@ from dataclasses import dataclass
 from typing import cast
 
 from bridge.activity import RunningShell, SessionActivity
-from bridge.board import ACK_POST, SYSTEM_CONVERSATION, AddressError, Party, Recipient, resolve_handle, send_message
+from bridge.board import (
+    ACK_POST,
+    SYSTEM_CONVERSATION,
+    AddressError,
+    Party,
+    Recipient,
+    convert_item_id_to_question_ref,
+    resolve_handle,
+    send_message,
+)
 from bridge.claims import list_claims
 from bridge.colleague_comments import load_draft_entry, map_db_to_colleague_feed
 from bridge.compaction import read_context_death
@@ -608,6 +617,7 @@ def _map_open_posts_to_needs(conn: sqlite3.Connection, config: Config, now: int)
             {
                 "type": "post",
                 "id": row["id"],
+                "question_ref": convert_item_id_to_question_ref(int(row["id"])),
                 "at": row["created_at"],
                 "kind": row["kind"],
                 "from": row["from_handle"],

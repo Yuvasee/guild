@@ -390,7 +390,7 @@ def take_all_notices(conn: sqlite3.Connection, now: int) -> list[UrgentNotice]:
     return notices
 
 
-def test_notice_fires_once_names_only_the_lead_and_survives_a_restart(tmp_path: Path) -> None:
+def test_notice_fires_once_names_the_lead_and_the_question_and_survives_a_restart(tmp_path: Path) -> None:
     path = tmp_path / "b.db"
     conn = connect(path)
     add_session(conn, "conv-a", "boris", surface="s-boris")
@@ -405,8 +405,8 @@ def test_notice_fires_once_names_only_the_lead_and_survives_a_restart(tmp_path: 
     second = take_all_notices(connect(path), 3000)
 
     assert [(n.item_id, n.text) for n in first] == [
-        (item, "Urgent question from Boris"),
-        (worker_item, "Urgent question"),
+        (item, f"Urgent question Q#{item} from Boris"),
+        (worker_item, f"Urgent question Q#{worker_item}"),
     ]
     assert second == []
     assert calm not in [n.item_id for n in first]
@@ -481,7 +481,7 @@ def test_the_service_notifies_once_without_touching_a_tab(
 
     assert wait_for(log.exists, 15)
     text = log.read_text()
-    assert text.count("Urgent question from Alex") == 1
+    assert text.count("Urgent question Q#1 from Alex") == 1
     assert "SECRET" not in text
     assert team.log() == before
 

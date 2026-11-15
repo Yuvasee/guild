@@ -70,12 +70,12 @@ from bridge.feed import (
     TAB_NOT_FOUND,
     StuckDelivery,
     UndeliveredTab,
-    answer_post,
     dismiss_undelivered_answer,
     find_stuck_deliveries,
     post_from_user_to_room,
     prune_typer_locks,
     release_dead_typing_claims,
+    reply_on_card,
     send_from_user,
     spawn_queued_retries,
     spawn_typed_delivery,
@@ -861,11 +861,11 @@ class DashboardState:
     def answer_item(self, item_id: int, answer: str) -> tuple[bool, str]:
         try:
             with self._connection() as conn, transaction(conn):
-                result = answer_post(conn, item_id, answer, self.config.user_alias or "user", now_ms())
+                result, asked = reply_on_card(conn, item_id, answer, self.config.user_alias or "user", now_ms())
         except MessageStateError as exc:
             return False, str(exc)
         self._deliver(result, result.recipients)
-        return True, "sent"
+        return True, "asked" if asked else "sent"
 
     def choose_colleague_reply(self, item_id: int, choice: str, text: str) -> tuple[bool, str]:
         """GitHub is written only here, on the owner's click, and with no transaction open."""

@@ -512,6 +512,7 @@ function isWaitingOnYou(need) {
 function renderDeliveringCard(need) {
   const card = el("div", "card delivering");
   card.append(el("div", "title", need.text));
+  card.append(el("div", "meta", need.question_ref + " · " + need.from + " · " + need.kind));
   const part = el("div", "part");
   part.append(el("span", "label", "Your answer"), renderText(need.answer));
   card.append(part);
@@ -554,7 +555,7 @@ function renderNeedCard(need) {
   if (need.urgent) title.append(el("span", "urgent", "URGENT"));
   title.append(need.text);
   card.append(title);
-  const meta = el("div", "meta", need.from + " · " + need.kind + " · " + age(state.now - need.at) + " ago");
+  const meta = el("div", "meta", need.question_ref + " · " + need.from + " · " + need.kind + " · " + age(state.now - need.at) + " ago");
   meta.title = "posted " + fullTime(need.at);
   card.append(meta);
   for (const section of need.sections) card.append(renderNeedSection(section));
@@ -566,7 +567,11 @@ function renderNeedCard(need) {
   const actions = el("div", "actions");
   const send = async (answer) => {
     const done = await post("/api/items/" + need.id + "/answer", { answer });
-    if (done.ok) drafts.delete(need.id); else setStatus(done.detail || "not sent");
+    if (done.ok && done.detail === "asked") {
+      // The card stays as it was, so its node and box stay too; text typed since sending is not this question.
+      if (input.value.trim() === answer) { input.value = ""; drafts.delete(need.id); }
+      setStatus("Asked " + need.from + "; " + need.question_ref + " stays open until you choose");
+    } else if (done.ok) drafts.delete(need.id); else setStatus(done.detail || "not sent");
     refresh();
   };
   for (const option of need.options) {
@@ -629,7 +634,7 @@ function renderColleagueDraftCard(need) {
   title.append(el("span", "attention-slot"), need.text);
   card.append(title);
   const meta = el("div", "meta");
-  meta.append(need.from + " drafted this " + age(state.now - need.at) + " ago · reply and push wait for your choice · ");
+  meta.append(need.question_ref + " · " + need.from + " drafted this " + age(state.now - need.at) + " ago · reply and push wait for your choice · ");
   meta.append(linkTo(c.url, "open on GitHub"));
   meta.title = "drafted " + fullTime(need.at);
   card.append(meta);

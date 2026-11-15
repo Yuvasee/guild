@@ -171,7 +171,7 @@ def test_a_waiver_from_an_answered_decision_stands_in_for_the_approval(tmp_path:
         assert record_approval_waiver(conn, BACKPORT, 24, "aide", NOW) == "Go"
     prs, _ = view(conn)
     assert prs[BACKPORT]["state"] == "lead merges: ready"
-    assert prs[BACKPORT]["approval_waived"] == "waived by the owner (decision #24)"
+    assert prs[BACKPORT]["approval_waived"] == "waived by the owner (Q#24)"
     with transaction(conn):
         clear_approval_waiver(conn, BACKPORT)
     prs, _ = view(conn)
