@@ -215,17 +215,17 @@ def test_a_stale_queue_reads_github_once_and_an_unreadable_pr_is_refused(tmp_pat
         conn.execute("INSERT OR REPLACE INTO review_poll (id, ok_at) VALUES (1, 1000)")
     targets = map_command_to_targets("gh pr merge 12", str(web))
     now = 1000 + GITHUB_STALE_S * 1000 + 1
-    with mock.patch("bridge.guard.fetch_merge_facts", return_value=(False, True, "FAILURE", "CLEAN", 0)) as fetch:
+    with mock.patch("bridge.guard.fetch_merge_facts", return_value=(False, True, "FAILURE", "CLEAN", 0, "a1")) as fetch:
         [refused] = find_merge_blocks(conn, CONFIG, targets, now)
     assert fetch.call_args.args[:3] == (CONFIG, "Acme/Web", 12)
     assert refused.waits == ("CI red",)
-    with mock.patch("bridge.guard.fetch_merge_facts", return_value=(False, True, None, "CLEAN", 0)):
+    with mock.patch("bridge.guard.fetch_merge_facts", return_value=(False, True, None, "CLEAN", 0, "a1")):
         assert find_merge_blocks(conn, CONFIG, targets, now) == []
     with transaction(conn):
         conn.execute("UPDATE review_prs SET merge_block = '1 review thread is unresolved'")
-    with mock.patch("bridge.guard.fetch_merge_facts", return_value=(False, True, None, "CLEAN", 0)):
+    with mock.patch("bridge.guard.fetch_merge_facts", return_value=(False, True, None, "CLEAN", 0, "a1")):
         assert find_merge_blocks(conn, CONFIG, targets, now) == []
-    with mock.patch("bridge.guard.fetch_merge_facts", return_value=(False, True, None, "CLEAN", 2)):
+    with mock.patch("bridge.guard.fetch_merge_facts", return_value=(False, True, None, "CLEAN", 2, "a1")):
         [threads] = find_merge_blocks(conn, CONFIG, targets, now)
     assert threads.waits == ("comments open",) and threads.merge_block == "2 review threads are unresolved"
     with mock.patch("bridge.guard.fetch_merge_facts", side_effect=GitHubError("gh failed: timeout")):
@@ -235,7 +235,7 @@ def test_a_stale_queue_reads_github_once_and_an_unreadable_pr_is_refused(tmp_pat
     fresh = 1000 + GITHUB_STALE_S * 1000
     # A fresh cache's refusal is confirmed live: it stands when GitHub agrees or can't be read, and lifts when GitHub
     # has moved on (a CI rerun or an approval one poll behind the cache).
-    with mock.patch("bridge.guard.fetch_merge_facts", return_value=(False, True, None, "CLEAN", 1)) as fetch:
+    with mock.patch("bridge.guard.fetch_merge_facts", return_value=(False, True, None, "CLEAN", 1, "a1")) as fetch:
         [cached] = find_merge_blocks(conn, CONFIG, targets, fresh)
     fetch.assert_called_once()
     assert cached.waits == ("comments open",)
@@ -244,13 +244,55 @@ def test_a_stale_queue_reads_github_once_and_an_unreadable_pr_is_refused(tmp_pat
     assert kept.waits == ("comments open",) and kept.error is None
     with transaction(conn):
         conn.execute("UPDATE review_prs SET checks = 'PENDING', merge_block = NULL")
-    with mock.patch("bridge.guard.fetch_merge_facts", return_value=(False, True, "SUCCESS", "CLEAN", 0)):
+    with mock.patch("bridge.guard.fetch_merge_facts", return_value=(False, True, "SUCCESS", "CLEAN", 0, "a1")):
         assert find_merge_blocks(conn, CONFIG, targets, fresh) == []
     with transaction(conn):
         conn.execute("UPDATE review_prs SET checks = NULL")
     with mock.patch("bridge.guard.fetch_merge_facts") as fetch:
         assert find_merge_blocks(conn, CONFIG, targets, fresh) == []
     fetch.assert_not_called()
+
+
+def test_a_merge_refused_for_ci_github_would_not_run_names_github_only_at_the_head_it_was_read_for(
+    tmp_path: Path,
+) -> None:
+    from test_reviews import CONFIG, make_pr
+
+    from bridge.db import connect
+    from bridge.review_github import CI_BLOCKED_BY_BILLING, GitHubError
+    from bridge.reviews import store_ci_blocked_by, store_open_prs
+
+    web = repo(tmp_path / "web")
+    conn = connect(tmp_path / "t.db")
+    with transaction(conn):
+        store_open_prs(conn, [make_pr(ref="pr:Acme/Web#12", repo="Acme/Web", number=12, checks="FAILURE")], 500)
+        conn.execute("""UPDATE review_prs SET approved_by = '["mira"]', reviewed_at = 600""")
+    targets = map_command_to_targets("gh pr merge 12", str(web))
+
+    def line(live_head: str | None = "a1", live: bool = True) -> str:
+        if live:
+            facts = mock.patch(
+                "bridge.guard.fetch_merge_facts", return_value=(False, True, "FAILURE", "CLEAN", 0, live_head)
+            )
+        else:
+            facts = mock.patch("bridge.guard.fetch_merge_facts", side_effect=GitHubError("gh failed: timeout"))
+        with facts:
+            [refused] = find_merge_blocks(conn, CONFIG, targets, 1000)
+        assert refused.waits == ("CI red",)
+        [text] = map_merge_blocks_to_lines([refused], "the owner", "The owner")
+        return text
+
+    assert "is not mergeable yet: CI red. The owner's rule" in line()
+    with transaction(conn):
+        store_ci_blocked_by(conn, "pr:Acme/Web#12", "a1", CI_BLOCKED_BY_BILLING)
+    assert (
+        "is not mergeable yet: CI didn't run: GitHub billing (not a code failure; rerun the failed jobs once GitHub "
+        "runs them again). The owner's rule" in line()
+    )
+    assert "is not mergeable yet: CI red." in line("b2"), "the reason was read for an older head"
+    with transaction(conn):
+        conn.execute("INSERT OR REPLACE INTO review_poll (id, ok_at) VALUES (1, 1000)")
+    assert "CI didn't run: GitHub billing" in line(live=False), "a fresh queue's own reason stands unconfirmed"
 
 
 def test_the_live_read_is_short_and_counts_only_owners_unresolved_threads() -> None:
@@ -264,11 +306,11 @@ def test_the_live_read_is_short_and_counts_only_owners_unresolved_threads() -> N
     review = {"state": "APPROVED", "author": {"__typename": "User", "login": "mira"}}
     answer = {"data": {"repository": {"pullRequest": {
         "isDraft": False, "mergeStateStatus": "CLEAN",
-        "commits": {"nodes": [{"commit": {"statusCheckRollup": None}}]},
+        "commits": {"nodes": [{"commit": {"oid": "a1", "statusCheckRollup": None}}]},
         "reviews": {"nodes": [review]},
         "reviewThreads": {"nodes": [thread(False, CONFIG.review_author.upper()), thread(True, CONFIG.review_author),
                                     thread(False, "mira")]},
     }}}}  # fmt: skip
     with mock.patch("bridge.review_github.run_gh", return_value=json.dumps(answer)) as gh:
-        assert fetch_merge_facts(CONFIG, "Acme/Web", 12) == (False, True, None, "CLEAN", 1)
+        assert fetch_merge_facts(CONFIG, "Acme/Web", 12) == (False, True, None, "CLEAN", 1, "a1")
     assert gh.call_args.args[1] <= 3

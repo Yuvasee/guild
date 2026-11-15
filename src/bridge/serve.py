@@ -1140,6 +1140,13 @@ def map_db_to_snapshot(conn: sqlite3.Connection, config: Config, now: int) -> di
         route_pr,
         config.review_stall_status,
         config.review_bot_name,
+        {
+            str(r["ref"]).lower(): (str(r["ci_blocked_for"]), str(r["ci_blocked_by"]))
+            for r in conn.execute(
+                "SELECT ref, ci_blocked_for, ci_blocked_by FROM review_prs "
+                "WHERE closed_at IS NULL AND ci_blocked_by IS NOT NULL"
+            )
+        },
     )
     return {
         "now": now,

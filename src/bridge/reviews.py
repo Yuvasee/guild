@@ -1,4 +1,5 @@
 import json
+import random
 import re
 import sqlite3
 import time
@@ -44,6 +45,7 @@ from bridge.refs import map_ref_to_label
 from bridge.registry import record_tab_parent
 from bridge.review_github import (
     UNKNOWN_DIFF,
+    ChecksRunning,
     DocDiff,
     FetchedComment,
     GitHubError,
@@ -96,6 +98,7 @@ _GROUP_ORDER = (WAITING_FOR_YOU, READY, BACKPORTS, PUBLISHED, DRAFTS)
 BACKPORT_CHECK_BUDGET_S = 20.0
 BACKPORT_CHECKS_PER_POLL = 2
 """Checks run serially before comments and wakes, so a round waits at most this many budgets for them."""
+CI_REREADS_PER_POLL = 5
 BACKPORT_RECHECK_MS = 15 * 60_000
 """A refused check runs again this often on the same head: a named PR may merge meanwhile."""
 LOC_RULE = 1
@@ -1203,6 +1206,10 @@ def poll_review_queue(
     for ref, repo, head in list_ci_blocks_to_check(conn):
         try:
             blocked_by = fetch_ci_blocked_by(repo, head)
+        except ChecksRunning:
+            with transaction(conn):
+                forget_ci_blocked_by(conn, ref)
+            continue
         except GitHubError as exc:
             print(f"review CI checks of {ref} failed: {exc}", flush=True)
             continue
@@ -1493,15 +1500,23 @@ def map_row_to_merge_blocked_by_github(row: sqlite3.Row) -> str | None:
 
 
 def list_ci_blocks_to_check(conn: sqlite3.Connection) -> list[tuple[str, str, str]]:
-    """(ref, repo, head) of PRs that would get the Merge button but for red CI, not yet read at this head or showing a
-    reason: a re-run keeps the head, and one that fails for real between two polls never shows the rollup change."""
+    """(ref, repo, head) of open PRs with red CI not yet read at this head or showing a reason: a re-run keeps the
+    head, and one that fails for real between two polls never shows the rollup change. Each one that would get the
+    Merge button is read again every poll, the rest a few at random, as a GitHub billing stop turns every PR red."""
     rows = conn.execute(
         """
         SELECT * FROM review_prs WHERE closed_at IS NULL AND checks = 'FAILURE'
         AND (ci_blocked_for IS NOT head_oid OR ci_blocked_by IS NOT NULL)
         """
     ).fetchall()
-    return [(str(r["ref"]), str(r["repo"]), str(r["head_oid"])) for r in rows if is_mergeable_but_for_ci(r)]
+    showing = [r for r in rows if r["ci_blocked_for"] == r["head_oid"] and not is_mergeable_but_for_ci(r)]
+    reread = random.sample(showing, min(CI_REREADS_PER_POLL, len(showing)))
+    return [(str(r["ref"]), str(r["repo"]), str(r["head_oid"])) for r in rows if r not in showing or r in reread]
+
+
+def forget_ci_blocked_by(conn: sqlite3.Connection, ref: str) -> None:
+    """The head is read again next poll."""
+    conn.execute("UPDATE review_prs SET ci_blocked_by = NULL, ci_blocked_for = NULL WHERE ref = ?", (ref,))
 
 
 def store_ci_blocked_by(conn: sqlite3.Connection, ref: str, head_oid: str, blocked_by: str | None) -> None:

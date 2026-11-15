@@ -15,6 +15,7 @@ ISSUE_QUIET_MS = 2 * 3_600_000
 _PRS_NAMED_MAX = 5
 
 STALL = "stall"
+CI_STOPPED = "ci stopped"
 
 IssueRouter = Callable[[str, list[str], list[str]], tuple[str | None, str | None] | None]
 """(issue ref, linked PR refs, merged PR refs meant to close it) to the (surface, handle) of the lead it is for."""
@@ -114,10 +115,12 @@ def find_signals(
     route_pr: PrRouter | None = None,
     stall_context: str = "",
     bot_name: str = "The review bot",
+    ci_blocked: dict[str, tuple[str, str]] | None = None,
 ) -> list[Signal]:
     """PR states that ask for the user's hand (ready to merge, red CI, changes, a stalled review bot), then issues
     that look finished. A PR's signals go to its owner by route_pr; with none found, to the session pick_owner picks.
-    stall_context is the commit status the bot's stall watch sets on a PR's head (review_stall_status)."""
+    stall_context is the commit status the bot's stall watch sets on a PR's head (review_stall_status). ci_blocked
+    maps a lowercased PR ref to (head commit, why GitHub refused to run its CI there)."""
     signals: dict[str, Signal] = {}
     pr_refs = sorted({r for s in sessions for r in s.refs if r.startswith("pr:")})
     for ref in pr_refs:
@@ -125,7 +128,8 @@ def find_signals(
         if not data or "state" not in data:
             continue
         session = pick_owner(ref, data, sessions)
-        found = _pr_signals(ref, data, session, map_ref_to_label(ref), stall_context, bot_name)
+        blocked = (ci_blocked or {}).get(ref.lower())
+        found = _pr_signals(ref, data, session, map_ref_to_label(ref), stall_context, bot_name, blocked)
         routed = route_pr(ref, data) if found and route_pr else None
         for signal in found:
             if routed is not None:
@@ -233,6 +237,7 @@ def _pr_signals(
     number: str,
     stall_context: str = "",
     bot_name: str = "The review bot",
+    ci_blocked: tuple[str, str] | None = None,
 ) -> list[Signal]:
     title = str(data.get("title") or "")
     url = str(data.get("url") or "")
@@ -249,7 +254,10 @@ def _pr_signals(
             why = str(stall.get("description") or "").strip() or "the status gives no reason"
             add(STALL, "action", f"{bot_name} stalled on {number}: {why}", f"{ref}:{STALL}:{oid}")
         if data.get("checks") in _RED:
-            if stall is None or not is_only_red_status(data, stall_context):
+            if ci_blocked is not None and ci_blocked[0] == data.get("head_oid"):
+                why = f"{ci_blocked[1]}, not a code failure: rerun the failed jobs once GitHub runs them again"
+                add(CI_STOPPED, "info", f"{number} {title}: {why}.", f"{ref}:{CI_STOPPED}:{oid}")
+            elif stall is None or not is_only_red_status(data, stall_context):
                 add("ci", "info" if data.get("draft") else "action", f"{number} {title}", f"{ref}:ci:{oid}")
         elif (
             not data.get("stale")

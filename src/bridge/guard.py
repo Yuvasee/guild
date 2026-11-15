@@ -995,6 +995,8 @@ class MergeRefusal:
     held_why: str | None = None
     backport: str | None = None
     """The backport check's verdict: why it needs no approval, or why it still does."""
+    ci_blocked_by: str | None = None
+    """Why CI is red when GitHub itself refused to run it at the head, e.g. its billing."""
 
 
 def list_merge_waits(facts: MergeFacts) -> tuple[str, ...]:
@@ -1082,18 +1084,24 @@ def find_merge_blocks(
         facts = map_row_to_merge_facts(row, row["merge_block"])
         # A fresh cache may still be one poll behind a CI rerun or an approval, so a refusal is confirmed live first.
         cached_waits = list_merge_waits(facts) if fresh else ()
+        head_oid: str | None = row["head_oid"]
         if not fresh or cached_waits:
             try:
                 left = deadline - time.monotonic()
                 if left < MERGE_FACTS_MIN_S:
                     raise GitHubError("out of time before reading GitHub")
-                draft, approved, checks, merge_state, his = fetch_merge_facts(
+                draft, approved, checks, merge_state, his, head_oid = fetch_merge_facts(
                     config, str(row["repo"]), int(row["number"]), min(left, MERGE_FACTS_TIMEOUT_S)
                 )
             except GitHubError as exc:
                 # A fresh cache's own reasons stand when GitHub can't confirm them.
                 refusals.append(
-                    MergeRefusal(ref, cached_waits, facts.merge_block)
+                    MergeRefusal(
+                        ref,
+                        cached_waits,
+                        facts.merge_block,
+                        ci_blocked_by=find_ci_blocked_by(row, cached_waits, head_oid),
+                    )
                     if cached_waits
                     else MergeRefusal(ref, (), row["merge_block"], str(exc))
                 )
@@ -1122,8 +1130,21 @@ def find_merge_blocks(
                     waived.append(f"bridge: {ref.removeprefix('pr:')} may merge: {verdict.reason}.")
             backport = verdict.reason if verdict is not None else None
         if waits:
-            refusals.append(MergeRefusal(ref, waits, facts.merge_block, backport=backport))
+            refusals.append(
+                MergeRefusal(
+                    ref,
+                    waits,
+                    facts.merge_block,
+                    backport=backport,
+                    ci_blocked_by=find_ci_blocked_by(row, waits, head_oid),
+                )
+            )
     return refusals
+
+
+def find_ci_blocked_by(row: sqlite3.Row, waits: tuple[str, ...], head_oid: str | None) -> str | None:
+    """The review queue's GitHub reason for red CI, when the queue read it at this head."""
+    return row["ci_blocked_by"] if CI_RED in waits and head_oid and row["ci_blocked_for"] == head_oid else None
 
 
 def map_merge_blocks_to_lines(refusals: list[MergeRefusal], owner: str, owner_at_start: str) -> list[str]:
@@ -1165,6 +1186,8 @@ def map_wait_to_reason(wait: str, refusal: MergeRefusal, owner: str) -> str:
             f"{owner} has not reviewed it (no Publish, no recorded decision); a colleague's or the bot's approval "
             "does not stand in"
         )
+    if wait == CI_RED and refusal.ci_blocked_by:
+        return f"{refusal.ci_blocked_by} (not a code failure; rerun the failed jobs once GitHub runs them again)"
     if wait == HELD:
         return (
             f"held for {owner}'s review ({refusal.held_why}); the hold ends once {owner} comments or reviews on "

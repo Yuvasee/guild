@@ -30,7 +30,7 @@ from bridge.refs import map_ref_to_label
 from bridge.registry import list_sessions
 from bridge.remote import REMOTE_STALE_AFTER_MS
 from bridge.reviews import find_lead_of
-from bridge.signals import STALL, map_enrichment_to_status
+from bridge.signals import CI_STOPPED, STALL, map_enrichment_to_status
 from bridge.watcher import BLOCKED_AFTER_S
 from bridge.workers import WORKER_CAP
 
@@ -534,8 +534,8 @@ def _is_signal_posted(conn: sqlite3.Connection, key: str) -> bool:
 def _send_signal(
     conn: sqlite3.Connection, signal: dict[str, object], key: str, recipient: Recipient, now: int
 ) -> Recipient:
-    # A stall's text says what it is; every other kind is named after its PR.
-    text = str(signal["text"]) if signal.get("kind") == STALL else f"{signal['text']} ({signal['kind']})"
+    # A stall's or a CI stop's text says what it is; every other kind is named after its PR.
+    text = str(signal["text"]) if signal.get("kind") in (STALL, CI_STOPPED) else f"{signal['text']} ({signal['kind']})"
     result = send_message(conn, Party(SYSTEM_CONVERSATION, "bridge"), [recipient], "info", text, now)
     # Not on the board: routine CI and review are for the lead, and the user must not see them.
     conn.execute(
@@ -545,6 +545,11 @@ def _send_signal(
     conn.execute(
         "INSERT INTO signal_posts (key, message_id, posted_at) VALUES (?, ?, ?)", (key, result.message_id, now)
     )
+    # A head can flip between a real failure and a GitHub stop as jobs are rerun; each flip is news again.
+    kind = str(signal.get("kind"))
+    other = {"ci": CI_STOPPED, CI_STOPPED: "ci"}.get(kind)
+    if other:
+        conn.execute("DELETE FROM signal_posts WHERE key = ?", (key.replace(f":{kind}:", f":{other}:", 1),))
     return recipient
 
 

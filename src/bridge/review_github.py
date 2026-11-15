@@ -49,7 +49,7 @@ _MERGE_FACTS_QUERY = """
 query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) { pullRequest(number: $number) {
     isDraft mergeStateStatus
-    commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+    commits(last: 1) { nodes { commit { oid statusCheckRollup { state } } } }
     reviews(last: 100) { nodes { state author { __typename login } } }
     reviewThreads(first: 100) { nodes { isResolved comments(first: 1) { nodes { author { login } } } } }
   } }
@@ -65,6 +65,7 @@ query($owner: String!, $name: String!, $oid: GitObjectID!) {
 }
 """
 _CHECK_FAILED = frozenset({"FAILURE", "TIMED_OUT", "CANCELLED", "STARTUP_FAILURE", "ACTION_REQUIRED", "ERROR"})
+_STATUS_RUNNING = frozenset({"PENDING", "EXPECTED"})
 # GitHub Actions' own annotation on a job it refused to start, e.g. when the account's payments failed.
 _NOT_STARTED = "the job was not started because"
 _BILLING = ("account payments have failed", "spending limit")
@@ -269,30 +270,35 @@ def fetch_review_threads(config: Config, repo: str, number: int) -> ReviewThread
     return map_threads_to_review_threads(nodes, config.review_author)
 
 
+class ChecksRunning(Exception):
+    """Every failed check so far is a job GitHub refused to start, but another check still runs."""
+
+
 def fetch_merge_facts(
     config: Config, repo: str, number: int, timeout_s: float = _MERGE_FACTS_TIMEOUT_S
-) -> tuple[bool, bool, str | None, str | None, int]:
-    """(draft, approved, CI rollup, merge state, the author's unresolved threads) of one PR, read live for the merge
-    guard."""
+) -> tuple[bool, bool, str | None, str | None, int, str | None]:
+    """(draft, approved, CI rollup, merge state, the author's unresolved threads, head commit) of one PR, read live for
+    the merge guard."""
     owner, _, name = repo.partition("/")
     args = ["api", "graphql", "-f", f"query={_MERGE_FACTS_QUERY}", "-f", f"owner={owner}", "-f", f"name={name}"]
     try:
         raw: Any = json.loads(run_gh([*args, "-F", f"number={number}"], timeout_s))
         pr: Any = raw["data"]["repository"]["pullRequest"]
         commits: list[Any] = pr["commits"]["nodes"]
-        rollup: Any = (commits[-1]["commit"].get("statusCheckRollup") if commits else None) or {}
+        head: Any = commits[-1]["commit"] if commits else {}
+        rollup: Any = head.get("statusCheckRollup") or {}
         reviews: list[Any] = pr["reviews"]["nodes"]
         author = config.review_author.casefold()
         approved = bool(map_reviews_to_approvers(reviews, config)) or is_approved_by_review_bot(reviews, config)
         threads: list[Any] = pr["reviewThreads"]["nodes"]
         his = sum(1 for t in threads if not t.get("isResolved") and _map_thread_to_starter(t) == author)
-        return bool(pr["isDraft"]), approved, rollup.get("state"), pr.get("mergeStateStatus"), his
-    except (ValueError, KeyError, TypeError, IndexError) as exc:
+        return bool(pr["isDraft"]), approved, rollup.get("state"), pr.get("mergeStateStatus"), his, head.get("oid")
+    except (ValueError, KeyError, TypeError, IndexError, AttributeError) as exc:
         raise GitHubError(f"unexpected answer from GitHub: {type(exc).__name__}") from exc
 
 
 def fetch_ci_blocked_by(repo: str, oid: str) -> str | None:
-    """Why GitHub itself kept CI from running at this commit, or None."""
+    """Why GitHub itself kept CI from running at this commit, or None. Raises ChecksRunning."""
     owner, _, name = repo.partition("/")
     args = ["api", "graphql", "-f", f"query={_HEAD_CHECKS_QUERY}", "-f", f"owner={owner}", "-f", f"name={name}"]
     try:
@@ -310,7 +316,8 @@ def fetch_ci_blocked_by(repo: str, oid: str) -> str | None:
 
 
 def map_checks_to_ci_blocked_by(nodes: list[Any]) -> str | None:
-    """A reason only when every failed check is a job GitHub refused to start: one real failure means CI is red."""
+    """A reason only when every failed check is a job GitHub refused to start: one real failure means CI is red. While
+    another check runs it raises ChecksRunning, as that check may still fail for real."""
     failed: list[Any] = [n for n in nodes if n and (n.get("conclusion") or n.get("state")) in _CHECK_FAILED]
     refusals: list[str] = []
     for node in failed:
@@ -323,8 +330,16 @@ def map_checks_to_ci_blocked_by(nodes: list[Any]) -> str | None:
         refusals.append(refusal)
     if not refusals:
         return None
+    if any(_is_check_running(n) for n in nodes if n):
+        raise ChecksRunning
     billing = all(any(words in m for words in _BILLING) for m in refusals)
     return CI_BLOCKED_BY_BILLING if billing else CI_BLOCKED_BY_GITHUB
+
+
+def _is_check_running(node: Any) -> bool:
+    if node.get("__typename") == "StatusContext":
+        return node.get("state") in _STATUS_RUNNING
+    return node.get("conclusion") is None
 
 
 def map_threads_to_review_threads(nodes: list[Any], author: str) -> ReviewThreads:
