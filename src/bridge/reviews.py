@@ -534,6 +534,20 @@ def classify_pending_comments(conn: sqlite3.Connection, config: Config, scanned_
             """,
             (verdict, reason, told_at, owner_asked_at, ref, row["comment_id"]),
         )
+    record_owner_reviews(conn, config)
+
+
+def record_owner_reviews(conn: sqlite3.Connection, config: Config) -> None:
+    """His own words on GitHub are his review, as much as one sent from the page: when his latest came. Read from all
+    his comments each time, so those classified before bridge kept this count too."""
+    conn.execute(
+        """
+        UPDATE review_prs SET owner_reviewed_by = ?, owner_reviewed_at = (
+            SELECT max(created_at) FROM review_comments c WHERE c.ref = review_prs.ref AND c.verdict = ?)
+        WHERE closed_at IS NULL AND ref IN (SELECT ref FROM review_comments WHERE verdict = ?)
+        """,
+        (config.review_author, HIS, HIS),
+    )
 
 
 def classify_review_by_its_comments(

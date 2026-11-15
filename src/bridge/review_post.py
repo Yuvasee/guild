@@ -441,8 +441,8 @@ def ask_for_doc_updates(conn: sqlite3.Connection, config: Config, now: int) -> l
             f"{row['url']} ({row['title']}) moved to {str(row['head_oid'])[:DOC_SHA_CHARS]}, and "
             f"{config.owner_name}'s review doc is at {at[:DOC_SHA_CHARS] or 'an unknown commit'}. Update it for what "
             f"changed, as {REVIEW_DOC_SPEC} lays out; {config.owner_name} has not reviewed it yet, so no Changes since "
-            f"the last review section. {DOC_HEAD_RULE} Keep its Reviews section current. Then register it again: "
-            f"guild review doc {name} /path/file.html."
+            f"the last review section. {DOC_HEAD_RULE} Keep its Reviews section current. Then register it again, which "
+            f"checks the section order and Where to look: guild review doc {name} /path/file.html."
         )
         told.append(tell_owner(conn, owner, text, now))
     return told
