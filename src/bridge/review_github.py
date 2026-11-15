@@ -301,7 +301,8 @@ def fetch_ci_blocked_by(repo: str, oid: str) -> str | None:
         rollup: Any = commit.get("statusCheckRollup") or {}
         contexts: Any = rollup.get("contexts") or {}
         nodes: list[Any] = contexts.get("nodes") or []
-        more = bool((contexts.get("pageInfo") or {}).get("hasNextPage"))
+        page: Any = contexts.get("pageInfo") or {}
+        more = bool(page.get("hasNextPage"))
     except (ValueError, KeyError, TypeError, AttributeError) as exc:
         raise GitHubError(f"unexpected answer from GitHub: {type(exc).__name__}") from exc
     # A real failure may sit past the first page; the button then stays hidden as for any red CI.
@@ -310,10 +311,11 @@ def fetch_ci_blocked_by(repo: str, oid: str) -> str | None:
 
 def map_checks_to_ci_blocked_by(nodes: list[Any]) -> str | None:
     """A reason only when every failed check is a job GitHub refused to start: one real failure means CI is red."""
-    failed = [n for n in nodes if n and (n.get("conclusion") or n.get("state")) in _CHECK_FAILED]
+    failed: list[Any] = [n for n in nodes if n and (n.get("conclusion") or n.get("state")) in _CHECK_FAILED]
     refusals: list[str] = []
     for node in failed:
-        annotations: list[Any] = (node.get("annotations") or {}).get("nodes") or []
+        block: Any = node.get("annotations") or {}
+        annotations: list[Any] = block.get("nodes") or []
         found = [str(a.get("message") or "").lower() for a in annotations if a]
         refusal = next((m for m in found if m.startswith(_NOT_STARTED)), None)
         if refusal is None:
