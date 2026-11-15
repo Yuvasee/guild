@@ -19,6 +19,7 @@ from bridge.review_post import (
     EXTERNAL,
     FAILED,
     INTERRUPTED,
+    POST_STALL_AFTER_MS,
     POSTED,
     POSTED_NO_LINK,
     SEND_TOOL,
@@ -42,6 +43,7 @@ from bridge.review_post import (
     retry_failed_post,
     run_review_post,
     send_to_slack,
+    tell_assistant_of_stalled_posts,
 )
 from bridge.review_worktree import REVIEW_LARGE_LOC
 from bridge.reviews import map_db_to_reviews, store_merge_blocks, store_open_prs
@@ -247,8 +249,23 @@ def publish(conn: sqlite3.Connection, now: int = 1000) -> tuple[list[str], list[
         return advance_posts(conn, CONFIG, now)
 
 
-def post_state(conn: sqlite3.Connection) -> str | None:
-    return conn.execute("SELECT post_state FROM review_prs").fetchone()[0]
+def post_state(conn: sqlite3.Connection, ref: str = REF) -> str | None:
+    return conn.execute("SELECT post_state FROM review_prs WHERE ref = ?", (ref,)).fetchone()[0]
+
+
+PARENT = "pr:Org/app#6"
+
+
+def make_parent(**changes: Any) -> Any:
+    return make_pr(ref=PARENT, number=6, url="https://github.com/Org/app/pull/6", head="dev/base", **changes)
+
+
+def setup_stacked_pr(tmp_path: Path) -> sqlite3.Connection:
+    conn = setup_pr(tmp_path, stack_parent=PARENT, base="dev/base")
+    with transaction(conn):
+        store_open_prs(conn, [make_parent()], 500)
+    add_sentence(conn)
+    return conn
 
 
 def add_sentence(conn: sqlite3.Connection) -> None:
@@ -426,12 +443,94 @@ def test_the_ask_waits_for_an_owner(tmp_path: Path) -> None:
 
 
 def test_a_stacked_pr_waits_until_it_is_first_unmerged(tmp_path: Path) -> None:
-    conn = setup_pr(tmp_path, stack_parent="pr:Org/app#6")
-    add_sentence(conn)
+    conn = setup_stacked_pr(tmp_path)
     assert publish(conn)[0] == [] and post_state(conn) == WAITING_STACK
     with transaction(conn):
         store_open_prs(conn, [make_pr(stack_parent=None)], 1500)
         assert advance_posts(conn, CONFIG, 2000)[0] == [REF]
+
+
+@pytest.mark.parametrize(("parent_state", "link"), [(POSTED, "https://acme.slack.com/archives/C/p1"), (EXTERNAL, "x")])
+def test_a_stacked_pr_posts_once_its_parents_post_is_out_while_the_parent_is_still_open(
+    tmp_path: Path, parent_state: str, link: str
+) -> None:
+    conn = setup_stacked_pr(tmp_path)
+    assert publish(conn)[0] == [] and post_state(conn) == WAITING_STACK
+    with transaction(conn):
+        conn.execute("UPDATE review_prs SET post_state = 'waiting-sentence' WHERE ref = ?", (PARENT,))
+        assert advance_posts(conn, CONFIG, 2000)[0] == []
+        conn.execute("UPDATE review_prs SET post_state = ?, post_link = ? WHERE ref = ?", (parent_state, link, PARENT))
+        assert advance_posts(conn, CONFIG, 3000)[0] == [REF]
+
+
+def test_a_parents_dry_run_releases_its_child_only_while_sending_is_off(tmp_path: Path) -> None:
+    conn = setup_stacked_pr(tmp_path)
+    publish(conn)
+    live = dataclasses.replace(CONFIG, review_post_dry_run=False)
+    with transaction(conn):
+        conn.execute("UPDATE review_prs SET post_state = ? WHERE ref = ?", (DRY_RUN, PARENT))
+        assert advance_posts(conn, live, 2000)[0] == [] and post_state(conn) == WAITING_STACK
+        assert advance_posts(conn, dataclasses.replace(CONFIG, review_post_dry_run=True), 3000)[0] == [REF]
+    with mock.patch("bridge.review_post.send_to_slack") as send:
+        assert run_review_post(conn, live, REF) is None
+    send.assert_not_called()
+    assert post_state(conn) == WAITING_STACK
+
+
+def test_a_pr_stacked_on_a_pr_bridge_does_not_track_posts_at_once(tmp_path: Path) -> None:
+    conn = setup_pr(tmp_path, stack_parent="pr:Org/app#99")
+    add_sentence(conn)
+    assert publish(conn)[0] == [REF]
+
+
+def test_a_post_not_out_15_minutes_after_publish_is_told_to_the_assistant_once_per_state(tmp_path: Path) -> None:
+    conn = setup_pr(tmp_path, stack_parent=PARENT, base="dev/base")
+    due = 1000 + POST_STALL_AFTER_MS
+    with transaction(conn):
+        store_open_prs(conn, [make_parent()], 500)
+        add_session(conn, "c1", "worker", branch="dev/x")
+    assert publish(conn)[0] == [] and post_state(conn) == WAITING_SENTENCE
+    assert "go-ahead" in conn.execute("SELECT body FROM messages").fetchone()[0]
+    with transaction(conn):
+        assert tell_assistant_of_stalled_posts(conn, CONFIG, due) == [], "no assistant to reach: tried again later"
+        add_session(conn, "aide-c", CONFIG.assistant_handle)
+        assert tell_assistant_of_stalled_posts(conn, CONFIG, due - 1) == []
+        told = tell_assistant_of_stalled_posts(conn, CONFIG, due)
+        assert [recipient.handle for _, recipient in told] == [CONFIG.assistant_handle]
+        assert tell_assistant_of_stalled_posts(conn, CONFIG, due + 10 * POST_STALL_AFTER_MS) == [], "once"
+    body = conn.execute("SELECT body FROM messages ORDER BY id DESC").fetchone()[0]
+    assert body.startswith("https://github.com/Org/app/pull/7 (T): ")
+    assert "pressed Publish at 01-01 00:00" in body and "still not out (waiting-sentence)" in body
+    assert "no description yet; bridge asked its owner" in body and 'guild review sentence Org/app#7 "…"' in body
+    # A new state is a new reason: told once more.
+    add_sentence(conn)
+    with transaction(conn):
+        assert advance_posts(conn, CONFIG, due)[0] == [] and post_state(conn) == WAITING_STACK
+        assert len(tell_assistant_of_stalled_posts(conn, CONFIG, due)) == 1
+        assert tell_assistant_of_stalled_posts(conn, CONFIG, due + 1) == []
+    body = conn.execute("SELECT body FROM messages ORDER BY id DESC").fetchone()[0]
+    assert "stacked on https://github.com/Org/app/pull/6, whose post is not out (not published yet)" in body
+    assert "guild review published Org/app#6 <link>; this one follows by itself" in body
+    with transaction(conn):
+        conn.execute("UPDATE review_prs SET post_state = ? WHERE ref = ?", (POSTED, PARENT))
+        assert advance_posts(conn, CONFIG, due + 2)[0] == [REF]
+        assert tell_assistant_of_stalled_posts(conn, CONFIG, due + 3) == []
+
+
+def test_a_stopped_sender_whose_post_was_seen_in_the_channel_is_no_stall(tmp_path: Path) -> None:
+    conn = claimed(tmp_path)
+    due = 1000 + POST_STALL_AFTER_MS
+    with transaction(conn):
+        add_session(conn, "aide-c", CONFIG.assistant_handle)
+        conn.execute("UPDATE review_prs SET post_state = ?", (INTERRUPTED,))
+        conn.execute(
+            "INSERT INTO review_slack_posts (repo, number, ts, link, seen_at) VALUES ('org/app', 7, '1', NULL, 1)"
+        )
+        assert tell_assistant_of_stalled_posts(conn, CONFIG, due) == []
+        conn.execute("DELETE FROM review_slack_posts")
+        assert len(tell_assistant_of_stalled_posts(conn, CONFIG, due)) == 1
+    body = conn.execute("SELECT body FROM messages ORDER BY id DESC").fetchone()[0]
+    assert "if not, guild review repost Org/app#7" in body
 
 
 def test_a_pr_turned_draft_after_publish_holds_its_post(tmp_path: Path) -> None:
@@ -478,7 +577,7 @@ def test_a_sent_post_with_no_link_cannot_be_reopened(tmp_path: Path) -> None:
 def test_the_sender_rechecks_what_changed_since_the_claim(tmp_path: Path) -> None:
     conn = claimed(tmp_path)
     with transaction(conn):
-        store_open_prs(conn, [make_pr(stack_parent="pr:Org/app#6")], 1500)
+        store_open_prs(conn, [make_pr(stack_parent=PARENT), make_parent()], 1500)
     with mock.patch("bridge.review_post.send_to_slack") as send:
         assert run_review_post(conn, LIVE, REF) is None
     send.assert_not_called()
@@ -488,7 +587,7 @@ def test_the_sender_rechecks_what_changed_since_the_claim(tmp_path: Path) -> Non
 def test_the_senders_recheck_does_not_erase_a_post_recorded_by_hand(tmp_path: Path) -> None:
     conn = claimed(tmp_path)
     with transaction(conn):
-        store_open_prs(conn, [make_pr(stack_parent="pr:Org/app#6")], 1500)
+        store_open_prs(conn, [make_pr(stack_parent=PARENT), make_parent()], 1500)
     real = conn.execute
 
     class Interleaved:

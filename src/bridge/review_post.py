@@ -274,7 +274,7 @@ def advance_posts(conn: sqlite3.Connection, config: Config, now: int) -> tuple[l
         if state == SENDING and now - int(row["post_started_at"] or 0) > SENDING_STALE_MS:
             _set_post(conn, ref, INTERRUPTED, "the sender stopped; look in the channel before posting again")
         elif state in _WAITING:
-            next_state = _map_row_to_post_step(row)
+            next_state = _map_row_to_post_step(conn, config, row)
             if next_state == SENDING:
                 conn.execute(
                     "UPDATE review_prs SET post_state = ?, post_started_at = ?, post_detail = NULL WHERE ref = ?",
@@ -302,16 +302,30 @@ def needs_reviewers(row: sqlite3.Row) -> bool:
     return not row["post_direct"] and not row["requested"] and not row["others_reviewed"]
 
 
-def _map_row_to_post_step(row: sqlite3.Row) -> str:
+def _map_row_to_post_step(conn: sqlite3.Connection, config: Config, row: sqlite3.Row) -> str:
     if is_published_elsewhere(row):
         return EXTERNAL
     if row["draft"] and not row["ready_at"]:
         return WAITING_DRAFT
     if not row["sentence"] or not is_short_description(str(row["sentence"])):
         return WAITING_SENTENCE
-    if row["stack_parent"]:
+    if find_unposted_parent(conn, config, row) is not None:
         return WAITING_STACK
     return SENDING
+
+
+def find_unposted_parent(conn: sqlite3.Connection, config: Config, row: sqlite3.Row) -> sqlite3.Row | None:
+    """The open PR this one is stacked on, while its post is not out: the channel reads a stack bottom-up. A parent
+    bridge does not track holds nothing; a parent's dry run counts only while sending is off."""
+    if not row["stack_parent"]:
+        return None
+    parent = conn.execute(
+        "SELECT * FROM review_prs WHERE ref = ? AND closed_at IS NULL", (row["stack_parent"],)
+    ).fetchone()
+    out = (POSTED, POSTED_NO_LINK, DRY_RUN) if config.review_post_dry_run else (POSTED, POSTED_NO_LINK)
+    if parent is None or parent["post_state"] in out or is_published_elsewhere(parent):
+        return None
+    return parent
 
 
 def _set_post(conn: sqlite3.Connection, ref: str, state: str, detail: str | None) -> None:
@@ -326,8 +340,9 @@ def _ask_for_sentence(
         return []
     conn.execute("UPDATE review_prs SET sentence_asked_at = ? WHERE ref = ?", (now, row["ref"]))
     text = (
-        f"{config.owner_name_at_start} is done reviewing {row['url']} ({row['title']}); its "
-        f"{config.review_channel_name} post waits for you. Give its description, at most {DESCRIPTION_MAX_WORDS} "
+        f"{config.owner_name_at_start} is done reviewing {row['url']} ({row['title']}) and pressed Publish, which is "
+        f"{config.owner_name}'s go-ahead for its {config.review_channel_name} post; it waits only for you. "
+        f"Give its description, at most {DESCRIPTION_MAX_WORDS} "
         "words, what it does, not its title and "
         f'with no agent prefix: guild review sentence {row["repo"]}#{row["number"]} "…"'
     )
@@ -480,6 +495,86 @@ def tell_assistant_of_stale_docs(conn: sqlite3.Connection, config: Config, now: 
             conn.execute("UPDATE review_prs SET doc_escalated_at = ? WHERE ref = ?", (now, row["ref"]))
             told.extend(delivered)
     return told
+
+
+POST_STALL_AFTER_MS = 15 * 60_000
+_STALLED = (WAITING_SENTENCE, WAITING_STACK, WAITING_DRAFT, FAILED, INTERRUPTED)
+
+
+def tell_assistant_of_stalled_posts(conn: sqlite3.Connection, config: Config, now: int) -> list[tuple[int, Recipient]]:
+    """Once per post and state: still not out 15 minutes after Publish, the assistant hears why and what unblocks it.
+    Not told while unreachable, so the next round tries again. A post already seen in the channel, as one whose sender
+    stopped after sending, is recorded on the next round instead."""
+    told: list[tuple[int, Recipient]] = []
+    for row in conn.execute(
+        f"""
+        SELECT * FROM review_prs p WHERE closed_at IS NULL AND reviewed_at <= ?
+        AND post_state IN ({", ".join("?" * len(_STALLED))})
+        AND NOT EXISTS (SELECT 1 FROM review_slack_posts s WHERE s.repo = lower(p.repo) AND s.number = p.number)
+        """,
+        (now - POST_STALL_AFTER_MS, *_STALLED),
+    ).fetchall():
+        key = f"post-stall:{row['ref']}:{row['post_state']}"
+        if (
+            is_backport_base(config.backport_bases, str(row["base"]))
+            or conn.execute("SELECT 1 FROM signal_posts WHERE key = ?", (key,)).fetchone()
+        ):
+            continue
+        why, unblock = map_stalled_post_to_reason(conn, config, row)
+        zone = ZoneInfo(config.work_timezone) if config.work_timezone else None
+        published = datetime.fromtimestamp(int(row["reviewed_at"]) / 1000, zone).strftime("%m-%d %H:%M")
+        text = (
+            f"{row['url']} ({row['title']}): {config.owner_name} pressed Publish at {published} and its "
+            f"{config.review_channel_name} post is still not out ({row['post_state']}). Why: {why}. To unblock: "
+            f"{unblock}. bridge tells you once for this state."
+        )
+        delivered = send_from_bridge(conn, config, config.assistant_handle, text, now)
+        if delivered:
+            conn.execute(
+                "INSERT INTO signal_posts (key, message_id, posted_at) VALUES (?, ?, ?)", (key, delivered[0][0], now)
+            )
+            told.extend(delivered)
+    return told
+
+
+def map_stalled_post_to_reason(conn: sqlite3.Connection, config: Config, row: sqlite3.Row) -> tuple[str, str]:
+    name = f"{row['repo']}#{row['number']}"
+    record = f"guild review published {name} <link>"
+    state = row["post_state"]
+    if state == WAITING_SENTENCE:
+        sentence = str(row["sentence"] or "")
+        if sentence:
+            why = f"its stored description has {len(sentence.split())} words, more than {DESCRIPTION_MAX_WORDS}"
+        elif row["sentence_asked_at"] is not None:
+            why = "it has no description yet; bridge asked its owner for one when Publish was pressed"
+        else:
+            why = "it has no description yet, and bridge found no live owner session to ask"
+        return (
+            why,
+            f'its owner or you gives one: guild review sentence {name} "…" (at most {DESCRIPTION_MAX_WORDS} words)',
+        )
+    if state == WAITING_STACK:
+        parent = find_unposted_parent(conn, config, row)
+        if parent is None:
+            return "it is stacked on another PR", "nothing: it goes out on bridge's next round"
+        parent_state = parent["post_state"] or "not published yet"
+        return (
+            f"it is stacked on {parent['url']}, whose post is not out ({parent_state}), and the channel reads a "
+            "stack bottom-up",
+            f"get that post out first, or record a hand post of it with guild review published "
+            f"{parent['repo']}#{parent['number']} <link>; this one follows by itself",
+        )
+    if state == WAITING_DRAFT:
+        return "the PR is a draft on GitHub again", f"its owner marks it ready: gh pr ready {row['url']}"
+    if state == FAILED:
+        return (
+            f"the send failed: {row['post_detail'] or 'no detail'}",
+            f"Retry on the page, or post by hand and {record}",
+        )
+    return (
+        "its sender stopped mid-send, so the post may or may not be in the channel",
+        f"look in {config.review_channel_name}: if it is there, {record}; if not, guild review repost {name}",
+    )
 
 
 CLEANUP_WITHIN_MS = 7 * 24 * 3_600_000
@@ -764,7 +859,7 @@ def run_review_post(conn: sqlite3.Connection, config: Config, ref: str, claim: i
         return None
     own_claim = row["post_started_at"]
     # Things can change between the claim and this start, by a poll of GitHub.
-    step = _map_row_to_post_step(row)
+    step = _map_row_to_post_step(conn, config, row)
     if step != SENDING:
         # Only its own claim: a post recorded by hand meanwhile must stay recorded.
         with transaction(conn):
