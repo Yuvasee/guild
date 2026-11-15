@@ -1580,12 +1580,20 @@ function queueMergeOkButton(pr) {
   return button;
 }
 
+function queueMergeCell(pr) {
+  if (hasCurrentMergeOk(pr)) return "OK sent";
+  if (pr.can_ok_merge) return queueMergeOkButton(pr);
+  if (pr.merge_blocked_by_github) return queueMergeBlockedButton(pr);
+  return queueMergeWord(pr);
+}
+
 // CI is red only because GitHub refused to run it: shown, not hidden, so an outage does not read as a failed PR.
 function queueMergeBlockedButton(pr) {
   const wrap = el("span", "mergeblocked");
   const button = el("button", "act merge", "Merge");
   button.disabled = true;
-  wrap.title = pr.merge_blocked_by_github + ": Merge comes back once CI runs green at " + pr.pr_at;
+  const why = queueMergeWhy(pr);
+  wrap.title = pr.merge_blocked_by_github + ": Merge comes back once CI runs green at " + pr.pr_at + (why ? "; " + why : "");
   wrap.append(button, el("span", "note", pr.merge_blocked_by_github));
   return wrap;
 }
@@ -1883,13 +1891,7 @@ function renderQueueTableRow(pr) {
   queueCell(row, queueReviewWord(pr), pr.resolve_threads.length ? "review yours" : "review", queueReviewWhy(pr));
 
   queueCell(row, queueApprovalWord(pr), "", queueApprovalWhy(pr));
-  if (pr.can_ok_merge && !hasCurrentMergeOk(pr)) {
-    queueCell(row, queueMergeOkButton(pr), "", queueMergeWhy(pr));
-  } else if (pr.merge_blocked_by_github) {
-    queueCell(row, queueMergeBlockedButton(pr), "", null);
-  } else {
-    queueCell(row, hasCurrentMergeOk(pr) ? "OK sent" : queueMergeWord(pr), "", queueMergeWhy(pr));
-  }
+  queueCell(row, queueMergeCell(pr), "", queueMergeWhy(pr));
   const docBehind = pr.doc_stale
     ? pr.doc_behind
     : pr.doc_url ? "the doc matches the PR's newest commit" : pr.large ? "its owner has not registered a doc yet" : null;

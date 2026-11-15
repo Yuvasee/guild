@@ -58,14 +58,13 @@ query($owner: String!, $name: String!, $number: Int!) {
 _HEAD_CHECKS_QUERY = """
 query($owner: String!, $name: String!, $oid: GitObjectID!) {
   repository(owner: $owner, name: $name) { object(oid: $oid) { ... on Commit {
-    statusCheckRollup { contexts(first: 100) {
-    nodes { __typename ... on CheckRun { status conclusion annotations(first: 5) { nodes { message } } }
+    statusCheckRollup { contexts(first: 100) { pageInfo { hasNextPage }
+    nodes { __typename ... on CheckRun { conclusion annotations(first: 5) { nodes { message } } }
       ... on StatusContext { state } }
   } } } } }
 }
 """
 _CHECK_FAILED = frozenset({"FAILURE", "TIMED_OUT", "CANCELLED", "STARTUP_FAILURE", "ACTION_REQUIRED", "ERROR"})
-_STATUS_SETTLED = frozenset({"SUCCESS", "FAILURE", "ERROR"})
 # GitHub Actions' own annotation on a job it refused to start, e.g. when the account's payments failed.
 _NOT_STARTED = "the job was not started because"
 _BILLING = ("account payments have failed", "spending limit")
@@ -292,27 +291,25 @@ def fetch_merge_facts(
         raise GitHubError(f"unexpected answer from GitHub: {type(exc).__name__}") from exc
 
 
-def fetch_ci_blocked_by(repo: str, oid: str) -> tuple[str | None, bool]:
-    """(why GitHub itself kept CI from running at this commit, or None; whether every check has finished)."""
+def fetch_ci_blocked_by(repo: str, oid: str) -> str | None:
+    """Why GitHub itself kept CI from running at this commit, or None."""
     owner, _, name = repo.partition("/")
     args = ["api", "graphql", "-f", f"query={_HEAD_CHECKS_QUERY}", "-f", f"owner={owner}", "-f", f"name={name}"]
     try:
         raw: Any = json.loads(run_gh([*args, "-f", f"oid={oid}"]))
         commit: Any = raw["data"]["repository"]["object"] or {}
         rollup: Any = commit.get("statusCheckRollup") or {}
-        nodes: list[Any] = (rollup.get("contexts") or {}).get("nodes") or []
+        contexts: Any = rollup.get("contexts") or {}
+        nodes: list[Any] = contexts.get("nodes") or []
+        more = bool((contexts.get("pageInfo") or {}).get("hasNextPage"))
     except (ValueError, KeyError, TypeError, AttributeError) as exc:
         raise GitHubError(f"unexpected answer from GitHub: {type(exc).__name__}") from exc
-    return map_checks_to_ci_blocked_by(nodes)
+    # A real failure may sit past the first page; the button then stays hidden as for any red CI.
+    return None if more else map_checks_to_ci_blocked_by(nodes)
 
 
-def map_checks_to_ci_blocked_by(nodes: list[Any]) -> tuple[str | None, bool]:
+def map_checks_to_ci_blocked_by(nodes: list[Any]) -> str | None:
     """A reason only when every failed check is a job GitHub refused to start: one real failure means CI is red."""
-    settled = all(
-        n.get("status") == "COMPLETED" if n.get("__typename") == "CheckRun" else n.get("state") in _STATUS_SETTLED
-        for n in nodes
-        if n
-    )
     failed = [n for n in nodes if n and (n.get("conclusion") or n.get("state")) in _CHECK_FAILED]
     refusals: list[str] = []
     for node in failed:
@@ -320,12 +317,12 @@ def map_checks_to_ci_blocked_by(nodes: list[Any]) -> tuple[str | None, bool]:
         found = [str(a.get("message") or "").lower() for a in annotations if a]
         refusal = next((m for m in found if m.startswith(_NOT_STARTED)), None)
         if refusal is None:
-            return None, settled
+            return None
         refusals.append(refusal)
     if not refusals:
-        return None, settled
+        return None
     billing = all(any(words in m for words in _BILLING) for m in refusals)
-    return (CI_BLOCKED_BY_BILLING if billing else CI_BLOCKED_BY_GITHUB), settled
+    return CI_BLOCKED_BY_BILLING if billing else CI_BLOCKED_BY_GITHUB
 
 
 def map_threads_to_review_threads(nodes: list[Any], author: str) -> ReviewThreads:

@@ -1,4 +1,7 @@
 import json
+import re
+import shutil
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -6,6 +9,7 @@ from unittest import mock
 
 import pytest
 from conftest import BridgeEnv
+from test_status_watchers import STUBS
 
 from bridge.board import BODY_MAX_CHARS, SYSTEM_CONVERSATION
 from bridge.config import Config
@@ -21,6 +25,7 @@ from bridge.review_github import (
     HisThread,
     OpenPr,
     ReviewThreads,
+    fetch_ci_blocked_by,
     fetch_comments,
     has_review_by_others,
     is_approved_by_review_bot,
@@ -1365,38 +1370,41 @@ BILLING_NOTE = (
 def check_run(conclusion: str | None, *notes: str) -> dict[str, Any]:
     return {
         "__typename": "CheckRun",
-        "status": "IN_PROGRESS" if conclusion is None else "COMPLETED",
         "conclusion": conclusion,
         "annotations": {"nodes": [{"message": n} for n in notes]},
     }
 
 
 def test_ci_is_blocked_by_github_only_when_every_failed_check_is_a_job_it_refused_to_start() -> None:
-    passed, skipped = check_run("SUCCESS"), check_run("SKIPPED")
+    passed, skipped, running = check_run("SUCCESS"), check_run("SKIPPED"), check_run(None)
     refused = check_run("FAILURE", "The ubuntu-latest label will migrate", BILLING_NOTE)
-    assert map_checks_to_ci_blocked_by([passed, skipped, refused, refused]) == (CI_BLOCKED_BY_BILLING, True)
+    assert map_checks_to_ci_blocked_by([passed, skipped, running, refused, refused]) == CI_BLOCKED_BY_BILLING
     other = check_run("FAILURE", "The job was not started because the runner group is disabled.")
-    assert map_checks_to_ci_blocked_by([refused, other]) == (CI_BLOCKED_BY_GITHUB, True)
-    assert map_checks_to_ci_blocked_by([refused, check_run("FAILURE", "Process completed with exit code 1.")]) == (
-        None,
-        True,
-    ), "one real failure means CI is red"
-    status = {"__typename": "StatusContext", "state": "ERROR"}
-    assert map_checks_to_ci_blocked_by([refused, status]) == (None, True)
-    pending = {"__typename": "StatusContext", "state": "PENDING"}
-    assert map_checks_to_ci_blocked_by([refused, pending]) == (CI_BLOCKED_BY_BILLING, False)
-    assert map_checks_to_ci_blocked_by([refused, check_run(None)])[1] is False
-    assert map_checks_to_ci_blocked_by([passed]) == (None, True)
+    assert map_checks_to_ci_blocked_by([refused, other]) == CI_BLOCKED_BY_GITHUB
+    real = check_run("FAILURE", "Process completed with exit code 1.")
+    assert map_checks_to_ci_blocked_by([refused, real]) is None, "one real failure means CI is red"
+    assert map_checks_to_ci_blocked_by([refused, {"__typename": "StatusContext", "state": "ERROR"}]) is None
+    assert map_checks_to_ci_blocked_by([passed]) is None
 
 
-def test_merge_shows_disabled_with_the_reason_while_github_refuses_to_run_ci_read_once_per_head(
-    tmp_path: Path,
-) -> None:
+def test_checks_past_the_first_page_leave_ci_red() -> None:
+    def answer(more: bool) -> str:
+        contexts = {"pageInfo": {"hasNextPage": more}, "nodes": [check_run("FAILURE", BILLING_NOTE)]}
+        commit = {"statusCheckRollup": {"contexts": contexts}}
+        return json.dumps({"data": {"repository": {"object": commit}}})
+
+    with mock.patch("bridge.review_github.run_gh", return_value=answer(False)):
+        assert fetch_ci_blocked_by("Org/app", "a1") == CI_BLOCKED_BY_BILLING
+    with mock.patch("bridge.review_github.run_gh", return_value=answer(True)):
+        assert fetch_ci_blocked_by("Org/app", "a1") is None
+
+
+def test_merge_shows_disabled_with_the_reason_while_github_refuses_to_run_ci(tmp_path: Path) -> None:
     conn = setup_pr(tmp_path, bot_cleared=True, checks="FAILURE")
     reads: list[str] = []
-    answer: list[tuple[str | None, bool]] = [(CI_BLOCKED_BY_BILLING, True)]
+    answer: list[str | None] = [CI_BLOCKED_BY_BILLING]
 
-    def fetch(_repo: str, oid: str) -> tuple[str | None, bool]:
+    def fetch(_repo: str, oid: str) -> str | None:
         reads.append(oid)
         return answer[0]
 
@@ -1414,24 +1422,54 @@ def test_merge_shows_disabled_with_the_reason_while_github_refuses_to_run_ci_rea
     assert (view["can_ok_merge"], view["merge_blocked_by_github"]) == (False, CI_BLOCKED_BY_BILLING)
     with pytest.raises(MergeOkRefused), transaction(conn):
         record_merge_ok(conn, CONFIG, REF, "a1", "theo", 700)
+
+    answer[0] = None
+    view = poll(red)
+    assert reads == ["a1", "a1"] and view["merge_blocked_by_github"] is None, (
+        "a re-run at the same head that failed for real between polls: no button"
+    )
     poll(red)
-    assert reads == ["a1"], "read once per head"
+    assert reads == ["a1", "a1"], "a real failure is read once per head"
 
     new_head = replace(red, head_oid="b2", commits=(("a1", 1000), ("b2", 2000)))
-    answer[0] = (None, True)
-    view = poll(new_head)
-    assert reads == ["a1", "b2"] and view["merge_blocked_by_github"] is None, "a real failure: no button"
-
+    answer[0] = CI_BLOCKED_BY_BILLING
+    assert poll(new_head)["merge_blocked_by_github"] == CI_BLOCKED_BY_BILLING and reads[-1] == "b2"
     view = poll(replace(new_head, checks="SUCCESS"))
     assert (view["can_ok_merge"], view["merge_blocked_by_github"]) == (True, None)
-    answer[0] = (CI_BLOCKED_BY_BILLING, False)
-    poll(new_head)
-    poll(new_head)
-    assert reads == ["a1", "b2", "b2", "b2"], "a re-run is read again, and so is a check still running"
-    assert merge_ok_view(conn)["merge_blocked_by_github"] is None
-
+    reads.clear()
     poll(replace(new_head, draft=True))
-    assert len(reads) == 4, "only a PR the button waits on CI for is read"
+    assert reads == [], "only a PR the button waits on CI for is read"
+
+
+def test_merge_cell_shows_the_disabled_button_with_its_reason_unless_an_ok_was_sent(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    assert node, "node is required to check the page script"
+    page = (Path(__file__).parent.parent / "src/bridge/web/guild.html").read_text()
+    script = re.search(r"<script>(.*)</script>", page, re.S)
+    assert script is not None
+    checks = """
+    globalThis.document = {
+      createElement: (tag) => ({ tag, children: [], append(...kids) { this.children.push(...kids); } }),
+    };
+    const eq = (a, b) => { if (a !== b) throw new Error(JSON.stringify(a) + " !== " + JSON.stringify(b)); };
+    const pr = { ref: "pr:Org/app#7", head_oid: "a1", pr_at: "a1", can_ok_merge: false, merge_ok: null,
+                 merge_blocked_by_github: "CI didn't run: GitHub billing", merge_block: null, approvers: [],
+                 merge_state: "BLOCKED", merge_path: null, group: "waiting", held: null, owner: "w",
+                 merge_ok_to: "w", bot_approved: false, approved_by: [], base: "main" };
+    const blocked = queueMergeCell(pr);
+    const [button, note] = blocked.children;
+    eq(button.tag, "button");
+    eq(button.disabled, true);
+    eq(note.textContent, "CI didn't run: GitHub billing");
+    eq(blocked.title.startsWith("CI didn't run: GitHub billing"), true);
+    eq(queueMergeCell({ ...pr, merge_ok: { current: true } }), "OK sent");
+    eq(queueMergeCell({ ...pr, can_ok_merge: true }).disabled, undefined);
+    eq(typeof queueMergeCell({ ...pr, merge_blocked_by_github: null }), "string");
+    """
+    path = tmp_path / "guild.js"
+    path.write_text(STUBS + script.group(1) + checks)
+    done = subprocess.run([node, str(path)], capture_output=True, text=True, timeout=20, check=False)
+    assert done.returncode == 0, done.stderr
 
 
 def test_a_reply_under_owners_account_before_the_prefix_counts_by_its_verdict(tmp_path: Path) -> None:

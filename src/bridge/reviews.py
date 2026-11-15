@@ -1202,14 +1202,12 @@ def poll_review_queue(
             store_review_threads(conn, ref, key, threads)
     for ref, repo, head in list_ci_blocks_to_check(conn):
         try:
-            blocked_by, settled = fetch_ci_blocked_by(repo, head)
+            blocked_by = fetch_ci_blocked_by(repo, head)
         except GitHubError as exc:
             print(f"review CI checks of {ref} failed: {exc}", flush=True)
             continue
-        # A check still running may yet fail for real, so the head is read again next poll.
-        if settled:
-            with transaction(conn):
-                store_ci_blocked_by(conn, ref, head, blocked_by)
+        with transaction(conn):
+            store_ci_blocked_by(conn, ref, head, blocked_by)
     for ref, repo, doc_commit, head in list_docs_to_compare(conn):
         try:
             diff = fetch_doc_diff(repo, doc_commit, head)
@@ -1495,9 +1493,13 @@ def map_row_to_merge_blocked_by_github(row: sqlite3.Row) -> str | None:
 
 
 def list_ci_blocks_to_check(conn: sqlite3.Connection) -> list[tuple[str, str, str]]:
-    """(ref, repo, head) of PRs that would get the Merge button but for red CI, not yet read at this head."""
+    """(ref, repo, head) of PRs that would get the Merge button but for red CI, not yet read at this head or showing a
+    reason: a re-run keeps the head, and one that fails for real between two polls never shows the rollup change."""
     rows = conn.execute(
-        "SELECT * FROM review_prs WHERE closed_at IS NULL AND checks = 'FAILURE' AND ci_blocked_for IS NOT head_oid"
+        """
+        SELECT * FROM review_prs WHERE closed_at IS NULL AND checks = 'FAILURE'
+        AND (ci_blocked_for IS NOT head_oid OR ci_blocked_by IS NOT NULL)
+        """
     ).fetchall()
     return [(str(r["ref"]), str(r["repo"]), str(r["head_oid"])) for r in rows if is_mergeable_but_for_ci(r)]
 
