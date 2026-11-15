@@ -27,6 +27,7 @@ from bridge.review_github import (
     ReviewThreads,
     fetch_ci_blocked_by,
     fetch_comments,
+    fetch_merge_facts,
     has_review_by_others,
     is_approved_by_review_bot,
     is_cleared_by_review_bot,
@@ -1400,7 +1401,7 @@ def test_checks_past_the_first_page_leave_ci_red() -> None:
 
 
 def test_merge_shows_disabled_with_the_reason_while_github_refuses_to_run_ci(tmp_path: Path) -> None:
-    conn = setup_pr(tmp_path, bot_cleared=True, checks="FAILURE")
+    conn = setup_pr(tmp_path, bot_cleared=True, bot_approved=True, checks="FAILURE")
     reads: list[str] = []
     answer: list[str | None] = [CI_BLOCKED_BY_BILLING]
 
@@ -1417,7 +1418,7 @@ def test_merge_shows_disabled_with_the_reason_while_github_refuses_to_run_ci(tmp
             poll_review_queue(conn, CONFIG, 5000, None, None)
         return merge_ok_view(conn)
 
-    red = make_pr(bot_cleared=True, checks="FAILURE")
+    red = make_pr(bot_cleared=True, bot_approved=True, checks="FAILURE")
     view = poll(red)
     assert (view["can_ok_merge"], view["merge_blocked_by_github"]) == (False, CI_BLOCKED_BY_BILLING)
     with pytest.raises(MergeOkRefused), transaction(conn):
@@ -1747,7 +1748,7 @@ def test_an_install_names_its_merge_rule_in_the_ready_and_approval_texts(tmp_pat
 
 
 def test_the_review_bots_approval_counts_and_owners_settled_comments_free_the_merge(tmp_path: Path) -> None:
-    conn = setup_reviewed_pr(tmp_path, bot_approved=True)
+    conn = setup_reviewed_pr(tmp_path, bot_approved=True, bot_cleared=True)
     with transaction(conn):
         add_session(conn, "c1", "worker", branch="dev/x")
     store(conn, comment("p1", at=2000, body="Too complex, refactor"))
@@ -1801,7 +1802,7 @@ def test_owners_open_thread_keeps_an_approved_pr_from_merging(tmp_path: Path) ->
 
 
 def test_a_published_ready_pr_sits_with_the_ready_ones_and_offers_no_second_post(tmp_path: Path) -> None:
-    conn = setup_pr(tmp_path, bot_approved=True)
+    conn = setup_pr(tmp_path, bot_approved=True, bot_cleared=True)
     with transaction(conn):
         conn.execute("UPDATE review_prs SET reviewed_at = 2600, merge_path = 'published'")
     view, _ = ready_view(conn)
@@ -1842,26 +1843,39 @@ def test_the_review_bot_clears_a_head_it_reviewed_without_asking_for_changes() -
     assert not is_cleared_by_review_bot([], "a1", CONFIG)
 
 
-def test_a_merge_ok_at_the_head_stands_in_for_an_approval_until_a_new_commit(tmp_path: Path) -> None:
+def test_the_guards_live_read_counts_the_review_bots_approval_only_at_the_head() -> None:
+    def answer(review_oid: str) -> str:
+        pr = {
+            "isDraft": False, "mergeStateStatus": "CLEAN",
+            "commits": {"nodes": [{"commit": {"oid": "b2", "statusCheckRollup": {"state": "SUCCESS"}}}]},
+            "reviews": {"nodes": [
+                {"state": "APPROVED", "commit": {"oid": review_oid}, "author": {"__typename": "Bot", "login": "bot"}},
+            ]},
+            "reviewThreads": {"nodes": []},
+        }  # fmt: skip
+        return json.dumps({"data": {"repository": {"pullRequest": pr}}})
+
+    with mock.patch("bridge.review_github.run_gh", return_value=answer("b2")):
+        assert fetch_merge_facts(CONFIG, "Org/app", 7)[1] is True
+    with mock.patch("bridge.review_github.run_gh", return_value=answer("a1")):
+        assert fetch_merge_facts(CONFIG, "Org/app", 7)[1] is False, "approved an earlier commit"
+
+
+def test_an_unapproved_pr_gets_no_merge_ok_and_a_press_is_never_an_approval(tmp_path: Path) -> None:
     conn = setup_pr(tmp_path, bot_cleared=True)
-
-    def waits() -> tuple[str, ...]:
-        row = conn.execute("SELECT * FROM review_prs WHERE ref = ?", (REF,)).fetchone()
-        return list_merge_waits(map_row_to_merge_facts(row, None))
-
-    assert NOT_APPROVED in waits()
-    with transaction(conn):
-        add_session(conn, "c1", "worker", branch="dev/x")
+    view = merge_ok_view(conn)
+    assert not view["can_ok_merge"] and "approval" in view["merge_ok_needs"]
+    with pytest.raises(MergeOkRefused, match="approval"), transaction(conn):
         record_merge_ok(conn, CONFIG, REF, "a1", "theo", 700)
-    assert waits() == ()
     with transaction(conn):
-        store_open_prs(conn, [make_pr(bot_cleared=True, head_oid="b2", commits=(("a1", 1000), ("b2", 2000)))], 800)
-    assert NOT_APPROVED in waits() and NOT_OWNER_REVIEWED in waits()
+        conn.execute("UPDATE review_prs SET merge_ok_oid = 'a1'")
+    row = conn.execute("SELECT * FROM review_prs WHERE ref = ?", (REF,)).fetchone()
+    assert NOT_APPROVED in list_merge_waits(map_row_to_merge_facts(row, None))
 
 
 def test_a_backport_gets_the_merge_button_and_its_press_satisfies_the_guard(tmp_path: Path) -> None:
     config = replace(CONFIG, backport_bases=("release/*",))
-    conn = setup_pr(tmp_path, bot_cleared=True, base="release/1.2")
+    conn = setup_pr(tmp_path, approved_by=("mira",), base="release/1.2")
     row = conn.execute("SELECT * FROM review_prs WHERE ref = ?", (REF,)).fetchone()
     assert can_ok_merge(config, row)
     with transaction(conn):
@@ -1897,18 +1911,21 @@ def merge_ok_view(conn: Any) -> dict[str, Any]:
 @pytest.mark.parametrize(
     ("changes", "offered"),
     [
-        ({"bot_cleared": True}, True),
-        ({"bot_cleared": True, "checks": None}, True),
-        ({"bot_cleared": True, "checks": "FAILURE"}, False),
-        ({"bot_cleared": True, "checks": "PENDING"}, False),
-        ({"bot_cleared": True, "draft": True}, False),
-        ({"bot_cleared": True, "stack_parent": "pr:Org/app#6"}, False),
+        ({"bot_cleared": True, "bot_approved": True}, True),
+        ({"bot_cleared": True, "bot_approved": True, "checks": None}, True),
+        ({"approved_by": ("mira",)}, True),
+        ({"approved_by": ("mira",), "base": "release/1.2"}, True),
+        ({"bot_cleared": True}, False),
         ({"bot_approved": True}, False),
-        ({"approved_by": ("mira",)}, False),
+        ({"approved_by": ("mira",), "merge_state": "BLOCKED"}, False),
+        ({"approved_by": ("mira",), "checks": "FAILURE"}, False),
+        ({"approved_by": ("mira",), "checks": "PENDING"}, False),
+        ({"approved_by": ("mira",), "draft": True}, False),
+        ({"approved_by": ("mira",), "stack_parent": "pr:Org/app#6"}, False),
         ({}, False),
     ],
 )
-def test_merge_ok_is_offered_once_the_review_bot_reviewed_the_head_without_blocking_and_ci_is_green(
+def test_merge_ok_is_offered_only_for_an_approved_green_pr_github_would_merge(
     tmp_path: Path, changes: dict[str, Any], offered: bool
 ) -> None:
     conn = setup_pr(tmp_path, **changes)
@@ -1919,7 +1936,7 @@ def test_merge_ok_is_offered_once_the_review_bot_reviewed_the_head_without_block
 
 
 def test_merge_ok_tells_the_owner_once_per_head_and_a_new_commit_voids_it(tmp_path: Path) -> None:
-    conn = setup_pr(tmp_path, bot_cleared=True, merge_state="BLOCKED")
+    conn = setup_pr(tmp_path, bot_cleared=True, bot_approved=True)
     with transaction(conn):
         add_session(conn, "c1", "worker", branch="dev/x")
         message_id, recipient = record_merge_ok(conn, CONFIG, REF, "a1", "theo", 700)
@@ -1927,7 +1944,7 @@ def test_merge_ok_tells_the_owner_once_per_head_and_a_new_commit_voids_it(tmp_pa
     body = conn.execute("SELECT body, from_conversation FROM messages WHERE id = ?", (message_id,)).fetchone()
     assert "OKs merging https://github.com/Org/app/pull/7 (T) at a1" in body[0]
     assert "gh pr merge https://github.com/Org/app/pull/7 --match-head-commit a1" in body[0]
-    assert "BLOCKED" in body[0] and body[1] == SYSTEM_CONVERSATION
+    assert body[1] == SYSTEM_CONVERSATION
     view = merge_ok_view(conn)
     assert view["merge_ok"] == {
         "by": "theo", "at": 700, "sent_to": "worker", "no_owner": False, "head": "a1", "current": True,
@@ -1936,7 +1953,11 @@ def test_merge_ok_tells_the_owner_once_per_head_and_a_new_commit_voids_it(tmp_pa
         record_merge_ok(conn, CONFIG, REF, "a1", "theo", 710)
 
     with transaction(conn):
-        store_open_prs(conn, [make_pr(bot_cleared=True, head_oid="b2", commits=(("a1", 1000), ("b2", 2000)))], 800)
+        store_open_prs(
+            conn,
+            [make_pr(bot_cleared=True, bot_approved=True, head_oid="b2", commits=(("a1", 1000), ("b2", 2000)))],
+            800,
+        )
     view = merge_ok_view(conn)
     assert view["can_ok_merge"] and view["merge_ok"]["current"] is False and view["head_oid"] == "b2"
     with pytest.raises(MergeOkRefused, match="new commits"), transaction(conn):
@@ -1947,7 +1968,7 @@ def test_merge_ok_tells_the_owner_once_per_head_and_a_new_commit_voids_it(tmp_pa
     assert conn.execute("SELECT count(*) FROM review_merge_oks").fetchone()[0] == 2
 
     with transaction(conn):
-        store_open_prs(conn, [make_pr(bot_cleared=True)], 900)
+        store_open_prs(conn, [make_pr(bot_cleared=True, bot_approved=True)], 900)
     restored = merge_ok_view(conn)
     assert restored["merge_ok"]["current"] is True and restored["merge_ok"]["head"] == "a1"
 
@@ -1958,19 +1979,23 @@ def owner_review_waits(conn: Any) -> bool:
 
 
 def test_merge_ok_is_the_owners_word_for_the_guard_until_a_new_commit(tmp_path: Path) -> None:
-    conn = setup_pr(tmp_path, bot_cleared=True)
+    conn = setup_pr(tmp_path, bot_cleared=True, bot_approved=True)
     assert owner_review_waits(conn)
     with transaction(conn):
         add_session(conn, "c1", "worker", branch="dev/x")
         record_merge_ok(conn, CONFIG, REF, "a1", "theo", 700)
     assert not owner_review_waits(conn)
     with transaction(conn):
-        store_open_prs(conn, [make_pr(bot_cleared=True, head_oid="b2", commits=(("a1", 1000), ("b2", 2000)))], 800)
+        store_open_prs(
+            conn,
+            [make_pr(bot_cleared=True, bot_approved=True, head_oid="b2", commits=(("a1", 1000), ("b2", 2000)))],
+            800,
+        )
     assert owner_review_waits(conn)
 
 
 def test_merge_ok_with_no_owner_goes_to_the_assistant(tmp_path: Path) -> None:
-    conn = setup_pr(tmp_path, bot_cleared=True)
+    conn = setup_pr(tmp_path, bot_cleared=True, bot_approved=True)
     assert merge_ok_view(conn)["merge_ok_to"] == CONFIG.assistant_handle
     with pytest.raises(MergeOkRefused, match="cannot be reached"), transaction(conn):
         record_merge_ok(conn, CONFIG, REF, "a1", "theo", 700)

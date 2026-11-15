@@ -35,6 +35,7 @@ from bridge.guard import (
     NOT_OWNER_REVIEWED,
     OWNER_COMMENTS_OPEN,
     READY,
+    is_approved_row,
     list_merge_waits,
     map_row_to_merge_facts,
     sync_claims_flag,
@@ -1474,15 +1475,35 @@ class MergeOkRefused(Exception):
 
 
 def can_ok_merge(config: Config, row: sqlite3.Row) -> bool:
-    """The owner may OK its merge from the page: open, not a draft, reviewed by the review bot at its head without a
-    request for changes (no approval needed), and CI green or none. A backport gets the button too: the press is the
-    owner's word for it at that head. A PR stacked on another PR's branch merges only after that one, so it gets no
-    button of its own."""
-    return is_mergeable_but_for_ci(row) and row["checks"] in (None, "SUCCESS")
+    """The owner may OK its merge from the page: see map_row_to_merge_ok_needs."""
+    return map_row_to_merge_ok_needs(row) is None
+
+
+def map_row_to_merge_ok_needs(row: sqlite3.Row) -> str | None:
+    """What keeps the Merge button off, or None: open, not a draft, not stacked (a stacked PR merges after the one
+    under it), approved by the review bot at its head or by a colleague, CI green or none, and GitHub would not refuse
+    it. A backport gets the button on the same terms."""
+    if not is_mergeable_but_for_ci(row):
+        return map_row_to_unmergeable_why(row)
+    if row["checks"] not in (None, "SUCCESS"):
+        return "CI is not green"
+    if row["merge_state"] == "BLOCKED":
+        return "GitHub would refuse it: branch protection wants an approval it does not have yet"
+    return None
 
 
 def is_mergeable_but_for_ci(row: sqlite3.Row) -> bool:
-    return row["closed_at"] is None and not row["draft"] and row["stack_parent"] is None and bool(row["bot_cleared"])
+    return row["closed_at"] is None and not row["draft"] and row["stack_parent"] is None and is_approved_row(row)
+
+
+def map_row_to_unmergeable_why(row: sqlite3.Row) -> str:
+    if row["closed_at"] is not None:
+        return "closed"
+    if row["draft"]:
+        return "a draft"
+    if row["stack_parent"] is not None:
+        return "stacked: it merges after the PR under it"
+    return "needs a colleague's approval or the review bot's approval of its newest commit"
 
 
 def map_row_to_merge_blocked_by_github(row: sqlite3.Row) -> str | None:
@@ -1539,10 +1560,7 @@ def record_merge_ok(
     if row is None or row["closed_at"] is not None:
         raise MergeOkRefused(f"{ref} is not an open PR in the queue")
     if not can_ok_merge(config, row):
-        raise MergeOkRefused(
-            f"{ref} is not reviewed at its head by {config.review_bot_name} without a request for changes "
-            "with CI green, or is a draft or stacked"
-        )
+        raise MergeOkRefused(f"{ref} cannot get a merge OK: {map_row_to_merge_ok_needs(row)}")
     if head_oid != row["head_oid"]:
         raise MergeOkRefused(f"{ref} has new commits since the page showed it; look at them first")
     if conn.execute("SELECT 1 FROM review_merge_oks WHERE ref = ? AND head_oid = ?", (ref, head_oid)).fetchone():
@@ -1574,23 +1592,14 @@ def map_merge_ok_to_text(config: Config, row: sqlite3.Row, no_owner: bool) -> st
     command = f"gh pr merge {url} --match-head-commit {oid}"
     given = (
         f"{config.owner_name_at_start} OKs merging {url} ({row['title']}) at {oid}: they pressed Merge on the Guild "
-        f"page, as {config.review_bot_name} reviewed this commit without asking for changes and CI is green. A new "
-        "commit voids this OK."
-    )
-    blocked = (
-        " GitHub reports its merge BLOCKED (branch protection may want a person's review), so the guard or GitHub may "
-        f"refuse it; if so, tell {config.owner_name} why through {config.assistant_handle}."
-        if row["merge_state"] == "BLOCKED"
-        else ""
+        f"page, as it is approved and CI is green. A new commit voids this OK."
     )
     if no_owner:
         return (
             f"{given} No session owns it, so it came to you: find its lead and pass this on, to merge it now through "
-            f"the guard as usual ({command}).{blocked}"
+            f"the guard as usual ({command})."
         )
-    return (
-        f"{given} Merge it now, through the guard as usual: {command}.{blocked} Deploys still need {config.owner_name}."
-    )
+    return f"{given} Merge it now, through the guard as usual: {command}. Deploys still need {config.owner_name}."
 
 
 def map_db_to_reviews(conn: sqlite3.Connection, config: Config, now: int) -> dict[str, object]:
@@ -1778,6 +1787,7 @@ def map_row_to_review(conn: sqlite3.Connection, config: Config, row: sqlite3.Row
         "merge_path": row["merge_path"],
         "head_oid": row["head_oid"],
         "can_ok_merge": can_ok_merge(config, row),
+        "merge_ok_needs": map_row_to_merge_ok_needs(row),
         "merge_blocked_by_github": map_row_to_merge_blocked_by_github(row),
         "merge_ok": load_merge_ok(conn, ref, str(row["head_oid"])),
         "merge_ok_to": owner.handle if owner else config.assistant_handle,

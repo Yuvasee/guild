@@ -1025,17 +1025,20 @@ def list_merge_waits(facts: MergeFacts) -> tuple[str, ...]:
 
 
 def has_merge_ok_at_head(row: sqlite3.Row) -> bool:
-    """The owner pressed Merge for this head: offered only once the review bot reviewed it without blocking."""
+    """The owner pressed Merge for this head: their word on it, never an approval."""
     return row["merge_ok_oid"] is not None and row["merge_ok_oid"] == row["head_oid"]
+
+
+def is_approved_row(row: sqlite3.Row) -> bool:
+    """A colleague's latest verdict is an approval, or the review bot approved and its latest review is of the head."""
+    bot = bool(row["bot_cleared"]) and bool(row["bot_approved"])
+    return bot or bool(json.loads(str(row["approved_by"] or "[]")))
 
 
 def map_row_to_merge_facts(row: sqlite3.Row, merge_block: str | None) -> MergeFacts:
     return MergeFacts(
         draft=bool(row["draft"]),
-        approved=bool(row["bot_approved"])
-        or bool(json.loads(str(row["approved_by"] or "[]")))
-        or row["approval_waived_at"] is not None
-        or has_merge_ok_at_head(row),
+        approved=is_approved_row(row) or row["approval_waived_at"] is not None,
         checks=row["checks"],
         merge_state=row["merge_state"],
         merge_block=merge_block,
@@ -1105,7 +1108,7 @@ def find_merge_blocks(
             # The owner's recorded waiver stands in for a GitHub approval; GitHub itself may not require one.
             facts = MergeFacts(
                 draft,
-                approved or row["approval_waived_at"] is not None or has_merge_ok_at_head(row),
+                approved or row["approval_waived_at"] is not None,
                 checks,
                 merge_state,
                 block,

@@ -1760,6 +1760,14 @@ function queueMergeWord(pr) {
   return pr.merge_state === "BEHIND" ? "behind " + pr.base : QUEUE_MERGE[pr.merge_state] || "–";
 }
 
+function queueMergeCellWhy(pr) {
+  // Why there is no Merge button comes first, so the owner sees what is missing without reading the rule.
+  const needs = !pr.can_ok_merge && !pr.merge_blocked_by_github && !hasCurrentMergeOk(pr) && pr.merge_ok_needs
+    ? "No Merge button: " + pr.merge_ok_needs : null;
+  const why = queueMergeWhy(pr);
+  return needs && why ? needs + ". " + why : needs || why;
+}
+
 function queueMergeWhy(pr) {
   if (pr.merge_block) return "Your comments: " + pr.merge_block + "; whatever the approvals, it is not merged until they are settled";
   const botOnly = pr.merge_state === "BLOCKED" && pr.bot_approved && !pr.approved_by.length;
@@ -1891,7 +1899,7 @@ function renderQueueTableRow(pr) {
   queueCell(row, queueReviewWord(pr), pr.resolve_threads.length ? "review yours" : "review", queueReviewWhy(pr));
 
   queueCell(row, queueApprovalWord(pr), "", queueApprovalWhy(pr));
-  queueCell(row, queueMergeCell(pr), "", queueMergeWhy(pr));
+  queueCell(row, queueMergeCell(pr), "", queueMergeCellWhy(pr));
   const docBehind = pr.doc_stale
     ? pr.doc_behind
     : pr.doc_url ? "the doc matches the PR's newest commit" : pr.large ? "its owner has not registered a doc yet" : null;

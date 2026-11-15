@@ -49,8 +49,8 @@ _MERGE_FACTS_QUERY = """
 query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) { pullRequest(number: $number) {
     isDraft mergeStateStatus
-    commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
-    reviews(last: 100) { nodes { state author { __typename login } } }
+    commits(last: 1) { nodes { commit { oid statusCheckRollup { state } } } }
+    reviews(last: 100) { nodes { state commit { oid } author { __typename login } } }
     reviewThreads(first: 100) { nodes { isResolved comments(first: 1) { nodes { author { login } } } } }
   } }
 }
@@ -283,7 +283,9 @@ def fetch_merge_facts(
         rollup: Any = (commits[-1]["commit"].get("statusCheckRollup") if commits else None) or {}
         reviews: list[Any] = pr["reviews"]["nodes"]
         author = config.review_author.casefold()
-        approved = bool(map_reviews_to_approvers(reviews, config)) or is_approved_by_review_bot(reviews, config)
+        head = str(commits[-1]["commit"].get("oid") or "") if commits else ""
+        bot = is_approved_by_review_bot(reviews, config) and is_cleared_by_review_bot(reviews, head, config)
+        approved = bool(map_reviews_to_approvers(reviews, config)) or bot
         threads: list[Any] = pr["reviewThreads"]["nodes"]
         his = sum(1 for t in threads if not t.get("isResolved") and _map_thread_to_starter(t) == author)
         return bool(pr["isDraft"]), approved, rollup.get("state"), pr.get("mergeStateStatus"), his
