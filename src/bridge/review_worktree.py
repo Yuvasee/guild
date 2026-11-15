@@ -18,6 +18,8 @@ from bridge.backport import is_backport_base
 from bridge.config import Config, state_dir
 from bridge.db import now_ms, transaction
 from bridge.doc_nav import convert_doc_to_viewable
+from bridge.leads import REVIEW_DOC_SPEC
+from bridge.review_doc_check import find_doc_problems
 from bridge.review_marks import convert_reviews_to_text, map_html_to_reviews
 
 FRESH_FOR_PREPARING_MS = 14 * 24 * 3_600_000
@@ -119,9 +121,13 @@ def is_worth_preparing(row: sqlite3.Row, config: Config, now: int) -> bool:
         return False
     if row["draft"] or row["closed_at"] is not None or int(row["loc"]) < REVIEW_LARGE_LOC:
         return False
-    if row["reviewed_at"] or row["owner_reviewed_at"] or row["post_state"] == "external":
+    if has_owner_reviewed(row) or row["post_state"] == "external":
         return False
     return now - _map_iso_to_ms(str(row["updated_at"])) <= FRESH_FOR_PREPARING_MS
+
+
+def has_owner_reviewed(row: sqlite3.Row) -> bool:
+    return bool(row["reviewed_at"] or row["owner_reviewed_at"])
 
 
 def _map_iso_to_ms(value: str) -> int:
@@ -961,20 +967,26 @@ def review_docs_dir() -> Path:
 def register_doc(conn: sqlite3.Connection, config: Config, ref: str, source: Path, now: int) -> None:
     """Copied in, so the page serves what was registered and never follows a path it was handed later. A new doc starts
     the update requests and the assistant's notice over."""
-    row = conn.execute("SELECT repo, number, head_oid FROM review_prs WHERE ref = ?", (ref,)).fetchone()
+    row = conn.execute("SELECT * FROM review_prs WHERE ref = ?", (ref,)).fetchone()
     if row is None:
         raise DocError(f"{ref} is not in the queue")
     if source.suffix.lower() not in (".html", ".htm") or not source.is_file():
         raise DocError(f"{source} is not an HTML file")
     if source.stat().st_size > DOC_MAX_BYTES:
         raise DocError(f"{source} is over {DOC_MAX_BYTES // 1_000_000} MB")
+    page = source.read_bytes()
+    commit = read_doc_head(page) or str(row["head_oid"])
+    files = list_files_at(Path(str(row["wt_path"])), commit) if row["wt_path"] else None
+    problems = find_doc_problems(page, has_owner_reviewed(row), config.owner_name, files)
+    if problems:
+        listed = "".join(f"\n- {problem}" for problem in problems)
+        raise DocError(f"{ref}: the doc was not registered, as {REVIEW_DOC_SPEC} asks:{listed}")
     name = f"{str(row['repo']).replace('/', '-')}-{row['number']}.html"
     target = review_docs_dir() / name
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix(".tmp")
-    shutil.copyfile(source, temporary)
+    temporary.write_bytes(page)
     temporary.replace(target)
-    html = target.read_bytes()
     conn.execute(
         """
         UPDATE review_prs SET doc_file = ?, doc_oid = ?, doc_at = ?, doc_head = ?, doc_reviews = ?,
@@ -985,11 +997,29 @@ def register_doc(conn: sqlite3.Connection, config: Config, ref: str, source: Pat
             name,
             row["head_oid"],
             now,
-            read_doc_head(html),
-            convert_reviews_to_text(map_html_to_reviews(html, config.review_names)),
+            read_doc_head(page),
+            convert_reviews_to_text(map_html_to_reviews(page, config.review_names)),
             ref,
         ),
     )
+
+
+def list_files_at(worktree: Path, commit: str) -> frozenset[str] | None:
+    """Every file and directory of the commit, read from the review worktree's repo rather than its checkout, which
+    may still stand at an earlier push; None when there is no worktree or it does not have that commit."""
+    if not worktree.is_dir():
+        return None
+    try:
+        listed = subprocess.run(
+            ["git", "-C", str(worktree), "ls-tree", "-r", "-t", "--name-only", "-z", commit],
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            timeout=60,
+            check=True,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return frozenset(name.decode("utf-8", "replace") for name in listed.split(b"\0") if name)
 
 
 def count_doc_terms(html: bytes) -> int:

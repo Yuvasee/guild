@@ -738,11 +738,11 @@ def test_a_doc_is_copied_in_and_goes_stale_with_new_commits(tmp_path: Path, monk
     config = config_for(tmp_path)
     conn = setup_pr(tmp_path, **large())
     source = tmp_path / "doc.html"
-    source.write_text("<h1>v1</h1>")
+    source.write_text("<h2>In short</h2>v1")
     with transaction(conn):
         register_doc(conn, REVIEWS_CONFIG, REF, source, NOW)
     source.write_text("<h1>changed after</h1>")
-    assert read_registered_doc(conn, "Org/app", 7) == b"<h1>v1</h1>"
+    assert read_registered_doc(conn, "Org/app", 7) == b"<h2>In short</h2>v1"
     view = map_db_to_reviews(conn, config, NOW)["prs"][0]  # type: ignore[index]
     assert (view["doc_url"], view["doc_stale"]) == ("/reviews/Org/app/7/doc", False)
     with transaction(conn):
@@ -759,7 +759,7 @@ def test_a_doc_whose_head_marker_matches_the_pr_is_current_however_it_was_regist
     head = "c0ffee123" + "0" * 31
     conn = setup_pr(tmp_path, **large())
     source = tmp_path / "doc.html"
-    source.write_text(f'<html><head><meta content="{head}" name="pr-head"></head><body><h1>v2</h1></body></html>')
+    source.write_text(f'<html><head><meta content="{head}" name="pr-head"></head><body><h2>In short</h2></body></html>')
     with transaction(conn):
         register_doc(conn, REVIEWS_CONFIG, REF, source, NOW)
     views: Any = map_db_to_reviews(conn, config, NOW)["prs"]
@@ -797,7 +797,7 @@ def test_a_doc_registered_before_markers_were_read_gets_its_marker_once(
     config = config_for(tmp_path)
     conn = setup_pr(tmp_path, head_oid="c3" * 20, **large())
     source = tmp_path / "doc.html"
-    source.write_text(f'<meta name="pr-head" content="{"c3" * 20}"><h1>doc</h1>')
+    source.write_text(f'<meta name="pr-head" content="{"c3" * 20}"><h2>In short</h2>')
     with transaction(conn):
         register_doc(conn, REVIEWS_CONFIG, REF, source, NOW)
         conn.execute("UPDATE review_prs SET doc_head = NULL, doc_oid = 'old'")
@@ -822,7 +822,7 @@ def test_each_new_head_asks_the_owner_once_to_update_the_doc_and_the_row_says_ho
     config = config_for(tmp_path)
     conn = setup_pr(tmp_path, **large())
     source = tmp_path / "doc.html"
-    source.write_text('<meta name="pr-head" content="a1a1a1a1a1">')
+    source.write_text('<meta name="pr-head" content="a1a1a1a1a1"><h2>In short</h2>')
     with transaction(conn):
         add_session(conn, "c1", "worker", branch="dev/x")
         conn.execute("UPDATE review_prs SET head_oid = 'a1a1a1a1a1'")
@@ -855,7 +855,7 @@ def test_a_doc_registered_for_a_push_bridge_has_not_read_yet_is_not_called_behin
     config = config_for(tmp_path)
     conn = setup_pr(tmp_path, **large())
     source = tmp_path / "doc.html"
-    source.write_text('<meta name="pr-head" content="b2b2b2b2b2">')
+    source.write_text('<meta name="pr-head" content="b2b2b2b2b2"><h2>In short</h2>')
     with transaction(conn):
         add_session(conn, "c1", "worker", branch="dev/x")
         conn.execute("UPDATE review_prs SET head_oid = 'a1a1a1a1a1'")
@@ -889,7 +889,7 @@ def test_the_page_serves_registered_docs_only_and_sandboxed(
     http_request(f"{dashboard}/reviews/Org/app/8/doc", expect=404)
     http_request(f"{dashboard}/reviews/..%2F..%2Fetc/passwd/7/doc", expect=404)
     source = tmp_path / "d.html"
-    source.write_text("<h1>doc</h1>")
+    source.write_text("<h2>In short</h2>")
     done = bridge_env.cli("sessions")
     assert done.returncode == 0
     env = bridge_env.env
@@ -899,7 +899,7 @@ def test_the_page_serves_registered_docs_only_and_sandboxed(
 
     with urllib.request.urlopen(f"{dashboard}/reviews/Org/app/7/doc", timeout=5) as response:
         served = response.read()
-        assert served.endswith(b"<h1>doc</h1>") and b'<style id="bridge-doc-view">' in served
+        assert served.endswith(b"<h2>In short</h2>") and b'<style id="bridge-doc-view">' in served
         assert response.headers["Content-Security-Policy"] == "sandbox allow-scripts"
         assert response.headers["Cache-Control"] == "no-store"
 
@@ -1069,16 +1069,16 @@ def test_a_large_pr_is_ready_for_the_owner_only_once_its_doc_names_codex_and_cla
     pr, ranking = view()
     assert pr["reviews_gap"] == "no doc yet" and REF not in ranking
     for html, gap, ran in (
-        ("<h1>Doc</h1><p>codex, Claude</p>", "doc lacks Reviews section", []),
-        ("<h2>Reviews</h2><p>ReviewBot: none</p>", "Codex / Claude review missing", ["ReviewBot"]),
-        ("<h2>Reviews</h2><p>Codex: 2 fixed in abc</p>", "Claude review missing", ["Codex"]),
+        ("<h2>In short</h2><p>codex, Claude</p>", "doc lacks Reviews section", []),
+        ("<h2>In short</h2><h2>Reviews</h2><p>ReviewBot: none</p>", "Codex / Claude review missing", ["ReviewBot"]),
+        ("<h2>In short</h2><h2>Reviews</h2><p>Codex: 2 fixed in abc</p>", "Claude review missing", ["Codex"]),
     ):
         source.write_text(html)
         with transaction(conn):
             register_doc(conn, REVIEWS_CONFIG, REF, source, NOW)
         pr, ranking = view()
         assert (pr["reviews_gap"], pr["reviews_ran"]) == (gap, ran) and REF not in ranking
-    source.write_text("<h2>Reviews</h2><p>Codex: fixed in abc. Claude: deferred, PROJ-1</p>")
+    source.write_text("<h2>In short</h2><h2>Reviews</h2><p>Codex: fixed in abc. Claude: deferred, PROJ-1</p>")
     with transaction(conn):
         register_doc(conn, REVIEWS_CONFIG, REF, source, NOW)
     pr, ranking = view()
@@ -1098,7 +1098,7 @@ def test_a_doc_registered_before_reviews_were_read_gets_them_once(
     monkeypatch.setenv("BRIDGE_STATE_DIR", str(tmp_path / "state"))
     conn = setup_pr(tmp_path, **large())
     source = tmp_path / "doc.html"
-    source.write_text("<h2>Reviews</h2><p>Codex, Claude</p>")
+    source.write_text("<h2>In short</h2><h2>Reviews</h2><p>Codex, Claude</p>")
     with transaction(conn):
         register_doc(conn, REVIEWS_CONFIG, REF, source, NOW)
         conn.execute("UPDATE review_prs SET doc_reviews = NULL")

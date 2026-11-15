@@ -65,7 +65,7 @@ Use these `h2` headings, in this order, worded as here. Inside a section, use `h
 | 3 | **How it works** | The mechanism, with diagrams: flow, sequence, data, where it runs. One `h3` per mechanism. Tables for structured facts (what each counter or field means). Extra essence sections, if any (for example, infrastructure the PR needs), go here as `h3`s or as `h2`s right after this one. |
 | 4 | **Decisions** | One folded block per decision. Open ones first, marked `needs-decision`: the summary line is the question and the recommendation; the body has the options, what each costs, and why. Then the ones taken, marked `decided`: the summary line is what was chosen; the body has the alternatives and why. |
 | 5 | **Costs and risks** | One folded block per cost or risk: the summary line is what it is and its handling; the body makes it clear without guessing (below). |
-| 6 | **Where to look** | Files and functions in reading order, one line each with what to check there; the local worktree path. Kept visible: the owner uses it every time. |
+| 6 | **Where to look** | Files in reading order, one row per file with what to check there (its functions too); the local worktree path in a paragraph above them. Kept visible: the owner uses it every time. |
 | 7 | **Tests** | Short: one line per test or group, or a small table (test, what it proves). What no test covers, one line. Detail, if any, folded. |
 | 8 | **Reviews** | One folded block per review that ran (Codex, the review bot, others). Summary line: who, how many findings, the outcome in a few words. Body: each finding one line with its outcome: fixed in `<commit>` / deferred: reason + issue / rejected: reason. Bridge reads this section: until it names every review the install requires (`required_reviews`) the PR is not ready for the owner. |
 | 9 | **Verified and not verified** | `h3` Tested live (required): what ran in a live environment for the PR (a preview, staging) and what it showed, marked `observed`; what could not run there and why. `h3` Verified: what else was run or checked and what it showed, one plain line each with its mark; hashes, run ids and logs folded. `h3` Not verified: what was not, why, and who would notice and when. |
@@ -75,6 +75,15 @@ The doc always opens with **In short**, written for a reader with no context: wh
 before it: no 'changed since' or update box at the top, even right after an update. What changed goes only in
 **Changes since the last review**, which exists only once the owner has reviewed an earlier head, and stays last
 and folded.
+
+In **Where to look**, each file is named once, by its full path from the repo root (`src/app/run.py`, not `run.py`,
+`.../app/run.py` or a home or worktree path). Each row is a list item or table row whose first `<code>` is that path;
+a line number after it (`run.py:40-52`) is fine.
+
+`guild review doc` refuses a doc whose first `h2` is not **In short**, that has **Changes since the last review**
+before the owner's review or anywhere but last, or whose **Where to look** names a file twice, gives a path not from
+the repo root, or, when the PR has a review worktree, a path the commit in `pr-head` does not have. Whether the doc
+reads plainly and holds no leftovers of an earlier design no check can tell: that stays the writer's job.
 
 A section with nothing in it says so in one line rather than disappearing, except **Decisions** and **Changes since
 the last review**, which are left out when empty.
