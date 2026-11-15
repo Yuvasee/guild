@@ -1546,6 +1546,26 @@ function renderResolveRow(pr) {
   return row;
 }
 
+const ANSWERED_LABEL = { true: "Resolved", false: "Answered, open", null: "Answered" };
+
+// An agent's answer to the owner's thread stays a day, resolved or not: an agent resolves under the owner's login.
+function renderAnsweredRow(pr) {
+  const row = el("tr", "resolve");
+  row.append(el("td"));
+  const cell = el("td");
+  cell.colSpan = QUEUE_COLUMNS.length - 1;
+  pr.answered_threads.forEach((thread) => {
+    const line = el("span", "thread");
+    line.append(queueLink(thread.url, ANSWERED_LABEL[thread.resolved], "open the thread on GitHub"));
+    line.append(": you “" + thread.his + "”, reply “" + thread.quote + "”");
+    thread.commits.forEach((commit) => line.append(" · ", queueLink(commit.url, commit.sha, "the commit the reply names")));
+    if (thread.resolved !== true) line.firstChild.classList.add("label");
+    cell.append(line);
+  });
+  row.append(cell);
+  return row;
+}
+
 function hasCurrentMergeOk(pr) {
   return Boolean(pr.merge_ok && pr.merge_ok.current);
 }
@@ -1949,6 +1969,7 @@ function renderQueueGroup(title, prs, first) {
   prs.forEach((pr, index) => {
     const rows = [renderQueueTableRow(pr)];
     if (pr.resolve_threads.length) rows.push(renderResolveRow(pr));
+    if (pr.answered_threads.length) rows.push(renderAnsweredRow(pr));
     if (wantsMergeOkRow(pr)) rows.push(renderMergeOkRow(pr));
     if (queueForm && queueForm.ref === pr.ref && (pr.can_publish || pr.can_repost)) rows.push(renderPublishForm(pr));
     rows.forEach((row, at) => {

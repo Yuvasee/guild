@@ -2174,3 +2174,101 @@ def test_the_poll_reads_whether_an_enabling_pr_lacks_how_this_will_be_used() -> 
     }  # fmt: skip
     assert map_node_to_open_pr(node, CONFIG).usage_missing == "Opt-in setting"
     assert map_node_to_open_pr({**node, "body": "## How this will be used\nPlan."}, CONFIG).usage_missing is None
+
+
+ANSWERED_AT = PREFIX_FROM_MS + 10_000
+FIX_OID = "ca982cb39ebbae8c5095315bd8c4ae7191039c12"
+
+
+def inline(comment_id: str, at: int, body: str, author: str = "me", parent: tuple[str, str] | None = None) -> Any:
+    url = f"https://github.com/Org/app/pull/7#discussion_r{comment_id[1:]}"
+    return FetchedComment(comment_id, author, at, body, url, *(parent or (None, None)))
+
+
+def answered_view(conn: Any, *comments: FetchedComment, threads: tuple[HisThread, ...] = (), now: int = 0) -> Any:
+    """The owner's threads after GitHub resolved every one not in `threads`."""
+    pr = make_pr(
+        approved_by=("bot",),
+        open_threads=len(threads),
+        thread_flags="r" + "o" * len(threads),
+        commits=(("a1", 1000), (FIX_OID, ANSWERED_AT)),
+    )
+    with transaction(conn):
+        store_open_prs(conn, [pr], 600)
+        store_comments(conn, CONFIG, REF, "U", list(comments))
+        classify_pending_comments(conn, CONFIG, ANSWERED_AT + 100_000)
+        store_review_threads(conn, REF, map_pr_to_threads_key(pr), ReviewThreads(len(threads), threads))
+        store_merge_blocks(conn)
+    return map_db_to_reviews(conn, CONFIG, now or ANSWERED_AT + 60_000)["prs"][0]  # type: ignore[index]
+
+
+QUESTION = inline("p1", ANSWERED_AT - 5000, "Why do we have these header arrays here and nowhere else?")
+FIXED_REPLY = inline("p2", ANSWERED_AT, "🤖 Claude: No good reason; removed in ca982cb39.", parent=("p1", "me"))
+
+
+def test_owners_thread_an_agent_answered_and_resolved_under_his_login_shows_its_reply_and_commit(
+    tmp_path: Path,
+) -> None:
+    view = answered_view(setup_pr(tmp_path), QUESTION, FIXED_REPLY)
+    assert view["resolve_threads"] == []
+    assert view["answered_threads"] == [
+        {
+            "url": "https://github.com/Org/app/pull/7#discussion_r1",
+            "his": "Why do we have these header arrays here and nowhere else?",
+            "quote": "No good reason; removed in ca982cb39.",
+            "commits": [{"sha": "ca982cb39", "url": f"https://github.com/Org/app/pull/7/commits/{FIX_OID}"}],
+            "resolved": True,
+        }
+    ]
+
+
+def test_an_answered_thread_still_open_shows_as_open_unless_the_resolve_line_already_quotes_it(
+    tmp_path: Path,
+) -> None:
+    conn = setup_pr(tmp_path)
+    answered = HisThread(QUESTION.url, 1, "p2", "me", FIXED_REPLY.body)
+    waiting = HisThread("https://github.com/Org/app/pull/7#discussion_r3", 0, None, "me", "And this?")
+    view = answered_view(conn, QUESTION, FIXED_REPLY, threads=(answered, waiting))
+    assert [(t["url"], t["resolved"]) for t in view["answered_threads"]] == [(QUESTION.url, False)]
+    view = answered_view(conn, threads=(answered,))
+    assert len(view["resolve_threads"]) == 1 and view["answered_threads"] == []
+
+
+def test_no_line_without_an_agent_reply_for_a_colleagues_thread_or_after_a_day(tmp_path: Path) -> None:
+    conn = setup_pr(tmp_path)
+    assert answered_view(conn, QUESTION)["answered_threads"] == []
+    theirs = inline("p5", ANSWERED_AT - 5000, "Rename this?", author="kai")
+    reply = inline("p6", ANSWERED_AT, "🤖 Claude: Renamed in ca982cb39.", parent=("p5", "kai"))
+    assert answered_view(conn, theirs, reply)["answered_threads"] == []
+    assert conn.execute("SELECT verdict FROM review_comments WHERE comment_id = 'p5'").fetchone()[0] == COLLEAGUE
+    assert len(answered_view(conn, FIXED_REPLY)["answered_threads"]) == 1
+    day_later = ANSWERED_AT + 24 * 3_600_000 + 1
+    assert answered_view(conn, now=day_later)["answered_threads"] == []
+
+
+def test_answered_line_names_its_state_and_links_the_thread_and_commit(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    assert node, "node is required to check the page script"
+    page = (Path(__file__).parent.parent / "src/bridge/web/guild.html").read_text()
+    script = re.search(r"<script>(.*)</script>", page, re.S)
+    assert script is not None
+    checks = """
+    globalThis.document = {
+      createElement: (tag) => ({ tag, children: [], classList: { add() {} },
+        append(...kids) { this.children.push(...kids); }, get firstChild() { return this.children[0]; } }),
+    };
+    const eq = (a, b) => { if (a !== b) throw new Error(JSON.stringify(a) + " !== " + JSON.stringify(b)); };
+    const thread = { url: "https://t/1", his: "Why?", quote: "Removed in ca982cb39.", resolved: true,
+                     commits: [{ sha: "ca982cb39", url: "https://c/1" }] };
+    const row = renderAnsweredRow({ answered_threads: [thread, { ...thread, resolved: false, commits: [] }] });
+    const [resolved, open] = row.children[1].children;
+    eq(resolved.children[0].textContent, "Resolved");
+    eq(resolved.children[0].href, "https://t/1");
+    eq(resolved.children[1], ": you “Why?”, reply “Removed in ca982cb39.”");
+    eq(resolved.children[3].href, "https://c/1");
+    eq(open.children[0].textContent, "Answered, open");
+    """
+    path = tmp_path / "guild.js"
+    path.write_text(STUBS + script.group(1) + checks)
+    done = subprocess.run([node, str(path)], capture_output=True, text=True, timeout=20, check=False)
+    assert done.returncode == 0, done.stderr

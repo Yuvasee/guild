@@ -112,6 +112,10 @@ APPROVED = "APPROVED"
 CHANGES_REQUESTED = "CHANGES_REQUESTED"
 AGENT_PREFIX = CLAUDE_PREFIX
 QUOTE_MAX_CHARS = 140
+HIS_QUOTE_MAX_CHARS = 80
+ANSWERED_SHOWN_MS = 24 * HOUR_MS
+"""How long an agent's answer to one of the owner's threads stays on the page: the day the owner looks back on."""
+_SHA_RE = re.compile(r"\b[0-9a-f]{7,40}\b")
 
 _PERMALINK_TS_RE = re.compile(r"/archives/\w+/p(\d{10})(\d{6})(?:\D|$)")
 _REPO_PATH_RE = re.compile(r"repos/([\w.-]+/[\w.-]+)/(?:pulls|issues)/(\d+)/")
@@ -1369,9 +1373,49 @@ def _is_thread_answered(conn: sqlite3.Connection, config: Config, ref: str, thre
     return verdict is not None and verdict[0] == AGENT
 
 
-def map_reply_to_quote(body: str) -> str:
+def map_reply_to_quote(body: str, limit: int = QUOTE_MAX_CHARS) -> str:
     text = " ".join(body.strip().removeprefix(AGENT_PREFIX).split())
-    return text if len(text) <= QUOTE_MAX_CHARS else text[: QUOTE_MAX_CHARS - 1].rstrip() + "…"
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def map_row_to_answered_threads(
+    conn: sqlite3.Connection, row: sqlite3.Row, now: int, shown: list[dict[str, str]]
+) -> list[dict[str, object]]:
+    """The owner's threads an agent answered in the last day, with the commits the answer names. An agent resolves a
+    thread under the owner's login too, so the answer, not the resolver, tells that the owner's point was handled."""
+    ref = str(row["ref"])
+    replies = conn.execute(
+        """
+        SELECT h.url, h.body AS his_body, r.body, r.created_at FROM review_comments h
+        JOIN review_comments r ON r.ref = h.ref AND r.parent_id = h.comment_id AND r.verdict = ?
+        WHERE h.ref = ? AND h.verdict = ? AND h.parent_id IS NULL
+        ORDER BY r.created_at
+        """,
+        (AGENT, ref, HIS),
+    ).fetchall()
+    latest = {str(r["url"]): r for r in replies}
+    shown_urls = {t["url"] for t in shown}
+    open_urls = {str(t["url"]) for t in json.loads(str(row["his_threads"] or "[]"))}
+    oids = [str(r[0]) for r in conn.execute("SELECT oid FROM review_heads WHERE ref = ?", (ref,))]
+    answered: list[dict[str, object]] = []
+    for url, reply in latest.items():
+        if url in shown_urls or int(reply["created_at"]) < now - ANSWERED_SHOWN_MS:
+            continue
+        commits = [
+            {"sha": sha, "url": f"{row['url']}/commits/{oid}"}
+            for sha in dict.fromkeys(_SHA_RE.findall(str(reply["body"])))
+            if (oid := next((o for o in oids if o.startswith(sha)), None))
+        ]
+        answered.append(
+            {
+                "url": url,
+                "his": map_reply_to_quote(str(reply["his_body"]), HIS_QUOTE_MAX_CHARS),
+                "quote": map_reply_to_quote(str(reply["body"])),
+                "commits": commits,
+                "resolved": url not in open_urls if _are_threads_current(row) else None,
+            }
+        )
+    return answered
 
 
 def store_merge_blocks(conn: sqlite3.Connection) -> None:
@@ -1782,6 +1826,7 @@ def map_row_to_review(conn: sqlite3.Connection, config: Config, row: sqlite3.Row
         "base": row["base"],
         "merge_block": row["merge_block"],
         "resolve_threads": resolve_threads,
+        "answered_threads": map_row_to_answered_threads(conn, row, now, resolve_threads),
         "resolve_is_last": is_resolving_all_that_is_left(row),
         "can_publish": group in (WAITING_FOR_YOU, READY) and not row["reviewed_at"] and row["post_state"] != "external",
         "merge_path": row["merge_path"],
