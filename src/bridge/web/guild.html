@@ -2028,7 +2028,14 @@ function renderQueue() {
   } else if (!queue.error) {
     box.append(el("div", "quiet", "No open PRs."));
   }
-  if (queue.error) box.append(el("div", "quiet", "GitHub is not answering: " + queue.error));
+  if (queue.error) {
+    // One failed poll is usually GitHub's brief hiccup; the owner should only worry once good refreshes stop.
+    const github = queue.github;
+    const lasting = !github.ok_at || state.now - github.ok_at > github.stale_s * 1000;
+    const head = lasting ? "GitHub has not answered for a while" : "GitHub did not answer the last refresh, usually brief";
+    const last = github.ok_at ? "last good refresh " + agoWords(state.now - github.ok_at) : "no good refresh yet";
+    box.append(el("div", "quiet", head + " (" + queue.error + "); " + last + "; retrying every " + github.every_s + " s."));
+  }
   const rules = queueFold("rules", queue.dry_run ? "How this list works · dry run: Publish sends nothing to Slack" : "How this list works");
   for (const rule of queue.rules) rules.append(el("div", "quiet", rule));
   box.append(rules);
