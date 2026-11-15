@@ -450,16 +450,23 @@ def ask_for_doc_updates(conn: sqlite3.Connection, config: Config, now: int) -> l
 
 def tell_assistant_of_stale_docs(conn: sqlite3.Connection, config: Config, now: int) -> list[tuple[int, Recipient]]:
     """Once per registered doc: still behind an hour after its first update request, the assistant hears which PR,
-    who was asked and when. Not told while unreachable, so the next round tries again."""
+    who was asked and when. Not told while unreachable, so the next round tries again. A doc current again, as after
+    a push that undid the code, ends that wait: a later push starts a new hour."""
     told: list[tuple[int, Recipient]] = []
     for row in conn.execute(
         """
         SELECT * FROM review_prs WHERE closed_at IS NULL AND doc_file IS NOT NULL AND doc_escalated_at IS NULL
-        AND doc_update_first_at <= ?
-        """,
-        (now - DOC_ESCALATE_AFTER_MS,),
+        AND doc_update_first_at IS NOT NULL
+        """
     ).fetchall():
-        if map_row_to_doc_heads(row)[1] or not is_worth_preparing(row, config, now):
+        at, current = map_row_to_doc_heads(row)
+        if current:
+            conn.execute("UPDATE review_prs SET doc_update_first_at = NULL WHERE ref = ?", (row["ref"],))
+            continue
+        if row["doc_diff_for"] != map_doc_to_diff_key(at, str(row["head_oid"])):
+            # The poll has not compared this head yet: it may hold only comments, or undo the change.
+            continue
+        if int(row["doc_update_first_at"]) > now - DOC_ESCALATE_AFTER_MS or not is_worth_preparing(row, config, now):
             continue
         zone = ZoneInfo(config.work_timezone) if config.work_timezone else None
         asked = datetime.fromtimestamp(int(row["doc_update_first_at"]) / 1000, zone).strftime("%m-%d %H:%M")

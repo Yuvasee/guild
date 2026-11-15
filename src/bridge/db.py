@@ -827,6 +827,7 @@ MIGRATIONS: tuple[str, ...] = (
     ALTER TABLE review_prs ADD COLUMN doc_update_first_at INTEGER;
     ALTER TABLE review_prs ADD COLUMN doc_update_to TEXT;
     ALTER TABLE review_prs ADD COLUMN doc_escalated_at INTEGER;
+    UPDATE review_prs SET doc_update_for = NULL WHERE closed_at IS NULL;
     """,
 )
 

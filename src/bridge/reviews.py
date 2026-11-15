@@ -887,9 +887,9 @@ def find_owner(
 
 def find_last_pusher(conn: sqlite3.Connection, config: Config, repo: str, head: str) -> Owner | None:
     """The session that last committed or pushed to the PR's branch while it is live, its lead once it has ended. Only
-    the latest writer counts: an earlier one may have handed the branch on, so when the latest maps to no one the
-    caller falls back to the PR's owner."""
-    row = conn.execute(
+    the latest writer in the PR's repo counts: an earlier one may have handed the branch on, so when the latest maps
+    to no one the caller falls back to the PR's owner."""
+    rows = conn.execute(
         """
         SELECT i.conversation_id, i.surface, i.repo, i.ended_at, s.handle FROM review_branch_writes w
         JOIN instances i ON i.instance_id = (
@@ -900,8 +900,9 @@ def find_last_pusher(conn: sqlite3.Connection, config: Config, repo: str, head: 
         WHERE w.branch = ? ORDER BY w.at DESC
         """,
         (head,),
-    ).fetchone()
-    if row is None or (row["repo"] is not None and config.pr_repo_for(row["repo"]) != repo):
+    ).fetchall()
+    row = next((r for r in rows if r["repo"] is None or config.pr_repo_for(r["repo"]) == repo), None)
+    if row is None:
         return None
     if is_conversation_locked(conn, config, str(row["conversation_id"])):
         return None

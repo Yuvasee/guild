@@ -362,7 +362,9 @@ def is_docs_file(path: str) -> bool:
 
 def is_comment_line(path: str, line: str) -> bool:
     """A whole line that is blank or a comment in its file's language; a file of an unknown language has none, so a
-    change there makes the doc stale. A docstring is code here: a line alone cannot tell it from a string."""
+    change there makes the doc stale. A line alone cannot tell a docstring, or a # inside a multi-line string or a
+    heredoc, from its surroundings: a docstring counts as code, those two as comments. A block comment's middle line
+    (" * text") counts as code, as in C it can be a dereference."""
     text = line.strip()
     if not text:
         return True
@@ -371,7 +373,9 @@ def is_comment_line(path: str, line: str) -> bool:
     if kind in _HASH_COMMENTED:
         return text.startswith("#")
     if kind in _SLASH_COMMENTED:
-        return text.startswith(("//", "/*", "*/")) or text == "*" or text.startswith("* ")
+        if text.startswith("/*"):
+            return "*/" not in text or (text.endswith("*/") and text.count("*/") == 1)
+        return text.startswith("//") or text in ("*", "*/")
     if kind in _DASH_COMMENTED:
         return text.startswith("--")
     return False
@@ -385,7 +389,8 @@ def count_code_lines_in_patch(path: str, patch: str) -> int:
 
 def map_compare_to_doc_diff(raw: Any) -> DocDiff:
     """From GitHub's compare of the doc's commit with the head. A file GitHub gives no patch for (binary, too large)
-    counts in full and is never only comments."""
+    counts in full and is never only comments; a file renamed from or to code is never only comments; a list GitHub
+    cut short has no line count."""
     status = raw.get("status")
     if status == "identical":
         return DocDiff(0, 0, True)
@@ -396,7 +401,10 @@ def map_compare_to_doc_diff(raw: Any) -> DocDiff:
     complete = len(files) < COMPARE_FILES_MAX
     for row in files:
         path = str(row.get("filename") or "")
-        if is_docs_file(path):
+        previous = str(row.get("previous_filename") or path)
+        if row.get("status") == "renamed" and not (is_docs_file(path) and is_docs_file(previous)):
+            complete = False
+        if is_docs_file(path) and is_docs_file(previous):
             continue
         patch = row.get("patch")
         if isinstance(patch, str):
@@ -404,7 +412,8 @@ def map_compare_to_doc_diff(raw: Any) -> DocDiff:
         else:
             complete = False
             lines += int(row.get("additions") or 0) + int(row.get("deletions") or 0)
-    return DocDiff(int(raw.get("ahead_by") or 0), lines, complete and lines == 0)
+    cut = len(files) >= COMPARE_FILES_MAX
+    return DocDiff(int(raw.get("ahead_by") or 0), None if cut else lines, complete and lines == 0)
 
 
 def fetch_doc_diff(repo: str, doc_commit: str, head: str) -> DocDiff:

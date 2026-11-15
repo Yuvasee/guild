@@ -39,7 +39,7 @@ def compare(*files: dict[str, Any], status: str = "ahead", ahead_by: int = 2) ->
 def test_a_compare_of_only_comments_and_docs_leaves_the_doc_current() -> None:
     reworded = {"filename": "app/svc.py", "patch": "@@ -3,2 +3,2 @@\n-    # old why\n+    # new why\n \n+\n"}
     readme = {"filename": "README.md", "patch": "@@ -1 +1 @@\n-x = 1\n+x = 2"}
-    jsdoc = {"filename": "web/a.ts", "patch": "@@ -1,3 +1,3 @@\n- * old\n+ * new\n-// a\n+/* b */"}
+    jsdoc = {"filename": "web/a.ts", "patch": "@@ -1,3 +1,3 @@\n-/** old */\n+/** new */\n-// a\n+/* b\n+*/"}
     assert map_compare_to_doc_diff(compare(reworded, readme, jsdoc)) == DocDiff(2, 0, True)
 
 
@@ -55,9 +55,15 @@ def test_when_unsure_the_doc_is_stale() -> None:
     unknown = {"filename": "app/run.xyz", "patch": "@@ -1 +1 @@\n-# a\n+# b"}
     assert map_compare_to_doc_diff(compare(unknown)) == DocDiff(2, 2, False), "a language it does not know"
     many = [{"filename": f"d{n}.md", "patch": "@@ -1 +1 @@\n-a\n+b"} for n in range(300)]
-    assert map_compare_to_doc_diff(compare(*many)).cosmetic is False, "GitHub may have cut the file list"
+    assert map_compare_to_doc_diff(compare(*many)) == DocDiff(2, None, False), "GitHub may have cut the file list"
     assert map_compare_to_doc_diff(compare(status="diverged")) == UNKNOWN_DIFF, "rebased or force-pushed since"
     assert not is_comment_line("a.c", "*p = 1;"), "a C dereference is code"
+    assert not is_comment_line("a.c", "* p = 1;"), "so is a block comment's middle line, which looks the same"
+    assert not is_comment_line("a.ts", "/* why */ run();"), "code after a comment"
+    moved = {"filename": "old.md", "previous_filename": "app.py", "status": "renamed", "additions": 0, "deletions": 0}
+    assert map_compare_to_doc_diff(compare(moved)).cosmetic is False, "code renamed into a docs file"
+    moved_docs = {**moved, "previous_filename": "notes.md"}
+    assert map_compare_to_doc_diff(compare(moved_docs)).cosmetic is True
     assert not is_comment_line("a.py", '    """A docstring line."""'), "a line alone cannot tell it from a string"
 
 
@@ -160,6 +166,17 @@ def test_with_no_known_pusher_the_ask_goes_to_the_recorded_owner(
     assert [recipient.handle for _, recipient in told] == ["quinn"]
 
 
+def test_a_later_push_to_a_same_named_branch_in_another_repo_does_not_hide_the_prs_pusher(tmp_path: Path) -> None:
+    config = config_for(tmp_path)
+    conn = setup_pr(tmp_path)
+    with transaction(conn):
+        add_session(conn, "mine", "fixer", branch="dev/x")
+        add_session(conn, "theirs", "elsewhere", branch="dev/x", repo="Org/other")
+        conn.execute("UPDATE review_branch_writes SET at = 9 WHERE conversation_id = 'theirs'")
+    pusher = find_last_pusher(conn, config, "Org/app", "dev/x")
+    assert pusher is not None and pusher.handle == "fixer"
+
+
 def test_a_doc_still_behind_an_hour_after_the_first_ask_is_told_to_the_assistant_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -187,6 +204,30 @@ def test_a_doc_still_behind_an_hour_after_the_first_ask_is_told_to_the_assistant
         compare_docs(conn, DocDiff(1, 2, False))
         assert len(ask_for_doc_updates(conn, config, NOW + 2 * DOC_ESCALATE_AFTER_MS)) == 1
         assert len(tell_assistant_of_stale_docs(conn, config, NOW + 3 * DOC_ESCALATE_AFTER_MS)) == 1
+
+
+def test_no_notice_before_the_poll_compared_the_new_head_and_a_doc_current_again_starts_a_new_hour(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = config_for(tmp_path)
+    conn = stale_pr(tmp_path, monkeypatch)
+    later = NOW + 2 * DOC_ESCALATE_AFTER_MS
+    with transaction(conn):
+        add_session(conn, "w", "fixer", branch="dev/x")
+        add_session(conn, "aide-c", config.assistant_handle)
+        compare_docs(conn)
+        assert len(ask_for_doc_updates(conn, config, NOW)) == 1
+        # A push that undoes the change: stored by the poll, not compared yet.
+        store_open_prs(conn, [make_pr(head_oid="f" * 40, **large())], NOW)
+        assert tell_assistant_of_stale_docs(conn, config, later) == []
+        compare_docs(conn, DocDiff(2, 0, True))
+        assert tell_assistant_of_stale_docs(conn, config, later) == []
+        assert conn.execute("SELECT doc_update_first_at FROM review_prs").fetchone()[0] is None
+        store_open_prs(conn, [make_pr(head_oid="a" * 40, **large())], NOW)
+        compare_docs(conn)
+        assert len(ask_for_doc_updates(conn, config, later)) == 1
+        assert tell_assistant_of_stale_docs(conn, config, later + 60_000) == [], "a new hour from this ask"
+        assert len(tell_assistant_of_stale_docs(conn, config, later + DOC_ESCALATE_AFTER_MS)) == 1
 
 
 def test_a_current_doc_is_never_told_to_the_assistant(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
