@@ -55,6 +55,22 @@ query($owner: String!, $name: String!, $number: Int!) {
   } }
 }
 """
+_HEAD_CHECKS_QUERY = """
+query($owner: String!, $name: String!, $oid: GitObjectID!) {
+  repository(owner: $owner, name: $name) { object(oid: $oid) { ... on Commit {
+    statusCheckRollup { contexts(first: 100) {
+    nodes { __typename ... on CheckRun { status conclusion annotations(first: 5) { nodes { message } } }
+      ... on StatusContext { state } }
+  } } } } }
+}
+"""
+_CHECK_FAILED = frozenset({"FAILURE", "TIMED_OUT", "CANCELLED", "STARTUP_FAILURE", "ACTION_REQUIRED", "ERROR"})
+_STATUS_SETTLED = frozenset({"SUCCESS", "FAILURE", "ERROR"})
+# GitHub Actions' own annotation on a job it refused to start, e.g. when the account's payments failed.
+_NOT_STARTED = "the job was not started because"
+_BILLING = ("account payments have failed", "spending limit")
+CI_BLOCKED_BY_BILLING = "CI didn't run: GitHub billing"
+CI_BLOCKED_BY_GITHUB = "CI didn't run: GitHub didn't start the jobs"
 # The merge guard runs inside a 5 s hook: a read cut short must still end in its refusal.
 _MERGE_FACTS_TIMEOUT_S = 3
 PENDING = "PENDING"
@@ -274,6 +290,42 @@ def fetch_merge_facts(
         return bool(pr["isDraft"]), approved, rollup.get("state"), pr.get("mergeStateStatus"), his
     except (ValueError, KeyError, TypeError, IndexError) as exc:
         raise GitHubError(f"unexpected answer from GitHub: {type(exc).__name__}") from exc
+
+
+def fetch_ci_blocked_by(repo: str, oid: str) -> tuple[str | None, bool]:
+    """(why GitHub itself kept CI from running at this commit, or None; whether every check has finished)."""
+    owner, _, name = repo.partition("/")
+    args = ["api", "graphql", "-f", f"query={_HEAD_CHECKS_QUERY}", "-f", f"owner={owner}", "-f", f"name={name}"]
+    try:
+        raw: Any = json.loads(run_gh([*args, "-f", f"oid={oid}"]))
+        commit: Any = raw["data"]["repository"]["object"] or {}
+        rollup: Any = commit.get("statusCheckRollup") or {}
+        nodes: list[Any] = (rollup.get("contexts") or {}).get("nodes") or []
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise GitHubError(f"unexpected answer from GitHub: {type(exc).__name__}") from exc
+    return map_checks_to_ci_blocked_by(nodes)
+
+
+def map_checks_to_ci_blocked_by(nodes: list[Any]) -> tuple[str | None, bool]:
+    """A reason only when every failed check is a job GitHub refused to start: one real failure means CI is red."""
+    settled = all(
+        n.get("status") == "COMPLETED" if n.get("__typename") == "CheckRun" else n.get("state") in _STATUS_SETTLED
+        for n in nodes
+        if n
+    )
+    failed = [n for n in nodes if n and (n.get("conclusion") or n.get("state")) in _CHECK_FAILED]
+    refusals: list[str] = []
+    for node in failed:
+        annotations: list[Any] = (node.get("annotations") or {}).get("nodes") or []
+        found = [str(a.get("message") or "").lower() for a in annotations if a]
+        refusal = next((m for m in found if m.startswith(_NOT_STARTED)), None)
+        if refusal is None:
+            return None, settled
+        refusals.append(refusal)
+    if not refusals:
+        return None, settled
+    billing = all(any(words in m for words in _BILLING) for m in refusals)
+    return (CI_BLOCKED_BY_BILLING if billing else CI_BLOCKED_BY_GITHUB), settled
 
 
 def map_threads_to_review_threads(nodes: list[Any], author: str) -> ReviewThreads:

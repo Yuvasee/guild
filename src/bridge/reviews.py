@@ -49,6 +49,7 @@ from bridge.review_github import (
     GitHubError,
     OpenPr,
     ReviewThreads,
+    fetch_ci_blocked_by,
     fetch_comments,
     fetch_doc_diff,
     fetch_open_prs,
@@ -175,6 +176,8 @@ def store_open_prs(conn: sqlite3.Connection, prs: list[OpenPr], now: int) -> Non
                 usage_missing = excluded.usage_missing,
                 approved_by = excluded.approved_by, bot_approved = excluded.bot_approved,
                 bot_cleared = excluded.bot_cleared,
+                ci_blocked_by = CASE WHEN excluded.checks = 'FAILURE' THEN ci_blocked_by END,
+                ci_blocked_for = CASE WHEN excluded.checks = 'FAILURE' THEN ci_blocked_for END,
                 others_reviewed = max(coalesce(others_reviewed, 0), excluded.others_reviewed),
                 merge_state = excluded.merge_state, in_merge_queue = excluded.in_merge_queue,
                 commit_oids = excluded.commit_oids,
@@ -1197,6 +1200,16 @@ def poll_review_queue(
             continue
         with transaction(conn):
             store_review_threads(conn, ref, key, threads)
+    for ref, repo, head in list_ci_blocks_to_check(conn):
+        try:
+            blocked_by, settled = fetch_ci_blocked_by(repo, head)
+        except GitHubError as exc:
+            print(f"review CI checks of {ref} failed: {exc}", flush=True)
+            continue
+        # A check still running may yet fail for real, so the head is read again next poll.
+        if settled:
+            with transaction(conn):
+                store_ci_blocked_by(conn, ref, head, blocked_by)
     for ref, repo, doc_commit, head in list_docs_to_compare(conn):
         try:
             diff = fetch_doc_diff(repo, doc_commit, head)
@@ -1467,12 +1480,32 @@ def can_ok_merge(config: Config, row: sqlite3.Row) -> bool:
     request for changes (no approval needed), and CI green or none. A backport gets the button too: the press is the
     owner's word for it at that head. A PR stacked on another PR's branch merges only after that one, so it gets no
     button of its own."""
-    return (
-        row["closed_at"] is None
-        and not row["draft"]
-        and row["stack_parent"] is None
-        and bool(row["bot_cleared"])
-        and row["checks"] in (None, "SUCCESS")
+    return is_mergeable_but_for_ci(row) and row["checks"] in (None, "SUCCESS")
+
+
+def is_mergeable_but_for_ci(row: sqlite3.Row) -> bool:
+    return row["closed_at"] is None and not row["draft"] and row["stack_parent"] is None and bool(row["bot_cleared"])
+
+
+def map_row_to_merge_blocked_by_github(row: sqlite3.Row) -> str | None:
+    """Why the Merge button shows disabled: CI is red only because GitHub refused to run it at this head."""
+    if row["checks"] != "FAILURE" or row["ci_blocked_for"] != row["head_oid"] or not is_mergeable_but_for_ci(row):
+        return None
+    return row["ci_blocked_by"]
+
+
+def list_ci_blocks_to_check(conn: sqlite3.Connection) -> list[tuple[str, str, str]]:
+    """(ref, repo, head) of PRs that would get the Merge button but for red CI, not yet read at this head."""
+    rows = conn.execute(
+        "SELECT * FROM review_prs WHERE closed_at IS NULL AND checks = 'FAILURE' AND ci_blocked_for IS NOT head_oid"
+    ).fetchall()
+    return [(str(r["ref"]), str(r["repo"]), str(r["head_oid"])) for r in rows if is_mergeable_but_for_ci(r)]
+
+
+def store_ci_blocked_by(conn: sqlite3.Connection, ref: str, head_oid: str, blocked_by: str | None) -> None:
+    conn.execute(
+        "UPDATE review_prs SET ci_blocked_by = ?, ci_blocked_for = ? WHERE ref = ? AND head_oid = ?",
+        (blocked_by, head_oid, ref, head_oid),
     )
 
 
@@ -1743,6 +1776,7 @@ def map_row_to_review(conn: sqlite3.Connection, config: Config, row: sqlite3.Row
         "merge_path": row["merge_path"],
         "head_oid": row["head_oid"],
         "can_ok_merge": can_ok_merge(config, row),
+        "merge_blocked_by_github": map_row_to_merge_blocked_by_github(row),
         "merge_ok": load_merge_ok(conn, ref, str(row["head_oid"])),
         "merge_ok_to": owner.handle if owner else config.assistant_handle,
         "approval_waived": (

@@ -206,6 +206,9 @@ table.pipeline { width: 100%; min-width: 1120px; table-layout: fixed; border-col
 .pipeline tr.mergeok .older, .pipeline tr.mergeok .orphan { color: var(--waiting); font-weight: 600; }
 .pipeline button.act.merge { color: var(--you); border-color: var(--you); }
 .pipeline button.act.merge:hover { color: var(--you); background: var(--you-wash); }
+.pipeline .mergeblocked { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+.pipeline .mergeblocked button.act.merge:disabled { color: var(--faint); border-color: var(--line); background: var(--raise); cursor: not-allowed; }
+.pipeline .mergeblocked .note { white-space: normal; line-height: 1.2; }
 .pipeline button.plain { color: inherit; font: inherit; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .pipeline button.plain:hover { color: var(--ink); text-decoration: underline; text-underline-offset: 2px; }
 .pipeline button.act { font: inherit; color: var(--soft); background: var(--raise); border: 1px solid var(--line); border-radius: 7px; padding: 0 8px; white-space: nowrap; }
@@ -1577,6 +1580,16 @@ function queueMergeOkButton(pr) {
   return button;
 }
 
+// CI is red only because GitHub refused to run it: shown, not hidden, so an outage does not read as a failed PR.
+function queueMergeBlockedButton(pr) {
+  const wrap = el("span", "mergeblocked");
+  const button = el("button", "act merge", "Merge");
+  button.disabled = true;
+  wrap.title = pr.merge_blocked_by_github + ": Merge comes back once CI runs green at " + pr.pr_at;
+  wrap.append(button, el("span", "note", pr.merge_blocked_by_github));
+  return wrap;
+}
+
 function renderMergeOkRow(pr) {
   const row = el("tr", "mergeok");
   row.append(el("td"));
@@ -1872,6 +1885,8 @@ function renderQueueTableRow(pr) {
   queueCell(row, queueApprovalWord(pr), "", queueApprovalWhy(pr));
   if (pr.can_ok_merge && !hasCurrentMergeOk(pr)) {
     queueCell(row, queueMergeOkButton(pr), "", queueMergeWhy(pr));
+  } else if (pr.merge_blocked_by_github) {
+    queueCell(row, queueMergeBlockedButton(pr), "", null);
   } else {
     queueCell(row, hasCurrentMergeOk(pr) ? "OK sent" : queueMergeWord(pr), "", queueMergeWhy(pr));
   }

@@ -14,6 +14,8 @@ from bridge.drivers import scan_transcripts
 from bridge.guard import NOT_APPROVED, NOT_OWNER_REVIEWED, list_merge_waits, map_row_to_merge_facts
 from bridge.guildview import post_signals_to_leads
 from bridge.review_github import (
+    CI_BLOCKED_BY_BILLING,
+    CI_BLOCKED_BY_GITHUB,
     FetchedComment,
     GitHubError,
     HisThread,
@@ -24,6 +26,7 @@ from bridge.review_github import (
     is_approved_by_review_bot,
     is_cleared_by_review_bot,
     list_loc_excluded,
+    map_checks_to_ci_blocked_by,
     map_files_to_loc,
     map_node_to_open_pr,
     map_reviews_to_approvers,
@@ -1351,6 +1354,84 @@ def test_a_thread_still_waiting_on_its_owner_keeps_the_ball_with_the_owner(tmp_p
     with transaction(conn):
         classify_pending_comments(conn, CONFIG, 100_000)
     assert resolve_view(conn, thread(1))["resolve_threads"] == []
+
+
+BILLING_NOTE = (
+    "The job was not started because recent account payments have failed or your spending limit needs to be "
+    "increased. Please check the 'Billing & plans' section in your settings"
+)
+
+
+def check_run(conclusion: str | None, *notes: str) -> dict[str, Any]:
+    return {
+        "__typename": "CheckRun",
+        "status": "IN_PROGRESS" if conclusion is None else "COMPLETED",
+        "conclusion": conclusion,
+        "annotations": {"nodes": [{"message": n} for n in notes]},
+    }
+
+
+def test_ci_is_blocked_by_github_only_when_every_failed_check_is_a_job_it_refused_to_start() -> None:
+    passed, skipped = check_run("SUCCESS"), check_run("SKIPPED")
+    refused = check_run("FAILURE", "The ubuntu-latest label will migrate", BILLING_NOTE)
+    assert map_checks_to_ci_blocked_by([passed, skipped, refused, refused]) == (CI_BLOCKED_BY_BILLING, True)
+    other = check_run("FAILURE", "The job was not started because the runner group is disabled.")
+    assert map_checks_to_ci_blocked_by([refused, other]) == (CI_BLOCKED_BY_GITHUB, True)
+    assert map_checks_to_ci_blocked_by([refused, check_run("FAILURE", "Process completed with exit code 1.")]) == (
+        None,
+        True,
+    ), "one real failure means CI is red"
+    status = {"__typename": "StatusContext", "state": "ERROR"}
+    assert map_checks_to_ci_blocked_by([refused, status]) == (None, True)
+    pending = {"__typename": "StatusContext", "state": "PENDING"}
+    assert map_checks_to_ci_blocked_by([refused, pending]) == (CI_BLOCKED_BY_BILLING, False)
+    assert map_checks_to_ci_blocked_by([refused, check_run(None)])[1] is False
+    assert map_checks_to_ci_blocked_by([passed]) == (None, True)
+
+
+def test_merge_shows_disabled_with_the_reason_while_github_refuses_to_run_ci_read_once_per_head(
+    tmp_path: Path,
+) -> None:
+    conn = setup_pr(tmp_path, bot_cleared=True, checks="FAILURE")
+    reads: list[str] = []
+    answer: list[tuple[str | None, bool]] = [(CI_BLOCKED_BY_BILLING, True)]
+
+    def fetch(_repo: str, oid: str) -> tuple[str | None, bool]:
+        reads.append(oid)
+        return answer[0]
+
+    def poll(pr: OpenPr) -> dict[str, Any]:
+        with (
+            mock.patch("bridge.reviews.fetch_open_prs", return_value=[pr]),
+            mock.patch("bridge.reviews.fetch_comments", return_value=[]),
+            mock.patch("bridge.reviews.fetch_ci_blocked_by", side_effect=fetch),
+        ):
+            poll_review_queue(conn, CONFIG, 5000, None, None)
+        return merge_ok_view(conn)
+
+    red = make_pr(bot_cleared=True, checks="FAILURE")
+    view = poll(red)
+    assert (view["can_ok_merge"], view["merge_blocked_by_github"]) == (False, CI_BLOCKED_BY_BILLING)
+    with pytest.raises(MergeOkRefused), transaction(conn):
+        record_merge_ok(conn, CONFIG, REF, "a1", "theo", 700)
+    poll(red)
+    assert reads == ["a1"], "read once per head"
+
+    new_head = replace(red, head_oid="b2", commits=(("a1", 1000), ("b2", 2000)))
+    answer[0] = (None, True)
+    view = poll(new_head)
+    assert reads == ["a1", "b2"] and view["merge_blocked_by_github"] is None, "a real failure: no button"
+
+    view = poll(replace(new_head, checks="SUCCESS"))
+    assert (view["can_ok_merge"], view["merge_blocked_by_github"]) == (True, None)
+    answer[0] = (CI_BLOCKED_BY_BILLING, False)
+    poll(new_head)
+    poll(new_head)
+    assert reads == ["a1", "b2", "b2", "b2"], "a re-run is read again, and so is a check still running"
+    assert merge_ok_view(conn)["merge_blocked_by_github"] is None
+
+    poll(replace(new_head, draft=True))
+    assert len(reads) == 4, "only a PR the button waits on CI for is read"
 
 
 def test_a_reply_under_owners_account_before_the_prefix_counts_by_its_verdict(tmp_path: Path) -> None:
