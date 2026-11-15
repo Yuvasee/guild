@@ -355,8 +355,9 @@ def _probe_box(config: Config, target: list[str], box: str, still_allowed: Calla
     # key alone looks the same before a replacing key lands, so only the added key counts there.
     with_key = {PROBE_KEY, before + PROBE_KEY} - {before}
     run_agterm(config, ["session", "type", *target, PROBE_KEY])
-    after = _await_box(config, target, lambda now: now in with_key, lambda now: now == before)
-    if after is None:
+    # A frame showing neither is waited out, giving up on one left the key in the owner's draft, unless the owner came.
+    after = _await_box(config, target, lambda now: now in with_key, lambda now: still_allowed())
+    if after is None or not still_allowed():
         return "unknown"
     if run_agterm(config, ["session", "type", *target, BACKSPACE]) is None:
         return "unknown"

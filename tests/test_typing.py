@@ -675,6 +675,48 @@ def test_a_probe_key_the_screen_shows_late_is_still_taken_back(tmp_path: Path) -
     assert fake.submitted == ["hello"]
 
 
+def test_a_probe_key_is_taken_back_after_a_frame_that_shows_neither_the_box_nor_the_key(tmp_path: Path) -> None:
+    class RedrawsOnce(FakeClaudeBox):
+        redraw = False
+
+        def run(self, _: Config, args: list[str]) -> str | None:
+            if args[:2] == ["session", "text"] and self.redraw:
+                self.redraw = False
+                return f"{RULE}\n{PROMPT}{NBSP}park\n{RULE}\n  -- INSERT --"
+            self.redraw = self.redraw or args[-1] == "."
+            return super().run(_, args)
+
+    fake = RedrawsOnce({"S": "park it"})
+
+    result = _type(tmp_path, fake, wait_s=3, may_probe_box=lambda: True)
+
+    assert fake.typed == [".", "\x7f"]
+    assert fake.boxes["S"] == "park it"
+    assert result == "draft"
+
+
+def test_no_backspace_once_the_owner_comes_to_the_tab_while_the_probe_key_is_awaited(tmp_path: Path) -> None:
+    class OwnerRetypes(FakeClaudeBox):
+        def run(self, _: Config, args: list[str]) -> str | None:
+            nonlocal selected
+            result = super().run(_, args)
+            if args[-1] == ".":
+                selected = True
+                self.boxes["S"] = "park"
+            elif selected and args[:2] == ["session", "text"]:
+                self.boxes["S"] = "park it."
+            return result
+
+    selected = False
+    fake = OwnerRetypes({"S": "park it"})
+
+    result = _type(tmp_path, fake, wait_s=3, may_probe_box=lambda: not selected)
+
+    assert result == "failed"
+    assert fake.typed == ["."]
+    assert fake.boxes["S"] == "park it."
+
+
 def test_a_probe_key_that_never_shows_gets_no_other_key(tmp_path: Path) -> None:
     fake = FakeClaudeBox({"S": "Ok, starting review 45"}, suggestions={"S"}, lagging_reads=99)
 

@@ -296,7 +296,7 @@ def _handle_death(
         f'{did}: agtermctl session type --target {tab.session} --pane-id {tab.pane} "/compact", then the same with '
         "$'\\r' for Enter."
     )
-    recipients = _find_alert_recipients(conn, config, tab)
+    recipients = find_alert_recipients(conn, config, tab)
     conn.execute(
         "UPDATE conversations SET context_dead_alerted_at = ? WHERE conversation_id = ?", (at_ms, tab.conversation_id)
     )
@@ -309,7 +309,7 @@ def _handle_death(
     actions.messages.extend((result.message_id, r) for r in recipients)
 
 
-def _find_alert_recipients(conn: sqlite3.Connection, config: Config, tab: ContextTab) -> list[Recipient]:
+def find_alert_recipients(conn: sqlite3.Connection, config: Config, tab: ContextTab) -> list[Recipient]:
     found: dict[str, Recipient] = {}
     try:
         assistant = resolve_handle(conn, config.assistant_handle)
