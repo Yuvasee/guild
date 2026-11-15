@@ -14,15 +14,24 @@ from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 from bridge.agent_prefix import CLAUDE_PREFIX
+from bridge.asks import send_from_bridge
 from bridge.backport import is_backport_base
 from bridge.board import BODY_MAX_CHARS, Recipient
 from bridge.config import Config, read_overlay, state_dir
 from bridge.db import now_ms, transaction
 from bridge.leads import REVIEW_DOC_SPEC, find_internal_names, list_internal_names
-from bridge.review_worktree import DOC_MIN_TERMS, DOC_SHA_CHARS, is_worth_preparing, map_row_to_doc_heads
+from bridge.review_worktree import (
+    DOC_MIN_TERMS,
+    DOC_SHA_CHARS,
+    is_worth_preparing,
+    map_doc_to_diff_key,
+    map_row_to_doc_behind,
+    map_row_to_doc_heads,
+)
 from bridge.reviews import (
     COMMENT_MAX_CHARS,
     Owner,
+    find_last_pusher,
     find_lead_of,
     find_owner,
     map_lead_to_owner,
@@ -368,7 +377,8 @@ def map_row_to_published_text(row: sqlite3.Row, owner_at_start: str) -> str:
 
 DOC_HEAD_RULE = (
     'Put <meta name="pr-head" content="<full sha of the PR head it describes>"> in its <head>: bridge shows the doc as '
-    "current only while that equals the PR's head, and asks you to update it after each push."
+    "current while that equals the PR's head or later commits change only comments and docs, and asks you to update "
+    "it after each other push."
 )
 TITLE_SLOT = "\x00"
 
@@ -387,11 +397,13 @@ DOC_REVIEWS_RULE = (
 )
 """The generic text of the doc-reviews overlay slot, the reviews this install wants before the owner's queue."""
 DOC_UPDATE_EVERY_MS = 15 * 60_000
+DOC_ESCALATE_AFTER_MS = 3_600_000
 
 
 def ask_for_doc_updates(conn: sqlite3.Connection, config: Config, now: int) -> list[tuple[int, Recipient]]:
     """One request per new head of a PR whose doc is behind it, at most one every 15 minutes, so a run of pushes
-    asks once for where it ended."""
+    asks once for where it ended. It goes to whoever pushed last, as the PR's recorded owner may be another lead than
+    the one whose session wrote the change; to the owner when no pusher is known."""
     told: list[tuple[int, Recipient]] = []
     poll = conn.execute("SELECT ok_at FROM review_poll WHERE id = 1").fetchone()
     read_at = poll["ok_at"] if poll else None
@@ -408,12 +420,21 @@ def ask_for_doc_updates(conn: sqlite3.Connection, config: Config, now: int) -> l
         if read_at is not None and row["doc_at"] is not None and row["doc_at"] > read_at:
             # Registered after bridge last read GitHub: it may describe a push bridge has not seen yet.
             continue
-        owner = find_owner(conn, config, str(row["ref"]), str(row["repo"]), str(row["head"]))
+        if row["doc_diff_for"] != map_doc_to_diff_key(at, str(row["head_oid"])):
+            # The poll has not compared the two yet, and a push of only comments leaves the doc current.
+            continue
+        owner = find_last_pusher(conn, config, str(row["repo"]), str(row["head"])) or find_owner(
+            conn, config, str(row["ref"]), str(row["repo"]), str(row["head"])
+        )
         if owner is None:
             continue
         conn.execute(
-            "UPDATE review_prs SET doc_update_for = ?, doc_update_at = ? WHERE ref = ?",
-            (row["head_oid"], now, row["ref"]),
+            """
+            UPDATE review_prs SET doc_update_for = ?, doc_update_at = ?, doc_update_to = ?,
+                doc_update_first_at = coalesce(doc_update_first_at, ?)
+            WHERE ref = ?
+            """,
+            (row["head_oid"], now, owner.handle, now, row["ref"]),
         )
         name = f"{row['repo']}#{row['number']}"
         text = (
@@ -424,6 +445,33 @@ def ask_for_doc_updates(conn: sqlite3.Connection, config: Config, now: int) -> l
             f"guild review doc {name} /path/file.html."
         )
         told.append(tell_owner(conn, owner, text, now))
+    return told
+
+
+def tell_assistant_of_stale_docs(conn: sqlite3.Connection, config: Config, now: int) -> list[tuple[int, Recipient]]:
+    """Once per registered doc: still behind an hour after its first update request, the assistant hears which PR,
+    who was asked and when. Not told while unreachable, so the next round tries again."""
+    told: list[tuple[int, Recipient]] = []
+    for row in conn.execute(
+        """
+        SELECT * FROM review_prs WHERE closed_at IS NULL AND doc_file IS NOT NULL AND doc_escalated_at IS NULL
+        AND doc_update_first_at <= ?
+        """,
+        (now - DOC_ESCALATE_AFTER_MS,),
+    ).fetchall():
+        if map_row_to_doc_heads(row)[1] or not is_worth_preparing(row, config, now):
+            continue
+        zone = ZoneInfo(config.work_timezone) if config.work_timezone else None
+        asked = datetime.fromtimestamp(int(row["doc_update_first_at"]) / 1000, zone).strftime("%m-%d %H:%M")
+        text = (
+            f"{row['url']} ({row['title']}): {config.owner_name}'s review doc is still behind the PR, "
+            f"{map_row_to_doc_behind(row)}. bridge first asked for a refresh at {asked}; the last ask went to "
+            f"{row['doc_update_to']}. No new doc was registered since. bridge tells you once for this doc."
+        )
+        delivered = send_from_bridge(conn, config, config.assistant_handle, text, now)
+        if delivered:
+            conn.execute("UPDATE review_prs SET doc_escalated_at = ? WHERE ref = ?", (now, row["ref"]))
+            told.extend(delivered)
     return told
 
 

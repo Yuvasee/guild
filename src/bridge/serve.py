@@ -135,6 +135,7 @@ from bridge.review_post import (
     reopen_unsent_post,
     retry_failed_post,
     spawn_review_post,
+    tell_assistant_of_stale_docs,
 )
 from bridge.review_slack import TOKEN_EVERY_S, apply_seen_posts, map_db_to_slack_freshness, read_slack_once
 from bridge.review_worktree import (
@@ -764,6 +765,7 @@ class DashboardState:
             told = [*told, *ask_for_docs(conn, self.config, now_ms())]
             told = [*told, *ask_for_usage_sections(conn, self.config, now_ms())]
             told = [*told, *ask_for_doc_updates(conn, self.config, now_ms())]
+            told = [*told, *tell_assistant_of_stale_docs(conn, self.config, now_ms())]
             told = [*told, *ask_to_clean_up(conn, self.config, now_ms())]
             told = [*told, *ask_to_mark_drafts_ready(conn, self.config, now_ms())]
             told = [*told, *ask_to_resolve_conflicts(conn, self.config, now_ms())]

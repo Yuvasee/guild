@@ -326,6 +326,95 @@ def map_files_to_loc(additions: int, deletions: int, files: list[Any], excluded:
     return max(loc, 0)
 
 
+COMPARE_FILES_MAX = 300
+"""GitHub's compare lists at most this many files: one more may be missing, so such a diff is never only comments."""
+_HASH_COMMENTED = frozenset({
+    ".py", ".pyi", ".sh", ".bash", ".zsh", ".rb", ".pl", ".r", ".yaml", ".yml", ".toml", ".tf", ".tfvars", ".hcl",
+    ".cfg", ".conf", ".mk", ".dockerfile", "dockerfile", "makefile",
+})  # fmt: skip
+_SLASH_COMMENTED = frozenset({
+    ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".go", ".java", ".kt", ".kts", ".scala", ".c", ".h", ".cc", ".cpp",
+    ".hpp", ".cs", ".rs", ".swift", ".php", ".dart", ".css", ".scss", ".less",
+})  # fmt: skip
+_DASH_COMMENTED = frozenset({".sql", ".lua", ".hs"})
+
+
+@dataclass(frozen=True)
+class DocDiff:
+    """What changed between the commit a review doc describes and the PR's head."""
+
+    commits: int | None
+    """Commits since the doc's; None when the head does not descend from it (a rebase or force-push) or GitHub
+    could not say."""
+    lines: int | None
+    """Changed lines other than comments, blank lines and docs; None as commits."""
+    cosmetic: bool
+    """Every change is a comment, a blank line or a docs file: the doc still describes the code."""
+
+
+UNKNOWN_DIFF = DocDiff(None, None, False)
+
+
+def is_docs_file(path: str) -> bool:
+    name = PurePosixPath(path).name.lower()
+    return any(fnmatch.fnmatch(name, pattern) for pattern in DOCS_AND_ASSETS)
+
+
+def is_comment_line(path: str, line: str) -> bool:
+    """A whole line that is blank or a comment in its file's language; a file of an unknown language has none, so a
+    change there makes the doc stale. A docstring is code here: a line alone cannot tell it from a string."""
+    text = line.strip()
+    if not text:
+        return True
+    name = PurePosixPath(path).name.lower()
+    kind = PurePosixPath(name).suffix or name
+    if kind in _HASH_COMMENTED:
+        return text.startswith("#")
+    if kind in _SLASH_COMMENTED:
+        return text.startswith(("//", "/*", "*/")) or text == "*" or text.startswith("* ")
+    if kind in _DASH_COMMENTED:
+        return text.startswith("--")
+    return False
+
+
+def count_code_lines_in_patch(path: str, patch: str) -> int:
+    """Added and removed lines of a GitHub file patch, hunks only with no file header, that are not comments or
+    blank."""
+    return sum(1 for line in patch.splitlines() if line[:1] in ("+", "-") and not is_comment_line(path, line[1:]))
+
+
+def map_compare_to_doc_diff(raw: Any) -> DocDiff:
+    """From GitHub's compare of the doc's commit with the head. A file GitHub gives no patch for (binary, too large)
+    counts in full and is never only comments."""
+    status = raw.get("status")
+    if status == "identical":
+        return DocDiff(0, 0, True)
+    if status != "ahead":
+        return UNKNOWN_DIFF
+    files: list[Any] = raw.get("files") or []
+    lines = 0
+    complete = len(files) < COMPARE_FILES_MAX
+    for row in files:
+        path = str(row.get("filename") or "")
+        if is_docs_file(path):
+            continue
+        patch = row.get("patch")
+        if isinstance(patch, str):
+            lines += count_code_lines_in_patch(path, patch)
+        else:
+            complete = False
+            lines += int(row.get("additions") or 0) + int(row.get("deletions") or 0)
+    return DocDiff(int(raw.get("ahead_by") or 0), lines, complete and lines == 0)
+
+
+def fetch_doc_diff(repo: str, doc_commit: str, head: str) -> DocDiff:
+    try:
+        raw: Any = json.loads(run_gh(["api", f"repos/{repo}/compare/{doc_commit}...{head}"]))
+        return map_compare_to_doc_diff(raw)
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise GitHubError(f"unexpected answer from GitHub: {type(exc).__name__}") from exc
+
+
 def fetch_all_files(repo: str, number: int) -> list[Any]:
     pages: Any = json.loads(run_gh(["api", "--paginate", "--slurp", f"repos/{repo}/pulls/{number}/files?per_page=100"]))
     return [

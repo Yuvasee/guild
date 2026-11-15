@@ -819,6 +819,15 @@ MIGRATIONS: tuple[str, ...] = (
     CREATE INDEX messages_kind_due ON messages (kind, respond_by);
     """,
     "ALTER TABLE review_prs ADD COLUMN merge_ok_oid TEXT;",
+    """
+    ALTER TABLE review_prs ADD COLUMN doc_diff_for TEXT;
+    ALTER TABLE review_prs ADD COLUMN doc_diff_commits INTEGER;
+    ALTER TABLE review_prs ADD COLUMN doc_diff_lines INTEGER;
+    ALTER TABLE review_prs ADD COLUMN doc_diff_cosmetic INTEGER;
+    ALTER TABLE review_prs ADD COLUMN doc_update_first_at INTEGER;
+    ALTER TABLE review_prs ADD COLUMN doc_update_to TEXT;
+    ALTER TABLE review_prs ADD COLUMN doc_escalated_at INTEGER;
+    """,
 )
 
 HOOK_BUSY_TIMEOUT_MS = 200

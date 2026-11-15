@@ -42,17 +42,27 @@ from bridge.leads import find_lead_on_surface, is_conversation_locked, list_lead
 from bridge.refs import map_ref_to_label
 from bridge.registry import record_tab_parent
 from bridge.review_github import (
+    UNKNOWN_DIFF,
+    DocDiff,
     FetchedComment,
     GitHubError,
     OpenPr,
     ReviewThreads,
     fetch_comments,
+    fetch_doc_diff,
     fetch_open_prs,
     fetch_review_threads,
     list_loc_excluded,
 )
 from bridge.review_marks import convert_reviews_to_text, map_text_to_reviews
-from bridge.review_worktree import DOC_SHA_CHARS, REVIEW_LARGE_LOC, map_row_to_doc_heads, map_worktree_to_workspace
+from bridge.review_worktree import (
+    DOC_SHA_CHARS,
+    REVIEW_LARGE_LOC,
+    map_doc_to_diff_key,
+    map_row_to_doc_behind,
+    map_row_to_doc_heads,
+    map_worktree_to_workspace,
+)
 
 GITHUB_EVERY_S = 90
 PARENT_WALK_MAX = 5
@@ -128,7 +138,7 @@ class Owner:
     surface: str | None
     lead: str | None
     via: str
-    """claim, branch, ref or lead: how the session was found."""
+    """claim, branch, ref, lead or pushed: how the session was found."""
 
 
 @dataclass(frozen=True)
@@ -875,6 +885,35 @@ def find_owner(
     return None
 
 
+def find_last_pusher(conn: sqlite3.Connection, config: Config, repo: str, head: str) -> Owner | None:
+    """The session that last committed or pushed to the PR's branch while it is live, its lead once it has ended. Only
+    the latest writer counts: an earlier one may have handed the branch on, so when the latest maps to no one the
+    caller falls back to the PR's owner."""
+    row = conn.execute(
+        """
+        SELECT i.conversation_id, i.surface, i.repo, i.ended_at, s.handle FROM review_branch_writes w
+        JOIN instances i ON i.instance_id = (
+            SELECT instance_id FROM instances WHERE conversation_id = w.conversation_id
+            ORDER BY last_observed_at DESC LIMIT 1
+        )
+        LEFT JOIN surfaces s ON s.surface = i.surface
+        WHERE w.branch = ? ORDER BY w.at DESC
+        """,
+        (head,),
+    ).fetchone()
+    if row is None or (row["repo"] is not None and config.pr_repo_for(row["repo"]) != repo):
+        return None
+    if is_conversation_locked(conn, config, str(row["conversation_id"])):
+        return None
+    if row["ended_at"] is None:
+        if not row["handle"] or row["handle"] == config.assistant_handle:
+            return None
+        display = find_lead_of(conn, row["surface"])[0]
+        return Owner(str(row["handle"]), str(row["conversation_id"]), row["surface"], display, "pushed")
+    display, lead_surface = find_lead_of_ended(conn, row["surface"], str(row["conversation_id"]))
+    return map_lead_to_owner(conn, config, lead_surface, display) if lead_surface else None
+
+
 def _find_lead_of_ended_writer(
     conn: sqlite3.Connection, config: Config, ref: str, repo: str, head: str, wrote: bool
 ) -> Owner | None:
@@ -1140,6 +1179,15 @@ def poll_review_queue(
             continue
         with transaction(conn):
             store_review_threads(conn, ref, key, threads)
+    for ref, repo, doc_commit, head in list_docs_to_compare(conn):
+        try:
+            diff = fetch_doc_diff(repo, doc_commit, head)
+        except GitHubError as exc:
+            # Recorded as unknown, so a commit GitHub no longer has is not asked for each poll: the doc reads as behind.
+            print(f"review doc compare of {ref} failed: {exc}", flush=True)
+            diff = UNKNOWN_DIFF
+        with transaction(conn):
+            store_doc_diff(conn, ref, map_doc_to_diff_key(doc_commit, head), diff)
     with transaction(conn):
         record_tab_parents(conn, tree)
         if scanned_from is not None:
@@ -1147,6 +1195,28 @@ def poll_review_queue(
             prune_marks(conn, now)
         store_merge_blocks(conn)
         return [*take_comment_wakes(conn, config, now), *tell_ready_to_merge(conn, config, now)]
+
+
+def list_docs_to_compare(conn: sqlite3.Connection) -> list[tuple[str, str, str, str]]:
+    """(ref, repo, doc commit, head) of open PRs whose doc names another commit than the head and has no compare for
+    the two yet."""
+    found: list[tuple[str, str, str, str]] = []
+    for row in conn.execute("SELECT * FROM review_prs WHERE closed_at IS NULL AND doc_file IS NOT NULL").fetchall():
+        at, current = map_row_to_doc_heads(row)
+        head = str(row["head_oid"])
+        if at and not current and row["doc_diff_for"] != map_doc_to_diff_key(at, head):
+            found.append((str(row["ref"]), str(row["repo"]), at, head))
+    return found
+
+
+def store_doc_diff(conn: sqlite3.Connection, ref: str, key: str, diff: DocDiff) -> None:
+    conn.execute(
+        """
+        UPDATE review_prs SET doc_diff_for = ?, doc_diff_commits = ?, doc_diff_lines = ?, doc_diff_cosmetic = ?
+        WHERE ref = ?
+        """,
+        (key, diff.commits, diff.lines, int(diff.cosmetic), ref),
+    )
 
 
 def drop_excluded_repos(conn: sqlite3.Connection, excluded: set[str]) -> None:
@@ -1692,7 +1762,7 @@ def map_row_to_review(conn: sqlite3.Connection, config: Config, row: sqlite3.Row
         "doc_stale": bool(row["doc_file"]) and not doc_current,
         "doc_at": doc_at[:DOC_SHA_CHARS] if row["doc_file"] else None,
         "pr_at": str(row["head_oid"])[:DOC_SHA_CHARS],
-        "doc_updating": bool(row["doc_file"]) and not doc_current and row["doc_update_for"] == row["head_oid"],
+        "doc_behind": map_row_to_doc_behind(row) if row["doc_file"] and not doc_current else None,
         "worktree_path": row["wt_path"],
         "worktree_url": map_worktree_to_url(Path(str(row["wt_path"]))) if row["wt_path"] else None,
         "worktree_state": row["wt_state"],

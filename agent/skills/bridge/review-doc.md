@@ -143,7 +143,12 @@ hit it and when.
 - One self-contained HTML file: CSS and scripts inline (a pinned Mermaid from a CDN is fine). The viewer serves it
   sandboxed: scripts run, but cannot call bridge.
 - `<meta name="pr-head" content="<full sha of the PR head it describes>">` in `<head>`. Bridge shows the doc as
-  current only while that equals the PR's head, and asks for an update after each push until the owner has reviewed.
+  current while that equals the PR's head, or while every change since is a comment line, a blank line or a docs
+  file (Markdown, images), read from GitHub's compare of the two; a docstring counts as code, and so does any file it
+  cannot read line by line. Otherwise the queue shows "doc older than code: N commits, M lines" (M leaves out comments
+  and docs) and bridge asks the session that pushed last, or its lead once it has ended, else the PR's owner, to
+  update it, once per new head until the owner has reviewed. Still behind an hour after the first ask, the assistant
+  is told once; registering the doc again starts this over.
 - Light and dark (`prefers-color-scheme`), an explicit `body` background, and a readable width on a phone with no
   sideways page scroll: long names in headings and code wrap (`overflow-wrap: anywhere`), wide tables and diagrams
   scroll inside their own box.
