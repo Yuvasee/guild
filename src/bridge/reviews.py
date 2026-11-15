@@ -1702,8 +1702,8 @@ def map_db_to_reviews(conn: sqlite3.Connection, config: Config, now: int) -> dic
                 if config.backport_bases
                 else []
             ),
-            f"GitHub is read every {GITHUB_EVERY_S} s: one GraphQL search per 50 PRs at 4 of the account's 5,000 "
-            "points an hour, so about 160 an hour, plus REST reads of comments and a 2-point read of review threads "
+            f"GitHub is read every {GITHUB_EVERY_S} s: one GraphQL search per 25 PRs, about 160 of the account's "
+            "5,000 points an hour, plus REST reads of comments and a 2-point read of review threads "
             "only for PRs whose time or open threads changed.",
             f"{convert_to_sentence_start(config.review_channel_name)} is read every minute with a Slack token in "
             "~/.secrets/slack, else every 5 minutes through "

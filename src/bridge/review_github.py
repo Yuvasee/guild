@@ -11,11 +11,12 @@ from bridge.config import Config
 from bridge.review_deps import map_markdown_to_dependency
 from bridge.review_marks import find_missing_usage_section, map_markdown_to_reviews
 
-_PAGES_MAX = 10
+_PAGES_MAX = 20
+"""A page of 25: with each PR's commits, checks and reviews, 50 took ~11 s, past which GitHub answers 502."""
 _GH_TIMEOUT_S = 60
 _SEARCH_QUERY = """
 query($q: String!, $after: String) {
-  search(query: $q, type: ISSUE, first: 50, after: $after) {
+  search(query: $q, type: ISSUE, first: 25, after: $after) {
     pageInfo { hasNextPage endCursor }
     nodes { ... on PullRequest {
       number title body url isDraft updatedAt mergeStateStatus isInMergeQueue
