@@ -1755,7 +1755,7 @@ function queueSlackWord(pr) {
 }
 
 function queueDocWord(pr) {
-  if (pr.doc_url) return pr.doc_stale ? (pr.doc_updating ? "updating" : "older") : "open";
+  if (pr.doc_url) return pr.doc_stale ? "older" : "open";
   return pr.large && pr.group !== "drafts" && pr.group !== "backports" ? "none yet" : "–";
 }
 
@@ -1871,7 +1871,7 @@ function renderQueueTableRow(pr) {
     queueCell(row, hasCurrentMergeOk(pr) ? "OK sent" : queueMergeWord(pr), "", queueMergeWhy(pr));
   }
   const docBehind = pr.doc_stale
-    ? "doc at " + (pr.doc_at || "unknown") + ", PR at " + pr.pr_at + (pr.doc_updating ? "; its owner was asked to update it" : "")
+    ? pr.doc_behind
     : pr.doc_url ? "the doc matches the PR's newest commit" : pr.large ? "its owner has not registered a doc yet" : null;
   const folder = queueFolderWord(pr);
   const folderWhy = pr.worktree_detail || (pr.worktree_path ? pr.worktree_path + (pr.worktree_stale ? ", behind the PR" : "") : null);
@@ -1883,10 +1883,7 @@ function renderQueueTableRow(pr) {
   reviewCell.replaceChildren(...folderLink);
   if (pr.doc_url) {
     const docWhy = [docBehind, queueReviewMarksWhy(pr)].filter(Boolean).join("; ");
-    const docMark = pr.doc_updating
-      ? "made for an earlier commit; its owner is updating it"
-      : "made for an earlier commit; refresh pending";
-    reviewCell.prepend(...queueStaleLink(pr.doc_url, "doc", docWhy, pr.doc_stale, docMark), " · ");
+    reviewCell.prepend(...queueStaleLink(pr.doc_url, "doc", docWhy, pr.doc_stale, pr.doc_behind), " · ");
   }
 
   row.append(renderQueueSlackCell(pr));

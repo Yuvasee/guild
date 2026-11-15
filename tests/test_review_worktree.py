@@ -15,6 +15,7 @@ from bridge.board import BODY_MAX_CHARS
 from bridge.config import Config
 from bridge.db import connect, transaction
 from bridge.doc_nav import convert_doc_to_viewable
+from bridge.review_github import DocDiff
 from bridge.review_post import ask_for_doc_updates, ask_for_docs
 from bridge.review_worktree import (
     DETACHED,
@@ -32,6 +33,7 @@ from bridge.review_worktree import (
     is_rebuilt_by_tools,
     is_worth_preparing,
     link_worktrees_to_prs,
+    map_doc_to_diff_key,
     map_doc_to_served,
     map_pyright_config_to_service_envs,
     map_requirements_to_consolidated,
@@ -43,7 +45,7 @@ from bridge.review_worktree import (
     run_worktree_job,
     write_editor_settings,
 )
-from bridge.reviews import map_db_to_reviews, store_open_prs
+from bridge.reviews import list_docs_to_compare, map_db_to_reviews, store_doc_diff, store_open_prs
 
 NOW = 1_793_000_000_000
 UPDATED = "2026-10-26T00:00:00+00:00"
@@ -763,7 +765,8 @@ def test_a_doc_whose_head_marker_matches_the_pr_is_current_however_it_was_regist
     views: Any = map_db_to_reviews(conn, config, NOW)["prs"]
     assert (views[0]["doc_stale"], views[0]["doc_at"], views[0]["pr_at"]) == (True, "c0ffee123", "a1")
     served = map_doc_to_served(conn, "Org/app", 7)
-    assert served is not None and b"<body><div" in served and b"doc at c0ffee123, PR at a1</div>" in served
+    assert served is not None and b"<body><div" in served
+    assert b"doc older than code (doc at c0ffee123, PR at a1)</div>" in served
     with transaction(conn):
         store_open_prs(conn, [make_pr(head_oid=head, **large())], NOW)
     views = map_db_to_reviews(conn, config, NOW)["prs"]
@@ -783,7 +786,7 @@ def test_a_served_doc_gets_its_contents_bar_under_the_stale_line(
         register_doc(conn, REVIEWS_CONFIG, REF, source, NOW)
     served = map_doc_to_served(conn, "Org/app", 7)
     assert served is not None and source.read_bytes() == original
-    assert served.index(b"PR at a1</div>") < served.index(b'<nav id="bridge-doc-nav"') < served.index(b"<h2 id=")
+    assert served.index(b"PR at a1)</div>") < served.index(b'<nav id="bridge-doc-nav"') < served.index(b"<h2 id=")
     assert b'<a href="#in-short">In short</a>' in served and b'<h2 id="reviews">Reviews</h2>' in served
 
 
@@ -803,7 +806,16 @@ def test_a_doc_registered_before_markers_were_read_gets_its_marker_once(
     assert views[0]["doc_stale"] is False
 
 
-def test_each_new_head_asks_the_owner_once_to_update_the_doc_and_the_row_says_updating(
+CODE_DIFF = DocDiff(1, 5, False)
+
+
+def compare_docs(conn: sqlite3.Connection, diff: DocDiff = CODE_DIFF) -> None:
+    """What the poll's compare step stores, with GitHub's answer given."""
+    for ref, _, doc_commit, head in list_docs_to_compare(conn):
+        store_doc_diff(conn, ref, map_doc_to_diff_key(doc_commit, head), diff)
+
+
+def test_each_new_head_asks_the_owner_once_to_update_the_doc_and_the_row_says_how_far_behind(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("BRIDGE_STATE_DIR", str(tmp_path / "state"))
@@ -817,6 +829,8 @@ def test_each_new_head_asks_the_owner_once_to_update_the_doc_and_the_row_says_up
         register_doc(conn, REVIEWS_CONFIG, REF, source, NOW)
         assert ask_for_doc_updates(conn, config, NOW) == []
         store_open_prs(conn, [make_pr(head_oid="b2b2b2b2b2", **large())], NOW)
+        assert ask_for_doc_updates(conn, config, NOW) == [], "not before the poll compared the two"
+        compare_docs(conn)
         assert len(ask_for_doc_updates(conn, config, NOW)) == 1
         assert ask_for_doc_updates(conn, config, NOW + 3_600_000) == []
     body = conn.execute("SELECT body FROM messages ORDER BY id DESC").fetchone()[0]
@@ -824,9 +838,11 @@ def test_each_new_head_asks_the_owner_once_to_update_the_doc_and_the_row_says_up
     assert "as ~/.claude/skills/bridge/review-doc.md lays out" in body and "no Changes since the last review" in body
     assert "guild review doc Org/app#7" in body and len(body) <= BODY_MAX_CHARS
     views: Any = map_db_to_reviews(conn, config, NOW)["prs"]
-    assert views[0]["doc_updating"] is True
+    assert views[0]["doc_behind"] == "doc older than code: 1 commit, 5 lines (doc at a1a1a1a1a, PR at b2b2b2b2b)"
+    assert "doc_updating" not in views[0]
     with transaction(conn):
         store_open_prs(conn, [make_pr(head_oid="c3c3c3c3c3", **large())], NOW)
+        compare_docs(conn)
         assert ask_for_doc_updates(conn, config, NOW + 60_000) == []
         assert len(ask_for_doc_updates(conn, config, NOW + 16 * 60_000)) == 1
 
@@ -848,6 +864,7 @@ def test_a_doc_registered_for_a_push_bridge_has_not_read_yet_is_not_called_behin
         assert ask_for_doc_updates(conn, config, NOW + 1000) == []
         # The next read still shows the old head: now the doc really is at another commit.
         conn.execute("UPDATE review_poll SET ok_at = ?", (NOW + 30_000,))
+        compare_docs(conn)
         assert len(ask_for_doc_updates(conn, config, NOW + 31_000)) == 1
 
 

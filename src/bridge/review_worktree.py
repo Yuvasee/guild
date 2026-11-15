@@ -959,7 +959,8 @@ def review_docs_dir() -> Path:
 
 
 def register_doc(conn: sqlite3.Connection, config: Config, ref: str, source: Path, now: int) -> None:
-    """Copied in, so the page serves what was registered and never follows a path it was handed later."""
+    """Copied in, so the page serves what was registered and never follows a path it was handed later. A new doc starts
+    the update requests and the assistant's notice over."""
     row = conn.execute("SELECT repo, number, head_oid FROM review_prs WHERE ref = ?", (ref,)).fetchone()
     if row is None:
         raise DocError(f"{ref} is not in the queue")
@@ -975,7 +976,11 @@ def register_doc(conn: sqlite3.Connection, config: Config, ref: str, source: Pat
     temporary.replace(target)
     html = target.read_bytes()
     conn.execute(
-        "UPDATE review_prs SET doc_file = ?, doc_oid = ?, doc_at = ?, doc_head = ?, doc_reviews = ? WHERE ref = ?",
+        """
+        UPDATE review_prs SET doc_file = ?, doc_oid = ?, doc_at = ?, doc_head = ?, doc_reviews = ?,
+            doc_update_for = NULL, doc_update_first_at = NULL, doc_update_to = NULL, doc_escalated_at = NULL
+        WHERE ref = ?
+        """,
         (
             name,
             row["head_oid"],
@@ -1022,13 +1027,33 @@ def fill_doc_reviews(conn: sqlite3.Connection, config: Config) -> None:
 
 
 def map_row_to_doc_heads(row: sqlite3.Row) -> tuple[str, bool]:
-    """(the commit the doc is at, whether that is the PR's head). Its marker wins over the head it was registered at,
-    which can lag when the doc was registered before bridge saw the push."""
+    """(the commit the doc is at, whether it describes the PR's head: it is that commit, or every change since is a
+    comment or docs). Its marker wins over the head it was registered at, which can lag when the doc was registered
+    before bridge saw the push."""
     head = str(row["head_oid"])
     marker = str(row["doc_head"] or "")
     if marker:
-        return marker, head.lower().startswith(marker)
-    return str(row["doc_oid"] or ""), row["doc_oid"] == head
+        at, same = marker, head.lower().startswith(marker)
+    else:
+        at, same = str(row["doc_oid"] or ""), row["doc_oid"] == head
+    return at, same or (row["doc_diff_for"] == map_doc_to_diff_key(at, head) and bool(row["doc_diff_cosmetic"]))
+
+
+def map_doc_to_diff_key(doc_commit: str, head: str) -> str:
+    return f"{doc_commit} {head}"
+
+
+def map_row_to_doc_behind(row: sqlite3.Row) -> str:
+    """How far the code moved past a doc that is behind: commits and changed lines of code once GitHub's compare for
+    this doc and head is in."""
+    at, _ = map_row_to_doc_heads(row)
+    head = str(row["head_oid"])
+    shas = f"doc at {at[:DOC_SHA_CHARS] or 'unknown'}, PR at {head[:DOC_SHA_CHARS]}"
+    commits, lines = row["doc_diff_commits"], row["doc_diff_lines"]
+    if row["doc_diff_for"] != map_doc_to_diff_key(at, head) or commits is None or lines is None:
+        return f"doc older than code ({shas})"
+    counted = f"{commits} commit{'' if commits == 1 else 's'}, {lines} line{'' if lines == 1 else 's'}"
+    return f"doc older than code: {counted} ({shas})"
 
 
 def map_doc_to_served(conn: sqlite3.Connection, repo: str, number: int) -> bytes | None:
@@ -1039,12 +1064,10 @@ def map_doc_to_served(conn: sqlite3.Connection, repo: str, number: int) -> bytes
     row = conn.execute("SELECT * FROM review_prs WHERE repo = ? AND number = ?", (repo, number)).fetchone()
     if doc is None or row is None:
         return doc
-    at, current = map_row_to_doc_heads(row)
+    _, current = map_row_to_doc_heads(row)
     if current:
         return doc
-    updating = row["doc_update_for"] == row["head_oid"]
-    words = f"doc at {at[:DOC_SHA_CHARS] or 'unknown'}, PR at {str(row['head_oid'])[:DOC_SHA_CHARS]}"
-    words += "; its owner is updating it" if updating else ""
+    words = map_row_to_doc_behind(row)
     banner = (
         '<div style="font:14px system-ui,sans-serif;padding:8px 12px;background:#fff3cd;color:#5c4400;'
         f'border-bottom:1px solid #e0c36a">{words}</div>'
