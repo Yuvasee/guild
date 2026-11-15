@@ -173,7 +173,8 @@ def store_open_prs(conn: sqlite3.Connection, prs: list[OpenPr], now: int) -> Non
                 loc = excluded.loc, loc_rule = excluded.loc_rule, checks = excluded.checks,
                 requested = excluded.requested, body_reviews = excluded.body_reviews, depends_on = excluded.depends_on,
                 usage_missing = excluded.usage_missing,
-                approved_by = excluded.approved_by, bot_approved = excluded.bot_approved, bot_cleared = excluded.bot_cleared,
+                approved_by = excluded.approved_by, bot_approved = excluded.bot_approved,
+                bot_cleared = excluded.bot_cleared,
                 others_reviewed = max(coalesce(others_reviewed, 0), excluded.others_reviewed),
                 merge_state = excluded.merge_state, in_merge_queue = excluded.in_merge_queue,
                 commit_oids = excluded.commit_oids,
@@ -1504,8 +1505,8 @@ def record_merge_ok(
         raise MergeOkRefused(f"{ref} is not an open PR in the queue")
     if not can_ok_merge(config, row):
         raise MergeOkRefused(
-            f"{ref} is not reviewed at its head by {config.review_bot_name} without a request for changes with CI green, "
-            "or is a draft or stacked"
+            f"{ref} is not reviewed at its head by {config.review_bot_name} without a request for changes "
+            "with CI green, or is a draft or stacked"
         )
     if head_oid != row["head_oid"]:
         raise MergeOkRefused(f"{ref} has new commits since the page showed it; look at them first")
@@ -1538,7 +1539,8 @@ def map_merge_ok_to_text(config: Config, row: sqlite3.Row, no_owner: bool) -> st
     command = f"gh pr merge {url} --match-head-commit {oid}"
     given = (
         f"{config.owner_name_at_start} OKs merging {url} ({row['title']}) at {oid}: they pressed Merge on the Guild "
-        f"page, as {config.review_bot_name} reviewed this commit without asking for changes and CI is green. A new commit voids this OK."
+        f"page, as {config.review_bot_name} reviewed this commit without asking for changes and CI is green. A new "
+        "commit voids this OK."
     )
     blocked = (
         " GitHub reports its merge BLOCKED (branch protection may want a person's review), so the guard or GitHub may "
