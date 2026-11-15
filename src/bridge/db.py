@@ -818,6 +818,7 @@ MIGRATIONS: tuple[str, ...] = (
     CREATE INDEX user_items_message ON user_items (message_id) WHERE message_id IS NOT NULL;
     CREATE INDEX messages_kind_due ON messages (kind, respond_by);
     """,
+    "ALTER TABLE review_prs ADD COLUMN merge_ok_oid TEXT;",
 )
 
 HOOK_BUSY_TIMEOUT_MS = 200

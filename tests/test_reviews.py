@@ -11,6 +11,7 @@ from bridge.board import BODY_MAX_CHARS, SYSTEM_CONVERSATION
 from bridge.config import Config
 from bridge.db import connect, transaction
 from bridge.drivers import scan_transcripts
+from bridge.guard import NOT_OWNER_REVIEWED, list_merge_waits, map_row_to_merge_facts
 from bridge.guildview import post_signals_to_leads
 from bridge.review_github import (
     FetchedComment,
@@ -1756,6 +1757,23 @@ def test_merge_ok_tells_the_owner_once_per_head_and_a_new_commit_voids_it(tmp_pa
         store_open_prs(conn, [make_pr(bot_approved=True)], 900)
     restored = merge_ok_view(conn)
     assert restored["merge_ok"]["current"] is True and restored["merge_ok"]["head"] == "a1"
+
+
+def owner_review_waits(conn: Any) -> bool:
+    row = conn.execute("SELECT * FROM review_prs WHERE ref = ?", (REF,)).fetchone()
+    return NOT_OWNER_REVIEWED in list_merge_waits(map_row_to_merge_facts(row, None))
+
+
+def test_merge_ok_is_the_owners_word_for_the_guard_until_a_new_commit(tmp_path: Path) -> None:
+    conn = setup_pr(tmp_path, bot_approved=True)
+    assert owner_review_waits(conn)
+    with transaction(conn):
+        add_session(conn, "c1", "worker", branch="dev/x")
+        record_merge_ok(conn, CONFIG, REF, "a1", "theo", 700)
+    assert not owner_review_waits(conn)
+    with transaction(conn):
+        store_open_prs(conn, [make_pr(bot_approved=True, head_oid="b2", commits=(("a1", 1000), ("b2", 2000)))], 800)
+    assert owner_review_waits(conn)
 
 
 def test_merge_ok_with_no_owner_goes_to_the_assistant(tmp_path: Path) -> None:

@@ -1034,7 +1034,9 @@ def map_row_to_merge_facts(row: sqlite3.Row, merge_block: str | None) -> MergeFa
         merge_state=row["merge_state"],
         merge_block=merge_block,
         held=row["held_at"] is not None,
-        owner_reviewed=row["reviewed_at"] is not None or row["approval_waived_at"] is not None,
+        owner_reviewed=row["reviewed_at"] is not None
+        or row["approval_waived_at"] is not None
+        or (row["merge_ok_oid"] is not None and row["merge_ok_oid"] == row["head_oid"]),
     )
 
 

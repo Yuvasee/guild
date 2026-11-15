@@ -1440,6 +1440,8 @@ def record_merge_ok(
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
         (ref, head_oid, by, now, recipient.handle, int(owner is None), result.message_id),
     )
+    # The press is the owner's word for this head only, so the guard lets the merge through until a new commit.
+    conn.execute("UPDATE review_prs SET merge_ok_oid = ? WHERE ref = ?", (head_oid, ref))
     return result.message_id, recipient
 
 
