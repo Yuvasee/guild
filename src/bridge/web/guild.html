@@ -1529,6 +1529,17 @@ function renderPublishComment(pr, preview) {
   return box;
 }
 
+const ANSWERED_LABEL = { true: "Resolved", false: "Answered, open", null: "Answered" };
+
+// Commit links go first: the row's cells clip a long line on the right.
+function renderThreadLine(url, label, title, answer, reply) {
+  const line = el("span", "thread");
+  line.append(queueLink(url, label, title));
+  if (answer) answer.commits.forEach((commit) => line.append(" · ", queueLink(commit.url, commit.sha, "the commit the reply names")));
+  line.append(answer ? ": you “" + answer.his + "”, reply “" + answer.quote + "”" : ": reply “" + reply + "”");
+  return line;
+}
+
 // The reply quoted under the row, so the owner can tell from the page whether it settles their point.
 function renderResolveRow(pr) {
   const row = el("tr", "resolve");
@@ -1536,9 +1547,9 @@ function renderResolveRow(pr) {
   const cell = el("td");
   cell.colSpan = QUEUE_COLUMNS.length - 1;
   pr.resolve_threads.forEach((thread, index) => {
-    const line = el("span", "thread");
     const label = pr.resolve_threads.length > 1 ? "Resolve your thread " + (index + 1) : "Resolve your thread";
-    line.append(queueLink(thread.url, label, "open the thread on GitHub"), ": reply “" + thread.quote + "”");
+    const answer = pr.answered_threads.find((a) => a.url === thread.url);
+    const line = renderThreadLine(thread.url, label, "open the thread on GitHub", answer, thread.quote);
     line.firstChild.classList.add("label");
     cell.append(line);
   });
@@ -1546,7 +1557,10 @@ function renderResolveRow(pr) {
   return row;
 }
 
-const ANSWERED_LABEL = { true: "Resolved", false: "Answered, open", null: "Answered" };
+function listAnsweredOnly(pr) {
+  const resolving = new Set(pr.resolve_threads.map((thread) => thread.url));
+  return pr.answered_threads.filter((thread) => !resolving.has(thread.url));
+}
 
 // An agent's answer to the owner's thread stays a day, resolved or not: an agent resolves under the owner's login.
 function renderAnsweredRow(pr) {
@@ -1554,11 +1568,8 @@ function renderAnsweredRow(pr) {
   row.append(el("td"));
   const cell = el("td");
   cell.colSpan = QUEUE_COLUMNS.length - 1;
-  pr.answered_threads.forEach((thread) => {
-    const line = el("span", "thread");
-    line.append(queueLink(thread.url, ANSWERED_LABEL[thread.resolved], "open the thread on GitHub"));
-    line.append(": you “" + thread.his + "”, reply “" + thread.quote + "”");
-    thread.commits.forEach((commit) => line.append(" · ", queueLink(commit.url, commit.sha, "the commit the reply names")));
+  listAnsweredOnly(pr).forEach((thread) => {
+    const line = renderThreadLine(thread.url, ANSWERED_LABEL[thread.resolved], "open the thread on GitHub", thread);
     if (thread.resolved !== true) line.firstChild.classList.add("label");
     cell.append(line);
   });
@@ -1969,7 +1980,7 @@ function renderQueueGroup(title, prs, first) {
   prs.forEach((pr, index) => {
     const rows = [renderQueueTableRow(pr)];
     if (pr.resolve_threads.length) rows.push(renderResolveRow(pr));
-    if (pr.answered_threads.length) rows.push(renderAnsweredRow(pr));
+    if (listAnsweredOnly(pr).length) rows.push(renderAnsweredRow(pr));
     if (wantsMergeOkRow(pr)) rows.push(renderMergeOkRow(pr));
     if (queueForm && queueForm.ref === pr.ref && (pr.can_publish || pr.can_repost)) rows.push(renderPublishForm(pr));
     rows.forEach((row, at) => {

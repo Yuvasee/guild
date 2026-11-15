@@ -115,6 +115,7 @@ QUOTE_MAX_CHARS = 140
 HIS_QUOTE_MAX_CHARS = 80
 ANSWERED_SHOWN_MS = 24 * HOUR_MS
 """How long an agent's answer to one of the owner's threads stays on the page: the day the owner looks back on."""
+THREADS_PAGE = 100
 _SHA_RE = re.compile(r"\b[0-9a-f]{7,40}\b")
 
 _PERMALINK_TS_RE = re.compile(r"/archives/\w+/p(\d{10})(\d{6})(?:\D|$)")
@@ -1378,9 +1379,7 @@ def map_reply_to_quote(body: str, limit: int = QUOTE_MAX_CHARS) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
-def map_row_to_answered_threads(
-    conn: sqlite3.Connection, row: sqlite3.Row, now: int, shown: list[dict[str, str]]
-) -> list[dict[str, object]]:
+def map_row_to_answered_threads(conn: sqlite3.Connection, row: sqlite3.Row, now: int) -> list[dict[str, object]]:
     """The owner's threads an agent answered in the last day, with the commits the answer names. An agent resolves a
     thread under the owner's login too, so the answer, not the resolver, tells that the owner's point was handled."""
     ref = str(row["ref"])
@@ -1393,18 +1392,20 @@ def map_row_to_answered_threads(
         """,
         (AGENT, ref, HIS),
     ).fetchall()
-    latest = {str(r["url"]): r for r in replies}
-    shown_urls = {t["url"] for t in shown}
+    latest = {str(r["url"]): r for r in replies if int(r["created_at"]) >= now - ANSWERED_SHOWN_MS}
+    if not latest:
+        return []
     open_urls = {str(t["url"]) for t in json.loads(str(row["his_threads"] or "[]"))}
+    # GitHub lists 100 threads at most: past that, a thread missing from the open ones may still be open.
+    key = row["threads_key"]
+    known = key is not None and _are_threads_current(row) and len(str(key).rpartition("|")[2]) < THREADS_PAGE
     oids = [str(r[0]) for r in conn.execute("SELECT oid FROM review_heads WHERE ref = ?", (ref,))]
     answered: list[dict[str, object]] = []
     for url, reply in latest.items():
-        if url in shown_urls or int(reply["created_at"]) < now - ANSWERED_SHOWN_MS:
-            continue
         commits = [
-            {"sha": sha, "url": f"{row['url']}/commits/{oid}"}
+            {"sha": sha, "url": f"{row['url']}/commits/{found[0]}"}
             for sha in dict.fromkeys(_SHA_RE.findall(str(reply["body"])))
-            if (oid := next((o for o in oids if o.startswith(sha)), None))
+            if len(found := [o for o in oids if o.startswith(sha)]) == 1
         ]
         answered.append(
             {
@@ -1412,7 +1413,7 @@ def map_row_to_answered_threads(
                 "his": map_reply_to_quote(str(reply["his_body"]), HIS_QUOTE_MAX_CHARS),
                 "quote": map_reply_to_quote(str(reply["body"])),
                 "commits": commits,
-                "resolved": url not in open_urls if _are_threads_current(row) else None,
+                "resolved": url not in open_urls if known else None,
             }
         )
     return answered
@@ -1826,7 +1827,7 @@ def map_row_to_review(conn: sqlite3.Connection, config: Config, row: sqlite3.Row
         "base": row["base"],
         "merge_block": row["merge_block"],
         "resolve_threads": resolve_threads,
-        "answered_threads": map_row_to_answered_threads(conn, row, now, resolve_threads),
+        "answered_threads": map_row_to_answered_threads(conn, row, now),
         "resolve_is_last": is_resolving_all_that_is_left(row),
         "can_publish": group in (WAITING_FOR_YOU, READY) and not row["reviewed_at"] and row["post_state"] != "external",
         "merge_path": row["merge_path"],

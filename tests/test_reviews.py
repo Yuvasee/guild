@@ -2222,7 +2222,7 @@ def test_owners_thread_an_agent_answered_and_resolved_under_his_login_shows_its_
     ]
 
 
-def test_an_answered_thread_still_open_shows_as_open_unless_the_resolve_line_already_quotes_it(
+def test_an_answered_thread_still_open_shows_as_open_also_beside_the_resolve_line(
     tmp_path: Path,
 ) -> None:
     conn = setup_pr(tmp_path)
@@ -2231,7 +2231,22 @@ def test_an_answered_thread_still_open_shows_as_open_unless_the_resolve_line_alr
     view = answered_view(conn, QUESTION, FIXED_REPLY, threads=(answered, waiting))
     assert [(t["url"], t["resolved"]) for t in view["answered_threads"]] == [(QUESTION.url, False)]
     view = answered_view(conn, threads=(answered,))
-    assert len(view["resolve_threads"]) == 1 and view["answered_threads"] == []
+    assert len(view["resolve_threads"]) == 1 and [t["resolved"] for t in view["answered_threads"]] == [False]
+
+
+def test_a_commit_is_linked_only_when_one_head_matches_and_resolved_is_unknown_past_githubs_page(
+    tmp_path: Path,
+) -> None:
+    conn = setup_pr(tmp_path)
+    twin = "ca982cb39ff" + "0" * 29
+    with transaction(conn):
+        conn.execute("INSERT INTO review_heads (ref, oid, committed_at) VALUES (?, ?, 1)", (REF, twin))
+    view = answered_view(conn, QUESTION, FIXED_REPLY)
+    assert view["answered_threads"][0]["commits"] == []
+    with transaction(conn):
+        conn.execute("UPDATE review_prs SET threads_key = threads_key || ?, threads_read_for = threads_key || ?",
+                     ("r" * 100, "r" * 100))  # fmt: skip
+    assert map_db_to_reviews(conn, CONFIG, ANSWERED_AT)["prs"][0]["answered_threads"][0]["resolved"] is None  # type: ignore[index]
 
 
 def test_no_line_without_an_agent_reply_for_a_colleagues_thread_or_after_a_day(tmp_path: Path) -> None:
@@ -2260,13 +2275,20 @@ def test_answered_line_names_its_state_and_links_the_thread_and_commit(tmp_path:
     const eq = (a, b) => { if (a !== b) throw new Error(JSON.stringify(a) + " !== " + JSON.stringify(b)); };
     const thread = { url: "https://t/1", his: "Why?", quote: "Removed in ca982cb39.", resolved: true,
                      commits: [{ sha: "ca982cb39", url: "https://c/1" }] };
-    const row = renderAnsweredRow({ answered_threads: [thread, { ...thread, resolved: false, commits: [] }] });
-    const [resolved, open] = row.children[1].children;
-    eq(resolved.children[0].textContent, "Resolved");
-    eq(resolved.children[0].href, "https://t/1");
-    eq(resolved.children[1], ": you “Why?”, reply “Removed in ca982cb39.”");
-    eq(resolved.children[3].href, "https://c/1");
-    eq(open.children[0].textContent, "Answered, open");
+    const open = { ...thread, url: "https://t/2", resolved: false, commits: [] };
+    const pr = { resolve_threads: [], answered_threads: [thread, open] };
+    const [resolvedLine, openLine] = renderAnsweredRow(pr).children[1].children;
+    eq(resolvedLine.children[0].textContent, "Resolved");
+    eq(resolvedLine.children[0].href, "https://t/1");
+    eq(resolvedLine.children[2].href, "https://c/1");
+    eq(resolvedLine.children[3], ": you “Why?”, reply “Removed in ca982cb39.”");
+    eq(openLine.children[0].textContent, "Answered, open");
+    const resolve_threads = [{ url: "https://t/2", quote: "q" }, { url: "https://t/3", quote: "Done." }];
+    const resolving = { ...pr, resolve_threads };
+    eq(listAnsweredOnly(resolving).length, 1);
+    const [answeredLine, plainLine] = renderResolveRow(resolving).children[1].children;
+    eq(answeredLine.children[1], ": you “Why?”, reply “Removed in ca982cb39.”");
+    eq(plainLine.children[1], ": reply “Done.”");
     """
     path = tmp_path / "guild.js"
     path.write_text(STUBS + script.group(1) + checks)
