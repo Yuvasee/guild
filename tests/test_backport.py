@@ -195,7 +195,7 @@ def test_the_guard_lets_an_identical_backport_merge_unapproved_and_says_why(tmp_
     gh = FakeGitHub("Backport of #52.", {59: MAIN_FIX, 52: MAIN_FIX}, {52: MERGED}, "release/1.13.x")
     waived: list[str] = []
     with (
-        mock.patch("bridge.guard.fetch_merge_facts", return_value=(False, False, "SUCCESS", "CLEAN", 0)),
+        mock.patch("bridge.guard.fetch_merge_facts", return_value=(False, False, "SUCCESS", "CLEAN", 0, "a1")),
         stub(gh),
     ):
         [unreviewed] = find_merge_blocks(conn, config, targets, 10**13, waived)
@@ -203,7 +203,7 @@ def test_the_guard_lets_an_identical_backport_merge_unapproved_and_says_why(tmp_
     with transaction(conn):
         conn.execute("UPDATE review_prs SET reviewed_at = 600")
     with (
-        mock.patch("bridge.guard.fetch_merge_facts", return_value=(False, False, "SUCCESS", "CLEAN", 0)),
+        mock.patch("bridge.guard.fetch_merge_facts", return_value=(False, False, "SUCCESS", "CLEAN", 0, "a1")),
         stub(gh),
     ):
         assert find_merge_blocks(conn, config, targets, 10**13, waived) == []
@@ -213,7 +213,7 @@ def test_the_guard_lets_an_identical_backport_merge_unapproved_and_says_why(tmp_
         assert plain.waits == ("not approved",) and plain.backport is None
     # Every other condition still applies.
     with (
-        mock.patch("bridge.guard.fetch_merge_facts", return_value=(False, False, "FAILURE", "CLEAN", 1)),
+        mock.patch("bridge.guard.fetch_merge_facts", return_value=(False, False, "FAILURE", "CLEAN", 1, "a1")),
         stub(gh),
     ):
         [red] = find_merge_blocks(conn, config, targets, 10**13)
@@ -222,7 +222,7 @@ def test_the_guard_lets_an_identical_backport_merge_unapproved_and_says_why(tmp_
     assert "CI red. It needs no approval: backport of #52, identical diff: no approval needed. " in red_line
     gh.diffs[59] = MAIN_FIX + OTHER_FIX
     with (
-        mock.patch("bridge.guard.fetch_merge_facts", return_value=(False, False, "SUCCESS", "CLEAN", 0)),
+        mock.patch("bridge.guard.fetch_merge_facts", return_value=(False, False, "SUCCESS", "CLEAN", 0, "a1")),
         stub(gh),
     ):
         [differs] = find_merge_blocks(conn, config, targets, 10**13)
@@ -241,7 +241,7 @@ def test_the_guard_keeps_all_its_github_reads_inside_the_hooks_budget(tmp_path: 
         store_open_prs(conn, [make_pr(ref="pr:Acme/Web#59", repo=REPO, number=59, head="feat/x")], 500)
         conn.execute("UPDATE review_prs SET reviewed_at = 600")
     targets = map_command_to_targets("gh pr merge 59", str(web))
-    with mock.patch("bridge.guard.fetch_merge_facts", return_value=(False, True, None, "CLEAN", 0)) as fetch:
+    with mock.patch("bridge.guard.fetch_merge_facts", return_value=(False, True, None, "CLEAN", 0, "a1")) as fetch:
         assert find_merge_blocks(conn, CONFIG, targets, 10**13) == []
     assert 0 < fetch.call_args.args[3] <= 3
     with (

@@ -20,6 +20,7 @@ from bridge.guildview import post_signals_to_leads
 from bridge.review_github import (
     CI_BLOCKED_BY_BILLING,
     CI_BLOCKED_BY_GITHUB,
+    ChecksRunning,
     FetchedComment,
     GitHubError,
     HisThread,
@@ -1379,11 +1380,15 @@ def check_run(conclusion: str | None, *notes: str) -> dict[str, Any]:
 def test_ci_is_blocked_by_github_only_when_every_failed_check_is_a_job_it_refused_to_start() -> None:
     passed, skipped, running = check_run("SUCCESS"), check_run("SKIPPED"), check_run(None)
     refused = check_run("FAILURE", "The ubuntu-latest label will migrate", BILLING_NOTE)
-    assert map_checks_to_ci_blocked_by([passed, skipped, running, refused, refused]) == CI_BLOCKED_BY_BILLING
+    assert map_checks_to_ci_blocked_by([passed, skipped, refused, refused]) == CI_BLOCKED_BY_BILLING
+    for still in (running, {"__typename": "StatusContext", "state": "PENDING"}):
+        with pytest.raises(ChecksRunning):
+            map_checks_to_ci_blocked_by([passed, still, refused])
     other = check_run("FAILURE", "The job was not started because the runner group is disabled.")
     assert map_checks_to_ci_blocked_by([refused, other]) == CI_BLOCKED_BY_GITHUB
     real = check_run("FAILURE", "Process completed with exit code 1.")
     assert map_checks_to_ci_blocked_by([refused, real]) is None, "one real failure means CI is red"
+    assert map_checks_to_ci_blocked_by([running, refused, real]) is None, "red whatever still runs"
     assert map_checks_to_ci_blocked_by([refused, {"__typename": "StatusContext", "state": "ERROR"}]) is None
     assert map_checks_to_ci_blocked_by([passed]) is None
 
@@ -1438,8 +1443,39 @@ def test_merge_shows_disabled_with_the_reason_while_github_refuses_to_run_ci(tmp
     view = poll(replace(new_head, checks="SUCCESS"))
     assert (view["can_ok_merge"], view["merge_blocked_by_github"]) == (True, None)
     reads.clear()
-    poll(replace(new_head, draft=True))
-    assert reads == [], "only a PR the button waits on CI for is read"
+    draft = replace(new_head, draft=True)
+    assert poll(draft)["merge_blocked_by_github"] is None and reads == ["b2"], "a draft's lead hears the reason too"
+    assert conn.execute("SELECT ci_blocked_by FROM review_prs").fetchone()[0] == CI_BLOCKED_BY_BILLING
+    poll(draft)
+    assert reads == ["b2", "b2"], "a showing reason is read again: a fast re-run may have failed for real"
+    with mock.patch("bridge.reviews.CI_REREADS_PER_POLL", 0):
+        poll(draft)
+    assert reads == ["b2", "b2"], "PRs without the button are re-read a few per poll, as a billing stop reddens all"
+
+
+def test_a_head_whose_refused_jobs_sit_beside_a_running_check_shows_no_reason_and_is_read_again(tmp_path: Path) -> None:
+    conn = setup_pr(tmp_path, checks="FAILURE")
+    answers: list[str | type[ChecksRunning] | None] = [ChecksRunning, CI_BLOCKED_BY_BILLING, ChecksRunning]
+
+    def fetch(_repo: str, _oid: str) -> str | None:
+        answer = answers.pop(0)
+        if answer is ChecksRunning:
+            raise ChecksRunning
+        return cast(str | None, answer)
+
+    def poll() -> tuple[str | None, str | None]:
+        with (
+            mock.patch("bridge.reviews.fetch_open_prs", return_value=[make_pr(checks="FAILURE")]),
+            mock.patch("bridge.reviews.fetch_comments", return_value=[]),
+            mock.patch("bridge.reviews.fetch_ci_blocked_by", side_effect=fetch),
+        ):
+            poll_review_queue(conn, CONFIG, 5000, None, None)
+        return tuple(conn.execute("SELECT ci_blocked_by, ci_blocked_for FROM review_prs").fetchone())
+
+    assert poll() == (None, None)
+    assert poll() == (CI_BLOCKED_BY_BILLING, "a1")
+    assert poll() == (None, None), "a re-run in progress drops the reason"
+    assert answers == []
 
 
 def test_merge_cell_shows_the_disabled_button_with_its_reason_unless_an_ok_was_sent(tmp_path: Path) -> None:
@@ -2089,6 +2125,24 @@ def test_a_red_ci_signal_on_a_workers_pr_reaches_its_lead(tmp_path: Path) -> Non
     assert [r.handle for r in posted] == ["alex"]
     with transaction(conn):
         assert post_signals_to_leads(conn, CONFIG, [signal], 2000) == []
+
+
+def test_a_ci_stop_by_github_reaches_the_lead_in_its_own_words_and_each_flip_at_one_head_is_news(
+    tmp_path: Path,
+) -> None:
+    conn = setup_shared_issue_pr(tmp_path)
+    text = (
+        "app#7 T: CI didn't run: GitHub billing, not a code failure: rerun the failed jobs once GitHub runs them again."
+    )
+    stopped: dict[str, object] = {
+        "key": f"{REF}:ci stopped:a1", "kind": "ci stopped", "text": text, "url": "https://x/7", "surface": "s-worker",
+    }  # fmt: skip
+    red: dict[str, object] = {**stopped, "key": f"{REF}:ci:a1", "kind": "ci", "text": "app#7 T"}
+    for at, signal in enumerate([red, stopped, stopped, red, red], 1):
+        with transaction(conn):
+            post_signals_to_leads(conn, CONFIG, [signal], at * 1000)
+    bodies = [r[0] for r in conn.execute("SELECT body FROM messages ORDER BY id")]
+    assert bodies == ["app#7 T (ci)", text, "app#7 T (ci)"]
 
 
 def test_a_stalled_reviewbot_reaches_the_prs_lead_and_the_assistant_once_each_off_the_board(tmp_path: Path) -> None:

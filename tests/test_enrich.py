@@ -343,6 +343,28 @@ def test_a_prs_signal_goes_to_the_owner_its_router_names_and_else_to_the_session
     assert quiet == [] and asked == ["pr:acme/web#7"] * 2, "no owner lookup for a PR with nothing to say"
 
 
+def test_red_ci_github_refused_to_run_tells_the_lead_why_and_asks_no_fix_only_at_that_head() -> None:
+    sessions = [SessionRefs("S", "s", "feat/x", ["pr:Acme/Web#7"])]
+    red = pr(checks="FAILURE", head_oid="c1")
+
+    def signals(blocked: dict[str, tuple[str, str]] | None) -> list[tuple[str, str, str, str]]:
+        found = find_signals(sessions, {"pr:Acme/Web#7": red}, ci_blocked=blocked)
+        return [(s.kind, s.severity, s.key, s.text) for s in found]
+
+    reason = "CI didn't run: GitHub billing"
+    assert signals({"pr:acme/web#7": ("c1", reason)}) == [
+        (
+            "ci stopped",
+            "info",
+            "pr:Acme/Web#7:ci stopped:c1",
+            "web#7 Fix it: CI didn't run: GitHub billing, not a code failure: rerun the failed jobs once GitHub runs "
+            "them again.",
+        )
+    ], "no ci signal, which asks the lead to get CI green"
+    assert signals({"pr:acme/web#7": ("c0", reason)}) == [("ci", "action", "pr:Acme/Web#7:ci:c1", "web#7 Fix it")]
+    assert signals(None) == [("ci", "action", "pr:Acme/Web#7:ci:c1", "web#7 Fix it")]
+
+
 STALL_CONTEXT = "Reviewbot / stall"
 
 
