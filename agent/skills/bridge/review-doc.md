@@ -71,6 +71,11 @@ Use these `h2` headings, in this order, worded as here. Inside a section, use `h
 | 9 | **Verified and not verified** | `h3` Tested live (required): what ran in a live environment for the PR (a preview, staging) and what it showed, marked `observed`; what could not run there and why. `h3` Verified: what else was run or checked and what it showed, one plain line each with its mark; hashes, run ids and logs folded. `h3` Not verified: what was not, why, and who would notice and when. |
 | 10 | **Changes since the last review** | Only after the owner's own review of this PR (their GitHub review or comments on it, or a review sent from the Guild page), covering what changed since their latest one. Never for other reviewers' rounds or for updates before the owner has looked. Always last; newest first, one folded block per update: what changed in the code and in this doc; commits inside. |
 
+The doc always opens with **In short**, written for a reader with no context: what, why, how. Nothing comes
+before it: no 'changed since' or update box at the top, even right after an update. What changed goes only in
+**Changes since the last review**, which exists only once the owner has reviewed an earlier head, and stays last
+and folded.
+
 A section with nothing in it says so in one line rather than disappearing, except **Decisions** and **Changes since
 the last review**, which are left out when empty.
 
