@@ -463,6 +463,20 @@ def test_a_stacked_pr_posts_once_its_parents_post_is_out_while_the_parent_is_sti
         assert advance_posts(conn, CONFIG, 3000)[0] == [REF]
 
 
+def test_a_parents_dry_run_releases_its_child_only_while_sending_is_off(tmp_path: Path) -> None:
+    conn = setup_stacked_pr(tmp_path)
+    publish(conn)
+    live = dataclasses.replace(CONFIG, review_post_dry_run=False)
+    with transaction(conn):
+        conn.execute("UPDATE review_prs SET post_state = ? WHERE ref = ?", (DRY_RUN, PARENT))
+        assert advance_posts(conn, live, 2000)[0] == [] and post_state(conn) == WAITING_STACK
+        assert advance_posts(conn, dataclasses.replace(CONFIG, review_post_dry_run=True), 3000)[0] == [REF]
+    with mock.patch("bridge.review_post.send_to_slack") as send:
+        assert run_review_post(conn, live, REF) is None
+    send.assert_not_called()
+    assert post_state(conn) == WAITING_STACK
+
+
 def test_a_pr_stacked_on_a_pr_bridge_does_not_track_posts_at_once(tmp_path: Path) -> None:
     conn = setup_pr(tmp_path, stack_parent="pr:Org/app#99")
     add_sentence(conn)
@@ -501,6 +515,22 @@ def test_a_post_not_out_15_minutes_after_publish_is_told_to_the_assistant_once_p
         conn.execute("UPDATE review_prs SET post_state = ? WHERE ref = ?", (POSTED, PARENT))
         assert advance_posts(conn, CONFIG, due + 2)[0] == [REF]
         assert tell_assistant_of_stalled_posts(conn, CONFIG, due + 3) == []
+
+
+def test_a_stopped_sender_whose_post_was_seen_in_the_channel_is_no_stall(tmp_path: Path) -> None:
+    conn = claimed(tmp_path)
+    due = 1000 + POST_STALL_AFTER_MS
+    with transaction(conn):
+        add_session(conn, "aide-c", CONFIG.assistant_handle)
+        conn.execute("UPDATE review_prs SET post_state = ?", (INTERRUPTED,))
+        conn.execute(
+            "INSERT INTO review_slack_posts (repo, number, ts, link, seen_at) VALUES ('org/app', 7, '1', NULL, 1)"
+        )
+        assert tell_assistant_of_stalled_posts(conn, CONFIG, due) == []
+        conn.execute("DELETE FROM review_slack_posts")
+        assert len(tell_assistant_of_stalled_posts(conn, CONFIG, due)) == 1
+    body = conn.execute("SELECT body FROM messages ORDER BY id DESC").fetchone()[0]
+    assert "if not, guild review repost Org/app#7" in body
 
 
 def test_a_pr_turned_draft_after_publish_holds_its_post(tmp_path: Path) -> None:
