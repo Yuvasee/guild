@@ -105,7 +105,7 @@ def test_foreign_host_origin_and_missing_header_are_refused(dashboard: str) -> N
 def test_merge_ok_needs_a_trusted_request_and_the_shown_head(bridge_env: BridgeEnv, dashboard: str) -> None:
     conn = bridge_env.connect()
     with transaction(conn):
-        store_open_prs(conn, [make_pr(bot_approved=True)], 500)
+        store_open_prs(conn, [make_pr(bot_cleared=True)], 500)
         add_session(conn, "c1", "worker", branch="dev/x")
     url = dashboard + "/api/reviews/Org/app/7/merge-ok"
     port = dashboard.rsplit(":", 1)[1]
