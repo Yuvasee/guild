@@ -117,7 +117,7 @@ def test_install_hooks_preserves_foreign_hooks_and_is_idempotent(tmp_path: Path)
     assert installed["hooks"]["Stop"][1]["hooks"][0]["command"] == "/home/u/.local/bin/bridge-hook Stop"
     assert set(installed["hooks"]) == {
         "SessionStart", "UserPromptSubmit", "Stop", "SessionEnd", "PostToolUse", "PostToolUseFailure",
-        "Notification", "PreToolUse",
+        "Notification", "PreToolUse", "StopFailure",
     }  # fmt: skip
     assert installed["hooks"]["Notification"][0]["matcher"] == "permission_prompt"
     assert installed["hooks"]["PostToolUse"][0]["hooks"][0]["command"].endswith(

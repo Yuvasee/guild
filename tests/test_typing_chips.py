@@ -12,6 +12,7 @@ from bridge.db import transaction
 from bridge.feed import (
     TYPED_USER_MAX_CHARS,
     _convert_message_to_typed_text,  # pyright: ignore[reportPrivateUsage]
+    convert_cut_to_resume_text,
     convert_user_message_to_typed_text,
     find_stuck_deliveries,
     record_stuck_delivery,
@@ -118,13 +119,23 @@ def test_every_typed_form_stays_under_the_chip() -> None:
         "user, whole": convert_user_message_to_typed_text("y" * 20, "x" * TYPED_USER_MAX_CHARS, 999_999),
         "user, cut": convert_user_message_to_typed_text("y" * 20, words, 999_999),
         "peer": _convert_message_to_typed_text(
-            _row(from_conversation="c", from_handle=handle, body=words, kind="info", respond_by=None), 999_999, 0
-        ),
-        "request": _convert_message_to_typed_text(
-            _row(from_conversation="c", from_handle=handle, body=words, kind="request", respond_by=-99_999_000),
+            _row(from_conversation="c", from_handle=handle, body=words, kind="info", respond_by=None, post_type=None),
             999_999,
             0,
         ),
+        "request": _convert_message_to_typed_text(
+            _row(
+                from_conversation="c",
+                from_handle=handle,
+                body=words,
+                kind="request",
+                respond_by=-99_999_000,
+                post_type=None,
+            ),
+            999_999,
+            0,
+        ),
+        "resume": convert_cut_to_resume_text(f"an API error ({'e' * 64})", 0),
     }
 
     assert {name: len(text) for name, text in longest.items() if len(text) >= CHIP_AT_CHARS} == {}

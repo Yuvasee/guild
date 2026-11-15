@@ -1,0 +1,302 @@
+import json
+import sqlite3
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+from unittest import mock
+
+import pytest
+from conftest import BridgeEnv, SpawnProcess
+from test_leads import Team
+from test_typing import NBSP, PROMPT, RULE, FakeClaudeBox
+
+from bridge.board import Recipient
+from bridge.config import Config
+from bridge.feed import (
+    TURN_CUT,
+    UndeliveredTab,
+    convert_screen_to_hold_reason,
+    deliver_typed,
+    take_new_undelivered_tabs,
+    tell_of_undelivered_tab,
+)
+from bridge.hooks import HOOK_EVENTS, handle_hook
+from bridge.tabinput import TypeResult, type_when_idle
+
+SLEEP_TEXT = "API Error: Your computer went to sleep mid-response. The response above may be incomplete."
+BASE_NS = 1_800_000_000_000 * 1_000_000
+CONFIG = Config(assistant_handle="old-b")
+
+
+def _at(t_s: int) -> str:
+    """A transcript timestamp t_s seconds after the base the hooks here run at."""
+    return datetime.fromtimestamp(BASE_NS // 1_000_000_000 + t_s, UTC).isoformat()
+
+
+def _answer(t_s: int) -> dict[str, object]:
+    at = _at(t_s)
+    usage = {"input_tokens": 10, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 5}
+    message = {"model": "claude-opus-5-5", "role": "assistant", "content": [{"type": "text", "text": "on it"}]}
+    return {"type": "assistant", "timestamp": at, "isSidechain": False, "message": {**message, "usage": usage}}
+
+
+def _failure(t_s: int, text: str = SLEEP_TEXT, error: str = "server_error") -> dict[str, object]:
+    at = _at(t_s)
+    message = {"model": "<synthetic>", "role": "assistant", "content": [{"type": "text", "text": text}]}
+    usage = {"input_tokens": 0, "output_tokens": 0}
+    entry = {"type": "assistant", "timestamp": at, "isApiErrorMessage": True, "error": error, "isSidechain": False}
+    return {**entry, "message": {**message, "stop_reason": "stop_sequence", "usage": usage}}
+
+
+def _write_transcript(path: Path, *entries: dict[str, object]) -> str:
+    path.write_text("".join(json.dumps(e) + "\n" for e in entries))
+    return str(path)
+
+
+class Cut:
+    """Lead alex in tab A, the assistant old-b in tab B; hooks run in this process and record what they would type."""
+
+    def __init__(self, bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:
+        self.team = Team(bridge_env, spawn_process)
+        assert self.team.enroll().returncode == 0
+        self.env = bridge_env
+        self.transcript = bridge_env.root / "conv-a.jsonl"
+        self.spawned: list[tuple[int, str]] = []
+
+    def hook(self, event: str, t_s: int, config: Config = CONFIG, **payload: object) -> None:
+        env = {"CLAUDE_PID": str(self.team.a), "AGTERM_PANE_ID": "PANE-A", "AGTERM_SESSION_ID": "TAB-A"}
+        base = {"session_id": "conv-a", "cwd": str(self.env.root), "transcript_path": str(self.transcript)}
+
+        def spawn(message_id: int, recipients: list[Recipient]) -> None:
+            self.spawned += [(message_id, r.handle) for r in recipients]
+
+        with self.env.connect() as conn, mock.patch("bridge.hooks.spawn_typed_delivery", spawn):
+            handle_hook(conn, event, {**base, **payload}, env, config, BASE_NS + t_s * 1_000_000_000)
+
+    def fail(self, t_s: int, text: str = SLEEP_TEXT, error: str = "server_error") -> None:
+        self.hook("StopFailure", t_s, error=error, last_assistant_message=text)
+
+    def messages(self, post_type: str | None = None) -> list[sqlite3.Row]:
+        with self.env.connect() as conn:
+            return conn.execute(
+                "SELECT m.id, m.body, m.post_type, m.cancelled_at, r.handle FROM messages m"
+                " JOIN message_recipients r ON r.message_id = m.id"
+                " WHERE m.from_handle = 'bridge' AND (? IS NULL OR m.post_type = ?) ORDER BY m.id",
+                (post_type, post_type),
+            ).fetchall()
+
+
+@pytest.fixture
+def cut(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> Cut:
+    return Cut(bridge_env, spawn_process)
+
+
+def test_stop_failure_is_a_hook_bridge_installs() -> None:
+    assert "StopFailure" in HOOK_EVENTS
+
+
+def test_a_turn_cut_by_sleep_is_resumed_once_and_the_tab_shows_idle(cut: Cut) -> None:
+    _write_transcript(cut.transcript, _answer(-300), _failure(-10))
+    cut.hook("UserPromptSubmit", 0, prompt="go on", prompt_id="p1")
+    cut.fail(5)
+
+    resumes = cut.messages(TURN_CUT)
+    with cut.env.connect() as conn:
+        status = conn.execute("SELECT status FROM instances WHERE pid = ?", (cut.team.a,)).fetchone()["status"]
+    assert [r["handle"] for r in resumes] == ["alex"]
+    assert resumes[0]["body"].startswith("[bridge] Your last turn was cut by Mac sleep at ")
+    assert resumes[0]["body"].endswith("Read bridge inbox and continue where you left off.")
+    assert cut.spawned == [(resumes[0]["id"], "alex")]
+    assert status == "idle"
+
+
+def test_any_other_api_error_is_resumed_too_and_named(cut: Cut) -> None:
+    rate = "API Error: Rate limit reached"
+    _write_transcript(cut.transcript, _answer(-300), _failure(-10, rate))
+    cut.fail(5, rate, "rate_limit")
+
+    assert [r["body"].split(" at ")[0] for r in cut.messages(TURN_CUT)] == [
+        "[bridge] Your last turn was cut by an API error (rate_limit)"
+    ]
+
+
+def test_a_resumed_turn_that_fails_again_is_told_to_the_assistant_once_and_never_typed_again(cut: Cut) -> None:
+    _write_transcript(cut.transcript, _answer(-300), _failure(-10))
+    cut.fail(5)
+    # The resume went in and its turn failed at once: no real answer since.
+    _write_transcript(cut.transcript, _answer(-300), _failure(-10), _failure(30))
+    cut.fail(60)
+    cut.fail(120)
+
+    resumes, alerts = cut.messages(TURN_CUT), cut.messages("to-assistant")
+    assert len(resumes) == 1 and resumes[0]["cancelled_at"] is not None
+    assert [a["handle"] for a in alerts] == ["old-b"]
+    assert "was cut again by Mac sleep" in alerts[0]["body"]
+    assert f"after bridge resumed it once (#{resumes[0]['id']}" in alerts[0]["body"]
+    assert "agtermctl session text --target TAB-A --pane-id PANE-A" in alerts[0]["body"]
+    assert [handle for _, handle in cut.spawned] == ["alex", "old-b"]
+
+
+def test_a_cut_after_the_resumed_turn_answered_is_a_new_cut_and_resumed_again(cut: Cut) -> None:
+    _write_transcript(cut.transcript, _answer(-300), _failure(-10))
+    cut.fail(5)
+    _write_transcript(cut.transcript, _answer(30), _failure(40))
+    cut.fail(60)
+
+    assert len(cut.messages(TURN_CUT)) == 2
+    assert cut.messages("to-assistant") == []
+
+
+def test_a_tab_that_is_neither_a_lead_nor_a_worker_is_not_resumed(cut: Cut) -> None:
+    with cut.env.connect() as conn:
+        conn.execute("UPDATE leads SET retired_at = 1")
+    _write_transcript(cut.transcript, _failure(-10))
+    cut.fail(5)
+
+    assert cut.messages(TURN_CUT) == []
+
+
+def test_a_worker_tab_is_resumed(cut: Cut) -> None:
+    with cut.env.connect() as conn:
+        conn.execute("UPDATE leads SET retired_at = 1")
+        conn.execute("INSERT INTO tab_parents (agterm_session, parent_session) VALUES ('TAB-A', 'TAB-B')")
+    _write_transcript(cut.transcript, _failure(-10))
+    cut.fail(5)
+
+    assert len(cut.messages(TURN_CUT)) == 1
+
+
+def test_a_context_over_its_window_is_left_to_compaction(cut: Cut) -> None:
+    too_long = "Prompt is too long"
+    _write_transcript(cut.transcript, _failure(-10, too_long, "invalid_request"))
+    cut.fail(5, too_long, "invalid_request")
+
+    assert cut.messages(TURN_CUT) == []
+
+
+def test_a_cut_after_a_compaction_since_the_resume_is_a_new_cut(cut: Cut) -> None:
+    _write_transcript(cut.transcript, _failure(-10))
+    cut.fail(5)
+    cut.fail(60)
+    resume = cut.messages(TURN_CUT)[0]
+    with cut.env.connect() as conn:
+        conn.execute("UPDATE conversations SET compacted_at = ? WHERE conversation_id = 'conv-a'", (2**62,))
+    # The transcript after the compaction holds no answer yet: only its boundary and the new failure.
+    _write_transcript(cut.transcript, {"type": "system", "subtype": "compact_boundary"}, _failure(100))
+    cut.fail(120)
+
+    assert resume["cancelled_at"] is not None
+    assert len(cut.messages(TURN_CUT)) == 2
+
+
+def test_a_cut_turn_over_its_window_is_recorded_for_compaction_at_once(cut: Cut) -> None:
+    too_long = "Prompt is too long"
+    _write_transcript(cut.transcript, _failure(-10, too_long, "invalid_request"))
+    cut.hook("StopFailure", 5, Config(assistant_handle="old-b", compact_at_tokens=600_000), error="invalid_request",
+             last_assistant_message=too_long)  # fmt: skip
+
+    with cut.env.connect() as conn:
+        why = conn.execute("SELECT context_dead_why FROM conversations WHERE conversation_id = 'conv-a'").fetchone()
+    assert why["context_dead_why"] == "too-long"
+    assert cut.messages(TURN_CUT) == []
+
+
+def test_a_compaction_request_the_cut_turn_never_answered_no_longer_reads_as_compacting(cut: Cut) -> None:
+    with cut.env.connect() as conn:
+        conn.execute("UPDATE conversations SET compact_phase = 'requested', compact_warned_at = 690000")
+    _write_transcript(cut.transcript, _failure(-10))
+    cut.fail(5)
+    resume = cut.messages(TURN_CUT)[0]
+    with cut.env.connect() as conn:
+        phase = conn.execute(
+            "SELECT compact_phase, compact_warned_at FROM conversations WHERE conversation_id = 'conv-a'"
+        )
+        assert tuple(phase.fetchone()) == (None, None)
+        conn.execute("UPDATE messages SET created_at = 1000 WHERE id = ?", (resume["id"],))
+        conn.execute("UPDATE message_recipients SET typing_wanted_at = 1000 WHERE message_id = ?", (resume["id"],))
+        tabs = take_new_undelivered_tabs(conn, CONFIG, 1000 + 6 * 60_000)
+
+    assert [(t.compacting, t.cut is not None) for t in tabs] == [(False, True)]
+    reason = convert_screen_to_hold_reason(tabs[0], _screen("Ok, push it"))
+    assert reason is not None and "compacting" not in reason
+
+
+def _screen(box: str) -> str:
+    return "\n".join([RULE, PROMPT + NBSP + box, RULE, "  -- INSERT --"])
+
+
+def _cut_tab(draft_proven: bool) -> UndeliveredTab:
+    return UndeliveredTab("c", "alex", "TAB-A", "PANE-A", None, 7, 0, 1, None, False, False, draft_proven,
+                          cut="cut by Mac sleep at 09:50")  # fmt: skip
+
+
+def test_a_resume_held_by_text_bridge_could_not_check_is_still_named_with_its_cause() -> None:
+    reason = convert_screen_to_hold_reason(_cut_tab(False), _screen("Ok, push it"))
+
+    assert reason is not None
+    assert reason.startswith("Its last turn was cut by Mac sleep at 09:50, and bridge's resume has not gone in.")
+    assert "grey suggestion or someone's draft" in reason
+
+
+def test_a_resume_held_by_a_proven_draft_names_the_draft_and_the_cut() -> None:
+    reason = convert_screen_to_hold_reason(_cut_tab(True), _screen("my own words"))
+
+    assert reason is not None and "cut by Mac sleep at 09:50" in reason and "'my own words'" in reason
+
+
+def test_a_cut_workers_waiting_resume_reaches_the_assistant_in_five_minutes(cut: Cut) -> None:
+    with cut.env.connect() as conn:
+        conn.execute("UPDATE leads SET retired_at = 1")
+        conn.execute("INSERT INTO tab_parents (agterm_session, parent_session) VALUES ('TAB-A', 'TAB-B')")
+    _write_transcript(cut.transcript, _failure(-10))
+    cut.fail(5)
+    resume = cut.messages(TURN_CUT)[0]
+    with cut.env.connect() as conn:
+        conn.execute("UPDATE messages SET created_at = 1000 WHERE id = ?", (resume["id"],))
+        conn.execute("UPDATE message_recipients SET typing_wanted_at = 1000 WHERE message_id = ?", (resume["id"],))
+        early = take_new_undelivered_tabs(conn, CONFIG, 1000 + 4 * 60_000)
+        tabs = take_new_undelivered_tabs(conn, CONFIG, 1000 + 6 * 60_000)
+        told = tell_of_undelivered_tab(conn, CONFIG, tabs[0], _screen("Ok, push it"), 1000 + 6 * 60_000)
+        body = conn.execute("SELECT body FROM messages WHERE id = ?", (told[0] if told else 0,)).fetchone()
+
+    assert early == []
+    assert told is not None and told[1].handle == "old-b"
+    assert "Its last turn was cut by Mac sleep at " in body["body"]
+
+
+def _type_briefly(*args: Any, **kw: Any) -> TypeResult:
+    return type_when_idle(*args, **{**kw, "wait_s": 6})
+
+
+def _deliver_resume(cut: Cut, fake: FakeClaudeBox) -> str | None:
+    _write_transcript(cut.transcript, _failure(-10))
+    cut.hook("UserPromptSubmit", 0, prompt="go on", prompt_id="p1")
+    cut.fail(5)
+    message_id = cut.messages(TURN_CUT)[0]["id"]
+    with (
+        cut.env.connect() as conn,
+        mock.patch("bridge.tabinput.run_agterm", fake.run),
+        mock.patch("bridge.feed.is_tab_selected", lambda *_: False),  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
+        mock.patch("bridge.feed.type_when_idle", _type_briefly),
+    ):
+        return deliver_typed(conn, Config(), message_id, "conv-a")
+
+
+def test_after_a_cut_the_grey_suggestion_is_probed_and_the_resume_typed_over_it(cut: Cut) -> None:
+    fake = FakeClaudeBox({"TAB-A": "Ok, push it"}, suggestions={"TAB-A"})
+
+    result = _deliver_resume(cut, fake)
+
+    assert result == "typed"
+    assert fake.typed[:2] == [".", "\x7f"]
+    assert [s.split(" at ")[0] for s in fake.submitted] == ["[bridge] Your last turn was cut by Mac sleep"]
+
+
+def test_after_a_cut_a_real_draft_gets_no_typing(cut: Cut) -> None:
+    fake = FakeClaudeBox({"TAB-A": "my own words"})
+
+    result = _deliver_resume(cut, fake)
+
+    assert result == "draft"
+    assert fake.typed == [".", "\x7f"]
+    assert fake.boxes["TAB-A"] == "my own words"
