@@ -201,6 +201,18 @@ def test_an_issue_assigned_to_a_colleague_raises_no_drift_whoever_would_own_it()
     assert drift(proj_77(assignee=None)) == ["eli"], "an unassigned issue is the team's"
 
 
+def test_a_blocked_issue_raises_no_drift() -> None:
+    sessions = [SessionRefs("S-eli", "eli", "feat/proj-77", ["issue:PROJ-77"], {"issue:PROJ-77": 1})]
+    prs = [linked(n, "merged", True, 1_000) for n in (970, 71)]
+
+    def drift(state: str) -> int:
+        found = find_signals(sessions, {"issue:PROJ-77": issue(state, prs, "started")}, at_ms=NOW)
+        return sum(s.kind == "drift" for s in found)
+
+    assert drift("In Progress") == 1
+    assert drift("Blocked") == 0
+
+
 def test_linear_says_whether_the_assignee_is_the_key_owner(monkeypatch: pytest.MonkeyPatch) -> None:
     def answer(assignee: dict[str, object] | None) -> bytes:
         node: dict[str, object] = {

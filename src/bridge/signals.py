@@ -9,6 +9,8 @@ _DONE_ISSUE_TYPES = frozenset({"completed", "canceled", "duplicate"})
 _READY_MERGE_STATES = frozenset({"CLEAN", "HAS_HOOKS"})
 _RED = frozenset({"FAILURE", "ERROR"})
 _FINISHED_PR_STATUSES = frozenset({"merged", "closed"})
+_WAITING_STATES = frozenset({"blocked"})
+"""A lead's truthful answer to "is it done?" when the work merged but something else must happen first."""
 ISSUE_QUIET_MS = 2 * 3_600_000
 _PRS_NAMED_MAX = 5
 
@@ -155,9 +157,9 @@ def _issue_done_signal(
     # Data cached before assignee_is_me was read counts as a colleague's until the next refresh.
     if data.get("assignee") and data.get("assignee_is_me") is not True:
         return None
-    if data.get("state_type") in _DONE_ISSUE_TYPES:
-        return None
     state = str(data.get("state") or "")
+    if data.get("state_type") in _DONE_ISSUE_TYPES or state.lower() in _WAITING_STATES:
+        return None
     linked = [
         cast(dict[str, object], p) for p in cast(list[object], data.get("linked_prs") or []) if isinstance(p, dict)
     ]
