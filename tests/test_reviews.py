@@ -2231,7 +2231,7 @@ def test_the_poll_reads_whether_an_enabling_pr_lacks_how_this_will_be_used() -> 
 
 
 ANSWERED_AT = PREFIX_FROM_MS + 10_000
-FIX_OID = "ca982cb39ebbae8c5095315bd8c4ae7191039c12"
+FIX_OID = "5eed0f1d2c3b4a5968778695a4b3c2d1e0f1a2b3"
 
 
 def inline(comment_id: str, at: int, body: str, author: str = "me", parent: tuple[str, str] | None = None) -> Any:
@@ -2256,8 +2256,8 @@ def answered_view(conn: Any, *comments: FetchedComment, threads: tuple[HisThread
     return map_db_to_reviews(conn, CONFIG, now or ANSWERED_AT + 60_000)["prs"][0]  # type: ignore[index]
 
 
-QUESTION = inline("p1", ANSWERED_AT - 5000, "Why do we have these header arrays here and nowhere else?")
-FIXED_REPLY = inline("p2", ANSWERED_AT, "🤖 Claude: No good reason; removed in ca982cb39.", parent=("p1", "me"))
+QUESTION = inline("p1", ANSWERED_AT - 5000, "Why does this module keep its own list of names?")
+FIXED_REPLY = inline("p2", ANSWERED_AT, "🤖 Claude: Dropped them in 5eed0f1d2.", parent=("p1", "me"))
 
 
 def test_owners_thread_an_agent_answered_and_resolved_under_his_login_shows_its_reply_and_commit(
@@ -2268,9 +2268,9 @@ def test_owners_thread_an_agent_answered_and_resolved_under_his_login_shows_its_
     assert view["answered_threads"] == [
         {
             "url": "https://github.com/Org/app/pull/7#discussion_r1",
-            "his": "Why do we have these header arrays here and nowhere else?",
-            "quote": "No good reason; removed in ca982cb39.",
-            "commits": [{"sha": "ca982cb39", "url": f"https://github.com/Org/app/pull/7/commits/{FIX_OID}"}],
+            "his": "Why does this module keep its own list of names?",
+            "quote": "Dropped them in 5eed0f1d2.",
+            "commits": [{"sha": "5eed0f1d2", "url": f"https://github.com/Org/app/pull/7/commits/{FIX_OID}"}],
             "resolved": True,
         }
     ]
@@ -2292,7 +2292,7 @@ def test_a_commit_is_linked_only_when_one_head_matches_and_resolved_is_unknown_p
     tmp_path: Path,
 ) -> None:
     conn = setup_pr(tmp_path)
-    twin = "ca982cb39ff" + "0" * 29
+    twin = "5eed0f1d2ff" + "0" * 29
     with transaction(conn):
         conn.execute("INSERT INTO review_heads (ref, oid, committed_at) VALUES (?, ?, 1)", (REF, twin))
     view = answered_view(conn, QUESTION, FIXED_REPLY)
@@ -2307,7 +2307,7 @@ def test_no_line_without_an_agent_reply_for_a_colleagues_thread_or_after_a_day(t
     conn = setup_pr(tmp_path)
     assert answered_view(conn, QUESTION)["answered_threads"] == []
     theirs = inline("p5", ANSWERED_AT - 5000, "Rename this?", author="kai")
-    reply = inline("p6", ANSWERED_AT, "🤖 Claude: Renamed in ca982cb39.", parent=("p5", "kai"))
+    reply = inline("p6", ANSWERED_AT, "🤖 Claude: Renamed in 5eed0f1d2.", parent=("p5", "kai"))
     assert answered_view(conn, theirs, reply)["answered_threads"] == []
     assert conn.execute("SELECT verdict FROM review_comments WHERE comment_id = 'p5'").fetchone()[0] == COLLEAGUE
     assert len(answered_view(conn, FIXED_REPLY)["answered_threads"]) == 1
@@ -2327,21 +2327,21 @@ def test_answered_line_names_its_state_and_links_the_thread_and_commit(tmp_path:
         append(...kids) { this.children.push(...kids); }, get firstChild() { return this.children[0]; } }),
     };
     const eq = (a, b) => { if (a !== b) throw new Error(JSON.stringify(a) + " !== " + JSON.stringify(b)); };
-    const thread = { url: "https://t/1", his: "Why?", quote: "Removed in ca982cb39.", resolved: true,
-                     commits: [{ sha: "ca982cb39", url: "https://c/1" }] };
+    const thread = { url: "https://t/1", his: "Why?", quote: "Removed in 5eed0f1d2.", resolved: true,
+                     commits: [{ sha: "5eed0f1d2", url: "https://c/1" }] };
     const open = { ...thread, url: "https://t/2", resolved: false, commits: [] };
     const pr = { resolve_threads: [], answered_threads: [thread, open] };
     const [resolvedLine, openLine] = renderAnsweredRow(pr).children[1].children;
     eq(resolvedLine.children[0].textContent, "Resolved");
     eq(resolvedLine.children[0].href, "https://t/1");
     eq(resolvedLine.children[2].href, "https://c/1");
-    eq(resolvedLine.children[3], ": you “Why?”, reply “Removed in ca982cb39.”");
+    eq(resolvedLine.children[3], ": you “Why?”, reply “Removed in 5eed0f1d2.”");
     eq(openLine.children[0].textContent, "Answered, open");
     const resolve_threads = [{ url: "https://t/2", quote: "q" }, { url: "https://t/3", quote: "Done." }];
     const resolving = { ...pr, resolve_threads };
     eq(listAnsweredOnly(resolving).length, 1);
     const [answeredLine, plainLine] = renderResolveRow(resolving).children[1].children;
-    eq(answeredLine.children[1], ": you “Why?”, reply “Removed in ca982cb39.”");
+    eq(answeredLine.children[1], ": you “Why?”, reply “Removed in 5eed0f1d2.”");
     eq(plainLine.children[1], ": reply “Done.”");
     """
     path = tmp_path / "guild.js"
