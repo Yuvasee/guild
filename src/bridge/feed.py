@@ -68,7 +68,7 @@ LOCKED_RETRY_DELAYS_S = (0.5, 1.0, 2.0, 4.0)
 # Outside the pane lock a long wait costs only the typer's own process, and giving up there loses the delivery.
 LOCKED_PATIENT_DELAYS_S = (1.0, 2.0, 4.0, 8.0, 15.0, 30.0, *(60.0,) * 8)
 TYPED_MESSAGE_SQL = """(m.from_conversation = 'user'
-               OR m.post_type IN ('blocked-tab', 'lead-to-worker', 'to-assistant', 'review-queue')
+               OR m.post_type IN ('blocked-tab', 'lead-to-worker', 'to-assistant', 'review-queue', 'turn-cut')
                OR i.surface IN (SELECT surface FROM leads WHERE retired_at IS NULL))"""
 """Messages m that reach i's tab at once, typed or by a rewake: the user's reach any session; a peer's only a team
 lead, that lead's worker or the assistant."""
@@ -85,7 +85,10 @@ DELIVERY_MARKS = frozenset({WORKER_REPORT, LEAD_TO_WORKER, TO_ASSISTANT, TO_LEAD
 """Say how a message is delivered, not what kind of post it is, so the page does not read them."""
 BLOCKED_TAB = "blocked-tab"
 REVIEW_QUEUE = "review-queue"
-_KEPT_RETRYING = (RELAYED_ANSWER, WORKER_REPORT, LEAD_TO_WORKER, TO_ASSISTANT, TO_LEAD, REVIEW_QUEUE)
+TURN_CUT = "turn-cut"
+"""bridge's one resume of a tab whose turn an API error, such as the Mac's sleep, cut short."""
+_KEPT_RETRYING = (RELAYED_ANSWER, WORKER_REPORT, LEAD_TO_WORKER, TO_ASSISTANT, TO_LEAD, REVIEW_QUEUE, TURN_CUT)
+_CUT_RE = re.compile(r"\bcut by .+? at \d{2}:\d{2}")
 _THREAD_KEY_RE = re.compile(r"[\w#:/.-]{1,80}")
 _SQUASHED_DUE = r",(?:respondwithin\d+m|\d+moverdue)"
 _SQUASHED_REQUEST_DUE_RE = re.compile(rf"\[bridge\]PeerREQUEST#\d+from[^,]+({_SQUASHED_DUE}),notfromtheuser;")
@@ -548,8 +551,8 @@ def _find_typable_row(
     )
     row = conn.execute(
         f"""
-        SELECT m.from_conversation, m.from_handle, m.body, m.kind, m.respond_by, s.agterm_session, i.surface,
-               i.instance_id, i.pid
+        SELECT m.from_conversation, m.from_handle, m.body, m.kind, m.respond_by, m.post_type, s.agterm_session,
+               i.surface, i.instance_id, i.pid
         FROM messages m JOIN message_recipients r ON r.message_id = m.id
         JOIN instances i ON i.conversation_id = r.conversation_id AND i.ended_at IS NULL AND i.agent = 'claude'
         JOIN surfaces s ON s.surface = i.surface
@@ -711,7 +714,7 @@ def find_unsent_message(conn: sqlite3.Connection, conversation_id: str, box: str
         return None
     row = conn.execute(
         """
-        SELECT m.from_conversation, m.from_handle, m.body, m.kind, m.respond_by
+        SELECT m.from_conversation, m.from_handle, m.body, m.kind, m.respond_by, m.post_type
         FROM messages m JOIN message_recipients r ON r.message_id = m.id
         WHERE m.id = ? AND r.conversation_id = ?
           AND m.cancelled_at IS NULL AND r.done_at IS NULL AND r.declined_at IS NULL
@@ -800,6 +803,8 @@ def claim_unsent_message(conn: sqlite3.Connection, conversation_id: str, box: st
 
 
 def _convert_message_to_typed_text(row: sqlite3.Row, message_id: int, at_ms: int) -> str:
+    if row["post_type"] == TURN_CUT:
+        return str(row["body"])
     if row["from_conversation"] == USER_CONVERSATION:
         return convert_user_message_to_typed_text(str(row["from_handle"]), str(row["body"]), message_id)
     preview = convert_text_to_preview(str(row["body"]), TYPED_PEER_PREVIEW_CHARS)
@@ -809,6 +814,12 @@ def _convert_message_to_typed_text(row: sqlite3.Row, message_id: int, at_ms: int
         f"[bridge] Peer message #{message_id} from {row['from_handle']}, not from the user; use judgment: "
         f"{preview} (full text and answer: bridge show {message_id}, bridge reply {message_id})"
     )
+
+
+def convert_cut_to_resume_text(cause: str, at_ms: int) -> str:
+    """Typed as it is: short, and read before the inbox it points to."""
+    at = time.strftime("%H:%M", time.localtime(at_ms / 1000))
+    return f"[bridge] Your last turn was cut by {cause} at {at}. Read bridge inbox and continue where you left off."
 
 
 def convert_user_message_to_typed_text(handle: str, text: str, message_id: int) -> str:
@@ -864,7 +875,7 @@ def record_failed_delivery(
             unproven_at = ?
         WHERE message_id = ? AND conversation_id = ? AND acked_at IS NULL
           AND EXISTS (SELECT 1 FROM messages m WHERE m.id = ?
-                       AND (? OR m.from_conversation = ? OR m.post_type IN (?, ?, ?, ?, ?, ?)))
+                       AND (? OR m.from_conversation = ? OR m.post_type IN (?, ?, ?, ?, ?, ?, ?)))
         """,
         (
             at_ms,
@@ -1098,6 +1109,8 @@ class UndeliveredTab:
     draft_proven: bool
     # Mail counts as waiting from no earlier than this: hours the Mac slept are not a delay.
     counted_from: int = 0
+    cut: str | None = None
+    """How its last turn ended, "cut by Mac sleep at 09:50", while bridge's resume of it waits."""
 
 
 def take_new_undelivered_tabs(
@@ -1113,6 +1126,7 @@ def take_new_undelivered_tabs(
         SELECT r.conversation_id, r.handle, MIN(m.id) AS oldest, MIN(m.created_at) AS oldest_at, COUNT(*) AS waiting,
                MIN(CASE WHEN r.stuck_at IS NOT NULL THEN m.id END) AS stuck,
                MAX(r.draft_told_at IS NOT NULL AND r.unproven_at IS NULL) AS draft_proven,
+               MAX(CASE WHEN m.post_type = ? THEN m.body END) AS cut_body,
                (SELECT i.surface FROM instances i WHERE i.conversation_id = r.conversation_id AND i.ended_at IS NULL
                 ORDER BY i.proc_start_ms DESC LIMIT 1) AS surface,
                (SELECT i.status FROM instances i WHERE i.conversation_id = r.conversation_id AND i.ended_at IS NULL
@@ -1123,12 +1137,14 @@ def take_new_undelivered_tabs(
         WHERE {_PENDING_SQL} AND max(m.created_at, ?) <= ?
         GROUP BY r.conversation_id
         """,
-        (counted_from, at_ms - UNDELIVERED_ALERT_AFTER_MS),
+        (TURN_CUT, counted_from, at_ms - UNDELIVERED_ALERT_AFTER_MS),
     ).fetchall()
     current: dict[str, UndeliveredTab] = {}
     for row in rows:
         conversation = str(row["conversation_id"])
-        if conversation not in leads and row["handle"] != config.assistant_handle:
+        cut = _CUT_RE.search(str(row["cut_body"] or ""))
+        # A worker is told of only when its resume waits: its other mail is its lead's to chase.
+        if conversation not in leads and row["handle"] != config.assistant_handle and cut is None:
             continue
         # A full context holds its mail by design, and the context watch already told of it.
         if (
@@ -1154,6 +1170,7 @@ def take_new_undelivered_tabs(
             busy=row["status"] == "active",
             draft_proven=bool(row["draft_proven"]),
             counted_from=counted_from,
+            cut=cut.group(0) if cut else None,
         )
     known = {str(r[0]): r[1] for r in conn.execute("SELECT conversation_id, told_at FROM undelivered_tabs")}
     for gone in known.keys() - current.keys():
@@ -1174,8 +1191,20 @@ def convert_screen_to_hold_reason(
 ) -> str | None:
     """Why the tab holds its mail, as far as bridge can tell; None for text in its box that no probe proved real.
 
-    Claude Code's grey suggestion reads as plain text, so only text a delivery's probe proved a draft is named.
+    Claude Code's grey suggestion reads as plain text, so only text a delivery's probe proved a draft is named. A tab
+    whose resume waits is named even then: nothing else will start it again.
     """
+    reason = _convert_screen_to_held_reason(tab, screen, unread_reason)
+    if tab.cut is None:
+        return reason
+    held = reason or (
+        "Its input box shows text bridge could not check, Claude Code's grey suggestion or someone's draft: "
+        "bridge checks only a tab that is not selected"
+    )
+    return f"Its last turn was {tab.cut}, and bridge's resume has not gone in. {held}"
+
+
+def _convert_screen_to_held_reason(tab: UndeliveredTab, screen: str | None, unread_reason: str) -> str | None:
     box = map_screen_to_draft(screen) if screen is not None else None
     if screen is not None and box and not box.startswith(BRIDGE_TEXT_PREFIX) and not map_screen_to_busy(screen):
         if not tab.draft_proven:

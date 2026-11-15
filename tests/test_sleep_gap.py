@@ -521,6 +521,7 @@ def _deliver_with_locked(tmp_path: Path, locked_sql: str, typer: Callable[..., s
         "body": "look",
         "kind": "message",
         "respond_by": None,
+        "post_type": None,
         "agterm_session": "S",
         "surface": "P",
         "instance_id": "i",
@@ -584,7 +585,8 @@ def test_a_claimed_typer_that_cannot_read_whether_it_is_wanted_stops_as_stuck_an
 
     conn = mock.MagicMock()
     conn.execute.side_effect = execute
-    row = {"from_conversation": "conv-b", "from_handle": "b", "body": "look", "kind": "message", "respond_by": None}
+    row = {"from_conversation": "conv-b", "from_handle": "b", "body": "look", "kind": "message", "respond_by": None,
+           "post_type": None}  # fmt: skip
     row |= {"agterm_session": "S", "surface": "P", "instance_id": "i", "pid": 1}
     with (
         mock.patch("bridge.feed.time.sleep"),

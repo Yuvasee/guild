@@ -156,7 +156,13 @@ def test_a_long_user_message_is_typed_as_its_start_and_where_to_read_it_all() ->
     from bridge.feed import TYPED_USER_MAX_CHARS, _convert_message_to_typed_text  # pyright: ignore[reportPrivateUsage]
 
     def typed(body: str) -> str:
-        row: Any = {"from_conversation": USER_CONVERSATION, "from_handle": "user", "body": body, "kind": "info"}
+        row: Any = {
+            "from_conversation": USER_CONVERSATION,
+            "from_handle": "user",
+            "body": body,
+            "kind": "info",
+            "post_type": None,
+        }
         return _convert_message_to_typed_text(row, 7, 0)
 
     short = "Send it.\n\nFinal text:\nfine as it is"

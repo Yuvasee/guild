@@ -13,7 +13,9 @@ from typing import cast
 
 from bridge.artifacts import capture_artifact_publish
 from bridge.board import (
+    HINT_SENT,
     INJECT_BUDGET_BYTES,
+    Recipient,
     is_delivery_owner,
     next_hint_epoch,
     retarget_open_messages,
@@ -45,7 +47,7 @@ from bridge.compaction import (
 from bridge.config import Config, db_path, load_config
 from bridge.db import HOOK_BUSY_TIMEOUT_MS, HOOK_RETRY_BUSY_TIMEOUT_MS, connect, transaction
 from bridge.errlog import log_error
-from bridge.feed import release_dead_typing_claims
+from bridge.feed import release_dead_typing_claims, spawn_typed_delivery
 from bridge.gitinfo import GitInfo, read_git_info
 from bridge.guard import (
     CLOSE,
@@ -116,11 +118,13 @@ from bridge.start_context import (
     write_pending_start,
 )
 from bridge.title_guard import find_prefixed_linear_title, find_prefixed_titles, map_titles_to_denial
+from bridge.turncut import take_turn_cut
 
 HOOK_EVENTS = (
     "SessionStart", "UserPromptSubmit", "Stop", "SessionEnd", "PostToolUse", "PostToolUseFailure", "Notification",
-    "PreToolUse",
+    "PreToolUse", "StopFailure",
 )  # fmt: skip
+"""StopFailure: Claude Code runs it instead of Stop when an API error ends the turn, as the Mac's sleep does."""
 ARTIFACT_HOOK = "ArtifactPublish"
 """A PostToolUse hook of its own for the Artifact tool, outside the hint gate, so every publish reaches /pinned."""
 _DELIVERY_EVENTS = frozenset({"SessionStart", "UserPromptSubmit", "PostToolUse", "PostToolUseFailure"})
@@ -380,9 +384,11 @@ def handle_hook(
     # A subagent's hooks carry the parent's session and transcript, but its tool results never reach the main
     # context and nothing injected there reaches the main conversation: no context reading, mail or roles.
     in_subagent = bool(_str(payload, "agent_id"))
+    reads_context = bool(config.compact_at_tokens) and event in _CONTEXT_EVENTS
+    # A cut turn's tail tells whether the model answered since bridge last resumed it.
     tail = (
         read_transcript_tail(Path(transcript_path))
-        if config.compact_at_tokens and transcript_path and event in _CONTEXT_EVENTS and not in_subagent
+        if transcript_path and not in_subagent and (reads_context or event == "StopFailure")
         else None
     )
     text = _str(payload, "prompt") if event == "UserPromptSubmit" else _str(payload, "last_assistant_message")
@@ -418,6 +424,7 @@ def handle_hook(
     worker_compacted = False
     reopened = 0
     packed: Packed | None = None
+    cut_mail: list[tuple[int, Recipient]] = []
     surface = observation.surface.surface if observation.surface else None
     drive: str | None = None
     can_drive = not nested and caller is None and map_env_to_can_drive(env)
@@ -500,6 +507,16 @@ def handle_hook(
             if conversation_id and text:
                 record_reply(conn, conversation_id, text, at_ms)
                 add_refs(conn, conversation_id, refs, "reply", at_ms)
+        elif event == "StopFailure" and conversation_id and observed.current and not in_subagent:
+            # No Stop follows: without this the tab stays "active", so no probe may tell its grey suggestion apart.
+            record_activity(conn, instance_id, "idle", event_ns)
+            # A request to save notes and end the turn died with it; the next prompt asks again.
+            if read_phase(conn, conversation_id) == PHASE_REQUESTED:
+                give_up_driving(conn, conversation_id)
+            if caller is None and not nested:
+                answered_at = tail.reading.at_ms if tail and tail.reading else None
+                error = _str(payload, "error")
+                cut_mail = take_turn_cut(conn, config, conversation_id, surface, error, text, answered_at, at_ms)
         elif event == "Notification":
             if observed.current:
                 set_attention(conn, instance_id, "permission", event_ns)
@@ -508,9 +525,11 @@ def handle_hook(
         elif event == "SessionEnd":
             if observed.current and _str(payload, "reason") not in _NON_TERMINAL_END_REASONS:
                 mark_ended(conn, instance_id, at_ms, event_ns)
-        if tail is not None and conversation_id and observed.current:
+        # A cut turn's failure counts at once: a context over its window is then compaction's to cure, not a resume's.
+        failure_counts = reads_context or (event == "StopFailure" and bool(config.compact_at_tokens))
+        if failure_counts and tail is not None and conversation_id and observed.current:
             record_failed_turns(conn, conversation_id, tail)
-        if tail is not None and tail.reading is not None and conversation_id and observed.current:
+        if reads_context and tail is not None and tail.reading is not None and conversation_id and observed.current:
             warning = record_context(
                 conn,
                 conversation_id,
@@ -598,6 +617,13 @@ def handle_hook(
             write_hint(pid, hint_due)
         except OSError:
             log_error("hint", traceback.format_exc())
+    for message_id, recipient in cut_mail:
+        try:
+            if recipient.pid:
+                write_hint(recipient.pid, HINT_SENT)
+            spawn_typed_delivery(message_id, [recipient])
+        except OSError:
+            log_error("turn cut", traceback.format_exc())
     keep = map_packed_to_keep_status(restored, packed)
     if (
         drive
