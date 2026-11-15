@@ -133,8 +133,9 @@ _PIN_SOURCES = frozenset({"startup", "resume", "clear", "fork"})
 _NON_TERMINAL_END_REASONS = frozenset({"clear", "resume", "compact"})
 _HOOK_RUNS_KEPT = 5000
 _MAIL_MIN_ROOM = 300
+TASK_NOTIFICATION = "<task-notification>"
 _HARNESS_PROMPT_PREFIXES = (
-    "<task-notification>", "<system-reminder>", "<local-command", "<command-name>", "[bridge]",
+    TASK_NOTIFICATION, "<system-reminder>", "<local-command", "<command-name>", "[bridge]",
 )  # fmt: skip
 
 
@@ -481,6 +482,9 @@ def handle_hook(
             # Task notifications and similar harness messages arrive as prompts but are not the user's words.
             if observed.current:
                 record_activity(conn, instance_id, "active", event_ns)
+            if (text or "").lstrip().startswith(TASK_NOTIFICATION):
+                # Mail or a finished task started a turn after compaction: it goes on without a typed "continue".
+                take_phase(conn, conversation_id, PHASE_CONTINUE, None)
         elif event == "UserPromptSubmit" and conversation_id:
             fresh = record_prompt(conn, conversation_id, text or "", prompt_id, at_ms)
             # The user picked the conversation up again; a typed "continue" would now land on top of their work.

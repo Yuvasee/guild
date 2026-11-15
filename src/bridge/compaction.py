@@ -463,6 +463,16 @@ def give_up_driving(conn: sqlite3.Connection, conversation_id: str) -> None:
     )
 
 
+def end_driving(conn: sqlite3.Connection, conversation_id: str, at_ms: int) -> None:
+    """A drive that waited in vain ends the cycle without a new request: what held it most likely holds the next one,
+    and every turn would be asked to save its notes again. The next request follows a compaction; serve's watcher
+    near the window may drive an idle, empty box again, dated from now so it waits its retry pause first."""
+    conn.execute(
+        "UPDATE conversations SET compact_phase = NULL, compact_requested_at = ? WHERE conversation_id = ?",
+        (at_ms, conversation_id),
+    )
+
+
 def reset_after_compaction(conn: sqlite3.Connection, conversation_id: str, at_ms: int) -> int:
     """Returns how many messages that reached the tab while its context was full are given again."""
     reopened = reopen_unread_messages(conn, conversation_id)

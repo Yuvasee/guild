@@ -9,7 +9,16 @@ import urllib.request
 from dataclasses import asdict
 from pathlib import Path
 
-from bridge.board import HINT_SENT, Party, Recipient, add_user_item, write_hint
+from bridge.board import (
+    HINT_SENT,
+    SYSTEM_CONVERSATION,
+    USER_ITEM_MAX_CHARS,
+    Party,
+    Recipient,
+    add_user_item,
+    send_message,
+    write_hint,
+)
 from bridge.claude import read_session_file
 from bridge.cli_board import add_board_commands
 from bridge.cli_claims import add_claim_commands
@@ -22,7 +31,7 @@ from bridge.compaction import (
     PHASE_COMPACTING,
     PHASE_CONTINUE,
     UNREAD_NOTE,
-    give_up_driving,
+    end_driving,
     list_dropped_lines,
     load_keep,
     read_phase,
@@ -30,12 +39,14 @@ from bridge.compaction import (
     take_phase,
 )
 from bridge.config import Config, db_path, load_config, state_dir
+from bridge.context_watch import ContextTab, find_alert_recipients, list_context_tabs
 from bridge.db import connect, now_ms, transaction
 from bridge.deploycheck import check_long_message, check_rewake, check_typing
 from bridge.dream import resolve_dreamers, run_dream, run_night, stop_claude_on_term
-from bridge.errlog import log_error
+from bridge.errlog import log_error, log_slow
 from bridge.errors import UsageError
 from bridge.feed import (
+    BLOCKED_TAB,
     LOCKED_PATIENT_DELAYS_S,
     StillLockedError,
     claim_failure_log,
@@ -74,11 +85,24 @@ from bridge.rewake_marks import install_waiter_script
 from bridge.serve import DEFAULT_PORT, serve
 from bridge.service import install_service, restart_service, uninstall_service
 from bridge.tabinput import is_tab_selected, type_when_idle
+from bridge.watcher import read_tree
 from bridge.worker_api import WORKER_API_PORT, convert_bridge_commands_to_gbridge
 
 DEFAULT_SETTINGS = Path.home() / ".claude/settings.json"
 PIN_SESSION_FILE_RETRIES = 10
-COMPACT_UNPROVEN_WAITS = 6
+COMPACT_WAIT_S = 3600
+"""The owner's text in the box, a selected tab's grey suggestion or a long turn can hold a drive this long."""
+_DRIVE_HELD = {
+    "draft": "its input box holds text bridge never clears, which may be the owner's draft",
+    "unproven": "its input box holds text, and the tab stayed selected, so bridge could not tell a draft from Claude "
+    "Code's grey suggestion",
+    "timeout": "it stayed busy with a turn or a dialog, or the Mac slept",
+}
+"""Waits that ran out: nothing went wrong, so they are no error."""
+_DRIVE_FAILED = {
+    "failed": "a key bridge typed did not show as expected, so it typed no more; look for a stray character in the box",
+    "stuck": "bridge's text did not leave the box after Enter",
+}
 COMPACT_CLAIM_TRIES = 6
 """Each waits the connection's busy timeout: half a minute in all."""
 
@@ -446,38 +470,76 @@ def cmd_compact_drive(args: argparse.Namespace, conn: sqlite3.Connection, config
         status = conn.execute("SELECT status FROM instances WHERE instance_id = ?", (instance_id,)).fetchone()
         return status is not None and status["status"] == "idle" and not is_tab_selected(config, session)
 
-    result = type_when_idle(config, session, pane, command, still_wanted, may_probe_box=may_probe_box)
-    for _ in range(COMPACT_UNPROVEN_WAITS):
-        # Most likely Claude Code's grey suggestion in a selected tab: wait for the owner to leave it, telling nobody.
-        if result != "unproven" or not still_wanted():
-            break
-        result = type_when_idle(config, session, pane, command, still_wanted, may_probe_box=may_probe_box)
+    result = type_when_idle(
+        config, session, pane, command, still_wanted, wait_s=COMPACT_WAIT_S, may_probe_box=may_probe_box
+    )
     if result == "typed":
         if phase == "continue":
             with transaction(conn):
                 take_phase(conn, conversation_id, PHASE_CONTINUE, None)
         return 0
-    if result == "unwanted" and read_phase(conn, conversation_id) != expected:
-        return 0
-    log_error("compact-drive", f"{phase} not typed for {conversation_id}: {result}")
+    # Read before the write lock: agterm can take seconds to answer.
+    tree = (read_tree(config) or {}) if result != "unwanted" else {}
     with transaction(conn):
-        if read_phase(conn, conversation_id) == expected:
-            give_up_driving(conn, conversation_id)
-            handle = conn.execute(
-                "SELECT s.handle FROM instances i LEFT JOIN surfaces s ON s.surface = i.surface"
-                " WHERE i.instance_id = ?",
-                (instance_id,),
-            ).fetchone()
-            name = str(handle["handle"]) if handle and handle["handle"] else conversation_id[:8]
-            what = "/compact" if phase == "compact" else "continue after compaction"
-            add_user_item(
-                conn,
-                Party(conversation_id, name),
-                "action",
-                f"bridge could not submit {what} in {name} (the tab stayed busy, or Enter did not take); do it by hand",
-                now_ms(),
-            )
-    return 1
+        if read_phase(conn, conversation_id) != expected:
+            return 0
+        end_driving(conn, conversation_id, now_ms())
+        # "unwanted" with the phase still ours: its tab ended or moved to another conversation, so nothing is owed.
+        told = (
+            []
+            if result == "unwanted"
+            else tell_of_held_drive(conn, config, tree, conversation_id, instance_id, phase, result)
+        )
+    if result in _DRIVE_FAILED:
+        # Once per cycle: no new request follows until the conversation compacts.
+        log_error("compact-drive", f"{phase} not typed for {conversation_id}: {result}")
+    elif result in _DRIVE_HELD:
+        log_slow("compact-drive", f"{phase} not typed for {conversation_id} in {COMPACT_WAIT_S // 60} min: {result}")
+    for message_id, recipient in told:
+        if recipient.pid:
+            write_hint(recipient.pid, HINT_SENT)
+        spawn_typed_delivery(message_id, [recipient])
+    return 1 if result in _DRIVE_FAILED else 0
+
+
+def tell_of_held_drive(
+    conn: sqlite3.Connection,
+    config: Config,
+    tree: dict[str, object],
+    conversation_id: str,
+    instance_id: str,
+    phase: str,
+    result: str,
+) -> list[tuple[int, Recipient]]:
+    """The assistant and a worker's lead hear it, as of a dead tab; with neither, the owner's page."""
+    row = conn.execute(
+        "SELECT s.handle, s.agterm_session, s.surface FROM instances i LEFT JOIN surfaces s ON s.surface = i.surface"
+        " WHERE i.instance_id = ?",
+        (instance_id,),
+    ).fetchone()
+    name = str(row["handle"]) if row and row["handle"] else conversation_id[:8]
+    shown = next((t for t in list_context_tabs(conn, config, tree) if t.conversation_id == conversation_id), None)
+    # Without agterm's tree the lead is unknown, but the assistant still hears it.
+    tab = shown or ContextTab(
+        conversation_id, instance_id, str(row["agterm_session"] if row else "?"), str(row["surface"] if row else ""),
+        name, None,
+    )  # fmt: skip
+    recipients = find_alert_recipients(conn, config, tab)
+    what = "/compact" if phase == "compact" else "continue"
+    if not recipients:
+        text = f"{name}: bridge could not type {what} ({result}); do it by hand once the box is clear"
+        add_user_item(conn, Party(conversation_id, name), "action", text[:USER_ITEM_MAX_CHARS], now_ms())
+        return []
+    why = _DRIVE_HELD.get(result) or _DRIVE_FAILED[result]
+    then = "type /compact there" if phase == "compact" else "tell it to continue"
+    body = (
+        f'bridge could not type {what} in tab "{tab.name}" ({tab.session}) within {COMPACT_WAIT_S // 60} min: {why}. '
+        f"It does not try again until the conversation compacts; once the box is clear, {then}. Claude Code also "
+        "compacts by itself near the end of its window."
+    )
+    sent = send_message(conn, Party(SYSTEM_CONVERSATION, "bridge"), recipients, "info", body, now_ms())
+    conn.execute("UPDATE messages SET post_type = ? WHERE id = ?", (BLOCKED_TAB, sent.message_id))
+    return [(sent.message_id, r) for r in recipients]
 
 
 def cmd_review_post(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
