@@ -2536,6 +2536,19 @@ def test_the_ready_group_and_its_lead_wait_for_a_sibling_that_is_not_ready(tmp_p
     assert [queue_view(conn, ref)["group"] for ref in (A, B, C)] == [READY] * 3
 
 
+def test_a_sibling_backport_whose_diff_check_passed_at_its_head_needs_no_approval(tmp_path: Path) -> None:
+    conn = store_siblings(tmp_path, sibling_prs(**{ref: {"approved_by": ("mira",)} for ref in (A, C)}))
+    with transaction(conn):
+        conn.execute("UPDATE review_prs SET reviewed_at = 550")
+        conn.execute("UPDATE review_prs SET backport_waived = 1, backport_key = 'old main' WHERE ref = ?", (B,))
+        store_merge_blocks(conn)
+    assert queue_view(conn, A)["waits_on"] == "goes with Org/app#8, which is not ready: not approved"
+    with transaction(conn):
+        conn.execute("UPDATE review_prs SET backport_key = head_oid || ' ' || base WHERE ref = ?", (B,))
+        store_merge_blocks(conn)
+    assert queue_view(conn, A)["waits_on"] is None and queue_view(conn, A)["group"] == READY
+
+
 def test_the_ready_group_waits_for_a_pr_its_body_names_and_a_backport_names_what_it_waits_on(tmp_path: Path) -> None:
     conn = store_siblings(tmp_path, sibling_prs(**{ref: {"approved_by": ("mira",)} for ref in (A, B, C)}))
     with transaction(conn):

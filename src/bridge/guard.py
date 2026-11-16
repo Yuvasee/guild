@@ -1080,14 +1080,19 @@ def map_siblings_to_wait(siblings: Sequence[sqlite3.Row], why_not: Callable[[sql
 
 
 def find_dependency_wait(
-    conn: sqlite3.Connection, row: sqlite3.Row, why_not: Callable[[sqlite3.Row], str | None] | None = None
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    why_not: Callable[[sqlite3.Row], str | None] | None = None,
+    siblings: Sequence[sqlite3.Row] | None = None,
 ) -> str | None:
     """The one dependency rule every merge path reads (the queue's Ready group and its lead's guard, the Merge button,
     the auto-merger): a PR its body names that must merge first and has not, or a sibling (a PR it names that names it
-    back) not ready by `why_not`, the caller's own rule; by default the lead's merge rule."""
+    back) not ready by `why_not`, the caller's own rule; by default the lead's merge rule. Siblings are judged on the
+    queue's last read, so a sibling that just turned ready lets the others through only after the next poll."""
     if blockers := map_row_to_dependency_blockers(row):
         return blockers[0]
-    return map_siblings_to_wait(load_open_siblings(conn, row), why_not or find_lead_wait_alone)
+    found = load_open_siblings(conn, row) if siblings is None else siblings
+    return map_siblings_to_wait(found, why_not or find_lead_wait_alone)
 
 
 def find_lead_wait_alone(row: sqlite3.Row) -> str | None:
@@ -1095,6 +1100,9 @@ def find_lead_wait_alone(row: sqlite3.Row) -> str | None:
     if blockers := map_row_to_dependency_blockers(row, with_siblings=False):
         return blockers[0]
     waits = list_merge_waits(map_row_to_merge_facts(row, row["merge_block"]))
+    # A backport whose diff check passed at this head needs no approval, as the guard's own check of it finds.
+    if row["backport_waived"] and str(row["backport_key"] or "").startswith(f"{row['head_oid']} "):
+        waits = tuple(w for w in waits if w != NOT_APPROVED)
     return ", ".join(waits) if waits else None
 
 

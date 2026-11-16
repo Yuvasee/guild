@@ -1550,16 +1550,20 @@ def map_row_to_answered_threads(conn: sqlite3.Connection, row: sqlite3.Row, now:
 def store_merge_blocks(conn: sqlite3.Connection) -> None:
     end_reviewed_holds(conn)
     for row in conn.execute("SELECT * FROM review_prs WHERE closed_at IS NULL").fetchall():
-        block = map_row_to_merge_block(conn, row)
-        waits_on = find_dependency_wait(conn, row)
         # The owner's comments reopen the telling, so once they are settled the lead hears it is ready again.
         conn.execute(
             """
-            UPDATE review_prs SET merge_block = ?1, merge_path = ?2,
-                merge_told_at = CASE WHEN ?1 IS NULL THEN merge_told_at END
-            WHERE ref = ?3
+            UPDATE review_prs SET merge_block = ?1, merge_told_at = CASE WHEN ?1 IS NULL THEN merge_told_at END
+            WHERE ref = ?2
             """,
-            (block, map_row_to_merge_path(row, block, waits_on), row["ref"]),
+            (map_row_to_merge_block(conn, row), row["ref"]),
+        )
+    # Every block is current before any is read: a PR waits on its siblings' blocks.
+    for row in conn.execute("SELECT * FROM review_prs WHERE closed_at IS NULL").fetchall():
+        waits_on = find_dependency_wait(conn, row)
+        conn.execute(
+            "UPDATE review_prs SET merge_path = ? WHERE ref = ?",
+            (map_row_to_merge_path(row, row["merge_block"], waits_on), row["ref"]),
         )
     # The shell hook reaches the guard only while its flag is up.
     sync_claims_flag(conn)
@@ -1932,7 +1936,7 @@ def map_row_to_review(conn: sqlite3.Connection, config: Config, row: sqlite3.Row
     group, group_why = map_row_to_group(row, config)
     resolve_threads = map_row_to_threads_to_resolve(conn, config, row)
     siblings = load_open_siblings(conn, row)
-    waits_on = find_dependency_wait(conn, row)
+    waits_on = find_dependency_wait(conn, row, siblings=siblings)
     published = group == PUBLISHED
     if published:
         state = "published"
