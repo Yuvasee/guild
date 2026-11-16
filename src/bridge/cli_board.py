@@ -268,7 +268,7 @@ def cmd_post(args: argparse.Namespace, conn: sqlite3.Connection, config: Config)
         and not (args.body or args.what or args.why)
         and me.conversation_id in find_lead_conversations(conn)
     ):
-        raise UsageError("a question from a lead needs --what and --why (or --body): what it is, why now, each cost")
+        raise UsageError("a question from a lead needs --body, or --what and --why: what it is, why now, each cost")
     body = sys.stdin.read() if args.body == "-" else str(args.body)
     try:
         if structured:
