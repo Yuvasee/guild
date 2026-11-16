@@ -36,9 +36,14 @@ from bridge.guard import (
     NOT_OWNER_REVIEWED,
     OWNER_COMMENTS_OPEN,
     READY,
+    WAITS_ON_PR,
+    find_dependency_wait,
     is_approved_row,
     list_merge_waits,
+    load_open_siblings,
+    map_row_to_dependency_blockers,
     map_row_to_merge_facts,
+    map_siblings_to_wait,
     sync_claims_flag,
 )
 from bridge.leads import find_lead_on_surface, is_conversation_locked, list_leads
@@ -333,27 +338,6 @@ def store_dependencies(conn: sqlite3.Connection, dependencies: dict[str, Depende
             for ref, d in dependencies.items()
         ],
     )  # fmt: skip
-
-
-def map_row_to_dependency_blockers(row: sqlite3.Row, with_siblings: bool = True) -> list[str]:
-    """Its waits on PRs outside its siblings, then, with_siblings, on the siblings it merges after."""
-    outside: list[str] = json.loads(str(row["dep_blockers"] or "[]"))
-    return [*outside, *json.loads(str(row["sibling_waits"] or "[]"))] if with_siblings else outside
-
-
-def load_open_siblings(conn: sqlite3.Connection, row: sqlite3.Row) -> list[sqlite3.Row]:
-    return conn.execute(
-        "SELECT * FROM review_prs WHERE closed_at IS NULL AND ref IN (SELECT value FROM json_each(?)) ORDER BY ref",
-        (str(row["siblings"] or "[]"),),
-    ).fetchall()
-
-
-def map_siblings_to_wait(siblings: Sequence[sqlite3.Row], why_not: Callable[[sqlite3.Row], str | None]) -> str | None:
-    """The first sibling not ready on its own terms, which keeps the rest from merging without it."""
-    for sibling in siblings:
-        if (reason := why_not(sibling)) is not None:
-            return f"goes with {str(sibling['ref']).removeprefix('pr:')}, which is not ready: {reason}"
-    return None
 
 
 def record_poll_error(conn: sqlite3.Connection, error: str, now: int) -> None:
@@ -1567,6 +1551,7 @@ def store_merge_blocks(conn: sqlite3.Connection) -> None:
     end_reviewed_holds(conn)
     for row in conn.execute("SELECT * FROM review_prs WHERE closed_at IS NULL").fetchall():
         block = map_row_to_merge_block(conn, row)
+        waits_on = find_dependency_wait(conn, row)
         # The owner's comments reopen the telling, so once they are settled the lead hears it is ready again.
         conn.execute(
             """
@@ -1574,7 +1559,7 @@ def store_merge_blocks(conn: sqlite3.Connection) -> None:
                 merge_told_at = CASE WHEN ?1 IS NULL THEN merge_told_at END
             WHERE ref = ?3
             """,
-            (block, map_row_to_merge_path(row, block), row["ref"]),
+            (block, map_row_to_merge_path(row, block, waits_on), row["ref"]),
         )
     # The shell hook reaches the guard only while its flag is up.
     sync_claims_flag(conn)
@@ -1595,10 +1580,10 @@ def end_reviewed_holds(conn: sqlite3.Connection) -> None:
     )
 
 
-def map_row_to_merge_path(row: sqlite3.Row, merge_block: str | None) -> str | None:
+def map_row_to_merge_path(row: sqlite3.Row, merge_block: str | None, waits_on: str | None = None) -> str | None:
     """READY when the owner's rule lets the PR's lead merge it: reviewed by the owner, approved, CI green, not a draft,
-    no conflicts and nothing of the owner's open. A Slack post alone is no review."""
-    return None if list_merge_waits(map_row_to_merge_facts(row, merge_block)) else READY
+    no conflicts, nothing of the owner's open and no PR its body names in the way. A Slack post alone is no review."""
+    return None if list_merge_waits(map_row_to_merge_facts(row, merge_block, waits_on)) else READY
 
 
 def is_approved(row: sqlite3.Row) -> bool:
@@ -1624,17 +1609,18 @@ _APPROVAL_LEFT = {
     CI_PENDING: "CI pending",
     CONFLICTS: "conflicts",
     BLOCKED_ON_GITHUB: "blocked on GitHub",
+    WAITS_ON_PR: "waits on another PR",
 }
 
 
-def map_row_to_approval_left(row: sqlite3.Row, threads_to_resolve: int) -> str | None:
+def map_row_to_approval_left(row: sqlite3.Row, threads_to_resolve: int, waits_on: str | None = None) -> str | None:
     """What an approved PR still waits for before its lead merges it. None when it is not approved, or is a draft,
     which waits on its owner first."""
     if not is_approved(row) or row["draft"]:
         return None
     if threads_to_resolve:
         return "resolve your threads"
-    waits = list_merge_waits(map_row_to_merge_facts(row, row["merge_block"]))
+    waits = list_merge_waits(map_row_to_merge_facts(row, row["merge_block"], waits_on))
     return _APPROVAL_LEFT[waits[0]] if waits else "ready to merge (lead)"
 
 
@@ -1946,11 +1932,12 @@ def map_row_to_review(conn: sqlite3.Connection, config: Config, row: sqlite3.Row
     group, group_why = map_row_to_group(row, config)
     resolve_threads = map_row_to_threads_to_resolve(conn, config, row)
     siblings = load_open_siblings(conn, row)
+    waits_on = find_dependency_wait(conn, row)
     published = group == PUBLISHED
     if published:
         state = "published"
     elif group == BACKPORTS:
-        state = map_row_to_backport_state(row)
+        state = map_row_to_backport_state(row, waits_on)
     elif comments_open:
         state = COMMENTS_OPEN
     elif group == READY:
@@ -1984,7 +1971,8 @@ def map_row_to_review(conn: sqlite3.Connection, config: Config, row: sqlite3.Row
         "group_why": group_why,
         "approved_by": json.loads(str(row["approved_by"])),
         "approvers": map_row_to_approvers(row, config),
-        "approval_left": map_row_to_approval_left(row, len(resolve_threads)),
+        "approval_left": map_row_to_approval_left(row, len(resolve_threads), waits_on),
+        "waits_on": waits_on,
         "merge_state": "in queue" if row["in_merge_queue"] else row["merge_state"],
         "conflict_asked_at": row["conflict_asked_at"] if row["conflict_asked_oid"] == row["head_oid"] else None,
         "base": row["base"],
@@ -2127,9 +2115,10 @@ _BACKPORT_WAIT_WORDS = {
 }
 
 
-def map_row_to_backport_state(row: sqlite3.Row) -> str:
+def map_row_to_backport_state(row: sqlite3.Row, waits_on: str | None = None) -> str:
     """A backport is its lead's to merge, never the owner's to review: its state says what the lead waits on."""
-    waits = list_merge_waits(map_row_to_merge_facts(row, row["merge_block"]))
+    waits = list_merge_waits(map_row_to_merge_facts(row, row["merge_block"], waits_on))
     if not waits:
         return "lead merges: ready"
-    return "lead merges: waiting on " + ", ".join(_BACKPORT_WAIT_WORDS.get(w, w) for w in waits)
+    words = {**_BACKPORT_WAIT_WORDS, WAITS_ON_PR: f"another PR ({waits_on})" if waits_on else "another PR"}
+    return "lead merges: waiting on " + ", ".join(words.get(w, w) for w in waits)

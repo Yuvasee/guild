@@ -149,6 +149,7 @@ CI_RED = "CI red"
 CI_PENDING = "CI pending"
 CONFLICTS = "conflicts"
 BLOCKED_ON_GITHUB = "blocked on GitHub"
+WAITS_ON_PR = "waits on another PR"
 _CI_RED_STATES = ("FAILURE", "ERROR")
 _PUSH_FLAGS = frozenset(
     {"--porcelain", "--follow-tags", "--no-follow-tags", "--signed", "--no-signed", "--atomic", "--no-atomic",
@@ -984,6 +985,8 @@ class MergeFacts:
     """Its lead holds it for the owner's own review."""
     owner_reviewed: bool = False
     """The owner pressed Publish or recorded a decision: no approval by a colleague or the bot stands in for it."""
+    waits_on: str | None = None
+    """Why a PR its body names keeps it from merging: see find_dependency_wait."""
 
 
 @dataclass(frozen=True)
@@ -997,6 +1000,7 @@ class MergeRefusal:
     """The backport check's verdict: why it needs no approval, or why it still does."""
     ci_blocked_by: str | None = None
     """Why CI is red when GitHub itself refused to run it at the head, e.g. its billing."""
+    waits_on: str | None = None
 
 
 def list_merge_waits(facts: MergeFacts) -> tuple[str, ...]:
@@ -1009,6 +1013,8 @@ def list_merge_waits(facts: MergeFacts) -> tuple[str, ...]:
         waits.append(DRAFT)
     if facts.merge_block:
         waits.append(OWNER_COMMENTS_OPEN)
+    if facts.waits_on:
+        waits.append(WAITS_ON_PR)
     if not facts.owner_reviewed:
         waits.append(NOT_OWNER_REVIEWED)
     if not facts.approved:
@@ -1037,7 +1043,7 @@ def is_approved_row(row: sqlite3.Row) -> bool:
     return bot or bool(json.loads(str(row["approved_by"] or "[]")))
 
 
-def map_row_to_merge_facts(row: sqlite3.Row, merge_block: str | None) -> MergeFacts:
+def map_row_to_merge_facts(row: sqlite3.Row, merge_block: str | None, waits_on: str | None = None) -> MergeFacts:
     return MergeFacts(
         draft=bool(row["draft"]),
         approved=is_approved_row(row) or row["approval_waived_at"] is not None,
@@ -1048,7 +1054,48 @@ def map_row_to_merge_facts(row: sqlite3.Row, merge_block: str | None) -> MergeFa
         owner_reviewed=row["reviewed_at"] is not None
         or row["approval_waived_at"] is not None
         or has_merge_ok_at_head(row),
+        waits_on=waits_on,
     )
+
+
+def map_row_to_dependency_blockers(row: sqlite3.Row, with_siblings: bool = True) -> list[str]:
+    """Its waits on PRs outside its siblings, then, with_siblings, on the siblings it merges after."""
+    outside: list[str] = json.loads(str(row["dep_blockers"] or "[]"))
+    return [*outside, *json.loads(str(row["sibling_waits"] or "[]"))] if with_siblings else outside
+
+
+def load_open_siblings(conn: sqlite3.Connection, row: sqlite3.Row) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM review_prs WHERE closed_at IS NULL AND ref IN (SELECT value FROM json_each(?)) ORDER BY ref",
+        (str(row["siblings"] or "[]"),),
+    ).fetchall()
+
+
+def map_siblings_to_wait(siblings: Sequence[sqlite3.Row], why_not: Callable[[sqlite3.Row], str | None]) -> str | None:
+    """The first sibling not ready on its own terms, which keeps the rest from merging without it."""
+    for sibling in siblings:
+        if (reason := why_not(sibling)) is not None:
+            return f"goes with {str(sibling['ref']).removeprefix('pr:')}, which is not ready: {reason}"
+    return None
+
+
+def find_dependency_wait(
+    conn: sqlite3.Connection, row: sqlite3.Row, why_not: Callable[[sqlite3.Row], str | None] | None = None
+) -> str | None:
+    """The one dependency rule every merge path reads (the queue's Ready group and its lead's guard, the Merge button,
+    the auto-merger): a PR its body names that must merge first and has not, or a sibling (a PR it names that names it
+    back) not ready by `why_not`, the caller's own rule; by default the lead's merge rule."""
+    if blockers := map_row_to_dependency_blockers(row):
+        return blockers[0]
+    return map_siblings_to_wait(load_open_siblings(conn, row), why_not or find_lead_wait_alone)
+
+
+def find_lead_wait_alone(row: sqlite3.Row) -> str | None:
+    """What keeps a PR from its lead's merge, its siblings aside."""
+    if blockers := map_row_to_dependency_blockers(row, with_siblings=False):
+        return blockers[0]
+    waits = list_merge_waits(map_row_to_merge_facts(row, row["merge_block"]))
+    return ", ".join(waits) if waits else None
 
 
 def find_merge_blocks(
@@ -1084,7 +1131,7 @@ def find_merge_blocks(
         if row["held_at"] is not None:
             refusals.append(MergeRefusal(ref, (HELD,), row["merge_block"], held_why=row["held_why"]))
             continue
-        facts = map_row_to_merge_facts(row, row["merge_block"])
+        facts = map_row_to_merge_facts(row, row["merge_block"], find_dependency_wait(conn, row))
         # A fresh cache may still be one poll behind a CI rerun or an approval, so a refusal is confirmed live first.
         cached_waits = list_merge_waits(facts) if fresh else ()
         head_oid: str | None = row["head_oid"]
@@ -1104,6 +1151,7 @@ def find_merge_blocks(
                         cached_waits,
                         facts.merge_block,
                         ci_blocked_by=find_ci_blocked_by(row, cached_waits, head_oid),
+                        waits_on=facts.waits_on,
                     )
                     if cached_waits
                     else MergeRefusal(ref, (), row["merge_block"], str(exc))
@@ -1118,6 +1166,7 @@ def find_merge_blocks(
                 merge_state,
                 block,
                 owner_reviewed=facts.owner_reviewed,
+                waits_on=facts.waits_on,
             )
         waits = list_merge_waits(facts)
         backport: str | None = None
@@ -1137,6 +1186,7 @@ def find_merge_blocks(
                     facts.merge_block,
                     backport=backport,
                     ci_blocked_by=find_ci_blocked_by(row, waits, head_oid),
+                    waits_on=facts.waits_on,
                 )
             )
     return refusals
@@ -1216,6 +1266,8 @@ def map_wait_to_reason(wait: str, refusal: MergeRefusal, owner: str) -> str:
             f"{owner} has not reviewed it (no Publish, no recorded decision); a colleague's or the bot's approval "
             "does not stand in"
         )
+    if wait == WAITS_ON_PR and refusal.waits_on:
+        return f"{refusal.waits_on} (the PRs its body names merge first, or together once all are ready)"
     if wait == CI_RED and refusal.ci_blocked_by:
         return f"{refusal.ci_blocked_by} (not a code failure; rerun the failed jobs once GitHub runs them again)"
     if wait == HELD:

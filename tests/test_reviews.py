@@ -68,6 +68,7 @@ from bridge.reviews import (
     map_events_to_rounds,
     map_pr_to_threads_key,
     map_prs_to_dependencies,
+    map_row_to_backport_state,
     poll_review_queue,
     read_dependency_states,
     record_agent_marks,
@@ -2510,6 +2511,44 @@ def test_the_sibling_merged_after_waits_and_the_first_one_gets_the_button(tmp_pa
     conn = store_siblings(tmp_path, sibling_prs(**{A: {**ready, "must_merge": ("Org/app#8",)}, B: ready, C: ready}))
     assert button(conn, A) == (False, "waits for Org/app#8 to merge")
     assert button(conn, B) == (True, None) and button(conn, C) == (True, None)
+
+
+def queue_view(conn: Any, ref: str) -> dict[str, Any]:
+    return next(
+        pr for pr in cast(list[dict[str, Any]], map_db_to_reviews(conn, CONFIG, 600)["prs"]) if pr["ref"] == ref
+    )
+
+
+def test_the_ready_group_and_its_lead_wait_for_a_sibling_that_is_not_ready(tmp_path: Path) -> None:
+    ready = {"approved_by": ("mira",)}
+    conn = store_siblings(tmp_path, sibling_prs(**{A: ready, B: ready}))
+    with transaction(conn):
+        conn.execute("UPDATE review_prs SET reviewed_at = 550")
+        store_merge_blocks(conn)
+    view = queue_view(conn, A)
+    assert view["group"] != READY and view["merge_path"] is None
+    assert view["approval_left"] == "waits on another PR"
+    assert view["waits_on"] == "goes with Org/lib#3, which is not ready: not approved"
+    assert tell_ready_to_merge(conn, CONFIG, 700) == []
+    with transaction(conn):
+        conn.execute("""UPDATE review_prs SET approved_by = '["mira"]'""")
+        store_merge_blocks(conn)
+    assert [queue_view(conn, ref)["group"] for ref in (A, B, C)] == [READY] * 3
+
+
+def test_the_ready_group_waits_for_a_pr_its_body_names_and_a_backport_names_what_it_waits_on(tmp_path: Path) -> None:
+    conn = store_siblings(tmp_path, sibling_prs(**{ref: {"approved_by": ("mira",)} for ref in (A, B, C)}))
+    with transaction(conn):
+        conn.execute("UPDATE review_prs SET reviewed_at = 550")
+        conn.execute("""UPDATE review_prs SET dep_blockers = '["waits for Org/web#1 to merge"]' WHERE ref = ?""", (C,))
+        store_merge_blocks(conn)
+    assert queue_view(conn, C)["waits_on"] == "waits for Org/web#1 to merge"
+    assert queue_view(conn, A)["waits_on"] == ("goes with Org/lib#3, which is not ready: waits for Org/web#1 to merge")
+    assert all(queue_view(conn, ref)["merge_path"] is None for ref in (A, B, C))
+    row = conn.execute("SELECT * FROM review_prs WHERE ref = ?", (C,)).fetchone()
+    assert map_row_to_backport_state(row, "waits for Org/web#1 to merge") == (
+        "lead merges: waiting on another PR (waits for Org/web#1 to merge)"
+    )
 
 
 def test_pr_states_tell_an_issue_and_a_number_that_does_not_exist_from_one_that_could_not_be_read() -> None:

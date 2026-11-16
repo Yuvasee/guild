@@ -193,7 +193,9 @@ def test_a_merge_waits_for_approval_owners_comments_and_green_ci_by_number_and_b
     assert "not mergeable yet: CI pending." in refusal("gh pr merge 12")
     update("UPDATE review_prs SET checks = NULL, merge_state = 'BLOCKED'")
     assert "not mergeable yet: blocked on GitHub." in refusal("gh pr merge 12")
-    update("UPDATE review_prs SET merge_state = 'CLEAN'")
+    update("""UPDATE review_prs SET merge_state = 'CLEAN', dep_blockers = '["waits for Acme/Lib#3 to merge"]'""")
+    assert "waits for Acme/Lib#3 to merge (the PRs its body names merge first" in refusal("gh pr merge 12")
+    update("UPDATE review_prs SET dep_blockers = NULL")
     assert (bridge_env.state_dir / "claims-active").exists()
     assert _run_guard(bridge_env, pair.b, "conv-b", "gh pr merge 12", web) == ""
     update("UPDATE review_prs SET closed_at = 1")

@@ -16,7 +16,15 @@ from bridge.board import (
 from bridge.config import Config
 from bridge.db import transaction
 from bridge.feed import REVIEW_QUEUE, FeedLink, add_post
-from bridge.guard import GITHUB_STALE_S, MergeRefusal, find_standing_rule_block, map_wait_to_reason
+from bridge.guard import (
+    GITHUB_STALE_S,
+    MergeRefusal,
+    find_standing_rule_block,
+    load_open_siblings,
+    map_row_to_dependency_blockers,
+    map_siblings_to_wait,
+    map_wait_to_reason,
+)
 from bridge.review_deps import map_markdown_to_dependency, map_markdown_to_named_prs, map_states_to_blockers
 from bridge.review_github import (
     PERSIST_SANDBOX,
@@ -27,14 +35,7 @@ from bridge.review_github import (
     read_live_merge_facts,
     run_gh,
 )
-from bridge.reviews import (
-    find_owner,
-    list_stacked_on,
-    load_open_siblings,
-    map_row_to_dependency_blockers,
-    map_siblings_to_wait,
-    tell_owner,
-)
+from bridge.reviews import find_owner, list_stacked_on, tell_owner
 
 SANDBOX_BLOCK = "PERSIST_SANDBOX in its body"
 MERGE_TIMEOUT_S = 120

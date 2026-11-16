@@ -1784,9 +1784,10 @@ const QUEUE_APPROVAL_LEFT = {
   "CI pending": "it merges once CI is green",
   conflicts: "it merges once its lead resolves the conflicts",
   "blocked on GitHub": "GitHub blocks the merge: branch protection wants more, usually a person's review or a required check",
+  "waits on another PR": "a PR its body names merges first, or with it once all are ready",
 };
 
-const QUEUE_APPROVAL_WORD = { "held for your review": "held", "ready to merge (lead)": "ready (lead)", "your comments open": "your comments", "resolve your threads": "your threads" };
+const QUEUE_APPROVAL_WORD = { "held for your review": "held", "ready to merge (lead)": "ready (lead)", "your comments open": "your comments", "resolve your threads": "your threads", "waits on another PR": "waits on a PR" };
 
 function queueApprovalWord(pr) {
   if (!pr.approvers.length && pr.approval_waived) return "waived";
@@ -1809,7 +1810,8 @@ function queueApprovalWhy(pr) {
     ? "only the review bot approved, no person yet" + (pr.merge_state === "BLOCKED" ? ", and " + state.review_bot + " doesn't count for this repo's branch protection" : "") + "; "
     : "";
   const check = pr.backport_check ? "; diff check: " + pr.backport_check.reason + (pr.backport_check.current ? "" : " (older head)") : "";
-  return by + bot + (QUEUE_APPROVAL_LEFT[pr.approval_left] || "a draft, its owner marks it ready first") + check;
+  const left = pr.approval_left === "waits on another PR" && pr.waits_on ? pr.waits_on : QUEUE_APPROVAL_LEFT[pr.approval_left];
+  return by + bot + (left || "a draft, its owner marks it ready first") + check;
 }
 
 function queueMergeWord(pr) {
