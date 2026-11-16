@@ -9,6 +9,7 @@ import urllib.request
 from dataclasses import asdict
 from pathlib import Path
 
+from bridge.auto_merge import map_db_to_dry_run
 from bridge.board import (
     HINT_SENT,
     SYSTEM_CONVERSATION,
@@ -173,6 +174,12 @@ def build_parser(config: Config) -> argparse.ArgumentParser:
     p = sub.add_parser("issue-sync", help="move Linear issues forward to match their PRs and live work")
     p.add_argument("--dry-run", action="store_true", help="print the moves without making them")
     p.set_defaults(func=cmd_issue_sync)
+
+    p = sub.add_parser(
+        "auto-merge", help="what the auto-merger would do with each open queue PR: merge it, or what blocks it"
+    )
+    p.add_argument("--dry-run", action="store_true", required=True, help="read GitHub, merge and write nothing")
+    p.set_defaults(func=cmd_auto_merge)
 
     p = sub.add_parser("shadow-report", help="what the shadow wake-up filter decided for messages to leads")
     p.add_argument("--days", type=float, default=7)
@@ -352,6 +359,13 @@ def cmd_issue_sync(args: argparse.Namespace, conn: sqlite3.Connection, config: C
         if recipient.pid:
             write_hint(recipient.pid, HINT_SENT)
     return 1 if report.failed or report.errors else 0
+
+
+def cmd_auto_merge(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
+    print(f"auto_merge = {config.auto_merge}")
+    for ref, block in map_db_to_dry_run(conn, config):
+        print(f"{ref.removeprefix('pr:')}: {'would merge' if block is None else f'blocked by {block}'}")
+    return 0
 
 
 def cmd_shadow_report(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:

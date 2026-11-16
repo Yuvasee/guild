@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 HIDDEN_NAME_MARKS = ("🔒", "🔐", "🔏")
 """Tabs or workspaces whose name contains one of these are left out of the dashboard."""
+AUTO_MERGE_MODES = ("off", "dry-run", "on")
 
 
 @dataclass(frozen=True)
@@ -150,6 +151,13 @@ class Config:
     """For each In short bullet."""
     doc_sentence_max_words: int = 30
     """For each sentence of a review doc's visible top: In short and What changes and why, folds left out."""
+    auto_merge: str = "off"
+    """off, dry-run (logs what it would merge) or on: bridge merges a queue PR by itself under the owner's standing
+    rule (a colleague approved, CI green, the review bot cleared the head, no named PR open)."""
+    auto_merge_decision: str = ""
+    """The owner's decision that set the standing rule (e.g. "Q#12"), cited in each merge's feed line."""
+    auto_merge_failures_to: str = ""
+    """Handle told once when an automatic merge fails; empty: the assistant."""
 
     @property
     def owner_name_at_start(self) -> str:
@@ -301,6 +309,9 @@ def map_toml_to_config(raw: dict[str, object]) -> Config:
         doc_in_short_max_bullets=_positive(raw, "doc_in_short_max_bullets", defaults.doc_in_short_max_bullets),
         doc_bullet_max_words=_positive(raw, "doc_bullet_max_words", defaults.doc_bullet_max_words),
         doc_sentence_max_words=_positive(raw, "doc_sentence_max_words", defaults.doc_sentence_max_words),
+        auto_merge=_choice(raw, "auto_merge", defaults.auto_merge, AUTO_MERGE_MODES),
+        auto_merge_decision=_str(raw, "auto_merge_decision", defaults.auto_merge_decision),
+        auto_merge_failures_to=_str(raw, "auto_merge_failures_to", defaults.auto_merge_failures_to),
     )
 
 
@@ -323,6 +334,13 @@ def _fraction(raw: dict[str, object], key: str, default: float) -> float:
     if not isinstance(value, (int, float)) or isinstance(value, bool) or not 0 <= value <= 1:
         raise ValueError(f"{key} must be a number from 0 to 1")
     return float(value)
+
+
+def _choice(raw: dict[str, object], key: str, default: str, choices: tuple[str, ...]) -> str:
+    value = _str(raw, key, default)
+    if value not in choices:
+        raise ValueError(f"{key} must be one of {', '.join(choices)}")
+    return value
 
 
 def _bool(raw: dict[str, object], key: str, default: bool) -> bool:

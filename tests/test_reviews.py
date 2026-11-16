@@ -29,6 +29,7 @@ from bridge.review_github import (
     fetch_ci_blocked_by,
     fetch_comments,
     fetch_merge_facts,
+    fetch_pr_states,
     has_review_by_others,
     is_approved_by_review_bot,
     is_cleared_by_review_bot,
@@ -49,6 +50,7 @@ from bridge.reviews import (
     READY,
     REVIEWER,
     UNCLEAR,
+    Dependencies,
     Mark,
     MergeOkRefused,
     can_ok_merge,
@@ -65,13 +67,16 @@ from bridge.reviews import (
     map_db_to_reviews,
     map_events_to_rounds,
     map_pr_to_threads_key,
+    map_prs_to_dependencies,
     poll_review_queue,
+    read_dependency_states,
     record_agent_marks,
     record_branch_writes,
     record_host_pushes,
     record_merge_ok,
     record_tab_parents,
     store_comments,
+    store_dependencies,
     store_merge_blocks,
     store_open_prs,
     store_review_threads,
@@ -2348,3 +2353,201 @@ def test_answered_line_names_its_state_and_links_the_thread_and_commit(tmp_path:
     path.write_text(STUBS + script.group(1) + checks)
     done = subprocess.run([node, str(path)], capture_output=True, text=True, timeout=20, check=False)
     assert done.returncode == 0, done.stderr
+
+
+def store_blockers(conn: Any, blockers: tuple[str, ...]) -> None:
+    with transaction(conn):
+        store_dependencies(conn, {REF: Dependencies(blockers)})
+
+
+@pytest.mark.parametrize(
+    ("blockers", "needs"),
+    [
+        (("waits for Org/lib#12 to merge",), "waits for Org/lib#12 to merge"),
+        (("could not read Org/lib#12",), "could not read Org/lib#12"),
+        ((), None),
+    ],
+)
+def test_the_merge_button_waits_for_each_pr_the_body_names_and_says_which(
+    tmp_path: Path, blockers: tuple[str, ...], needs: str | None
+) -> None:
+    conn = setup_pr(tmp_path, approved_by=("mira",), named_prs=("Org/lib#12",))
+    store_blockers(conn, blockers)
+    view = merge_ok_view(conn)
+    assert (view["can_ok_merge"], view["merge_ok_needs"]) == (needs is None, needs)
+    if needs:
+        with pytest.raises(MergeOkRefused, match="Org/lib#12"), transaction(conn):
+            record_merge_ok(conn, CONFIG, REF, "a1", "theo", 700)
+
+
+def test_a_backport_the_bot_approved_waits_for_its_main_pr_and_one_never_approved_gets_no_button(
+    tmp_path: Path,
+) -> None:
+    config = replace(CONFIG, backport_bases=("release/*",))
+    conn = setup_pr(tmp_path, bot_approved=True, bot_cleared=True, base="release/1.2", must_merge=("Org/app#5",))
+    deps = map_prs_to_dependencies([make_pr(must_merge=("Org/app#5",))], {"Org/app#5": "OPEN"})
+    store_blockers(conn, deps[REF].blockers)
+    row = conn.execute("SELECT * FROM review_prs WHERE ref = ?", (REF,)).fetchone()
+    assert not can_ok_merge(config, row) and merge_ok_view(conn)["merge_ok_needs"] == "waits for Org/app#5 to merge"
+
+    unapproved = setup_pr(tmp_path / "b", base="release/1.2", must_merge=("Org/app#5",))
+    store_blockers(unapproved, ())
+    assert not merge_ok_view(unapproved)["can_ok_merge"]
+    assert "approval" in merge_ok_view(unapproved)["merge_ok_needs"]
+
+
+def test_named_prs_read_from_the_queue_when_open_there_and_from_github_otherwise() -> None:
+    prs = [
+        make_pr(named_prs=("org/app#8", "Org/lib#12", "Org/lib#13"), must_merge=("Org/lib#14",)),
+        make_pr(ref="pr:Org/app#8", number=8, stack_parent=None),
+    ]
+    with mock.patch(
+        "bridge.reviews.fetch_pr_states",
+        return_value={"Org/lib#12": "MERGED", "Org/lib#13": None, "Org/lib#14": "OPEN"},
+    ) as fetch:
+        states = read_dependency_states(prs)
+    assert fetch.call_args.args[0] == ["Org/lib#12", "Org/lib#13", "Org/lib#14"], "the open queue PR is not read"
+    assert map_prs_to_dependencies(prs, states)[REF].blockers == (
+        "waits for org/app#8 to merge",
+        "could not read Org/lib#13",
+        "waits for Org/lib#14 to merge",
+    )
+
+
+def test_a_stack_bottom_whose_body_lists_the_stack_does_not_wait_for_its_children() -> None:
+    bottom = make_pr(named_prs=("Org/app#8", "Org/app#9"))
+    middle = make_pr(ref="pr:Org/app#8", number=8, stack_parent=REF, named_prs=("Org/app#7", "Org/app#9"))
+    top = make_pr(ref="pr:Org/app#9", number=9, stack_parent="pr:Org/app#8", named_prs=("Org/app#7", "Org/app#8"))
+    states = dict.fromkeys(("Org/app#7", "Org/app#8", "Org/app#9"), "OPEN")
+    deps = map_prs_to_dependencies([bottom, middle, top], states)
+    assert deps[REF] == Dependencies()
+    assert deps["pr:Org/app#8"].blockers == ("waits for Org/app#7 to merge",)
+
+
+def test_a_backport_must_merge_after_the_main_prs_it_names_and_persist_sandbox_is_seen() -> None:
+    config = replace(CONFIG, backport_bases=("release/*",))
+    node: Any = {
+        "number": 7, "title": "Backport #5", "url": "u", "isDraft": False, "updatedAt": "U", "headRefName": "bp-5",
+        "headRefOid": "b2", "baseRefName": "release/1.2", "additions": 1, "deletions": 1,
+        "repository": {"nameWithOwner": "Org/app"}, "baseRef": None,
+        "commits": {"nodes": [{"commit": {"oid": "b2", "committedDate": "2026-11-02T11:00:00Z",
+                                          "statusCheckRollup": None}}]},
+        "files": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        "reviewRequests": {"nodes": []}, "reviews": {"nodes": []}, "latestReviews": {"nodes": []},
+        "reviewThreads": {"nodes": []},
+        "body": "Same diff as the main PR. Goes with Org/lib#3.\n<!-- PERSIST_SANDBOX -->",
+    }  # fmt: skip
+    pr = map_node_to_open_pr(node, config)
+    assert (pr.must_merge, pr.named_prs, pr.persist_sandbox) == (("Org/app#5",), ("Org/lib#3",), True)
+    assert map_node_to_open_pr({**node, "baseRefName": "main", "body": ""}, config).must_merge == ()
+
+
+A, B, C = "pr:Org/app#7", "pr:Org/app#8", "pr:Org/lib#3"
+
+
+def sibling_prs(**changes: dict[str, Any]) -> list[OpenPr]:
+    """#7 and #8 name each other; Org/lib#3 names #8, which names it back: one group of three."""
+    base = {
+        A: {"named_prs": ("Org/app#8",)},
+        B: {"named_prs": ("Org/app#7", "Org/lib#3"), "ref": B, "number": 8, "head": "dev/y",
+            "url": "https://github.com/Org/app/pull/8"},
+        C: {"named_prs": ("Org/app#8",), "ref": C, "repo": "Org/lib", "number": 3, "head": "dev/z",
+            "url": "https://github.com/Org/lib/pull/3"},
+    }  # fmt: skip
+    return [make_pr(**{**base[ref], **changes.get(ref, {})}) for ref in (A, B, C)]
+
+
+def test_prs_that_name_each_other_directly_or_through_a_chain_are_siblings_and_wait_only_outside() -> None:
+    prs = sibling_prs(**{A: {"named_prs": ("Org/app#8", "Org/web#1")}})
+    deps = map_prs_to_dependencies(prs, {"Org/web#1": "OPEN"})
+    assert deps[A] == Dependencies(("waits for Org/web#1 to merge",), (), (B, C))
+    assert deps[C] == Dependencies((), (), (A, B))
+
+
+def test_a_sibling_it_merges_after_orders_them_and_a_cycle_of_merge_after_is_named() -> None:
+    ordered = map_prs_to_dependencies(sibling_prs(**{A: {"must_merge": ("Org/app#8",)}}), {})
+    assert ordered[A].sibling_waits == ("waits for Org/app#8 to merge",) and ordered[B].sibling_waits == ()
+    cycle = map_prs_to_dependencies(
+        sibling_prs(**{A: {"must_merge": ("Org/app#8",)}, B: {"must_merge": ("Org/app#7",)}}), {}
+    )
+    assert cycle[A].blockers == (
+        "waits for Org/app#8 to merge, which merges after this one: a cycle no merge can start",
+    )
+    assert "a cycle" in cycle[B].blockers[0]
+
+
+def store_siblings(tmp_path: Path, prs: list[OpenPr]) -> Any:
+    conn = connect(tmp_path / "t.db")
+    with transaction(conn):
+        store_open_prs(conn, prs, 500)
+        store_dependencies(conn, map_prs_to_dependencies(prs, {}))
+    return conn
+
+
+def button(conn: Any, ref: str) -> tuple[bool, str | None]:
+    view = next(
+        pr for pr in cast(list[dict[str, Any]], map_db_to_reviews(conn, CONFIG, 600)["prs"]) if pr["ref"] == ref
+    )
+    return view["can_ok_merge"], view["merge_ok_needs"]
+
+
+def test_siblings_get_the_merge_button_only_once_each_is_ready_on_its_own_terms(tmp_path: Path) -> None:
+    ready = {"approved_by": ("mira",)}
+    conn = store_siblings(tmp_path, sibling_prs(**{A: ready, B: ready}))
+    assert button(conn, A) == (
+        False,
+        "goes with Org/lib#3, which is not ready: needs a colleague's approval or the review bot's approval of its "
+        "newest commit",
+    )
+    with pytest.raises(MergeOkRefused, match="goes with Org/lib#3"), transaction(conn):
+        record_merge_ok(conn, CONFIG, A, "a1", "theo", 700)
+    conn = store_siblings(tmp_path / "all", sibling_prs(**{A: ready, B: ready, C: ready}))
+    assert [button(conn, ref) for ref in (A, B, C)] == [(True, None)] * 3
+
+
+def test_the_sibling_merged_after_waits_and_the_first_one_gets_the_button(tmp_path: Path) -> None:
+    ready = {"approved_by": ("mira",)}
+    conn = store_siblings(tmp_path, sibling_prs(**{A: {**ready, "must_merge": ("Org/app#8",)}, B: ready, C: ready}))
+    assert button(conn, A) == (False, "waits for Org/app#8 to merge")
+    assert button(conn, B) == (True, None) and button(conn, C) == (True, None)
+
+
+def test_pr_states_tell_an_issue_and_a_number_that_does_not_exist_from_one_that_could_not_be_read() -> None:
+    answer = {
+        "data": {"r0": {"p0": {"__typename": "PullRequest", "state": "OPEN"}, "p1": {"__typename": "Issue"},
+                        "p2": None}, "r1": None},
+        "errors": [{"type": "NOT_FOUND", "path": ["r0", "p2"]}, {"type": "NOT_FOUND", "path": ["r1"]}],
+    }  # fmt: skip
+    done = subprocess.CompletedProcess([], 1, json.dumps(answer), "gh: not found")
+    refs = ["Org/zz#1", "Org/zz#2", "Org/zz#3", "Org/gone#1"]
+    with mock.patch("bridge.review_github.subprocess.run", return_value=done) as run:
+        assert fetch_pr_states(refs) == {
+            "Org/zz#1": "OPEN",
+            "Org/zz#2": "ISSUE",
+            "Org/zz#3": "NONE",
+            "Org/gone#1": None,
+        }
+    with mock.patch("bridge.review_github.subprocess.run", side_effect=OSError("gh missing")):
+        again = fetch_pr_states(refs)
+    assert again == {"Org/zz#1": None, "Org/zz#2": "ISSUE", "Org/zz#3": None, "Org/gone#1": None}, "only final kept"
+    assert run.call_count == 1
+
+
+def test_a_cycle_of_merge_after_keeps_every_sibling_from_merging(tmp_path: Path) -> None:
+    ready = {"approved_by": ("mira",)}
+    prs = sibling_prs(
+        **{A: {**ready, "must_merge": ("Org/app#8",)}, B: {**ready, "must_merge": ("Org/app#7",)}, C: ready}
+    )
+    deps = map_prs_to_dependencies(prs, {})
+    assert "a cycle" in deps[A].blockers[0] and deps[A].sibling_waits == ()
+    conn = store_siblings(tmp_path, prs)
+    can, needs = button(conn, C)
+    assert not can and needs is not None and "goes with Org/app#7, which is not ready" in needs and "a cycle" in needs
+
+
+def test_two_backports_that_name_each_other_are_siblings_not_a_cycle() -> None:
+    bp7 = make_pr(base="release/1", named_prs=("Org/app#8",), must_merge=("Org/app#5", "Org/app#8"))
+    bp8 = make_pr(ref="pr:Org/app#8", number=8, base="release/2", named_prs=("Org/app#7",),
+                  must_merge=("Org/app#5", "Org/app#7"))  # fmt: skip
+    deps = map_prs_to_dependencies([bp7, bp8], {"Org/app#5": "MERGED"}, ("release/*",))
+    assert deps[REF] == Dependencies((), (), ("pr:Org/app#8",))

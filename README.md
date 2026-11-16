@@ -308,6 +308,7 @@ Full usage and flags: [docs/commands.md](docs/commands.md), or `<command> --help
 | [`bridge deploy-check`](docs/commands.md#bridge-deploy-check) | type a line and its Enter into a throwaway tab, as bridge types into leads' tabs, and wake an idle throwaway Claude through the rewake waiter; run before and after a deploy, exit 1 if either does not work |
 | **`bridge` · Outside services** | |
 | [`bridge issue-sync`](docs/commands.md#bridge-issue-sync) | move Linear issues forward to match their PRs and live work |
+| [`bridge auto-merge`](docs/commands.md#bridge-auto-merge) | what the auto-merger would do with each open queue PR: merge it, or what blocks it |
 | **`guild` · Team leads** | |
 | [`guild leads`](docs/commands.md#guild-leads) | list team leads |
 | [`guild lead add`](docs/commands.md#guild-lead-add) | make a tab a team lead: name, tint, a place in the TEAM workspace |

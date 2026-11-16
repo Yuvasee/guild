@@ -17,7 +17,7 @@ from bridge.db import transaction
 from bridge.gitinfo import RepoFacts, read_repo_facts
 from bridge.procinfo import process_start_ms
 from bridge.registry import PROC_START_TOLERANCE_MS
-from bridge.review_github import GitHubError, fetch_merge_facts
+from bridge.review_github import GitHubError, LiveMergeFacts, fetch_merge_facts
 
 # Shell-glob fragments for the hook's fast gate; spacing and `git -C dir push` must still reach Python.
 DEFAULT_TRIGGERS = (
@@ -1109,10 +1109,7 @@ def find_merge_blocks(
                     else MergeRefusal(ref, (), row["merge_block"], str(exc))
                 )
                 continue
-            # Threads are read live; an unanswered comment is known only from the queue's last read.
-            kept = [r for r in str(row["merge_block"] or "").split("; ") if r and "review thread" not in r]
-            live = [f"{his} review thread{'s are' if his > 1 else ' is'} unresolved"] if his else []
-            block = "; ".join([*live, *kept]) or None
+            block = map_live_threads_to_merge_block(row, his)
             # The owner's recorded waiver stands in for a GitHub approval; GitHub itself may not require one.
             facts = MergeFacts(
                 draft,
@@ -1143,6 +1140,36 @@ def find_merge_blocks(
                 )
             )
     return refusals
+
+
+def map_live_threads_to_merge_block(row: sqlite3.Row, his_threads: int) -> str | None:
+    """Threads are read live; an unanswered comment is known only from the queue's last read."""
+    kept = [r for r in str(row["merge_block"] or "").split("; ") if r and "review thread" not in r]
+    live = [f"{his_threads} review thread{'s are' if his_threads > 1 else ' is'} unresolved"] if his_threads else []
+    return "; ".join([*live, *kept]) or None
+
+
+def find_standing_rule_block(config: Config, row: sqlite3.Row, live: LiveMergeFacts) -> MergeRefusal | None:
+    """The guard's check under the owner's standing rule for merging without them, on facts just read from GitHub.
+    Their review is replaced by the rule: a colleague's approval (the review bot's alone or a waiver does not count),
+    the review bot's review of the head without changes asked, GitHub's CLEAN, the head the queue read, and a base
+    that is the default branch or a backport branch. None: it may merge."""
+    ref = str(row["ref"])
+    if row["held_at"] is not None:
+        return MergeRefusal(ref, (HELD,), row["merge_block"], held_why=row["held_why"])
+    block = map_live_threads_to_merge_block(row, live.his_threads)
+    facts = MergeFacts(live.draft, bool(live.approvers), live.checks, live.merge_state, block, owner_reviewed=True)
+    waits = list(list_merge_waits(facts))
+    if not live.bot_cleared:
+        waits.append(f"{config.review_bot_name} has not reviewed the head without asking for changes")
+    if live.merge_state != "CLEAN" and CONFLICTS not in waits and BLOCKED_ON_GITHUB not in waits:
+        waits.append(f"GitHub's merge state is {live.merge_state or 'unknown'}, not CLEAN")
+    if live.head_oid != row["head_oid"]:
+        waits.append("new commits since the queue read it")
+    base = live.base or ""
+    if base != live.default_branch and not is_backport_base(config.backport_bases, base):
+        waits.append(f"its base {base or '(unknown)'} is not the default branch")
+    return MergeRefusal(ref, tuple(waits), block) if waits else None
 
 
 def find_ci_blocked_by(row: sqlite3.Row, waits: tuple[str, ...], head_oid: str | None) -> str | None:
