@@ -4,7 +4,7 @@ import re
 import sqlite3
 import time
 import urllib.parse
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -44,6 +44,7 @@ from bridge.guard import (
 from bridge.leads import find_lead_on_surface, is_conversation_locked, list_leads
 from bridge.refs import map_ref_to_label
 from bridge.registry import record_tab_parent
+from bridge.review_deps import map_states_to_blockers
 from bridge.review_github import (
     UNKNOWN_DIFF,
     ChecksRunning,
@@ -56,6 +57,7 @@ from bridge.review_github import (
     fetch_comments,
     fetch_doc_diff,
     fetch_open_prs,
+    fetch_pr_states,
     fetch_review_threads,
     list_loc_excluded,
 )
@@ -175,14 +177,15 @@ def store_open_prs(conn: sqlite3.Connection, prs: list[OpenPr], now: int) -> Non
                                     checks, requested, approved_by, bot_approved, others_reviewed, merge_state,
                                     in_merge_queue, commit_oids, updated_at, first_seen_at,
                                     fetched_at, threads_key, loc_rule, body_reviews, depends_on, usage_missing,
-                                    bot_cleared)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    bot_cleared, named_prs, must_merge, persist_sandbox)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (ref) DO UPDATE SET
                 title = excluded.title, url = excluded.url, draft = excluded.draft, head = excluded.head,
                 head_oid = excluded.head_oid, base = excluded.base, stack_parent = excluded.stack_parent,
                 loc = excluded.loc, loc_rule = excluded.loc_rule, checks = excluded.checks,
                 requested = excluded.requested, body_reviews = excluded.body_reviews, depends_on = excluded.depends_on,
-                usage_missing = excluded.usage_missing,
+                usage_missing = excluded.usage_missing, named_prs = excluded.named_prs,
+                must_merge = excluded.must_merge, persist_sandbox = excluded.persist_sandbox,
                 approved_by = excluded.approved_by, bot_approved = excluded.bot_approved,
                 bot_cleared = excluded.bot_cleared,
                 ci_blocked_by = CASE WHEN excluded.checks = 'FAILURE' THEN ci_blocked_by END,
@@ -202,7 +205,8 @@ def store_open_prs(conn: sqlite3.Connection, prs: list[OpenPr], now: int) -> Non
                 int(pr.others_reviewed),
                 pr.merge_state, int(pr.in_merge_queue), json.dumps(pr.commit_oids), pr.updated_at, now, now,
                 map_pr_to_threads_key(pr), LOC_RULE, convert_reviews_to_text(pr.body_reviews), pr.depends_on,
-                pr.usage_missing, int(pr.bot_cleared),
+                pr.usage_missing, int(pr.bot_cleared), json.dumps(pr.named_prs), json.dumps(pr.must_merge),
+                int(pr.persist_sandbox),
             ),
         )  # fmt: skip
         if not pr.open_threads:
@@ -219,6 +223,125 @@ def store_open_prs(conn: sqlite3.Connection, prs: list[OpenPr], now: int) -> Non
         """,
         (now,),
     )
+
+
+def read_dependency_states(prs: list[OpenPr]) -> dict[str, str | None]:
+    """The state of every PR the open PRs' bodies name: open when it is one of them, else as GitHub says."""
+    open_refs = {pr.ref.removeprefix("pr:").casefold() for pr in prs}
+    named = {ref for pr in prs for ref in (*pr.named_prs, *pr.must_merge)}
+    states = fetch_pr_states(sorted(ref for ref in named if ref.casefold() not in open_refs))
+    return {**states, **{ref: "OPEN" for ref in named if ref.casefold() in open_refs}}
+
+
+@dataclass(frozen=True)
+class Dependencies:
+    blockers: tuple[str, ...] = ()
+    """Why it waits on PRs outside its siblings: one named there is open or unread, or one it merges after is not
+    merged."""
+    sibling_waits: tuple[str, ...] = ()
+    """Siblings it merges after (its depends_on or a backport's main PR), or a cycle of them."""
+    siblings: tuple[str, ...] = ()
+    """Open queue PRs it merges together with: they name each other, directly or through a chain of such pairs."""
+
+
+def map_prs_to_dependencies(prs: list[OpenPr], states: dict[str, str | None]) -> dict[str, Dependencies]:
+    """Each open PR's waits on the PRs it names. Two of them naming each other cannot go one before the other, so they
+    are siblings: each merges once all are ready, in the order their depends_on gives. Those stacked on a PR are left
+    out of its waits: a stack's bottom PR whose body lists the whole stack would otherwise wait for its own children."""
+    children: dict[str, list[str]] = {}
+    for pr in prs:
+        if pr.stack_parent:
+            children.setdefault(pr.stack_parent.casefold(), []).append(pr.ref.casefold())
+    names = {_map_ref_to_key(pr.ref): {r.casefold() for r in (*pr.named_prs, *pr.must_merge)} for pr in prs}
+    must = {_map_ref_to_key(pr.ref): {r.casefold() for r in pr.must_merge} for pr in prs}
+    refs = {_map_ref_to_key(pr.ref): pr.ref for pr in prs}
+    stacked = {_map_ref_to_key(pr.ref): list_stacked_on(children, pr.ref.casefold()) for pr in prs}
+    groups = map_names_to_sibling_groups(names, stacked)
+    found: dict[str, Dependencies] = {}
+    for pr in prs:
+        key = _map_ref_to_key(pr.ref)
+        group = groups.get(key, set()) - {key}
+        skipped = stacked[key] | group
+        waits = tuple(
+            f"waits for {refs[other].removeprefix('pr:')} to merge"
+            + (", which merges after this one: a cycle no merge can start" if key in _reach(must, other) else "")
+            for other in sorted(must[key] & group)
+        )
+        found[pr.ref] = Dependencies(
+            map_states_to_blockers(pr.named_prs, pr.must_merge, skipped, states),
+            waits,
+            tuple(sorted(refs[other] for other in group)),
+        )
+    return found
+
+
+def map_names_to_sibling_groups(names: dict[str, set[str]], stacked: dict[str, set[str]]) -> dict[str, set[str]]:
+    """PR to the PRs linked to it by a chain of pairs that name each other; only PRs in a pair are keys. A PR stacked
+    on another is no pair with it: the stack gives their order."""
+
+    def is_pair(key: str, other: str) -> bool:
+        linked = other in names and key in names[other] and other != key
+        return linked and other not in stacked.get(key, ()) and key not in stacked.get(other, ())
+
+    pairs = {key: {other for other in named if is_pair(key, other)} for key, named in names.items()}
+    groups: dict[str, set[str]] = {}
+    for key, linked in pairs.items():
+        if linked and key not in groups:
+            group = _reach(pairs, key) | {key}
+            groups.update(dict.fromkeys(group, group))
+    return groups
+
+
+def _reach(edges: dict[str, set[str]], start: str) -> set[str]:
+    found: set[str] = set()
+    todo = list(edges.get(start, ()))
+    while todo:
+        key = todo.pop()
+        if key not in found:
+            found.add(key)
+            todo.extend(edges.get(key, ()))
+    return found
+
+
+def _map_ref_to_key(ref: str) -> str:
+    return ref.removeprefix("pr:").casefold()
+
+
+def list_stacked_on(children: dict[str, list[str]], ref: str) -> set[str]:
+    """owner/repo#N, lowercase, of every PR stacked on `ref`, however deep."""
+    return {child.removeprefix("pr:") for child in _reach({k: set(v) for k, v in children.items()}, ref)}
+
+
+def store_dependencies(conn: sqlite3.Connection, dependencies: dict[str, Dependencies]) -> None:
+    conn.executemany(
+        "UPDATE review_prs SET dep_blockers = ?, sibling_waits = ?, siblings = ? WHERE ref = ?",
+        [
+            (json.dumps(d.blockers) if d.blockers else None, json.dumps(d.sibling_waits) if d.sibling_waits else None,
+             json.dumps(d.siblings), ref)
+            for ref, d in dependencies.items()
+        ],
+    )  # fmt: skip
+
+
+def map_row_to_dependency_blockers(row: sqlite3.Row, with_siblings: bool = True) -> list[str]:
+    """Its waits on PRs outside its siblings, then, with_siblings, on the siblings it merges after."""
+    outside: list[str] = json.loads(str(row["dep_blockers"] or "[]"))
+    return [*outside, *json.loads(str(row["sibling_waits"] or "[]"))] if with_siblings else outside
+
+
+def load_open_siblings(conn: sqlite3.Connection, row: sqlite3.Row) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM review_prs WHERE closed_at IS NULL AND ref IN (SELECT value FROM json_each(?)) ORDER BY ref",
+        (str(row["siblings"] or "[]"),),
+    ).fetchall()
+
+
+def map_siblings_to_wait(siblings: Sequence[sqlite3.Row], why_not: Callable[[sqlite3.Row], str | None]) -> str | None:
+    """The first sibling not ready on its own terms, which keeps the rest from merging without it."""
+    for sibling in siblings:
+        if (reason := why_not(sibling)) is not None:
+            return f"goes with {str(sibling['ref']).removeprefix('pr:')}, which is not ready: {reason}"
+    return None
 
 
 def record_poll_error(conn: sqlite3.Connection, error: str, now: int) -> None:
@@ -1186,9 +1309,11 @@ def poll_review_queue(
             for ref, status in (fetch_prs(missing) if missing else {}).items()
             if isinstance(status, PrStatus) and status.state != "OPEN"
         ]
+        states = read_dependency_states(prs)
         with transaction(conn):
             store_open_prs(conn, prs, now)
             mark_closed(conn, gone, now)
+            store_dependencies(conn, map_prs_to_dependencies(prs, states))
     for ref, repo, number, key in list_backports_to_check(conn, config, now)[:BACKPORT_CHECKS_PER_POLL]:
         verdict = check_backport(repo, number, config.backport_bases, time.monotonic() + BACKPORT_CHECK_BUDGET_S)
         with transaction(conn):
@@ -1526,17 +1651,26 @@ class MergeOkRefused(Exception):
     pass
 
 
-def can_ok_merge(config: Config, row: sqlite3.Row) -> bool:
+def can_ok_merge(config: Config, row: sqlite3.Row, siblings: Sequence[sqlite3.Row] = ()) -> bool:
     """The owner may OK its merge from the page: see map_row_to_merge_ok_needs."""
-    return map_row_to_merge_ok_needs(row) is None
+    return map_row_to_merge_ok_needs(row, siblings) is None
 
 
-def map_row_to_merge_ok_needs(row: sqlite3.Row) -> str | None:
+def map_row_to_merge_ok_needs(row: sqlite3.Row, siblings: Sequence[sqlite3.Row] = ()) -> str | None:
     """What keeps the Merge button off, or None: open, not a draft, not stacked (a stacked PR merges after the one
-    under it), approved by the review bot at its head or by a colleague, CI green or none, and GitHub would not refuse
-    it. A backport gets the button on the same terms."""
+    under it), approved by the review bot at its head or by a colleague, no PR its body names still open (for a
+    backport, its default-branch PRs merged), CI green or none, GitHub would not refuse it, and each open sibling
+    ready on the same terms."""
+    return map_row_to_own_merge_ok_needs(row) or map_siblings_to_wait(
+        siblings, lambda sibling: map_row_to_own_merge_ok_needs(sibling, with_siblings=False)
+    )
+
+
+def map_row_to_own_merge_ok_needs(row: sqlite3.Row, with_siblings: bool = True) -> str | None:
     if not is_mergeable_but_for_ci(row):
         return map_row_to_unmergeable_why(row)
+    if blockers := map_row_to_dependency_blockers(row, with_siblings):
+        return blockers[0]
     if row["checks"] not in (None, "SUCCESS"):
         return "CI is not green"
     if row["merge_state"] == "BLOCKED":
@@ -1619,8 +1753,9 @@ def record_merge_ok(
     row = conn.execute("SELECT * FROM review_prs WHERE ref = ?", (ref,)).fetchone()
     if row is None or row["closed_at"] is not None:
         raise MergeOkRefused(f"{ref} is not an open PR in the queue")
-    if not can_ok_merge(config, row):
-        raise MergeOkRefused(f"{ref} cannot get a merge OK: {map_row_to_merge_ok_needs(row)}")
+    siblings = load_open_siblings(conn, row)
+    if not can_ok_merge(config, row, siblings):
+        raise MergeOkRefused(f"{ref} cannot get a merge OK: {map_row_to_merge_ok_needs(row, siblings)}")
     if head_oid != row["head_oid"]:
         raise MergeOkRefused(f"{ref} has new commits since the page showed it; look at them first")
     if conn.execute("SELECT 1 FROM review_merge_oks WHERE ref = ? AND head_oid = ?", (ref, head_oid)).fetchone():
@@ -1798,6 +1933,7 @@ def map_row_to_review(conn: sqlite3.Connection, config: Config, row: sqlite3.Row
     # Reviewers on a PR do not make it published: the owner decides, and only a known post counts.
     group, group_why = map_row_to_group(row, config)
     resolve_threads = map_row_to_threads_to_resolve(conn, config, row)
+    siblings = load_open_siblings(conn, row)
     published = group == PUBLISHED
     if published:
         state = "published"
@@ -1847,8 +1983,8 @@ def map_row_to_review(conn: sqlite3.Connection, config: Config, row: sqlite3.Row
         "can_publish": group in (WAITING_FOR_YOU, READY) and not row["reviewed_at"] and row["post_state"] != "external",
         "merge_path": row["merge_path"],
         "head_oid": row["head_oid"],
-        "can_ok_merge": can_ok_merge(config, row),
-        "merge_ok_needs": map_row_to_merge_ok_needs(row),
+        "can_ok_merge": can_ok_merge(config, row, siblings),
+        "merge_ok_needs": map_row_to_merge_ok_needs(row, siblings),
         "merge_blocked_by_github": map_row_to_merge_blocked_by_github(row),
         "merge_ok": load_merge_ok(conn, ref, str(row["head_oid"])),
         "merge_ok_to": owner.handle if owner else config.assistant_handle,

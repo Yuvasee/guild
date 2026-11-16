@@ -153,6 +153,9 @@ overlay_dir = "~/.config/bridge/house"    # your house texts, below
 people_dir = "~/.config/bridge/people"    # your people file, below
 ask_autoclose_decision = "Q#12"           # your decision that verified asks close by themselves, cited when they do
 asks_panel_max = 10                       # asks the page lists as needing attention (the default); the rest are counted
+auto_merge = "off"                        # off (the default), dry-run or on: merge queue PRs under the standing rule
+auto_merge_decision = "Q#41"              # your decision that set that rule, cited in each merge's feed line
+auto_merge_failures_to = "lead-x"         # handle told when an automatic merge fails; default: the assistant
 ```
 
 **House texts** (`overlay_dir`): one `<slot>.md` per slot replaces or adds a passage of the roles and briefs. A

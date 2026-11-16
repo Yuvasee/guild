@@ -834,6 +834,18 @@ MIGRATIONS: tuple[str, ...] = (
     ALTER TABLE review_prs ADD COLUMN ci_blocked_by TEXT;
     ALTER TABLE review_prs ADD COLUMN ci_blocked_for TEXT;
     """,
+    # What the body names that keeps a PR from merging, and the auto-merger's own record: one attempt per head.
+    """
+    ALTER TABLE review_prs ADD COLUMN named_prs TEXT NOT NULL DEFAULT '[]';
+    ALTER TABLE review_prs ADD COLUMN must_merge TEXT NOT NULL DEFAULT '[]';
+    ALTER TABLE review_prs ADD COLUMN dep_blockers TEXT;
+    ALTER TABLE review_prs ADD COLUMN sibling_waits TEXT;
+    ALTER TABLE review_prs ADD COLUMN siblings TEXT NOT NULL DEFAULT '[]';
+    ALTER TABLE review_prs ADD COLUMN persist_sandbox INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE review_prs ADD COLUMN sandbox_told_oid TEXT;
+    ALTER TABLE review_prs ADD COLUMN auto_merge_oid TEXT;
+    ALTER TABLE review_prs ADD COLUMN auto_merge_error TEXT;
+    """,
 )
 
 HOOK_BUSY_TIMEOUT_MS = 200

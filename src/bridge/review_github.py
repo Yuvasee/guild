@@ -8,7 +8,7 @@ from typing import Any, cast
 
 from bridge.agent_prefix import strip_agent_prefix
 from bridge.config import Config
-from bridge.review_deps import map_markdown_to_dependency
+from bridge.review_deps import map_markdown_to_dependency, map_markdown_to_named_prs
 from bridge.review_marks import find_missing_usage_section, map_markdown_to_reviews
 
 _PAGES_MAX = 20
@@ -48,8 +48,8 @@ query($owner: String!, $name: String!, $number: Int!) {
 """
 _MERGE_FACTS_QUERY = """
 query($owner: String!, $name: String!, $number: Int!) {
-  repository(owner: $owner, name: $name) { pullRequest(number: $number) {
-    isDraft mergeStateStatus
+  repository(owner: $owner, name: $name) { defaultBranchRef { name } pullRequest(number: $number) {
+    isDraft mergeStateStatus baseRefName
     commits(last: 1) { nodes { commit { oid statusCheckRollup { state } } } }
     reviews(last: 100) { nodes { state commit { oid } author { __typename login } } }
     reviewThreads(first: 100) { nodes { isResolved comments(first: 1) { nodes { author { login } } } } }
@@ -77,6 +77,9 @@ _MERGE_FACTS_TIMEOUT_S = 3
 PENDING = "PENDING"
 REVIEW_LOCKFILES = ("uv.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock")
 APPROVED_STATE = "APPROVED"
+PERSIST_SANDBOX = "PERSIST_SANDBOX"
+NO_SUCH_NUMBER = "NONE"
+_FINAL_STATES: dict[str, str] = {}
 
 
 def list_loc_excluded(config: Config) -> tuple[str, ...]:
@@ -146,6 +149,12 @@ class OpenPr:
     """One letter per thread, r resolved and o open: a thread resolved and another reopened keep the count."""
     depends_on: str | None = None
     """owner/repo#N of the PR its body says it merges only after."""
+    named_prs: tuple[str, ...] = ()
+    """owner/repo#N of every PR its body names: each one open keeps it from merging."""
+    must_merge: tuple[str, ...] = ()
+    """owner/repo#N of the PRs that must be merged first: depends_on, and a backport's default-branch PRs."""
+    persist_sandbox: bool = False
+    """Its body asks to keep its sandbox (PERSIST_SANDBOX): it never merges by itself."""
 
     @property
     def commit_oids(self) -> tuple[str, ...]:
@@ -230,6 +239,8 @@ def map_node_to_open_pr(node: Any, config: Config, known_loc: dict[tuple[str, st
     rollup: Any = last.get("statusCheckRollup") or {}
     review_threads: Any = node.get("reviewThreads") or {}
     threads: list[Any] = review_threads.get("nodes") or []
+    body = str(node.get("body") or "")
+    depends_on = map_markdown_to_dependency(body, repo, number)
     return OpenPr(
         ref=ref,
         repo=repo,
@@ -249,7 +260,10 @@ def map_node_to_open_pr(node: Any, config: Config, known_loc: dict[tuple[str, st
         bot_cleared=is_cleared_by_review_bot(node["reviews"]["nodes"], head_oid, config),
         body_reviews=map_markdown_to_reviews(str(node.get("body") or ""), config.review_names),
         usage_missing=find_missing_usage_section(strip_agent_prefix(str(node["title"])), str(node.get("body") or "")),
-        depends_on=map_markdown_to_dependency(str(node.get("body") or ""), repo, number),
+        depends_on=depends_on,
+        named_prs=map_markdown_to_named_prs(body, repo, number),
+        must_merge=map_pr_to_must_merge(config, repo, number, node, depends_on),
+        persist_sandbox=PERSIST_SANDBOX in body,
         others_reviewed=has_review_by_others(node["latestReviews"]["nodes"], config),
         merge_state=node.get("mergeStateStatus"),
         in_merge_queue=bool(node.get("isInMergeQueue")),
@@ -258,6 +272,69 @@ def map_node_to_open_pr(node: Any, config: Config, known_loc: dict[tuple[str, st
         open_threads=sum(1 for thread in threads if not thread.get("isResolved")),
         thread_flags="".join("r" if thread.get("isResolved") else "o" for thread in threads),
     )
+
+
+def map_pr_to_must_merge(config: Config, repo: str, number: int, node: Any, depends_on: str | None) -> tuple[str, ...]:
+    # Loaded here: the backport module reads GitHub through this one.
+    from bridge.backport import find_named_prs, is_backport_base
+
+    must: set[str] = {depends_on} if depends_on else set()
+    if is_backport_base(config.backport_bases, str(node["baseRefName"])):
+        named = find_named_prs(repo, number, str(node["title"]), str(node.get("body") or ""), str(node["headRefName"]))
+        must.update(f"{repo}#{n}" for n in named)
+    return tuple(sorted(must))
+
+
+def fetch_pr_states(refs: list[str]) -> dict[str, str | None]:
+    """owner/repo#N to OPEN, MERGED or CLOSED, ISSUE or NONE when the number is an issue or nothing at all, or None
+    when it could not be read. All but OPEN and CLOSED are kept for the process's life: a body that names many merged
+    PRs costs one read each."""
+    states: dict[str, str | None] = {r: _FINAL_STATES[r.casefold()] for r in refs if r.casefold() in _FINAL_STATES}
+    by_repo: dict[str, list[tuple[str, int]]] = {}
+    for ref in refs:
+        repo, _, number = ref.partition("#")
+        if ref not in states and "/" in repo and number.isdigit():
+            by_repo.setdefault(repo.casefold(), []).append((ref, int(number)))
+    if not by_repo:
+        return {**dict.fromkeys(refs), **states}
+    parts: list[str] = []
+    aliases: dict[tuple[str, str], str] = {}
+    for r, (repo, items) in enumerate(by_repo.items()):
+        owner, name = repo.split("/", 1)
+        fields: list[str] = []
+        for p, (ref, number) in enumerate(items):
+            aliases[(f"r{r}", f"p{p}")] = ref
+            fields.append(f"p{p}: issueOrPullRequest(number: {number}) {{ __typename ... on PullRequest {{ state }} }}")
+        parts.append(f"r{r}: repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) {{ {' '.join(fields)} }}")
+    try:
+        # A number that is neither fails its own field only, and gh then exits 1 with the rest of the answer.
+        done = subprocess.run(
+            ["gh", "api", "graphql", "-f", f"query=query {{ {' '.join(parts)} }}"],
+            capture_output=True, encoding="utf-8", errors="replace", timeout=_GH_TIMEOUT_S, check=False,
+        )  # fmt: skip
+        answer: Any = json.loads(done.stdout)
+        data: Any = answer.get("data") or {}
+        errors: list[Any] = answer.get("errors") or []
+        # Not found under a repository that was found: GitHub has no such number there, so it names no PR.
+        missing: set[str] = {".".join(map(str, e["path"])) for e in errors if e.get("type") == "NOT_FOUND"}
+    except (OSError, subprocess.TimeoutExpired, ValueError, AttributeError, KeyError, TypeError):
+        data, missing = {}, set()
+    for (repo_alias, pr_alias), ref in aliases.items():
+        state: object = None
+        try:
+            repository: Any = data[repo_alias]
+            node: Any = repository[pr_alias]
+            if node is None and f"{repo_alias}.{pr_alias}" in missing:
+                state = NO_SUCH_NUMBER
+            elif node is not None:
+                state = "ISSUE" if node["__typename"] == "Issue" else node["state"]
+        except (KeyError, TypeError):
+            state = None
+        # A closed PR can be reopened; a merged one and an issue stay what they are.
+        if state in ("MERGED", "ISSUE", NO_SUCH_NUMBER):
+            _FINAL_STATES[ref.casefold()] = str(state)
+        states[ref] = str(state) if state in ("OPEN", "MERGED", "CLOSED", "ISSUE", NO_SUCH_NUMBER) else None
+    return {**dict.fromkeys(refs), **states}
 
 
 def fetch_review_threads(config: Config, repo: str, number: int) -> ReviewThreads:
@@ -275,27 +352,63 @@ class ChecksRunning(Exception):
     """Every failed check so far is a job GitHub refused to start, but another check still runs."""
 
 
+@dataclass(frozen=True)
+class LiveMergeFacts:
+    draft: bool
+    approvers: tuple[str, ...]
+    """People whose latest verdict is APPROVED; never the review bot."""
+    bot_approved: bool
+    """The review bot approved, and its latest review is of the head."""
+    bot_cleared: bool
+    checks: str | None
+    merge_state: str | None
+    his_threads: int
+    """The author's unresolved threads."""
+    head_oid: str | None
+    base: str | None
+    default_branch: str | None
+
+
 def fetch_merge_facts(
     config: Config, repo: str, number: int, timeout_s: float = _MERGE_FACTS_TIMEOUT_S
 ) -> tuple[bool, bool, str | None, str | None, int, str | None]:
     """(draft, approved, CI rollup, merge state, the author's unresolved threads, head commit) of one PR, read live for
     the merge guard."""
+    live = read_live_merge_facts(config, repo, number, timeout_s)
+    approved = bool(live.approvers) or live.bot_approved
+    return live.draft, approved, live.checks, live.merge_state, live.his_threads, live.head_oid
+
+
+def read_live_merge_facts(
+    config: Config, repo: str, number: int, timeout_s: float = _MERGE_FACTS_TIMEOUT_S
+) -> LiveMergeFacts:
     owner, _, name = repo.partition("/")
     args = ["api", "graphql", "-f", f"query={_MERGE_FACTS_QUERY}", "-f", f"owner={owner}", "-f", f"name={name}"]
     try:
         raw: Any = json.loads(run_gh([*args, "-F", f"number={number}"], timeout_s))
-        pr: Any = raw["data"]["repository"]["pullRequest"]
+        repository: Any = raw["data"]["repository"]
+        pr: Any = repository["pullRequest"]
         commits: list[Any] = pr["commits"]["nodes"]
         head: Any = commits[-1]["commit"] if commits else {}
         rollup: Any = head.get("statusCheckRollup") or {}
         reviews: list[Any] = pr["reviews"]["nodes"]
         author = config.review_author.casefold()
         head_oid = str(head.get("oid") or "")
-        bot = is_approved_by_review_bot(reviews, config) and is_cleared_by_review_bot(reviews, head_oid, config)
-        approved = bool(map_reviews_to_approvers(reviews, config)) or bot
+        bot_cleared = is_cleared_by_review_bot(reviews, head_oid, config)
         threads: list[Any] = pr["reviewThreads"]["nodes"]
-        his = sum(1 for t in threads if not t.get("isResolved") and _map_thread_to_starter(t) == author)
-        return bool(pr["isDraft"]), approved, rollup.get("state"), pr.get("mergeStateStatus"), his, head_oid or None
+        default: Any = repository.get("defaultBranchRef") or {}
+        return LiveMergeFacts(
+            draft=bool(pr["isDraft"]),
+            approvers=map_reviews_to_approvers(reviews, config),
+            bot_approved=is_approved_by_review_bot(reviews, config) and bot_cleared,
+            bot_cleared=bot_cleared,
+            checks=rollup.get("state"),
+            merge_state=pr.get("mergeStateStatus"),
+            his_threads=sum(1 for t in threads if not t.get("isResolved") and _map_thread_to_starter(t) == author),
+            head_oid=head_oid or None,
+            base=pr.get("baseRefName"),
+            default_branch=default.get("name"),
+        )
     except (ValueError, KeyError, TypeError, IndexError, AttributeError) as exc:
         raise GitHubError(f"unexpected answer from GitHub: {type(exc).__name__}") from exc
 

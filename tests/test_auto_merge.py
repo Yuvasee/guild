@@ -1,0 +1,238 @@
+import json
+from dataclasses import replace
+from pathlib import Path
+from typing import Any
+from unittest import mock
+
+import pytest
+from test_reviews import CONFIG, REF, add_session, make_pr
+
+from bridge.auto_merge import SANDBOX_BLOCK, map_db_to_dry_run, map_row_to_auto_merge_block, run_auto_merge
+from bridge.db import connect, transaction
+from bridge.review_github import GitHubError, LiveMergeFacts
+from bridge.reviews import Dependencies, map_prs_to_dependencies, store_dependencies, store_open_prs
+
+ON = replace(CONFIG, auto_merge="on", auto_merge_decision="Q#41", auto_merge_failures_to="lead-x", owner_name="Theo")
+CLEAN = {"approved_by": ("mira",), "bot_cleared": True, "checks": "SUCCESS", "merge_state": "CLEAN"}
+LIVE = LiveMergeFacts(
+    draft=False, approvers=("mira",), bot_approved=False, bot_cleared=True, checks="SUCCESS", merge_state="CLEAN",
+    his_threads=0, head_oid="a1", base="main", default_branch="main",
+)  # fmt: skip
+MERGED = json.dumps({"state": "MERGED", "mergeCommit": {"oid": "c0ffee1234"}})
+
+
+def setup(tmp_path: Path, *prs: Any) -> Any:
+    conn = connect(tmp_path / "t.db")
+    with transaction(conn):
+        store_open_prs(conn, list(prs) or [make_pr(**CLEAN)], 500)
+        add_session(conn, "c1", "worker", branch="dev/x")
+        add_session(conn, "c2", "lead-x", surface="s-lead")
+    return conn
+
+
+def row(conn: Any, ref: str = REF) -> Any:
+    return conn.execute("SELECT * FROM review_prs WHERE ref = ?", (ref,)).fetchone()
+
+
+class Gh:
+    """A stub gh: records each call, merges unless told to fail."""
+
+    def __init__(self, fail: str | None = None) -> None:
+        self.calls: list[list[str]] = []
+        self.fail = fail
+
+    def __call__(self, args: list[str], timeout_s: float = 60) -> str:
+        self.calls.append(args)
+        if args[:2] == ["pr", "merge"] and self.fail:
+            raise GitHubError(self.fail)
+        return MERGED if args[:2] == ["pr", "view"] else ""
+
+    @property
+    def merges(self) -> list[list[str]]:
+        return [c for c in self.calls if c[:2] == ["pr", "merge"]]
+
+
+def run(conn: Any, config: Any = ON, live: LiveMergeFacts = LIVE, gh: Gh | None = None, now: int = 1000) -> Gh:
+    gh = gh or Gh()
+    with (
+        mock.patch("bridge.guard.read_live_merge_facts", return_value=live),
+        mock.patch("bridge.auto_merge.run_gh", side_effect=gh),
+    ):
+        run_auto_merge(conn, config, now)
+    return gh
+
+
+@pytest.mark.parametrize(
+    ("changes", "column", "reason"),
+    [
+        ({"stack_parent": "pr:Org/app#6"}, None, "stacked"),
+        ({"draft": True}, None, "a draft"),
+        ({}, ("held_at", 1), "held for Theo's review"),
+        ({}, ("merge_block", "1 review thread is unresolved"), "Theo's comments are open"),
+        ({"approved_by": (), "bot_approved": True}, None, "no colleague's approval"),
+        ({"bot_cleared": False}, None, "has not reviewed its newest commit"),
+        ({"checks": "FAILURE"}, None, "CI is failure"),
+        ({"checks": "PENDING"}, None, "CI is pending"),
+        ({"merge_state": "BLOCKED"}, None, "not CLEAN"),
+        ({"merge_state": "UNSTABLE"}, None, "not CLEAN"),
+        ({}, ("dep_blockers", '["waits for Org/lib#3 to merge"]'), "waits for Org/lib#3 to merge"),
+        ({}, ("auto_merge_oid", "a1"), "already ran"),
+        ({"persist_sandbox": True}, None, SANDBOX_BLOCK),
+    ],
+)
+def test_each_condition_of_the_standing_rule_blocks_alone(
+    tmp_path: Path, changes: dict[str, Any], column: tuple[str, Any] | None, reason: str
+) -> None:
+    conn = setup(tmp_path, make_pr(**{**CLEAN, **changes}))
+    if column:
+        with transaction(conn):
+            conn.execute(f"UPDATE review_prs SET {column[0]} = ?", (column[1],))
+    assert reason in (map_row_to_auto_merge_block(ON, row(conn)) or "")
+    assert run(conn).merges == []
+
+
+def test_a_clean_pr_merges_once_with_a_feed_line_and_its_lead_told_merged_not_deployed(tmp_path: Path) -> None:
+    conn = setup(tmp_path)
+    assert map_row_to_auto_merge_block(ON, row(conn)) is None
+    gh = run(conn)
+    assert gh.merges == [["pr", "merge", "https://github.com/Org/app/pull/7", "--squash", "--match-head-commit", "a1"]]
+    item = conn.execute("SELECT kind, text, links FROM user_items").fetchone()
+    assert (item["kind"], item["text"]) == ("done", "merged Org/app#7 T as c0ffee1 (rule Q#41)")
+    assert "https://github.com/Org/app/commit/c0ffee1234" in item["links"]
+    told = conn.execute("SELECT m.body, r.handle FROM messages m JOIN message_recipients r ON r.message_id = m.id")
+    body, handle = told.fetchone()
+    assert handle == "worker" and "is merged as c0ffee1" in body and "Merged is not deployed" in body
+    assert run(conn).merges == [], "never the same head twice"
+
+
+def test_at_most_one_merge_per_round(tmp_path: Path) -> None:
+    other = make_pr(**CLEAN, ref="pr:Org/app#8", number=8, url="https://github.com/Org/app/pull/8", head="dev/y")
+    conn = setup(tmp_path, make_pr(**CLEAN), other)
+    assert len(run(conn).merges) == 1
+    assert len(run(conn, live=replace(LIVE, head_oid="a1")).merges) == 1, "the next round takes the next one"
+
+
+def test_a_failed_merge_is_reported_once_and_not_tried_again_at_that_head(tmp_path: Path) -> None:
+    conn = setup(tmp_path)
+    assert len(run(conn, gh=Gh(fail="gh failed: Pull request is not mergeable")).merges) == 1
+    told = conn.execute("SELECT m.body, r.handle FROM messages m JOIN message_recipients r ON r.message_id = m.id")
+    rows = told.fetchall()
+    assert [r["handle"] for r in rows] == ["lead-x"] and "not mergeable" in rows[0]["body"]
+    assert "not mergeable" in str(row(conn)["auto_merge_error"])
+    assert run(conn).merges == []
+    assert conn.execute("SELECT count(*) FROM messages").fetchone()[0] == 1
+    assert conn.execute("SELECT count(*) FROM user_items").fetchone()[0] == 0, "no feed line for a failure"
+
+    with transaction(conn):
+        store_open_prs(conn, [make_pr(**CLEAN, head_oid="b2", commits=(("a1", 1000), ("b2", 2000)))], 900)
+    assert len(run(conn, live=replace(LIVE, head_oid="b2")).merges) == 1, "a new head is tried"
+
+
+@pytest.mark.parametrize(
+    "live",
+    [
+        replace(LIVE, approvers=(), bot_approved=True),
+        replace(LIVE, bot_cleared=False),
+        replace(LIVE, checks="PENDING"),
+        replace(LIVE, merge_state="BLOCKED"),
+        replace(LIVE, merge_state="BEHIND"),
+        replace(LIVE, head_oid="b2"),
+        replace(LIVE, base="dev/parent"),
+        replace(LIVE, his_threads=1),
+        replace(LIVE, draft=True),
+    ],
+)
+def test_the_live_check_refuses_what_the_queue_copy_did_not_see(tmp_path: Path, live: LiveMergeFacts) -> None:
+    conn = setup(tmp_path)
+    assert run(conn, live=live).merges == []
+    assert row(conn)["auto_merge_oid"] is None, "a refusal is not an attempt: it is checked again next round"
+
+
+def test_github_unreadable_merges_nothing(tmp_path: Path) -> None:
+    conn = setup(tmp_path)
+    with (
+        mock.patch("bridge.guard.read_live_merge_facts", side_effect=GitHubError("gh failed: timeout")),
+        mock.patch("bridge.auto_merge.run_gh") as gh,
+    ):
+        run_auto_merge(conn, ON, 1000)
+    gh.assert_not_called()
+
+
+@pytest.mark.parametrize(("state", "merges"), [("OPEN", 0), (None, 0), ("MERGED", 1)])
+def test_a_named_pr_is_read_again_right_before_merging(tmp_path: Path, state: str | None, merges: int) -> None:
+    conn = setup(tmp_path, make_pr(**CLEAN, named_prs=("Org/lib#3",)))
+    with transaction(conn):
+        store_dependencies(conn, {REF: Dependencies()})
+    with mock.patch("bridge.auto_merge.fetch_pr_states", return_value={"Org/lib#3": state}):
+        assert len(run(conn).merges) == merges
+
+
+def test_persist_sandbox_tells_the_lead_once_per_head_and_never_merges(tmp_path: Path) -> None:
+    conn = setup(tmp_path, make_pr(**CLEAN, persist_sandbox=True))
+    assert run(conn).merges == [] and run(conn).merges == []
+    bodies = [r[0] for r in conn.execute("SELECT body FROM messages")]
+    assert len(bodies) == 1 and "ready to auto-merge except PERSIST_SANDBOX in its body" in bodies[0]
+    with transaction(conn):
+        store_open_prs(conn, [make_pr(**CLEAN, persist_sandbox=True, head_oid="b2")], 900)
+    run(conn)
+    assert conn.execute("SELECT count(*) FROM messages").fetchone()[0] == 2
+
+
+@pytest.mark.parametrize("mode", ["off", "dry-run"])
+def test_off_and_dry_run_write_nothing_and_merge_nothing(tmp_path: Path, mode: str) -> None:
+    conn = setup(tmp_path, make_pr(**CLEAN), make_pr(**CLEAN, ref="pr:Org/app#8", number=8, persist_sandbox=True))
+    before = conn.total_changes
+    gh = run(conn, config=replace(ON, auto_merge=mode))
+    assert gh.calls == [] and conn.total_changes == before
+
+
+def test_the_dry_run_lists_each_open_pr_with_its_verdict(tmp_path: Path) -> None:
+    draft = make_pr(**CLEAN, ref="pr:Org/app#8", number=8, draft=True)
+    conn = setup(tmp_path, make_pr(**CLEAN), draft)
+    before = conn.total_changes
+    with mock.patch("bridge.guard.read_live_merge_facts", return_value=LIVE):
+        assert map_db_to_dry_run(conn, ON) == [(REF, None), ("pr:Org/app#8", "a draft")]
+    with mock.patch("bridge.guard.read_live_merge_facts", return_value=replace(LIVE, approvers=())):
+        assert "not approved" in str(map_db_to_dry_run(conn, ON)[0][1])
+    assert conn.total_changes == before
+
+
+def sibling(number: int, named: tuple[str, ...], **changes: Any) -> Any:
+    return make_pr(**{**CLEAN, "ref": f"pr:Org/app#{number}", "number": number, "head": f"dev/{number}",
+                      "url": f"https://github.com/Org/app/pull/{number}", "named_prs": named, **changes})  # fmt: skip
+
+
+def setup_siblings(tmp_path: Path, *prs: Any) -> Any:
+    conn = setup(tmp_path, *prs)
+    with transaction(conn):
+        store_dependencies(conn, map_prs_to_dependencies(list(prs), {}))
+    return conn
+
+
+def test_siblings_merge_one_per_round_only_once_all_are_ready(tmp_path: Path) -> None:
+    waiting = setup_siblings(tmp_path, sibling(7, ("Org/app#8",)), sibling(8, ("Org/app#7",), approved_by=()))
+    assert "goes with Org/app#8, which is not ready" in str(map_db_to_dry_run(waiting, ON)[0][1])
+    assert run(waiting).merges == []
+
+    conn = setup_siblings(tmp_path / "ready", sibling(7, ("Org/app#8",)), sibling(8, ("Org/app#7",)))
+    with mock.patch("bridge.auto_merge.fetch_pr_states") as states:
+        first = run(conn).merges
+        assert len(first) == 1
+        with transaction(conn):
+            conn.execute("UPDATE review_prs SET closed_at = 1100 WHERE url = ?", (first[0][2],))
+        second = run(conn).merges
+    assert len(second) == 1 and second != first
+    assert not states.called, "a sibling is not read as a dependency"
+
+
+def test_a_sibling_merged_after_goes_second_and_a_cycle_never_merges(tmp_path: Path) -> None:
+    conn = setup_siblings(tmp_path, sibling(7, ("Org/app#8",), must_merge=("Org/app#8",)), sibling(8, ("Org/app#7",)))
+    assert run(conn).merges[0][2] == "https://github.com/Org/app/pull/8"
+
+    cycle = setup_siblings(
+        tmp_path / "cycle",
+        sibling(7, ("Org/app#8",), must_merge=("Org/app#8",)),
+        sibling(8, ("Org/app#7",), must_merge=("Org/app#7",)),
+    )
+    assert all("a cycle no merge can start" in str(why) for _, why in map_db_to_dry_run(cycle, ON))
+    assert run(cycle).merges == []

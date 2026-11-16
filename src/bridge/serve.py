@@ -29,6 +29,7 @@ from bridge.asks import (
     tell_owner_of_reopen,
 )
 from bridge.attention import load_projects, map_page_to_ranked_page
+from bridge.auto_merge import run_auto_merge
 from bridge.board import (
     HINT_SENT,
     SYSTEM_CONVERSATION,
@@ -761,6 +762,10 @@ class DashboardState:
             try:
                 with self._connection() as conn:
                     sent = poll_review_queue(conn, self.config, now_ms(), self._tree[0], self._scanned_from)
+                    try:
+                        sent = [*sent, *run_auto_merge(conn, self.config, now_ms())]
+                    except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, MessageStateError) as exc:
+                        print(f"auto-merge failed: {exc}", flush=True)
                     with transaction(conn):
                         latch_held_breaches(conn, now_ms())
                     user = self.config.user_alias or "user"
