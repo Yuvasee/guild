@@ -22,6 +22,7 @@ from bridge.pages import find_unpublished_citations
 
 STATES = ("open", "in_progress", "done_claimed", "verified", "closed")
 CLOSED_HOW = ("auto", "owner", "assistant")
+"""Who closed it; NULL is a drop by the ask's own session (`guild ask drop`), whose history row names it."""
 WAIT_ON = ("owner", "approval", "release", "verifier")
 WAITABLE = ("open", "in_progress", "done_claimed")
 ASK_STALE_HOURS = 4
@@ -37,7 +38,8 @@ is still current, done or obsolete."""
 ASK_TO_VERIFY_HOURS = 24
 """A claim unverified this long reaches the assistant once, under "To verify"."""
 TOLD_TO_VERIFY = "sent to the assistant to verify"
-DAY_MS = 24 * 3_600_000
+HOUR_MS = 3_600_000
+DAY_MS = 24 * HOUR_MS
 Role = Literal["assistant", "lead", "other"]
 
 WORDS_MAX_CHARS = 4000
@@ -280,12 +282,35 @@ def close_ask(
 
 
 def drop_ask(conn: sqlite3.Connection, ask_id: int, by: Actor, why: str, at_ms: int) -> Ask:
-    """Its owner session or the assistant lets an unfinished ask go as obsolete, with the reason in its history."""
+    """Its owner session or the assistant lets an ask not yet claimed go as obsolete, with the reason in its history.
+    A claim is not dropped: that would skip its verification; a reopen comes first."""
     ask = get_ask(conn, ask_id)
     if by.role != "assistant" and by.handle != ask.owner:
         raise AskError(f"#{ask_id} is {ask.owner}'s: only {ask.owner} or the assistant drops it")
-    _require(ask, STATES[:3], "drop", hint={"verified": "it is verified and closes by itself"})
+    _require(
+        ask,
+        ("open", "in_progress"),
+        "drop",
+        hint={
+            "done_claimed": f"it is claimed done; it is verified, or `guild ask reopen {ask_id} --why '…'` first",
+            "verified": "it is verified and closes by itself",
+        },
+    )
     return close_ask(conn, ask_id, "assistant" if by.role == "assistant" else None, by.handle, at_ms, dropped=why)
+
+
+def tell_assistant_of_drop(
+    conn: sqlite3.Connection, config: Config, ask: Ask, why: str, now: int
+) -> list[tuple[int, Recipient]]:
+    """A lead closing the owner's words never goes unseen: the assistant can reopen it."""
+    if is_recipient_locked(conn, config, config.assistant_handle):
+        return []
+    text = (
+        f"{ask.owner} dropped ask #{ask.id} as obsolete ({_cut(map_words_to_sendable(conn, why), 600)}): "
+        f'"{_cut(map_words_to_sendable(conn, ask.words), 600)}". If {config.owner_name} still wants it: '
+        f"`guild ask reopen {ask.id} --why '…'`."
+    )
+    return send_from_bridge(conn, config, config.assistant_handle, text, now)
 
 
 def reopen_ask(conn: sqlite3.Connection, ask_id: int, by: str, why: str, at_ms: int) -> Ask:
@@ -387,7 +412,7 @@ def _log(conn: sqlite3.Connection, ask_id: int, at_ms: int, by: str, state: str 
     )
 
 
-NAG_GAP_MAX_MS = 24 * 3_600_000
+NAG_GAP_MAX_MS = DAY_MS
 _ASK_LINE = re.compile(r"^#(\d+) ", re.MULTILINE)
 
 
@@ -436,7 +461,10 @@ def find_asks_to_verify(conn: sqlite3.Connection, now: int, after_ms: int) -> li
         """
         SELECT * FROM asks a
         WHERE state = 'done_claimed' AND done_at <= ? AND (wait_until IS NULL OR wait_until <= ?)
-          AND NOT EXISTS (SELECT 1 FROM ask_events e WHERE e.ask_id = a.id AND e.note = ? AND e.at >= a.done_at)
+          AND NOT EXISTS (
+            SELECT 1 FROM ask_events e
+            WHERE e.ask_id = a.id AND e.by = 'bridge' AND e.state IS NULL AND e.note = ? AND e.at >= a.done_at
+          )
         ORDER BY id
         """,
         (now - after_ms, now, TOLD_TO_VERIFY),
@@ -455,10 +483,13 @@ def map_overdue_to_assistant_nag(
     to that lead went unanswered or reached no one: a lead reminded of an ask that waits on the owner marks it so.
     Claims come only from `to_verify`, so each reaches the assistant once; they are not counted as reminders."""
     own = [ask for ask in asks if ask.owner == assistant and ask.state != "done_claimed"]
+    # A waiting ask's daily check is a question to its owner; only an owner nobody could tell hands it on.
     overdue = [
         ask
         for ask in asks
-        if ask.owner != assistant and ask.state != "done_claimed" and (ask.nag_count > 0 or ask.owner in unreached)
+        if ask.owner != assistant
+        and ask.state != "done_claimed"
+        and (ask.owner in unreached or (ask.nag_count > 0 and ask.wait_on is None))
     ]
     lines = [f"Not told, no live session: {', '.join(unreached)}"] if unreached else []
     for nag in map_asks_to_owner_nags(own, owner_name, now):
@@ -542,12 +573,16 @@ def send_ask_nags(conn: sqlite3.Connection, config: Config, now: int, owner_off:
     """Held while the owner is off (night word, dreams, or off hours); the morning gets one batch."""
     if owner_off:
         return []
-    hour = 3_600_000
+    hour = HOUR_MS
     assistant = config.assistant_handle
 
     def sendable(asks: list[Ask]) -> list[Ask]:
         return [
-            replace(ask, words=map_words_to_sendable(conn, ask.words))
+            replace(
+                ask,
+                words=map_words_to_sendable(conn, ask.words),
+                wait_why=ask.wait_why and map_words_to_sendable(conn, ask.wait_why),
+            )
             for ask in asks
             if not is_owner_locked(conn, config, ask.owner)
         ]
@@ -702,7 +737,7 @@ def _cut(text: str, limit: int) -> str:
 def map_db_to_asks_page(conn: sqlite3.Connection, config: Config, now: int) -> dict[str, object]:
     """Per owner, what is not verified yet; for the owner, only the asks that need attention (waiting on them, a claim
     unverified for a day, overdue), oldest first and at most `asks_panel_max`, and the verified ones they may reopen."""
-    hour = 3_600_000
+    hour = HOUR_MS
     stale_ms = ASK_STALE_HOURS * hour
     by_owner: dict[str, dict[str, object]] = {}
     attention: list[dict[str, object]] = []
@@ -741,7 +776,7 @@ def map_db_to_asks_page(conn: sqlite3.Connection, config: Config, now: int) -> d
         entry["overdue"] = bool(entry["overdue"]) or overdue
         item = {"id": ask.id, "state": ask.state, "words": ask.words, "at": ask.created_at, "overdue": overdue}
         cast(list[dict[str, object]], entry["items"]).append({**item, "wait": wait})
-    shown = max(config.asks_panel_max, 0)
+    shown = config.asks_panel_max
     return {
         "by_owner": by_owner,
         "attention": attention[:shown],

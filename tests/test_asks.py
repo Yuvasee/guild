@@ -38,7 +38,7 @@ from bridge.asks import (
 )
 from bridge.board import Recipient
 from bridge.capacity import read_owner_presence, record_owner_off, record_owner_on
-from bridge.config import Config
+from bridge.config import Config, map_toml_to_config
 from bridge.db import connect
 from bridge.registry import rename_handle
 
@@ -353,6 +353,8 @@ def test_an_ask_quiet_for_three_days_is_checked_daily_waiting_or_not(conn: sqlit
     for command in (f"guild ask note {waits} ", f"guild ask done {waits} --claim", f"guild ask drop {waits} '<why>'"):
         assert command in text
     assert f"#{paused} " not in text
+    assert "Asks overdue" not in map_overdue_to_texts(conn, HOUR + 5 * DAY).get("aide", "")
+    assert f"#{waits} alex open" in map_overdue_to_texts(conn, HOUR + 5 * DAY, ["alex"])["aide"]
     wait_ask(conn, waits, LEAD, "owner", "Theo grants the org admin rights on Friday", HOUR + 5 * DAY)
     assert due_ids(conn, HOUR + 8 * DAY - 1) == []
 
@@ -380,10 +382,12 @@ def test_an_owner_session_drops_its_obsolete_ask_with_the_reason_in_history(conn
     )
     by_assistant = add_ask(conn, "alex", "aide", "Answer the vendor", "tab", [], 0).id
     assert drop_ask(conn, by_assistant, ASSISTANT, "the vendor withdrew", HOUR).closed_how == "assistant"
-    verified = claimed(conn)
-    verify_ask(conn, verified, OTHER_LEAD, EVIDENCE, HOW, 4000)
+    claim = claimed(conn)
+    with pytest.raises(AskError, match=f"it is claimed done; it is verified, or `guild ask reopen {claim}"):
+        drop_ask(conn, claim, LEAD, "not needed any more", 4000)
+    verify_ask(conn, claim, OTHER_LEAD, EVIDENCE, HOW, 4000)
     with pytest.raises(AskError, match="it is verified and closes by itself"):
-        drop_ask(conn, verified, LEAD, "not needed any more", 5000)
+        drop_ask(conn, claim, LEAD, "not needed any more", 5000)
 
 
 def test_cli_drop_closes_and_show_says_so(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:
@@ -391,7 +395,12 @@ def test_cli_drop_closes_and_show_says_so(bridge_env: BridgeEnv, spawn_process: 
     assert team.guild("ask", "add", "alex", "--words", "Fix the export", pid=team.b).returncode == 0
     dropped = team.guild("ask", "drop", "1", "the export was removed from the product", pid=team.a)
     assert dropped.returncode == 0, dropped.stderr
-    assert dropped.stdout.strip() == "#1 closed as dropped"
+    assert dropped.stdout.strip() == "#1 closed as dropped; old-b is told"
+    told = bridge_env.connect().execute("SELECT body, post_type FROM messages WHERE from_handle = 'bridge'").fetchone()
+    assert told[0].startswith(
+        'alex dropped ask #1 as obsolete (the export was removed from the product): "Fix the export"'
+    )
+    assert "`guild ask reopen 1 --why '…'`" in told[0] and told[1] == "to-assistant"
     shown = team.guild("ask", "show", "1").stdout
     assert "closed: dropped by its owner session" in shown
     assert "alex closed: dropped: the export was removed from the product" in shown
@@ -815,6 +824,7 @@ def test_a_claim_reaches_its_lead_first_and_the_assistant_once_after_a_day(
 
     reopen_ask(conn, own_claim, "aide", "the export still drops a column", 201 * HOUR)
     claim_ask_done(conn, own_claim, LEAD, "Export fixed again in PR 4, deployed", 202 * HOUR)
+    note_ask(conn, own_claim, LEAD, TOLD_TO_VERIFY, 203 * HOUR)
     assert find_asks_to_verify(conn, 226 * HOUR - 1, 24 * HOUR) == []
     assert [a.id for a in find_asks_to_verify(conn, 226 * HOUR, 24 * HOUR)] == [own_claim]
 
@@ -831,6 +841,18 @@ def test_a_lead_hears_of_its_own_claim_when_the_assistant_cannot_be_told(
     body = str(conn.execute("SELECT body FROM messages WHERE id = ?", (sent[0][0],)).fetchone()[0])
     assert "you claimed it, so another lead or the assistant verifies it" in body
     assert get_ask(conn, ask_id).nag_count == 1
+
+
+def test_a_wait_citing_an_unpublished_page_does_not_sink_the_daily_check(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    make_lead_and_assistant(bridge_env, spawn_process)
+    conn = bridge_env.connect()
+    ask_id = add_ask(conn, "alex", "old-b", "Fix the export", "tab", [], 0).id
+    wait_ask(conn, ask_id, LEAD, "approval", "Security approves the scope on /p/missing-page", HOUR)
+    sent = send_ask_nags(conn, Config(assistant_handle="old-b", owner_name="Theo"), HOUR + 3 * DAY, owner_off=False)
+    assert [recipient.handle for _, recipient in sent] == ["alex"]
+    assert "approves the scope on (page missing-page, not published)" in bodies_to(conn, sent, "alex")
 
 
 def test_words_citing_an_unpublished_page_do_not_sink_the_reminder(
@@ -862,3 +884,9 @@ def test_a_locked_assistant_counts_as_not_told(
     claim_ask_done(conn, ask_id, LEAD, "Export fixed in PR 3, deployed", 0)
     sent = send_ask_nags(conn, Config(assistant_handle="old-b", owner_name="Theo"), HOUR, owner_off=False)
     assert [recipient.handle for _, recipient in sent] == ["alex"]
+
+
+def test_the_panel_shows_at_least_one_ask() -> None:
+    assert map_toml_to_config({"asks_panel_max": 3}).asks_panel_max == 3
+    with pytest.raises(ValueError, match="asks_panel_max must be 1 or more"):
+        map_toml_to_config({"asks_panel_max": 0})

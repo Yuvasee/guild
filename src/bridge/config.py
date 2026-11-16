@@ -279,7 +279,7 @@ def map_toml_to_config(raw: dict[str, object]) -> Config:
         overlay_dir=_str(raw, "overlay_dir", defaults.overlay_dir),
         people_dir=_str(raw, "people_dir", defaults.people_dir),
         ask_autoclose_decision=_str(raw, "ask_autoclose_decision", defaults.ask_autoclose_decision),
-        asks_panel_max=_int(raw, "asks_panel_max", defaults.asks_panel_max),
+        asks_panel_max=_positive_int(raw, "asks_panel_max", defaults.asks_panel_max),
     )
 
 
@@ -287,6 +287,13 @@ def _int(raw: dict[str, object], key: str, default: int) -> int:
     value = raw.get(key, default)
     if not isinstance(value, int) or isinstance(value, bool):
         raise ValueError(f"{key} must be an integer")
+    return value
+
+
+def _positive_int(raw: dict[str, object], key: str, default: int) -> int:
+    value = _int(raw, key, default)
+    if value < 1:
+        raise ValueError(f"{key} must be 1 or more")
     return value
 
 

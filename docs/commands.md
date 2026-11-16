@@ -1054,8 +1054,8 @@ positional arguments:
     done                claim it done; another session verifies
     verify              done_claimed → verified, with evidence of what the owner would see
     close               verified → closed (the assistant only, relaying the owner)
-    drop                close an unfinished ask as obsolete, with why (its owner session or the
-                        assistant)
+    drop                close an ask not yet claimed as obsolete, with why (its owner session or
+                        the assistant)
     reopen              back to open: the result is not what the owner asked for
 
 options:
@@ -1205,7 +1205,7 @@ options:
 
 ### guild ask drop
 
-close an unfinished ask as obsolete, with why (its owner session or the assistant)
+close an ask not yet claimed as obsolete, with why (its owner session or the assistant)
 
 ```text
 usage: guild ask drop [-h] id why

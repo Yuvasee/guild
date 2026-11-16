@@ -24,11 +24,13 @@ from bridge.asks import (
     note_ask,
     reopen_ask,
     start_ask,
+    tell_assistant_of_drop,
     verify_ask,
     wait_ask,
 )
 from bridge.config import Config
 from bridge.db import now_ms, transaction
+from bridge.feed import spawn_typed_delivery
 from bridge.identity import current_party, ensure_current_instance
 from bridge.leads import LeadError, find_lead_on_surface, get_lead, is_assistant_surface, is_surface_locked
 
@@ -96,7 +98,7 @@ def add_ask_commands(sub: "argparse._SubParsersAction[argparse.ArgumentParser]",
     p.add_argument("--dropped", metavar="WHY", help="close an unfinished ask the owner let go, and why")
     p.set_defaults(func=cmd_ask_close)
     p = ask_sub.add_parser(
-        "drop", help="close an unfinished ask as obsolete, with why (its owner session or the assistant)"
+        "drop", help="close an ask not yet claimed as obsolete, with why (its owner session or the assistant)"
     )
     p.add_argument("id", type=int)
     p.add_argument("why", help="why it is no longer wanted; kept in its history")
@@ -223,7 +225,10 @@ def cmd_ask_drop(args: argparse.Namespace, conn: sqlite3.Connection, config: Con
     actor = current_actor(conn, config)
     with transaction(conn):
         ask = drop_ask(conn, int(args.id), actor, str(args.why), now_ms())
-    print(f"#{ask.id} closed as dropped")
+        told = [] if actor.role == "assistant" else tell_assistant_of_drop(conn, config, ask, str(args.why), now_ms())
+    for message_id, recipient in told:
+        spawn_typed_delivery(message_id, [recipient])
+    print(f"#{ask.id} closed as dropped" + (f"; {config.assistant_handle} is told" if told else ""))
     return 0
 
 
