@@ -8,7 +8,9 @@ from conftest import VENV_BIN, BridgeEnv
 from bridge.agent_prefix import strip_agent_prefix
 from bridge.enrich import map_node_to_pr
 from bridge.install import convert_event_to_command, install_hooks
-from bridge.title_guard import find_prefixed_linear_title, find_prefixed_titles
+from bridge.title_guard import find_owner_label_writes, find_prefixed_linear_title, find_prefixed_titles
+
+LABEL = "owner-reviewed"
 
 HEREDOC_COMMIT = """git commit -m "$(cat <<'EOF'
 🤖 Claude: Fix the export
@@ -151,3 +153,76 @@ def test_install_hooks_matches_the_linear_issue_tool(tmp_path: Path) -> None:
     install_hooks(settings, "/home/u/.local/bin/bridge-hook")
     group = json.loads(settings.read_text())["hooks"]["PreToolUse"][0]
     assert group["matcher"] == "Bash|mcp__claude_ai_Linear__save_issue"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gh pr edit 7 --add-label owner-reviewed",
+        "gh pr edit https://github.com/acme/web/pull/7 --add-label 'bug,Owner-Reviewed'",
+        "gh pr edit 7 --remove-label=owner-reviewed",
+        "gh -R acme/web issue edit 7 --add-label owner-reviewed",
+        "gh pr create -t Fix -b body -l owner-reviewed",
+        "gh issue create --title Bug --label owner-reviewed",
+        "gh api repos/acme/web/issues/7/labels -f 'labels[]=owner-reviewed'",
+        "gh api -X PUT repos/acme/web/issues/7/labels -f labels[]=bug -f labels[]=owner-reviewed",
+        "gh api --method DELETE /repos/acme/web/issues/7/labels/owner-reviewed",
+        "gh api -X DELETE repos/{owner}/{repo}/issues/7/labels/owner%2Dreviewed",
+        "gh api -X PATCH repos/acme/web/labels/bug -f new_name=owner-reviewed",
+        "gh label delete owner-reviewed -R acme/web --yes",
+        "gh label edit owner-reviewed --color 000000",
+        "gh label edit bug --name owner-reviewed",
+        "cd web && gh pr edit 7 --add-label owner-reviewed",
+        "gh pr new -t Fix -b body -l owner-reviewed",
+        "gh pr create -dl owner-reviewed -t Fix -b body",
+        "/opt/homebrew/bin/gh pr edit 7 --add-label owner-reviewed",
+        "bash -lc 'gh pr edit 7 --add-label owner-reviewed'",
+        'for pr in 7 8; do gh pr edit "$pr" --add-label owner-reviewed; done',
+        'gh api repos/acme/web/issues/7/labels -X POST --input - <<\'JSON\'\n{"labels":["owner-reviewed"]}\nJSON',
+        "gh api -X PATCH repos/acme/web/issues/7 -f 'labels[]=owner-reviewed'",
+        'LABEL=owner-reviewed; gh pr edit 7 --add-label "$LABEL"',
+        "gh label create owner-reviewed --force --color 000000",
+    ],
+)
+def test_every_spelling_that_changes_the_owners_label_is_found(command: str) -> None:
+    assert find_owner_label_writes(command, LABEL), command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gh pr edit 7 --add-label bug --remove-label wip",
+        "gh pr edit 7 --body 'needs owner-reviewed first'",
+        "gh pr view 7 --json labels",
+        "gh api repos/acme/web/issues/7/labels",
+        "gh api repos/acme/web/issues/7/labels -X GET",
+        "gh api repos/acme/web/labels -f name=owner-reviewed",
+        "gh label create owner-reviewed -R acme/web",
+        "gh label list --search owner-reviewed",
+        "echo gh pr edit 7 --add-label owner-reviewed",
+        "gh api -X PATCH repos/acme/web/labels/bug -f description=owner-reviewed",
+        "gh api -X PATCH repos/acme/web/issues/7 -f body=owner-reviewed",
+        'gh pr edit 7 --add-label "$BUG"',
+    ],
+)
+def test_other_labels_and_reads_pass(command: str) -> None:
+    assert find_owner_label_writes(command, LABEL) == []
+
+
+def test_with_no_owner_label_configured_nothing_is_refused() -> None:
+    assert find_owner_label_writes("gh pr edit 7 --add-label owner-reviewed", "") == []
+
+
+def test_the_hook_refuses_the_owners_label_with_no_claim_held(bridge_env: BridgeEnv, tmp_path: Path) -> None:
+    config = Path(bridge_env.env["BRIDGE_CONFIG"])
+    config.write_text(config.read_text() + f'review_owner_label = "{LABEL}"\nowner_name = "Theo"\n')
+    assert not (bridge_env.state_dir / "claims-active").exists()
+
+    denied = _run_guard(bridge_env, tmp_path, "Bash", {"command": "gh pr edit 7 --add-label owner-reviewed"})
+    short = _run_guard(bridge_env, tmp_path, "Bash", {"command": "gh pr create -t Fix -b b -l owner-reviewed"})
+    other = _run_guard(bridge_env, tmp_path, "Bash", {"command": "gh pr edit 7 --add-label bug"})
+
+    reason = json.loads(denied)["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "only Theo's Publish sets the label owner-reviewed" in reason
+    assert json.loads(short)["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert other == ""

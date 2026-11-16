@@ -118,6 +118,8 @@ class Config:
     """Commit status context the review bot sets red on a PR it stalled on; empty watches none."""
     review_channel_name: str = "the review channel"
     """How texts name the chat channel of review posts (review_channel_id)."""
+    review_owner_label: str = ""
+    """GitHub label bridge puts on a queue PR once the owner pressed Publish, and refuses to agents; empty is off."""
     grooming_states: tuple[str, ...] = ()
     """Tracker states issue sync never moves an issue out of, lowercase; their leads are told once instead."""
     pages_dir: str = "~/pages"
@@ -292,6 +294,7 @@ def map_toml_to_config(raw: dict[str, object]) -> Config:
         required_reviews=_str_list(raw, "required_reviews", defaults.required_reviews),
         review_stall_status=_str(raw, "review_stall_status", defaults.review_stall_status),
         review_channel_name=_str(raw, "review_channel_name", defaults.review_channel_name),
+        review_owner_label=_str(raw, "review_owner_label", defaults.review_owner_label).strip(),
         grooming_states=tuple(s.lower() for s in _str_list(raw, "grooming_states", defaults.grooming_states)),
         pages_dir=_str(raw, "pages_dir", defaults.pages_dir),
         disk_folders=_str_list(raw, "disk_folders", defaults.disk_folders),

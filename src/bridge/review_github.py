@@ -1,3 +1,4 @@
+import contextlib
 import fnmatch
 import json
 import subprocess
@@ -30,6 +31,7 @@ query($q: String!, $after: String) {
       reviews(last: 100) { nodes { state commit { oid } author { __typename login } } }
       latestReviews(first: 100) { nodes { author { __typename login } } }
       reviewThreads(first: 100) { nodes { isResolved } }
+      labels(first: 100) { nodes { name } }
     } }
   }
 }
@@ -80,6 +82,8 @@ APPROVED_STATE = "APPROVED"
 PERSIST_SANDBOX = "PERSIST_SANDBOX"
 NO_SUCH_NUMBER = "NONE"
 _FINAL_STATES: dict[str, str] = {}
+OWNER_LABEL_COLOR = "0e8a16"
+OWNER_LABEL_ABOUT = "The owner reviewed this PR"
 
 
 def list_loc_excluded(config: Config) -> tuple[str, ...]:
@@ -155,6 +159,7 @@ class OpenPr:
     """owner/repo#N of the PRs that must be merged first: depends_on, and a backport's default-branch PRs."""
     persist_sandbox: bool = False
     """Its body asks to keep its sandbox (PERSIST_SANDBOX): it never merges by itself."""
+    labels: tuple[str, ...] = ()
 
     @property
     def commit_oids(self) -> tuple[str, ...]:
@@ -200,6 +205,19 @@ def run_gh(args: list[str], timeout_s: float = _GH_TIMEOUT_S) -> str:
     return done.stdout
 
 
+def add_label(repo: str, number: int, label: str) -> None:
+    """Creates the label in the repo first when adding it fails, then adds it once more."""
+    add = ["api", "-X", "POST", f"repos/{repo}/issues/{number}/labels", "-f", f"labels[]={label}"]
+    try:
+        run_gh(add)
+        return
+    except GitHubError:
+        pass
+    with contextlib.suppress(GitHubError):
+        run_gh(["label", "create", label, "-R", repo, "--color", OWNER_LABEL_COLOR, "--description", OWNER_LABEL_ABOUT])
+    run_gh(add)
+
+
 def fetch_open_prs(config: Config, known_loc: dict[tuple[str, str], int] | None = None) -> list[OpenPr]:
     """Raises rather than returning part of the list: a PR missing from it would look closed."""
     query = f"is:pr is:open archived:false author:{config.review_author} org:{config.review_org}"
@@ -241,6 +259,8 @@ def map_node_to_open_pr(node: Any, config: Config, known_loc: dict[tuple[str, st
     threads: list[Any] = review_threads.get("nodes") or []
     body = str(node.get("body") or "")
     depends_on = map_markdown_to_dependency(body, repo, number)
+    label_nodes: Any = node.get("labels") or {}
+    labels: list[Any] = label_nodes.get("nodes") or []
     return OpenPr(
         ref=ref,
         repo=repo,
@@ -271,6 +291,7 @@ def map_node_to_open_pr(node: Any, config: Config, known_loc: dict[tuple[str, st
         updated_at=str(node["updatedAt"]),
         open_threads=sum(1 for thread in threads if not thread.get("isResolved")),
         thread_flags="".join("r" if thread.get("isResolved") else "o" for thread in threads),
+        labels=tuple(str(n["name"]) for n in labels),
     )
 
 

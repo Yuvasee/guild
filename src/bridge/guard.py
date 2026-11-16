@@ -56,7 +56,7 @@ _HARMLESS_ENV_RE = re.compile(
 )
 _QUOTING_RE = re.compile(r"[\"'\\]")
 _WRAPPERS = frozenset({"command", "env", "time", "nohup", "exec"})
-_SHELL_KEYWORDS = frozenset(
+SHELL_KEYWORDS = frozenset(
     {"if", "then", "else", "elif", "fi", "do", "done", "while", "until", "for", "case", "esac", "select", "function",
      "{", "}", "!", "[[", "]]", "coproc"}
 )  # fmt: skip
@@ -70,7 +70,7 @@ _INERT_COMMANDS = frozenset(
 _GIT_VALUE_OPTIONS = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--attr-source"})
 # `git -c` keys that neither route a push nor run a program.
 _HARMLESS_CONFIG = ("user.", "color.", "advice.")
-_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
+SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
 # env -S and its forms, with env already stripped: the string it splits into a command.
 _ENV_SPLIT_RE = re.compile(r"(?:-[a-zA-Z0-9]*S|--split-string=?)(.*)", re.DOTALL)
 # Programs that run the command in their words, after their options; each option matched takes the next word.
@@ -294,7 +294,7 @@ def map_command_to_targets(
             if strict and any(_REPO_ENV_RE.match(w) for w in env):
                 note(COMMAND, env)
             continue
-        if strict and (joined_by in ("(", ")") or tokens[0] in _SHELL_KEYWORDS):
+        if strict and (joined_by in ("(", ")") or tokens[0] in SHELL_KEYWORDS):
             note(COMMAND, tokens)
             continue
         # A host already refuses these as commands it cannot read.
@@ -496,7 +496,7 @@ def _runs_hidden_push(tokens: list[str], stdin: Sequence[str] = ()) -> bool:
         runs += [words[k + 1 :] for k, word in enumerate(words) if word in _FIND_EXECS]
     elif head == "eval":
         scripts.append(" ".join(words))
-    elif head in _SHELLS:
+    elif head in SHELLS:
         scripts += [script for flag, script in pairwise(words) if re.fullmatch(r"-[a-zA-Z]*c[a-zA-Z]*", flag)]
         here_strings = [w.removeprefix("<<<") or after for w, after in pairwise([*words, ""]) if w.startswith("<<<")]
         scripts += [*stdin, *here_strings]
@@ -507,7 +507,7 @@ def _runs_hidden_push(tokens: list[str], stdin: Sequence[str] = ()) -> bool:
                 scripts.append(split.group(1) or (tokens[k + 1] if k + 1 < len(tokens) else ""))
     runs += [segment for script in scripts for segment, _ in segment_command(script)]
     for run in runs:
-        while run and run[0] in _SHELL_KEYWORDS:
+        while run and run[0] in SHELL_KEYWORDS:
             run = run[1:]
         run = _strip_prefixes(run)
         run = [PurePosixPath(run[0]).name, *run[1:]] if run else run

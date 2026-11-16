@@ -152,6 +152,7 @@ from bridge.review_worktree import (
 from bridge.reviews import (
     GITHUB_EVERY_S,
     MergeOkRefused,
+    add_owner_label,
     find_issue_lead,
     find_owner_of_ref,
     map_db_to_reviews,
@@ -833,6 +834,7 @@ class DashboardState:
         people = dict(self.config.review_mention_people)
         if unknown := [name for name in mention if name not in people]:
             return False, f"not in review_mention_people: {', '.join(unknown)}"
+        published: sqlite3.Row | None = None
         try:
             post_comment = map_typed_comment_to_slack(comment, people) if mention else ""
             with self._connection() as conn:
@@ -847,9 +849,14 @@ class DashboardState:
                         by = self.config.user_alias or "user"
                         ids = tuple(people[name] for name in mention)
                         record_publish(conn, ref, by, now_ms(), direct, ids, post_comment)
+                        published = conn.execute("SELECT repo, number FROM review_prs WHERE ref = ?", (ref,)).fetchone()
                 self._advance_reviews(conn, [])
         except ReviewError as exc:
             return False, str(exc)
+        if published is not None and self.config.review_owner_label:
+            # Off the request: GitHub may take seconds, and the poll labels it anyway if this fails.
+            args = (self.config, str(published["repo"]), int(published["number"]))
+            threading.Thread(target=add_owner_label, args=args, daemon=True).start()
         return True, "ok"
 
     def ok_merge(self, ref: str, head_oid: str) -> tuple[bool, str]:

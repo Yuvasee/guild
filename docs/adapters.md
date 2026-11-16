@@ -141,6 +141,7 @@ work_days = [0, 1, 2, 3, 4]               # Monday is 0 (the default)
 review_bot_name = "ReviewBot"             # your review bot as people name it; its approval counts
 required_reviews = ["Codex"]              # reviews a large PR's doc must name before it reaches you
 review_stall_status = "reviewbot/stall"   # the commit status your bot sets red when it stalls; empty watches none
+review_owner_label = "owner-reviewed"     # label put on a PR once you press Publish; agents may not set it; empty is off
 review_ignored_posts = ["1700000000.000100"]  # Slack ts of review-channel posts that publish nothing (a digest)
 agent_prefix_from_ms = 1700000000000      # when agents began prefixing GitHub posts; older unprefixed ones stay unclear
 host_worker_disabled_plugins = ["example@plugins"]  # plugins host workers run without, besides the defaults

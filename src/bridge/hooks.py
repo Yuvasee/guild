@@ -117,7 +117,13 @@ from bridge.start_context import (
     take_pending_start,
     write_pending_start,
 )
-from bridge.title_guard import find_prefixed_linear_title, find_prefixed_titles, map_titles_to_denial
+from bridge.title_guard import (
+    find_owner_label_writes,
+    find_prefixed_linear_title,
+    find_prefixed_titles,
+    map_label_write_to_denial,
+    map_titles_to_denial,
+)
 from bridge.turncut import take_turn_cut
 
 HOOK_EVENTS = (
@@ -223,8 +229,8 @@ def run_artifact_hook() -> int:
 def handle_pre_tool_use(
     conn: sqlite3.Connection, payload: dict[str, object], config: Config, host_checkout: HostRepoReader | None = None
 ) -> str:
-    """Denies a robot-prefixed title, or a shell command that would mutate a resource another live session has
-    claimed.
+    """Denies a robot-prefixed title, a change to the owner's label, or a shell command that would mutate a resource
+    another live session has claimed.
 
     host_checkout is set for a host worker: git facts come from its report, and a merge it names no PR for is refused.
     """
@@ -240,6 +246,8 @@ def handle_pre_tool_use(
     titles = find_prefixed_titles(command)
     if titles:
         return _deny(map_titles_to_denial(titles))
+    if label_writes := find_owner_label_writes(command, config.review_owner_label):
+        return _deny(map_label_write_to_denial(config.review_owner_label, config.owner_name, label_writes[0]))
     unreadable: list[Unreadable] = []
     if host_checkout is None:
         targets = map_command_to_targets(command, _str(payload, "cwd") or os.getcwd(), unreadable)

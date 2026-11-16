@@ -58,6 +58,7 @@ from bridge.review_github import (
     GitHubError,
     OpenPr,
     ReviewThreads,
+    add_label,
     fetch_ci_blocked_by,
     fetch_comments,
     fetch_doc_diff,
@@ -1310,6 +1311,8 @@ def poll_review_queue(
             store_open_prs(conn, prs, now)
             mark_closed(conn, gone, now)
             store_dependencies(conn, map_prs_to_dependencies(prs, states, config.backport_bases))
+        for pr in list_prs_to_label(conn, config, prs):
+            add_owner_label(config, pr.repo, pr.number)
     for ref, repo, number, key in list_backports_to_check(conn, config, now)[:BACKPORT_CHECKS_PER_POLL]:
         verdict = check_backport(repo, number, config.backport_bases, time.monotonic() + BACKPORT_CHECK_BUDGET_S)
         with transaction(conn):
@@ -1358,6 +1361,27 @@ def poll_review_queue(
             prune_marks(conn, now)
         store_merge_blocks(conn)
         return [*take_comment_wakes(conn, config, now), *tell_ready_to_merge(conn, config, now)]
+
+
+def list_prs_to_label(conn: sqlite3.Connection, config: Config, prs: list[OpenPr]) -> list[OpenPr]:
+    """Open PRs the owner published that GitHub shows without the owner's label: those published before it was set,
+    and those whose labelling at Publish failed."""
+    label = config.review_owner_label.casefold()
+    if not label:
+        return []
+    published = {
+        str(r[0])
+        for r in conn.execute("SELECT ref FROM review_prs WHERE closed_at IS NULL AND reviewed_at IS NOT NULL")
+    }
+    return [pr for pr in prs if pr.ref in published and label not in (n.casefold() for n in pr.labels)]
+
+
+def add_owner_label(config: Config, repo: str, number: int) -> None:
+    """A failure waits for the next poll, which finds the label still missing."""
+    try:
+        add_label(repo, number, config.review_owner_label)
+    except GitHubError as exc:
+        print(f"owner label on {repo}#{number} failed: {exc}", flush=True)
 
 
 def list_docs_to_compare(conn: sqlite3.Connection) -> list[tuple[str, str, str, str]]:
@@ -1639,14 +1663,25 @@ def tell_ready_to_merge(conn: sqlite3.Connection, config: Config, now: int) -> l
             continue
         ready = read_overlay(config, "ready-to-merge", "ready to merge")
         text = (
-            f"{row['url']} ({row['title']}) is {ready}: approved on GitHub by "
-            f"{', '.join(map_row_to_approvers(row, config))}, CI green or none, no conflicts, and no comment of "
-            f"{config.owner_name}'s open. Merge it once you judge it safe: gh pr merge {row['url']}. "
-            f"Deploys still need {config.owner_name}."
+            f"{row['url']} ({row['title']}) is {ready}: {map_row_to_approval_words(row, config)}, CI green or none, "
+            f"no conflicts, and no comment of {config.owner_name}'s open. Merge it once you judge it safe: "
+            f"gh pr merge {row['url']}. Deploys still need {config.owner_name}."
         )
         sent.append(tell_owner(conn, owner, text, now))
         conn.execute("UPDATE review_prs SET merge_told_at = ? WHERE ref = ?", (now, row["ref"]))
     return sent
+
+
+def map_row_to_approval_words(row: sqlite3.Row, config: Config) -> str:
+    """Who approved, for a notice: an owner's waiver is no GitHub approval, so a branch rule may still refuse it."""
+    if approvers := map_row_to_approvers(row, config):
+        return f"approved on GitHub by {', '.join(approvers)}"
+    decision = row["approval_waived_decision"]
+    ref = f" ({convert_item_id_to_question_ref(int(decision))})" if decision is not None else ""
+    return (
+        f"no approval on GitHub; {config.owner_name}'s decision{ref} stands in for one, so GitHub may still refuse "
+        "the merge until someone approves it"
+    )
 
 
 class MergeOkRefused(Exception):
