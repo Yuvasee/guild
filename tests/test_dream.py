@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import signal
 import sqlite3
 import subprocess
@@ -571,13 +572,14 @@ def test_dreams_page_shows_each_latest_dream_newest_first_escaped(tmp_path: Path
     assert page.index("Xavi") < page.index("Alex") and "Bob" not in page
 
 
-def test_dreams_page_is_served_and_linked_last_from_the_guild_page(dashboard: str) -> None:
+def test_dreams_page_is_served_and_linked_from_the_guild_page_top_row(dashboard: str) -> None:
     assert "<title>Dreams</title>" in http_request(dashboard + "/dreams")
     guild = http_request(dashboard + "/guild")
-    assert 'url: "/dreams"' in guild and "diskFree(state.disk), DREAMS_LINK," in guild
+    top = guild[guild.index('<div id="top">') : guild.index('<nav id="sections"')]
+    assert re.search(r'<a href="/dreams"><svg [^>]*>.*?</svg>Dreams</a>', top)
 
 
-def test_a_configured_link_marked_last_comes_after_the_pages_own() -> None:
+def test_links_keep_config_order_and_an_old_last_key_still_loads() -> None:
     config = map_toml_to_config(
         tomllib.loads(
             '[[links]]\nname = "Status board"\nurl = "https://tv.example"\nlast = true\n'
@@ -585,4 +587,4 @@ def test_a_configured_link_marked_last_comes_after_the_pages_own() -> None:
         )
     )
 
-    assert [(link.name, link.last) for link in config.links] == [("Status board", True), ("Versions", False)]
+    assert [link.name for link in config.links] == ["Status board", "Versions"]

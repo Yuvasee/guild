@@ -337,7 +337,7 @@ class DashboardState:
             guild["watchers"] = read_watchers(self.config.watchers, now_ms())
             guild["page_version"] = GUILD_PAGE_VERSION
             guild["disk"] = map_reading_to_dict(self._disk) if self._disk else None
-            guild["links"] = [{"name": link.name, "url": link.url, "last": link.last} for link in self.config.links]
+            guild["links"] = [{"name": link.name, "url": link.url} for link in self.config.links]
             guild["agents"] = {
                 "busy": count_busy_agents(conn),
                 "hosts": count_busy_host_agents(conn),

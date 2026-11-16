@@ -6,8 +6,9 @@ import pytest
 from test_review_worktree import NOW, REVIEWS_CONFIG
 from test_reviews import REF, setup_pr
 
+from bridge.config import Config, map_toml_to_config
 from bridge.db import transaction
-from bridge.review_doc_check import find_doc_problems
+from bridge.review_doc_check import PlainLimits, find_doc_problems, find_doc_warnings, read_visible_top
 from bridge.review_worktree import DocError, read_registered_doc, register_doc
 
 WHERE = """
@@ -29,8 +30,12 @@ def make_doc(where: str = WHERE, first: str = "In short", last: str = "") -> byt
     return f"<html><body>{body}{where}{tail}{last}</body></html>".encode()
 
 
+DEFAULTS = Config()
+LIMITS = PlainLimits(DEFAULTS.doc_in_short_max_bullets, DEFAULTS.doc_bullet_max_words, DEFAULTS.doc_sentence_max_words)
+
+
 def problems(page: bytes, reviewed: bool = False, files: frozenset[str] | None = None) -> list[str]:
-    return find_doc_problems(page, reviewed, "Sam", files)
+    return find_doc_problems(page, reviewed, "Sam", files, LIMITS)
 
 
 FILES = frozenset({"src", "src/app", "src/app/run.py", "src/app/store.py", "tests", "tests/test_run.py"})
@@ -168,3 +173,96 @@ def test_a_refused_doc_lists_every_problem_names_the_spec_and_is_not_stored(
         conn.execute("UPDATE review_prs SET owner_reviewed_at = ?", (NOW,))
     register(conn, tmp_path, make_doc(last=SINCE))
     assert read_registered_doc(conn, "Org/app", 7) == make_doc(last=SINCE), "after the owner's review, and last"
+
+
+def make_top(short: str, changes: str = "<p>One plain line.</p>", verified: str = "") -> bytes:
+    rest = "<h2>How it works</h2><p>" + "word " * 60 + "ends here.</p>"
+    return (
+        f"<html><body><h1>Title</h1><p>{'lead ' * 40}</p><h2>In short</h2>{short}"
+        f"<h2>What changes and why</h2>{changes}{rest}<h2>Verified and not verified</h2>{verified}</body></html>"
+    ).encode()
+
+
+def words(count: int, end: str = ".") -> str:
+    return " ".join(["Alpha", *["beta"] * (count - 1)]) + end
+
+
+def bullets(*sizes: int) -> str:
+    return "<ul>" + "".join(f"<li>{words(size)}</li>" for size in sizes) + "</ul>"
+
+
+def test_in_short_holds_at_most_five_bullets_of_at_most_25_words() -> None:
+    assert problems(make_top(bullets(25, 25, 25, 25, 25))) == []
+    assert problems(make_top(bullets(5, 5, 5, 5, 5, 5))) == ["In short has 6 bullets; at most 5"]
+    (refused,) = problems(make_top(bullets(5, 26)))
+    assert refused.startswith('an In short bullet has 26 words, over 25; keep the point and fold the rest: "Alpha')
+    nested = "<ul><li>Short point.<ul><li>" + words(30) + "</li></ul></li><li>Second.</li></ul>"
+    (nested_refused,) = problems(make_top(nested))
+    assert "bullet has 32 words" in nested_refused, "a nested list is part of its bullet, and not a bullet itself"
+    folded = "<ul><li>Short point.<details><summary>Why</summary>" + words(80) + "</details></li></ul>"
+    assert problems(make_top(folded)) == [], "a fold's body is not read"
+
+
+def test_no_sentence_above_the_folds_runs_over_30_words() -> None:
+    assert problems(make_top("<p>" + words(30) + " " + words(30) + "</p>")) == []
+    (refused,) = problems(make_top("<p>Fine.</p>", "<p>" + words(31) + "</p>"))
+    assert refused.startswith('a sentence above the folds has 31 words, over 30; split it or fold it: "Alpha')
+    hidden = (
+        "<details class='item'><summary>D1. Short summary</summary><p>" + words(60) + "</p></details>"
+        "<pre>" + words(60) + "</pre><svg><text>" + words(60) + "</text></svg>"
+        "<p>" + words(29, "") + ' <span class="mark observed">observed</span></p>'
+    )
+    assert problems(make_top("<p>Fine.</p>", hidden)) == [], "folds, code blocks, diagrams and marks are not read"
+    (summary,) = problems(make_top("<p>Fine.</p>", "<details><summary>" + words(31) + "</summary></details>"))
+    assert "31 words" in summary, "a fold's summary line shows"
+    (opened,) = problems(
+        make_top("<p>Fine.</p>", "<details open><summary>S</summary><p>" + words(31) + "</p></details>")
+    )
+    assert "31 words" in opened, "an open fold shows all it holds"
+    cells = "<table><tr><td>" + words(20) + "</td><td>" + words(20) + "</td></tr></table>"
+    assert problems(make_top("<p>Fine.</p>", cells)) == [], "each table cell is its own block"
+    identifier = "<p>" + words(16) + " bridge_cli now " + words(14) + "</p>"
+    assert problems(make_top("<p>Fine.</p>", identifier)) == [], "a sentence may start with a lowercase name"
+    broken = "<p>" + words(16, "") + "<br>" + words(15) + "</p>"
+    assert len(problems(make_top("<p>Fine.</p>", broken))) == 1, "a line break does not end a sentence"
+    folded_heading = "<details><summary>More</summary><h2>Background</h2></details><p>" + words(31) + "</p>"
+    assert len(problems(make_top(folded_heading))) == 1, "a heading in a fold starts no section"
+    unclosed = b"<h2>In short<h2>What changes and why</h2><p>" + words(31).encode() + b"</p>"
+    assert len(problems(unclosed)) == 1, "a heading left open ends at the next one"
+    abbreviations = "<p>Seen in docs, e.g. Alpha and Beta, vs. Gamma, and " + words(22) + "</p>"
+    assert len(problems(make_top("<p>Fine.</p>", abbreviations))) == 1, "e.g. and vs. end no sentence"
+
+
+def test_the_limits_come_from_config() -> None:
+    page = make_top(bullets(8, 8, 8), "<p>" + words(12) + "</p>")
+    assert problems(page) == []
+    strict = find_doc_problems(page, False, "Sam", None, PlainLimits(bullets=2, bullet_words=7, sentence_words=10))
+    assert [line.split(";")[0].split(",")[0] for line in strict] == [
+        "In short has 3 bullets",
+        "an In short bullet has 8 words",
+        "an In short bullet has 8 words",
+        "an In short bullet has 8 words",
+        "a sentence above the folds has 12 words",
+    ]
+
+
+def test_a_missing_first_reader_line_is_a_warning() -> None:
+    _, verified = read_visible_top(
+        make_top("<p>x.</p>", verified="<p>First reader with the reader profile: passed.</p>")
+    )
+    assert find_doc_warnings(verified) == []
+    _, without = read_visible_top(make_top("<p>x.</p>", verified="<p>Unit tests pass. A reader read it.</p>"))
+    (warning,) = find_doc_warnings(without)
+    assert warning.startswith("Verified does not say the first reader (with the reader profile) passed")
+    _, failed = read_visible_top(make_top("<p>x.</p>", verified="<p>The first reader did not pass.</p>"))
+    assert len(find_doc_warnings(failed)) == 1
+    _, cells = read_visible_top(
+        make_top("<p>x.</p>", verified="<table><tr><td>First reader</td><td>passed</td></tr></table>")
+    )
+    assert find_doc_warnings(cells) == []
+
+
+def test_the_limits_must_be_at_least_one() -> None:
+    assert map_toml_to_config({"doc_sentence_max_words": 40}).doc_sentence_max_words == 40
+    with pytest.raises(ValueError, match="doc_sentence_max_words must be at least 1"):
+        map_toml_to_config({"doc_sentence_max_words": 0})

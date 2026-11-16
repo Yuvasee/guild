@@ -19,7 +19,7 @@ from bridge.config import Config, state_dir
 from bridge.db import now_ms, transaction
 from bridge.doc_nav import convert_doc_to_viewable
 from bridge.leads import REVIEW_DOC_SPEC
-from bridge.review_doc_check import find_doc_problems
+from bridge.review_doc_check import PlainLimits, find_doc_problems
 from bridge.review_marks import convert_reviews_to_text, map_html_to_reviews
 
 FRESH_FOR_PREPARING_MS = 14 * 24 * 3_600_000
@@ -964,9 +964,9 @@ def review_docs_dir() -> Path:
     return state_dir() / "review-docs"
 
 
-def register_doc(conn: sqlite3.Connection, config: Config, ref: str, source: Path, now: int) -> None:
+def register_doc(conn: sqlite3.Connection, config: Config, ref: str, source: Path, now: int) -> bytes:
     """Copied in, so the page serves what was registered and never follows a path it was handed later. A new doc starts
-    the update requests and the assistant's notice over."""
+    the update requests and the assistant's notice over. Returns the page as registered."""
     row = conn.execute("SELECT * FROM review_prs WHERE ref = ?", (ref,)).fetchone()
     if row is None:
         raise DocError(f"{ref} is not in the queue")
@@ -977,7 +977,8 @@ def register_doc(conn: sqlite3.Connection, config: Config, ref: str, source: Pat
     page = source.read_bytes()
     commit = read_doc_head(page) or str(row["head_oid"])
     files = list_files_at(Path(str(row["wt_path"])), commit) if row["wt_path"] else None
-    problems = find_doc_problems(page, has_owner_reviewed(row), config.owner_name, files)
+    limits = PlainLimits(config.doc_in_short_max_bullets, config.doc_bullet_max_words, config.doc_sentence_max_words)
+    problems = find_doc_problems(page, has_owner_reviewed(row), config.owner_name, files, limits)
     if problems:
         listed = "".join(f"\n- {problem}" for problem in problems)
         raise DocError(f"{ref}: the doc was not registered, as {REVIEW_DOC_SPEC} asks:{listed}")
@@ -1002,6 +1003,7 @@ def register_doc(conn: sqlite3.Connection, config: Config, ref: str, source: Pat
             ref,
         ),
     )
+    return page
 
 
 def list_files_at(worktree: Path, commit: str) -> frozenset[str] | None:
