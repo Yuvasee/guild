@@ -1,4 +1,5 @@
 import html
+import os
 import re
 import sqlite3
 import urllib.parse
@@ -7,6 +8,7 @@ from datetime import datetime
 from importlib.resources import files
 from pathlib import Path
 
+from bridge.doc_nav import convert_page_to_styled
 from bridge.errors import UsageError
 
 SLUG_MAX_CHARS = 60
@@ -138,6 +140,29 @@ def add_page(
     )
     _archive_published_pin(conn, url, slug, now)
     return get_live_page(conn, slug)
+
+
+def add_doc_style_to_page(source: str) -> Path | None:
+    """Writes the shared doc style into the page's HTML file, so the published artifact carries it; the file when it
+    changed, None when it already had the style."""
+    html_file = find_html_file(Path(source))
+    if html_file is None:
+        raise PageError(f"{source} holds neither index.html nor a single .html file")
+    try:
+        text = html_file.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        raise PageError(f"cannot read {html_file}: {error}") from error
+    styled = convert_page_to_styled(text)
+    if styled is None:
+        return None
+    tmp = html_file.with_name(f".{html_file.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(styled, encoding="utf-8")
+        os.replace(tmp, html_file)
+    except OSError as error:
+        tmp.unlink(missing_ok=True)
+        raise PageError(f"cannot write {html_file}: {error}") from error
+    return html_file
 
 
 def set_page_url(conn: sqlite3.Connection, slug: str, artifact_url: str, now: int) -> Page:

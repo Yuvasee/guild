@@ -195,7 +195,8 @@ options:
 a post in the user's feed: blocked, decision, done or insight; `post resolve N` withdraws yours
 
 ```text
-usage: bridge post [-h] [--body BODY] [--link LINK] [--option OPTION] [--urgent]
+usage: bridge post [-h] [--body BODY] [--link LINK] [--option OPTION] [--what WHAT] [--why WHY]
+                   [--cost COST] [--pick PICK] [--pick-why PICK_WHY] [--urgent]
                    {blocked,decision,done,insight,resolve} title
 
 positional arguments:
@@ -207,6 +208,12 @@ options:
   --body BODY           details; '-' reads stdin
   --link LINK           label=https://… (repeatable)
   --option OPTION       an answer button (repeatable; blocked/decision)
+  --what WHAT           blocked/decision: what is being decided, in plain words; a line of the
+                        card
+  --why WHY             blocked/decision: why it is needed now; a line of the card
+  --cost COST           what the --option before it costs; shown under it
+  --pick PICK           the answer you recommend, by its number (1 = the first --option)
+  --pick-why PICK_WHY   one line: why that answer
   --urgent              blocked/decision only, when prod or users are hurting, money is leaking,
                         or a deadline is today
 ```

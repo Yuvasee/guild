@@ -1,0 +1,114 @@
+/* Shared doc style, injected into every review doc and page. No borders or lines anywhere: rows and blocks are told
+   apart by background, every corner is rounded. Base rules sit in :where() so a doc's own colours and sizes win;
+   only the no-line rule is forced. */
+:root{
+--ds-fg:#1f2328;--ds-muted:#59636e;--ds-zebra:rgba(110,118,129,.075);--ds-hover:rgba(11,90,216,.08);
+--ds-th:rgba(110,118,129,.15);--ds-tint:rgba(110,118,129,.085);
+--ds-link:#0b5ad8;--ds-code-bg:rgba(110,118,129,.13);--ds-pre-bg:#f2f4f7;--ds-pre-fg:#1f2328;
+--ds-path:#0a6c74;--ds-ident:#7a3db8;--ds-focus:#0b5ad8;
+--ds-red:#c4271c;--ds-green:#1a7f37;--ds-blue:#0b5ad8;--ds-violet:#8250df;--ds-amber:#9a6700;--ds-grey:#6e7781;
+--ds-k:#cf222e;--ds-s:#0a3069;--ds-c:#6e7781;--ds-n:#0550ae;--ds-f:#8250df;--ds-b:#953800;--ds-m:#6e7781;
+--ds-add:#116329;--ds-add-bg:#dafbe1;--ds-del:#82071e;--ds-del-bg:#ffebe9;--ds-hunk:#0550ae;--ds-hunk-bg:#ddf4ff;
+--ds-sticky-top:0px}
+@media (prefers-color-scheme:dark){:root:not(.ds-light):not(.bdv-light):not([data-theme="light"]){
+--ds-fg:#e6edf3;--ds-muted:#9198a1;--ds-zebra:rgba(110,118,129,.13);--ds-hover:rgba(110,168,254,.12);
+--ds-th:rgba(110,118,129,.26);--ds-tint:rgba(110,118,129,.15);
+--ds-link:#6ea8fe;--ds-code-bg:rgba(110,118,129,.26);--ds-pre-bg:#1b2129;--ds-pre-fg:#e6edf3;
+--ds-path:#56d4dd;--ds-ident:#d2a8ff;--ds-focus:#6ea8fe;
+--ds-red:#ff7b72;--ds-green:#3fb950;--ds-blue:#58a6ff;--ds-violet:#bc8cff;--ds-amber:#d29922;--ds-grey:#9198a1;
+--ds-k:#ff7b72;--ds-s:#a5d6ff;--ds-c:#8b949e;--ds-n:#79c0ff;--ds-f:#d2a8ff;--ds-b:#ffa657;--ds-m:#8b949e;
+--ds-add:#aff5b4;--ds-add-bg:#033a16;--ds-del:#ffdcd7;--ds-del-bg:#67060c;--ds-hunk:#79c0ff;--ds-hunk-bg:#0c2d6b}}
+:root.ds-dark,:root.bdv-dark:not(.ds-light),:root[data-theme="dark"]:not(.ds-light){
+--ds-fg:#e6edf3;--ds-muted:#9198a1;--ds-zebra:rgba(110,118,129,.13);--ds-hover:rgba(110,168,254,.12);
+--ds-th:rgba(110,118,129,.26);--ds-tint:rgba(110,118,129,.15);
+--ds-link:#6ea8fe;--ds-code-bg:rgba(110,118,129,.26);--ds-pre-bg:#1b2129;--ds-pre-fg:#e6edf3;
+--ds-path:#56d4dd;--ds-ident:#d2a8ff;--ds-focus:#6ea8fe;
+--ds-red:#ff7b72;--ds-green:#3fb950;--ds-blue:#58a6ff;--ds-violet:#bc8cff;--ds-amber:#d29922;--ds-grey:#9198a1;
+--ds-k:#ff7b72;--ds-s:#a5d6ff;--ds-c:#8b949e;--ds-n:#79c0ff;--ds-f:#d2a8ff;--ds-b:#ffa657;--ds-m:#8b949e;
+--ds-add:#aff5b4;--ds-add-bg:#033a16;--ds-del:#ffdcd7;--ds-del-bg:#67060c;--ds-hunk:#79c0ff;--ds-hunk-bg:#0c2d6b}
+
+/* No lines. The script lifts .ds-measure for a moment to see which boxes had a border and tints them instead. */
+:root:not(.ds-measure) body *{border-style:none!important;outline-style:none!important}
+:root:not(.ds-measure) hr{height:0!important;background:none!important;margin:1.6em 0}
+:root:not(.ds-measure) table{border-collapse:separate!important;border-spacing:0!important}
+:root body *:focus-visible{outline:2px solid var(--ds-focus)!important;outline-offset:2px}
+.ds-tint{background-color:var(--ds-tint)!important}
+:where(.ds-tint){border-radius:10px}
+:where(.ds-tint:not(span,a,code,b,i,em,strong,small,label)){padding:max(.5em,1px) .8em}
+.ds-under{text-decoration:underline dotted;text-decoration-thickness:1px;text-underline-offset:.22em}
+:where(img,iframe,video,canvas,figure,picture,embed,object){border-radius:10px}
+:where(input,select,textarea){background:var(--ds-tint);border-radius:8px;padding:.3em .6em}
+
+/* Headings: a clear ladder. */
+:where(h1){font-size:1.8em;line-height:1.2;font-weight:700;letter-spacing:-.015em;margin:.4em 0 .5em}
+:where(h2){font-weight:650;letter-spacing:-.01em}
+:where(h3){font-weight:600}
+:where(h4){font-size:1em;font-weight:600;color:var(--ds-muted);text-transform:uppercase;letter-spacing:.04em}
+
+/* Links: coloured, underlined, external ones marked. */
+:where(a[href]){color:var(--ds-link);text-decoration:underline;text-decoration-thickness:1px;text-underline-offset:.18em;
+text-decoration-color:color-mix(in srgb,currentColor 40%,transparent)}
+:where(a[href]:hover){text-decoration-color:currentColor;text-decoration-thickness:2px}
+a.ds-ext::after{content:"\2197";display:inline-block;margin-left:.12em;font-size:.78em;line-height:1;opacity:.7;
+text-decoration:none;vertical-align:.12em}
+
+/* Inline code, and its two roles: file paths and code identifiers. */
+:where(:not(pre)>code){font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.88em;
+background:var(--ds-code-bg);padding:.08em .4em;border-radius:6px;overflow-wrap:anywhere}
+code.ds-path{color:var(--ds-path);background:color-mix(in srgb,var(--ds-path) 12%,transparent)}
+code.ds-path::before{content:"";display:inline-block;width:.5em;height:.66em;margin-right:.32em;vertical-align:-.02em;
+background:currentColor;border-radius:1px 3px 1px 1px;opacity:.45}
+code.ds-ident{color:var(--ds-ident);background:color-mix(in srgb,var(--ds-ident) 11%,transparent)}
+a code.ds-path,a code.ds-ident{color:inherit}
+
+/* Code blocks and syntax colours (highlight.js token classes). */
+:where(pre){font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.9em;line-height:1.5;
+background:var(--ds-pre-bg);color:var(--ds-pre-fg);border-radius:12px;padding:12px 14px;overflow-x:auto;tab-size:4}
+:where(pre code){background:none;padding:0;font-size:inherit;border-radius:0}
+pre[data-ds-lang]{position:relative;padding-top:1.8em}
+pre[data-ds-lang]::before{content:attr(data-ds-lang);position:absolute;top:5px;right:10px;
+font:600 10px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif;letter-spacing:.06em;text-transform:uppercase;
+color:var(--ds-muted);opacity:.75;pointer-events:none}
+.hljs-keyword,.hljs-selector-tag,.hljs-meta .hljs-keyword,.hljs-template-tag,.hljs-type.hljs-keyword{color:var(--ds-k)}
+.hljs-string,.hljs-regexp,.hljs-meta .hljs-string,.hljs-char.escape_{color:var(--ds-s)}
+.hljs-comment,.hljs-quote{color:var(--ds-c);font-style:italic}
+.hljs-number,.hljs-literal,.hljs-attr,.hljs-attribute,.hljs-variable.constant_,.hljs-symbol,.hljs-selector-attr,
+.hljs-selector-class,.hljs-selector-id,.hljs-operator{color:var(--ds-n)}
+.hljs-title,.hljs-title.function_,.hljs-title.class_,.hljs-section{color:var(--ds-f)}
+.hljs-built_in,.hljs-type,.hljs-variable,.hljs-params .hljs-type,.hljs-property{color:var(--ds-b)}
+.hljs-meta,.hljs-doctag,.hljs-tag{color:var(--ds-m)}
+.hljs-name,.hljs-bullet{color:var(--ds-k)}
+.hljs-emphasis{font-style:italic}.hljs-strong{font-weight:700}
+.hljs-addition{color:var(--ds-add);background:var(--ds-add-bg)}
+.hljs-deletion{color:var(--ds-del);background:var(--ds-del-bg)}
+.ds-diff .hljs-addition,.ds-diff .hljs-deletion,.ds-diff .hljs-meta{display:inline-block;min-width:100%;border-radius:4px}
+.ds-diff .hljs-meta{color:var(--ds-hunk);background:var(--ds-hunk-bg);font-style:normal}
+.ds-diff .hljs-comment{color:var(--ds-muted)}
+
+/* Evidence and handling chips: from the text FROM CODE / REPRODUCED / OBSERVED, .tag and .mark elements. */
+.ds-chip{--c:var(--ds-grey);display:inline-block;font:650 .7em/1.6 system-ui,-apple-system,"Segoe UI",sans-serif;
+padding:0 .65em;border-radius:999px;color:var(--c);background:color-mix(in srgb,var(--c) 15%,transparent);
+white-space:nowrap;vertical-align:.12em;letter-spacing:.03em;text-transform:uppercase;box-shadow:none}
+.ds-chip.ds-observed{--c:var(--ds-red)}
+.ds-chip.ds-reproduced,.ds-chip.ds-fixed-here{--c:var(--ds-green)}
+.ds-chip.ds-from-code{--c:var(--ds-blue)}
+.ds-chip.ds-decided{--c:var(--ds-violet)}
+.ds-chip.ds-deferred,.ds-chip.ds-accepted{--c:var(--ds-amber)}
+.ds-chip.ds-needs-decision{--c:var(--ds-amber);background:color-mix(in srgb,var(--c) 26%,transparent)}
+.ds-chip.ds-not-verified{--c:var(--ds-grey);background:color-mix(in srgb,var(--c) 10%,transparent);font-style:italic}
+
+/* Callouts: a paragraph that opens with a bold Risk:, Decision:, Note: (or class callout risk|decision|note). */
+.ds-callout{--c:var(--ds-blue);border-radius:12px;background:color-mix(in srgb,var(--c) 10%,transparent);
+padding:10px 14px;margin:12px 0}
+.ds-callout>b:first-child,.ds-callout>strong:first-child{color:var(--c)}
+.ds-callout.ds-risk{--c:var(--ds-red)}
+.ds-callout.ds-decision{--c:var(--ds-violet)}
+.ds-callout.ds-ok{--c:var(--ds-green)}
+:where(blockquote){margin:12px 0;padding:8px 14px;background:var(--ds-tint);border-radius:12px;color:var(--ds-muted)}
+
+/* Tables: header band, zebra rows, hover; each row a rounded strip; the header stays in view. */
+:where(th){background:var(--ds-th);font-weight:600;text-align:left;position:sticky;top:var(--ds-sticky-top);z-index:1}
+:where(tr:nth-child(even)>td){background:var(--ds-zebra)}
+:where(tbody tr:hover>td){background:var(--ds-hover)}
+:where(th:first-child,td:first-child){border-top-left-radius:8px;border-bottom-left-radius:8px}
+:where(th:last-child,td:last-child){border-top-right-radius:8px;border-bottom-right-radius:8px}

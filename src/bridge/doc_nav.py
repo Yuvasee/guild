@@ -1,10 +1,13 @@
 import html
 import re
 from dataclasses import dataclass
+from functools import cache
 from html.parser import HTMLParser
+from importlib.resources import files
 
 NAV_ID = "bridge-doc-nav"
 VIEW_ID = "bridge-doc-view"
+DOC_STYLE_ID = "bridge-doc-style"
 TERMS_FLAG = "data-viewer-terms"
 MIN_HEADINGS = 2
 NAV_MAX_BYTES = 2_000_000
@@ -14,36 +17,36 @@ _RAW_TAGS = ("script", "style")
 
 _STYLE = """
 #bridge-doc-nav,#bridge-doc-nav *{all:revert;box-sizing:border-box}
-#bridge-doc-nav{--bdn-bg:Canvas;--bdn-fg:CanvasText;--bdn-acc:var(--bdv-link,#2a5db0);
---bdn-line:color-mix(in srgb,var(--bdn-fg) 16%,transparent);color-scheme:light dark;display:block;position:sticky;top:0;
+#bridge-doc-nav{--bdn-bg:Canvas;--bdn-fg:CanvasText;--bdn-acc:var(--bdv-link,#2a5db0);color-scheme:light dark;
+display:block;position:sticky;top:0;
 z-index:2147483000;margin:0;padding:0;background:var(--bdn-bg);color:var(--bdn-fg);
-font:14px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif;border-bottom:1px solid var(--bdn-line);
-box-shadow:0 2px 10px rgba(0,0,0,.12)}
+font:14px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif;
+background:color-mix(in srgb,var(--bdn-fg) 5%,var(--bdn-bg))}
 #bridge-doc-nav summary{display:flex;gap:10px;align-items:center;padding:8px 12px;cursor:pointer;list-style:none;
 user-select:none}
 #bridge-doc-nav summary::-webkit-details-marker{display:none}
-#bridge-doc-nav .bdn-label{flex:none;font-weight:600;color:var(--bdn-acc);border:1px solid currentColor;
-border-radius:7px;padding:4px 12px}
+#bridge-doc-nav .bdn-label{flex:none;font-weight:600;color:var(--bdn-acc);border-radius:999px;padding:4px 12px;
+background:color-mix(in srgb,var(--bdn-acc) 10%,transparent)}
 #bridge-doc-nav .bdn-label::before{content:"\\2630\\00a0\\00a0"}
-#bridge-doc-nav details[open] .bdn-label{background:color-mix(in srgb,var(--bdn-acc) 14%,transparent)}
+#bridge-doc-nav details[open] .bdn-label{background:color-mix(in srgb,var(--bdn-acc) 20%,transparent)}
 #bridge-doc-nav .bdn-cur{font-weight:600;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;min-width:0;flex:1}
 #bridge-doc-nav ol{list-style:none;margin:0;padding:6px 8px 10px;max-height:min(70vh,560px);overflow:auto}
-#bridge-doc-nav:not(.bdn-side) ol{position:absolute;left:0;right:0;top:100%;background:var(--bdn-bg);
-border-bottom:1px solid var(--bdn-line);box-shadow:0 10px 18px rgba(0,0,0,.18)}
+#bridge-doc-nav:not(.bdn-side) ol{position:absolute;left:8px;right:8px;top:calc(100% + 4px);background:var(--bdn-bg);
+border-radius:12px;box-shadow:0 10px 24px rgba(0,0,0,.18)}
 #bridge-doc-nav li{margin:0;padding:0}
-#bridge-doc-nav a{display:block;padding:5px 10px;border-left:3px solid transparent;border-radius:0 6px 6px 0;
+#bridge-doc-nav a{display:block;padding:5px 10px;border-radius:8px;
 color:inherit;text-decoration:none;overflow-wrap:anywhere}
 #bridge-doc-nav li.bdn-h2 a{font-weight:600;margin-top:2px}
 #bridge-doc-nav li.bdn-h3 a{padding-left:24px;font-size:13px;opacity:.8}
 #bridge-doc-nav a:hover{background:color-mix(in srgb,var(--bdn-fg) 8%,transparent)}
-#bridge-doc-nav a.bdn-on{border-left-color:var(--bdn-acc);color:var(--bdn-acc);opacity:1;
-background:color-mix(in srgb,var(--bdn-acc) 12%,transparent)}
+#bridge-doc-nav a.bdn-on{color:var(--bdn-acc);opacity:1;font-weight:600;
+background:color-mix(in srgb,var(--bdn-acc) 14%,transparent)}
 #bridge-doc-nav.bdn-top{position:fixed;top:0;left:0;right:0}
 #bridge-doc-nav.bdn-side{position:fixed;top:0;left:0;bottom:0;width:var(--bdn-w,240px);overflow:auto;
-padding:14px 8px 24px;border-bottom:0;border-right:1px solid var(--bdn-line);box-shadow:none;
+padding:14px 8px 24px;
 background:color-mix(in srgb,var(--bdn-fg) 4%,var(--bdn-bg))}
 #bridge-doc-nav.bdn-side summary{cursor:default;padding:2px 10px 10px}
-#bridge-doc-nav.bdn-side details .bdn-label{border:0;padding:0;color:inherit;font-size:12px;letter-spacing:.08em;
+#bridge-doc-nav.bdn-side details .bdn-label{padding:0;color:inherit;font-size:12px;letter-spacing:.08em;
 text-transform:uppercase;background:none;opacity:.75}
 #bridge-doc-nav.bdn-side .bdn-label::before,#bridge-doc-nav.bdn-side .bdn-cur{display:none}
 #bridge-doc-nav.bdn-side ol{max-height:none;overflow:visible;padding:0}
@@ -98,11 +101,11 @@ if(dark&&dark.addEventListener)dark.addEventListener("change",function(){setTime
 """
 
 _LIGHT = (
-    "--bdv-link:#2a5db0;--bdv-pop-bg:#ffffff;--bdv-pop-fg:#1d1d1b;--bdv-line:rgba(0,0,0,.14);--bdv-red:#b3261e;"
+    "--bdv-link:#2a5db0;--bdv-pop-bg:#ffffff;--bdv-pop-fg:#1d1d1b;--bdv-tint:rgba(110,118,129,.085);--bdv-red:#b3261e;"
     "--bdv-green:#1e7a46;--bdv-blue:#2f5d8a;--bdv-violet:#5b4a9e;--bdv-grey:#5f6368;--bdv-amber:#9a5b00"
 )
 _DARK = (
-    "--bdv-link:#8ab4f8;--bdv-pop-bg:#26282c;--bdv-pop-fg:#ece9e4;--bdv-line:rgba(255,255,255,.16);--bdv-red:#f2a49e;"
+    "--bdv-link:#8ab4f8;--bdv-pop-bg:#26282c;--bdv-pop-fg:#ece9e4;--bdv-tint:rgba(110,118,129,.15);--bdv-red:#f2a49e;"
     "--bdv-green:#7dd3a0;--bdv-blue:#a8c4ef;--bdv-violet:#c5b5f5;--bdv-grey:#b0b4b9;--bdv-amber:#f0c27a"
 )
 # Zero-specificity :where() rules lose to any rule of the doc's own, so older docs that style these keep their look.
@@ -113,8 +116,7 @@ _VIEW_STYLE = (
 @media (max-width:600px){:root{--bdv-ind:10px}}
 :where(a:link,a:visited){color:var(--bdv-link);text-decoration-thickness:1px;text-underline-offset:2px}
 :where(a:hover){text-decoration-thickness:2px}
-:where(h2){font-size:1.5em;line-height:1.25;margin:2.2em 0 .6em;padding-bottom:.3em;
-border-bottom:1px solid var(--bdv-line)}
+:where(h2){font-size:1.5em;line-height:1.25;margin:2.2em 0 .6em}
 :where(h3){font-size:1.17em;line-height:1.3;margin:1.6em 0 .5em}
 .bdv-in2{margin-left:var(--bdv-ind)}
 .bdv-in3{margin-left:calc(2*var(--bdv-ind))}
@@ -124,7 +126,8 @@ border-bottom:1px solid var(--bdv-line)}
 border-right:2px solid currentColor;border-bottom:2px solid currentColor;transform:rotate(-45deg);
 margin:0 .65em .12em .1em;transition:transform .15s;opacity:.65}
 :where(details[open]:not(#bridge-doc-nav details)>summary)::before{transform:rotate(45deg)}
-:where(details.item){border-top:1px solid var(--bdv-line);padding:.55em 0}
+:where(details.item){padding:.5em .75em;margin:.3em 0;border-radius:10px}
+:where(details.item[open],details.item:hover){background:var(--bdv-tint)}
 :where(details.item>:not(summary)){margin-left:1.3em}
 :where(details.item[open]>summary){margin-bottom:.4em}
 :where(details.item>summary){font-weight:400}
@@ -143,7 +146,7 @@ background:color-mix(in srgb,var(--bdv-link) 12%,transparent)}
 #bdv-pop{box-sizing:border-box;position:fixed;z-index:2147483600;
 max-width:340px;max-height:calc(100vh - 16px);overflow:auto;
 padding:8px 12px;border-radius:8px;
-background:var(--bdv-pop-bg);color:var(--bdv-pop-fg);border:1px solid var(--bdv-line);
+background:var(--bdv-pop-bg);color:var(--bdv-pop-fg);
 box-shadow:0 6px 20px rgba(0,0,0,.2);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;text-align:left;
 white-space:normal;overflow-wrap:anywhere}
 #bdv-pop[hidden]{display:none}
@@ -305,10 +308,36 @@ def convert_doc_to_viewable(doc: bytes) -> bytes:
         f'<style id="{VIEW_ID}">{_VIEW_STYLE}</style>'
         f"<script>document.documentElement.setAttribute('{TERMS_FLAG}','');{_VIEW_SCRIPT}</script>"
     )
-    edits.append((insert_at, nav + view))
+    style = "" if DOC_STYLE_ID in scanner.ids else build_doc_style()
+    edits.append((insert_at, nav + view + style))
     for at, piece in sorted(edits, key=lambda edit: edit[0], reverse=True):
         text = text[:at] + piece + text[at:]
     return text.encode("utf-8", "surrogateescape")
+
+
+def convert_page_to_styled(text: str) -> str | None:
+    """The page with the shared doc style right after its <body> tag; None when it already has it or cannot be read
+    as HTML."""
+    scanner = _DocScanner(text)
+    try:
+        scanner.feed(text)
+        scanner.close()
+    except (AssertionError, ValueError):
+        return None
+    if DOC_STYLE_ID in scanner.ids:
+        return None
+    at = next((at for at in (scanner.after_body, scanner.after_head, scanner.after_doctype) if at is not None), 0)
+    return text[:at] + build_doc_style() + text[at:]
+
+
+@cache
+def build_doc_style() -> str:
+    """The shared doc style: colours code by language and gives links, paths, names and evidence words their roles,
+    with no borders or lines; its highlighter loads only when the doc has a code block."""
+    web = files("bridge").joinpath("web")
+    css = web.joinpath("doc-style.css").read_text(encoding="utf-8")
+    script = web.joinpath("doc-style.js").read_text(encoding="utf-8")
+    return f'<style id="{DOC_STYLE_ID}">{css}</style><script>{script}</script>'
 
 
 def _pick_anchor(label: str, taken: set[str]) -> str:
