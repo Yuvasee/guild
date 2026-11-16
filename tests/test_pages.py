@@ -311,7 +311,7 @@ def test_routes_redirect_list_and_explain(bridge_env: BridgeEnv, dashboard: str,
     assert 'href="/p/draft"' in pinned and 'href="/p/old"' not in pinned
     assert 'href="/pinned?kind=page">All pages</a>' in missing
     guild = http_request(dashboard + "/guild")
-    assert 'url: "/pinned"' in guild and 'url: "/p/"' not in guild and "PAGES_LINK" not in guild
+    assert 'href="/pinned"' in guild and 'url: "/p/"' not in guild and "PAGES_LINK" not in guild
 
 
 def test_a_message_post_or_pin_citing_a_page_that_would_not_open_is_refused(

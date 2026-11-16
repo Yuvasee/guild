@@ -267,4 +267,4 @@ def test_pinned_page_is_served(bridge_env: BridgeEnv, dashboard: str) -> None:
         add_pin(db, "<i>Release</i>", "link", "https://x.example/r", "ask #64", "alex", 1000)
     page = http_request(dashboard + "/pinned")
     assert "<title>Pinned</title>" in page and "&lt;i&gt;Release&lt;/i&gt;" in page and "ask #64" in page
-    assert 'url: "/pinned"' in http_request(dashboard + "/guild")
+    assert '<a href="/pinned">' in http_request(dashboard + "/guild")

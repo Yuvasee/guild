@@ -27,18 +27,18 @@
 * { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; }
 body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-main { max-width: 1680px; margin: 0 auto; padding: 28px clamp(32px, 4vw, 72px) 64px; }
+main { --gutter: clamp(32px, 4vw, 72px); max-width: 1680px; margin: 0 auto; padding: 28px var(--gutter) 64px; }
 a { color: inherit; text-decoration-color: var(--faint); text-underline-offset: 2px; }
 a:hover { text-decoration-color: currentColor; }
 button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
 [hidden] { display: none !important; }
 
 /* The page's only heading: its name, a dot that says what the tab icon says, and when it last heard from bridge. */
-#top { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 14px; margin-bottom: 30px; }
+#top { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 14px; margin-bottom: 10px; }
 #brand { display: flex; align-items: center; gap: 9px; margin: 0; font-size: 21px; font-weight: 700; letter-spacing: .01em; color: var(--ink); }
 #brand .pulse { width: 9px; height: 9px; border-radius: 50%; background: #9a9a94; }
 #top .warn { font-size: 13px; font-weight: 600; color: var(--stuck); }
-#top .end { margin-left: auto; display: flex; align-items: center; gap: 10px; min-width: 0; }
+#top .end { margin-left: auto; display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 6px 10px; min-width: 0; }
 #fresh { font-size: 12px; color: var(--faint); }
 #fresh.bad { color: var(--ink); font-weight: 600; }
 /* A still sign of life: its color says how old the data is, its tooltip says when; nothing ticks on screen. */
@@ -46,22 +46,42 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 .alive.fresh { background: var(--working); }
 .alive.late { background: var(--waiting); }
 .alive.stale { background: var(--stuck); }
-/* Background jobs that report through a status file: one steady pill each, under the name; words change by the minute. */
-#watchers { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 6px 8px; margin-top: 8px; }
-.watch { display: inline-flex; align-items: flex-start; gap: 7px; max-width: 100%; padding: 3px 12px 3px 9px; border-radius: 12px; background: var(--row); font-size: 12px; color: var(--soft); cursor: help; }
-.watch .label { min-width: 0; overflow-wrap: anywhere; }
-.watch .dot { margin-top: 5.5px; }
+/* Right of the name: one chip per watcher, the page links, and Links, a menu of the configured sites. */
+#watchers { display: flex; flex-wrap: wrap; gap: 6px; }
+.watch { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px 2px 8px; border-radius: 11px; background: var(--row); font-size: 12px; color: var(--soft); white-space: nowrap; }
 .watch b { font-weight: 600; color: var(--ink); }
+.watch.late { background: color-mix(in srgb, var(--waiting) 14%, transparent); color: var(--ink); }
 .watch.bad { background: color-mix(in srgb, var(--stuck) 9%, transparent); color: var(--ink); }
-a.watch.link { cursor: pointer; color: var(--ink); text-decoration: none; font-weight: 600; }
-a.watch.link:hover { text-decoration: underline; text-underline-offset: 2px; }
+#pages { display: flex; align-items: center; gap: 12px; font-size: 13px; }
+#pages > a { display: inline-flex; align-items: center; gap: 4px; }
+#pages svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+#pages > a, #pages summary { color: var(--soft); text-decoration: none; }
+#pages > a:hover, #pages summary:hover { color: var(--ink); }
+/* A click opens the details under its row, right-aligned, so on a phone it never runs off the screen. */
+#top, #leads > header { position: relative; }
+.pop { margin: 0; font-size: inherit; color: inherit; }
+.pop > summary { display: inline-flex; align-items: center; list-style: none; cursor: pointer; }
+.pop > summary::-webkit-details-marker { display: none; }
+.pop > .panel { position: absolute; z-index: 10; right: 0; top: calc(100% + 6px); width: max-content; max-width: min(440px, calc(100vw - 32px)); padding: 10px 12px; background: var(--raise); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 6px 24px rgb(0 0 0 / .14); font-size: 12px; line-height: 1.6; color: var(--soft); white-space: pre-wrap; overflow-wrap: anywhere; }
+.pop > .panel a { display: block; padding: 2px 0; font-size: 13px; color: var(--ink); text-decoration: none; }
+.pop > .panel a:hover { text-decoration: underline; }
+#laptop { font-size: 12px; }
+#laptop > summary { color: var(--soft); }
+#laptop.bad > summary { color: var(--stuck); font-weight: 600; }
 
-.section { margin-bottom: 44px; }
+/* Stays on screen while the page scrolls; a narrow screen scrolls the bar sideways, never the page. */
+#sections { position: sticky; top: 0; z-index: 5; display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; margin: 0 calc(-1 * var(--gutter)) 26px; padding: 8px var(--gutter); background: var(--bg); border-bottom: 1px solid var(--line); }
+#sections::-webkit-scrollbar { display: none; }
+#sections a { flex: none; padding: 3px 10px; border-radius: 8px; font-size: 13px; color: var(--soft); text-decoration: none; white-space: nowrap; }
+#sections a:hover { color: var(--ink); }
+#sections a.current { background: var(--row); color: var(--ink); font-weight: 600; }
+/* Under the bar after a jump; renderSectionNav counts a section current once its top is within 24px under the bar. */
+.section { margin-bottom: 44px; scroll-margin-top: 52px; }
 #needs, #chat { max-width: 90ch; margin-left: auto; margin-right: auto; }
 .section > header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; margin-bottom: 12px; }
 h2 { font-size: 19px; font-weight: 650; letter-spacing: .005em; margin: 0; color: var(--ink); }
 .note { font-size: 12px; color: var(--faint); }
-header .note.end { margin-left: auto; }
+header .end { margin-left: auto; }
 
 .dot { display: inline-block; flex: none; width: 10px; height: 10px; border-radius: 50%; vertical-align: middle; }
 .dot.tiny { width: 7px; height: 7px; }
@@ -115,7 +135,7 @@ header .note.end { margin-left: auto; }
 .ask:not(.open) { display: flex; gap: 10px; align-items: baseline; }
 .askgroup { cursor: pointer; user-select: none; }
 .ask:not(.open) .words { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 400; }
-.ask:not(.open) .meta { margin-top: 0; white-space: nowrap; }
+.ask:not(.open) .meta { margin-top: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ask:not(.open) .part, .ask:not(.open) .actions { display: none; }
 .ask .part { font-size: 13px; color: var(--soft); margin-top: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .ask .part .label { font-size: 12px; color: var(--faint); margin-right: 6px; }
@@ -295,7 +315,10 @@ details table { margin-top: 4px; color: var(--faint); }
 details td.what { color: var(--faint); font-weight: 400; }
 
 @media (max-width: 560px) {
-  main { padding: 18px 16px 64px; }
+  main { --gutter: 16px; padding: 18px var(--gutter) 64px; }
+  #top .end, #pages { column-gap: 8px; }
+  /* Beside the name, so it never wraps onto a line of its own. */
+  #top .alive { position: absolute; right: 0; top: 12px; }
   .lead .head, .chunk { grid-template-columns: minmax(0, 1fr); }
   .lead .colhead { display: none; }
   th.what { width: 40%; } th.why, td.why { display: none; }
@@ -351,20 +374,22 @@ details td.what { color: var(--faint); font-weight: 400; }
 </head>
 <body>
 <main>
-  <div id="top"><h1 id="brand"><span class="pulse"></span>Guild</h1><span id="warn" class="warn">Connecting…</span><span class="end"><span id="fresh"></span><span id="alive" class="alive"></span></span><div id="watchers" hidden></div></div>
+  <div id="top"><h1 id="brand"><span class="pulse"></span>Guild</h1><span id="warn" class="warn">Connecting…</span><span class="end"><span id="watchers"></span><span id="pages"><a href="/pinned"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="5"/><path d="M12 13v8"/></svg>Pinned</a><a href="/dreams"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg>Dreams</a><details id="links" class="pop" hidden><summary>Links ▾</summary><div class="panel"></div></details></span><span id="fresh"></span><span id="alive" class="alive"></span></span></div>
+  <nav id="sections" aria-label="Sections"></nav>
 
   <!--
     A section: <section id=X class=section hidden><header><h2>…</h2></header><div class=body></div></section>,
     filled by a render function added to RENDERERS. showSection() unhides it.
   -->
   <section id="needs" class="section" hidden><header><h2>Needs you</h2></header><div class="body"></div></section>
-  <section id="queue" class="section" hidden><header><h2>PRs</h2><span class="note" id="priority"></span><span class="note end" id="queue-fresh"></span></header><div class="body"></div></section>
-  <section id="colleagues" class="section" hidden><header><h2>Colleague comments</h2><span class="note">on our PRs, only what waits for a reply, a draft or your choice</span></header><div class="body"></div></section>
-  <section id="leads" class="section"><header>
+  <section id="queue" class="section" data-tab="PRs" hidden><header><h2>PRs</h2><span class="note" id="priority"></span><span class="note end" id="queue-fresh"></span></header><div class="body"></div></section>
+  <section id="colleagues" class="section" data-tab="Comments" hidden><header><h2>Colleague comments</h2><span class="note">on our PRs, only what waits for a reply, a draft or your choice</span></header><div class="body"></div></section>
+  <section id="leads" class="section" data-tab="Leads"><header>
     <h2>Team Leads</h2>
+    <details id="laptop" class="pop end" hidden><summary></summary><div class="panel"></div></details>
   </header><div class="body"></div></section>
-  <section id="resources" class="section" hidden><header><h2>Resources in use</h2></header><div class="body"></div></section>
-  <section id="chat" class="section"><header>
+  <section id="resources" class="section" data-tab="Resources" hidden><header><h2>Resources in use</h2></header><div class="body"></div></section>
+  <section id="chat" class="section" data-tab="Chat"><header>
     <h2>Team chat</h2>
     <span class="note">newest first</span>
     <span class="chips end" id="chips" style="margin-left:auto"></span>
@@ -2112,11 +2137,8 @@ function watchAgo(ms) {
 function mapWatcherToLine(watcher, now) {
   const ran = watcher.last_run_at ? watchAgo(now - watcher.last_run_at) : "";
   const summary = watcher.summary ? ", " + watcher.summary : "";
-  const words = {
-    ok: "last sweep " + ran + summary,
-    failed: "last sweep failed " + ran + summary,
-    stale: "no sweep for " + ran.replace(/ ago$/, ""),
-  }[watcher.state] || watcher.why || "no status";
+  const short = { ok: ran, failed: "failed " + ran, stale: "no sweep for " + ran.replace(/ ago$/, "") }[watcher.state];
+  const words = !short ? watcher.why || "no status" : watcher.state === "stale" ? short : "last sweep " + short + summary;
   const tip = [];
   if (watcher.last_run_at) tip.push("Last sweep " + fullTime(watcher.last_run_at) + (watcher.status === "failed" ? ", failed" : ""));
   if (watcher.state === "stale" && watcher.summary) tip.push("It said: " + watcher.summary);
@@ -2124,41 +2146,68 @@ function mapWatcherToLine(watcher, now) {
   if (watcher.stale_after_min) tip.push("Turns red after " + watcher.stale_after_min + " min without a sweep");
   if (watcher.why) tip.push(watcher.why);
   tip.push("Status file: " + watcher.path);
-  return { name: watcher.name, words, bad: watcher.state !== "ok", tip: tip.join("\n") };
+  // A sweep that ran and failed is amber: the watcher is alive. No sweep at all is red.
+  const level = watcher.state === "ok" ? "working" : watcher.state === "failed" ? "waiting" : "stuck";
+  return { name: watcher.name, words, short: short || "no status", level, tip: tip.join("\n") };
 }
 
-// Ages count from one shared minute mark, so every pill's words change together, at most once a minute.
+function renderPop(cls) {
+  const pop = el("details", "pop");
+  pop.append(el("summary", cls), el("div", "panel"));
+  return pop;
+}
+
+// Ages count from one shared minute mark, so every chip's words change together, at most once a minute.
+// A chip is updated in place, so a panel the reader opened stays open across polls.
 function renderWatchers() {
   const minute = Math.floor(state.now / 60_000) * 60_000;
   const lines = (state.watchers || []).map((watcher) => mapWatcherToLine(watcher, minute));
-  const configured = state.links || [];
-  const links = [
-    ...configured.filter((link) => !link.last), PINNED_LINK, laptopLoadCount(state.agents), diskFree(state.disk), DREAMS_LINK,
-    ...configured.filter((link) => link.last),
-  ].filter(Boolean);
   const box = document.getElementById("watchers");
-  box.hidden = false;
-  const signature = JSON.stringify([lines.length, links]);
-  if (box.dataset.shape !== signature) {
-    box.dataset.shape = signature;
-    box.replaceChildren(...lines.map(() => el("span", "watch")), ...links.map(renderPageLink));
-  }
+  if (box.children.length !== lines.length) box.replaceChildren(...lines.map(() => renderPop("watch")));
   lines.forEach((line, index) => {
-    const pill = box.children[index];
+    const pop = box.children[index];
     const signature = JSON.stringify(line);
-    if (pill.dataset.shown === signature) return;
-    pill.dataset.shown = signature;
-    pill.className = "watch" + (line.bad ? " bad" : "");
-    pill.title = line.tip;
-    const label = el("span", "label");
-    label.append(el("b", null, line.name), ": " + line.words);
-    pill.replaceChildren(el("span", "dot tiny " + (line.bad ? "stuck" : "working")), label);
+    if (pop.dataset.shown === signature) return;
+    pop.dataset.shown = signature;
+    const [chip, panel] = pop.children;
+    chip.className = "watch" + { working: "", waiting: " late", stuck: " bad" }[line.level];
+    chip.title = line.words + "\n" + line.tip;
+    chip.replaceChildren(el("span", "dot tiny " + line.level), el("b", null, line.name), line.short);
+    panel.textContent = line.name + ": " + line.words + "\n" + line.tip;
   });
 }
 
-// Served by this same bridge, so it opens in place, unlike the configured links to other sites.
-const PINNED_LINK = { name: "Pinned", url: "/pinned", local: true };
-const DREAMS_LINK = { name: "Dreams", url: "/dreams", local: true };
+// Links to other sites, in config order.
+function renderLinks() {
+  const links = state.links || [];
+  const menu = document.getElementById("links");
+  menu.hidden = !links.length;
+  const signature = JSON.stringify(links);
+  if (menu.dataset.shown === signature) return;
+  menu.dataset.shown = signature;
+  menu.children[1].replaceChildren(...links.map((link) => {
+    const a = el("a", null, link.name + " ↗");
+    a.href = link.url;
+    a.target = "_blank";
+    a.rel = "noopener";
+    return a;
+  }));
+}
+
+// The laptop's own signals sit with the team leads, whose workers they count, not in the page's top row.
+function renderLaptop() {
+  const box = document.getElementById("laptop");
+  const parts = [laptopLoadCount(state.agents), diskFree(state.disk)].filter(Boolean);
+  box.hidden = !parts.length;
+  const signature = JSON.stringify(parts);
+  if (box.dataset.shown === signature) return;
+  box.dataset.shown = signature;
+  const [summary, panel] = box.children;
+  box.classList.toggle("bad", parts.some((part) => part.bad));
+  summary.textContent = "Laptop · " + parts.map((part) => part.short).join(" · ");
+  summary.title = parts.map((part) => part.tip).join("\n\n");
+  panel.textContent = parts.map((part) => part.name + "\n" + part.tip).join("\n\n");
+}
 
 // The laptop cap counts every agent working on this Mac; over it, new workers wait in a queue.
 function laptopLoadCount(agents) {
@@ -2166,7 +2215,7 @@ function laptopLoadCount(agents) {
   const queued = agents.queued ? " · " + agents.queued + " queued" : "";
   const hosts = Object.entries(agents.hosts || {}).map(([host, n]) => " · " + n + " on " + host).join("");
   const label = agents.busy + "/" + agents.cap + " agents working" + hosts + queued;
-  return { name: "Laptop load · " + label, tip: "Over the cap, new workers wait in a queue." };
+  return { name: "Load: " + label, short: agents.busy + "/" + agents.cap + " agents" + queued, tip: "Over the cap, new workers wait in a queue." };
 }
 
 // Checked hourly by bridge serve; folder sizes come from du in the background, so they can lag the free figure.
@@ -2178,23 +2227,51 @@ function diskFree(disk) {
   else disk.folders.forEach((f) => tip.push(f.path + ": " + (f.bytes == null ? "du timed out" : gb(f.bytes))));
   if (disk.folders) tip.push("Docker: " + (disk.docker || "did not answer"));
   tip.push("Under 40 GB free or over 90% used, the assistant hears once.");
-  return { name: "Disk · " + gb(disk.free) + " free", tip: tip.join("\n"), bad: disk.low };
+  return { name: "Disk: " + gb(disk.free) + " free", short: gb(disk.free) + " free", tip: tip.join("\n"), bad: disk.low };
 }
 
-function renderPageLink(link) {
-  if (!link.url) {
-    const pill = el("span", link.bad ? "watch bad" : "watch", link.name);
-    pill.title = link.tip;
-    return pill;
-  }
-  const a = el("a", "watch link", link.local ? link.name : link.name + " ↗");
-  a.href = link.url;
-  if (!link.local) {
-    a.target = "_blank";
-    a.rel = "noopener";
-  }
-  return a;
+// One panel open at a time; a click elsewhere or Escape closes it, and Escape gives focus back to its summary.
+function closePops(except) {
+  document.querySelectorAll("details.pop[open]").forEach((pop) => { if (pop !== except) pop.open = false; });
 }
+document.addEventListener("click", (event) => closePops(event.target.closest && event.target.closest("details.pop")));
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  const focused = document.activeElement && document.activeElement.closest && document.activeElement.closest("details.pop[open]");
+  closePops(null);
+  if (focused) focused.firstElementChild.focus();
+});
+
+// Tabs come from the sections themselves, so the bar follows the page's own order and list.
+function renderSectionTabs() {
+  const tabs = [...document.querySelectorAll("main > section.section")].map((section) => {
+    const tab = el("a", null, section.dataset.tab || section.querySelector("h2").textContent);
+    tab.href = "#" + section.id;
+    return tab;
+  });
+  document.getElementById("sections").replaceChildren(...tabs);
+}
+
+// A section the page hides has no tab; the current one is the last whose top has passed under the bar.
+function renderSectionNav() {
+  const tabs = [...document.querySelectorAll("#sections a")];
+  for (const tab of tabs) tab.hidden = document.getElementById(tab.hash.slice(1)).hidden;
+  const shown = tabs.filter((tab) => !tab.hidden);
+  const line = document.getElementById("sections").getBoundingClientRect().bottom + 24;
+  const atEnd = window.scrollY > 0 && window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 2;
+  const passed = shown.filter((tab) => document.getElementById(tab.hash.slice(1)).getBoundingClientRect().top <= line);
+  const current = atEnd ? shown.at(-1) : passed.at(-1) || shown[0];
+  for (const tab of tabs) tab.classList.toggle("current", tab === current);
+}
+let sectionNavQueued = false;
+document.addEventListener("scroll", () => {
+  if (sectionNavQueued) return;
+  sectionNavQueued = true;
+  requestAnimationFrame(() => {
+    sectionNavQueued = false;
+    renderSectionNav();
+  });
+}, { passive: true });
 
 const COLLEAGUE_CALLS = {
   undecided: "Not decided yet",
@@ -2271,7 +2348,7 @@ function renderColleagueComments() {
   box.replaceChildren(...nodes);
 }
 
-const RENDERERS = [renderNeeds, renderAsks, renderQueue, renderColleagueComments, renderLeads, renderRoom, renderResources, renderWatchers, renderVerdict];
+const RENDERERS = [renderNeeds, renderAsks, renderQueue, renderColleagueComments, renderLeads, renderRoom, renderResources, renderWatchers, renderLinks, renderLaptop, renderVerdict, renderSectionNav];
 
 async function refresh() {
   try {
@@ -2336,6 +2413,7 @@ document.getElementById("text").addEventListener("keydown", (event) => {
   }
 });
 
+renderSectionTabs();
 refresh();
 setInterval(refresh, POLL_MS);
 setInterval(renderVerdict, 1000);

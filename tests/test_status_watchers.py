@@ -130,15 +130,18 @@ def test_page_words_change_by_the_minute_and_say_why_when_red(tmp_path: Path) ->
     eq(mapWatcherToLine({ ...base, state: "ok", last_run_at: now - 30_000 }, now).words, "last sweep just now, 0 new");
     const ok = mapWatcherToLine({ ...base, state: "ok", last_run_at: now - 7 * 60_000 - 59_000 }, now);
     eq(ok.words, "last sweep 7 min ago, 0 new");
-    eq(ok.bad, false);
+    eq(ok.short, "7 min ago");
+    eq(ok.level, "working");
     const stale = mapWatcherToLine({ ...base, state: "stale", last_run_at: now - 34 * 60_000 }, now);
     eq(stale.words, "no sweep for 34 min");
-    eq(stale.bad, true);
     eq(stale.tip.includes("It said: 0 new"), true);
+    eq(stale.level, "stuck");
     const failed = mapWatcherToLine(
       { ...base, state: "failed", status: "failed", last_run_at: now - 120_000, detail: "502" }, now);
     eq(failed.words, "last sweep failed 2 min ago, 0 new");
     eq(failed.tip.includes("502"), true);
+    eq(failed.short, "failed 2 min ago");
+    eq(failed.level, "waiting");
     const missing = mapWatcherToLine({ name: "x", path: "p", state: "missing", why: "no status file" }, now);
     eq(missing.words, "no status file");
     """
@@ -154,20 +157,20 @@ def test_fifo_at_the_path_is_unreadable_without_blocking(tmp_path: Path) -> None
     assert read_watcher(Watcher(path=str(path)), NOW)["state"] == "unreadable"
 
 
-def test_page_rewrites_pills_at_most_once_a_minute(tmp_path: Path) -> None:
+def test_page_rewrites_watcher_chips_at_most_once_a_minute(tmp_path: Path) -> None:
     node = shutil.which("node")
     assert node, "node is required to check the page script"
     script = re.search(r"<script>(.*)</script>", PAGE.read_text(), re.S)
     assert script is not None
     checks = """
     let writes = 0;
-    const pills = [];
-    const box = { hidden: false, children: pills, dataset: {},
-                  replaceChildren(...nodes) { pills.splice(0, pills.length, ...nodes); } };
-    globalThis.document = {
-      getElementById: () => box,
-      createElement: () => ({ dataset: {}, append() {}, replaceChildren() { writes++; } }),
-    };
+    const node = () => ({ dataset: {}, children: [], classList: { toggle() {} },
+                          append(...kids) { this.children.push(...kids); }, replaceChildren() { writes++; } });
+    const box = { ...node(), replaceChildren(...kids) { this.children = kids; } };
+    const quiet = () => ({ dataset: {}, classList: { toggle() {} }, replaceChildren() {} });
+    const pop = () => ({ ...quiet(), children: [quiet(), quiet()] });
+    const others = { links: pop(), laptop: pop() };
+    globalThis.document = { getElementById: (id) => others[id] || box, createElement: node };
     const w = (at) => ({ name: "a", path: "p", status: "ok", state: "ok", summary: "", detail: "",
                          stale_after_min: 20, last_run_at: at });
     state.watchers = [w(1_000_000), w(1_030_000)];
@@ -178,7 +181,7 @@ def test_page_rewrites_pills_at_most_once_a_minute(tmp_path: Path) -> None:
       renderWatchers();
       if (writes !== before) moments.add(second);
     }
-    if (writes !== 6) throw new Error("pills rewritten " + writes + " times");
+    if (writes !== 6) throw new Error("chips rewritten " + writes + " times");
     if ([...moments].join() !== "0,60,120") throw new Error("rewritten at seconds " + [...moments].join());
     """
     path = tmp_path / "guild.js"
@@ -187,21 +190,30 @@ def test_page_rewrites_pills_at_most_once_a_minute(tmp_path: Path) -> None:
     assert done.returncode == 0, done.stderr
 
 
-def test_laptop_load_is_a_plain_count_beside_the_links_and_absent_without_a_cap(tmp_path: Path) -> None:
+def test_laptop_block_counts_agents_and_disk_and_is_absent_without_either(tmp_path: Path) -> None:
     node = shutil.which("node")
     assert node, "node is required to check the page script"
     script = re.search(r"<script>(.*)</script>", PAGE.read_text(), re.S)
     assert script is not None
     checks = """
     const eq = (a, b) => { if (a !== b) throw new Error(JSON.stringify(a) + " !== " + JSON.stringify(b)); };
-    globalThis.document = { createElement: (tag) => ({ tag }) };
     eq(laptopLoadCount({ cap: 0, busy: 3 }), null);
     const count = laptopLoadCount({ cap: 8, busy: 3, queued: 1, hosts: { devbox: 2 } });
-    eq(count.name, "Laptop load · 3/8 agents working · 2 on devbox · 1 queued");
-    const pill = renderPageLink(count);
-    eq(pill.tag, "span");
-    eq(pill.href, undefined);
-    eq(renderPageLink(DREAMS_LINK).href, "/dreams");
+    eq(count.name, "Load: 3/8 agents working · 2 on devbox · 1 queued");
+    const summary = { title: "" }, panel = {};
+    let bad = false;
+    const box = { dataset: {}, children: [summary, panel], classList: { toggle: (c, on) => { bad = on; } } };
+    globalThis.document = { getElementById: () => box };
+    state.agents = { cap: 8, busy: 3, queued: 1, hosts: { devbox: 2 } };
+    state.disk = { free: 50e9, total: 500e9, used_pct: 90, low: true, at: 0 };
+    renderLaptop();
+    eq(box.hidden, false);
+    eq(summary.textContent, "Laptop · 3/8 agents · 1 queued · 50 GB free");
+    eq(bad, true);
+    state.agents = null;
+    state.disk = null;
+    renderLaptop();
+    eq(box.hidden, true);
     """
     path = tmp_path / "guild.js"
     path.write_text(STUBS + script.group(1) + checks)
@@ -240,6 +252,44 @@ def test_an_open_page_reloads_when_the_service_serves_another_version(tmp_path: 
     fields = [{ value: "  " }];
     eq(isPageOutdated(), true);
     eq(reloads, 1);
+    """
+    path = tmp_path / "guild.js"
+    path.write_text(STUBS + script.group(1) + checks)
+    done = subprocess.run([node, str(path)], capture_output=True, text=True, timeout=20, check=False)
+    assert done.returncode == 0, done.stderr
+
+
+def test_section_nav_drops_hidden_sections_and_marks_the_one_under_the_bar(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    assert node, "node is required to check the page script"
+    script = re.search(r"<script>(.*)</script>", PAGE.read_text(), re.S)
+    assert script is not None
+    checks = """
+    const eq = (a, b) => { if (a !== b) throw new Error(JSON.stringify(a) + " !== " + JSON.stringify(b)); };
+    const tops = { needs: -900, queue: -400, leads: 60, chat: 900 };
+    const sections = Object.fromEntries(["needs", "queue", "leads", "chat"].map((id) =>
+      [id, { hidden: id === "needs", getBoundingClientRect: () => ({ top: tops[id], bottom: 0 }) }]));
+    sections.sections = { getBoundingClientRect: () => ({ bottom: 42 }) };
+    const tab = (id) => {
+      const t = { hash: "#" + id, on: false };
+      t.classList = { toggle: (c, on) => { t.on = on; } };
+      return t;
+    };
+    const tabs = ["needs", "queue", "leads", "chat"].map(tab);
+    globalThis.window = { innerHeight: 800, scrollY: 1000 };
+    globalThis.document = { getElementById: (id) => sections[id], querySelectorAll: () => tabs,
+                            documentElement: { scrollHeight: 5000 } };
+    renderSectionNav();
+    eq(tabs[0].hidden, true);
+    eq(tabs.filter((t) => t.on).map((t) => t.hash).join(), "#leads");
+    window.scrollY = 4200;
+    renderSectionNav();
+    eq(tabs.filter((t) => t.on).map((t) => t.hash).join(), "#chat");
+    window.scrollY = 0;
+    document.documentElement.scrollHeight = 800;
+    tops.leads = 300;
+    renderSectionNav();
+    eq(tabs.filter((t) => t.on).map((t) => t.hash).join(), "#queue");
     """
     path = tmp_path / "guild.js"
     path.write_text(STUBS + script.group(1) + checks)
