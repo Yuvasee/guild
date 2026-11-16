@@ -1768,6 +1768,21 @@ def test_an_approved_green_pr_waits_for_owners_review_then_is_ready_and_its_owne
     assert ready_view(conn)[1] == []
 
 
+def test_a_ready_notice_on_a_waived_approval_names_the_decision_not_an_empty_approver(tmp_path: Path) -> None:
+    conn = setup_pr(tmp_path)
+    with transaction(conn):
+        add_session(conn, "c1", "worker", branch="dev/x")
+        conn.execute(
+            "UPDATE review_prs SET reviewed_at = 600, reviewed_by = 'theo', approval_waived_at = 600, "
+            "approval_waived_by = 'theo', approval_waived_decision = 42"
+        )
+    view, sent = ready_view(conn)
+    assert view["merge_path"] == READY and len(sent) == 1
+    body = conn.execute("SELECT body FROM messages WHERE id = ?", (sent[0][0],)).fetchone()[0]
+    assert "approved on GitHub by ," not in body
+    assert "no approval on GitHub; the owner's decision (Q#42) stands in for one" in body
+
+
 def test_an_install_names_its_merge_rule_in_the_ready_and_approval_texts(tmp_path: Path) -> None:
     house = tmp_path / "house"
     house.mkdir()

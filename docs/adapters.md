@@ -115,6 +115,10 @@ only reads the file:
 `status` is `ok` or `failed`; a run older than `stale_after_min` shows as stale, and a missing or unreadable file
 says so.
 
+Set `watcher_alert_to = "<handle>"` and a watcher that leaves ok (failed, stale, missing or unreadable) is told to that
+session once, by bridge; still not ok after `watcher_escalate_after_min` (default 60), the assistant hears it once too,
+and everyone told hears when it is back to ok. Empty, the default, tells nobody.
+
 ## Team rules: defaults you can change
 
 Some rules are a way of working rather than a mechanism. They ship as defaults, written into the lead role and the

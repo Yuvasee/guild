@@ -65,8 +65,11 @@ them) and the **team board** (talk between sessions) on the dashboard.
 
 ```bash
 bridge post decision "Ship the export worker behind a flag, or wait for the load test?" \
-  --body "Load test ends tonight; shipping now keeps the flag off until then." \
-  --option "Ship behind the flag" --option "Wait" --link "PR=https://github.com/org/repo/pull/7"
+  --what "The export worker is built and reviewed; the flag keeps it off." \
+  --why "The load test ends tonight and the release is cut tomorrow morning." \
+  --option "Ship behind the flag" --cost "One deploy now; the flag stays off until the test passes." \
+  --option "Wait" --cost "Misses tomorrow's release: a week later." \
+  --pick 1 --pick-why "Same risk, a week sooner." --link "PR=https://github.com/org/repo/pull/7"
 ```
 
 - `blocked`: you cannot go on without the user (credentials, access, a conflict between
@@ -80,6 +83,11 @@ bridge post decision "Ship the export worker behind a flag, or wait for the load
   answered with a result. One post per task, with the outcome and links, not the steps.
 - `insight`: something the user or other sessions must know and would not find out otherwise (a
   root cause, a trap in shared infra, a wrong assumption in the plan). Not progress notes.
+- A question becomes a card: `--what` and `--why` as its facts, each `--option` a row with the `--cost` given right
+  after it, `--pick N` marks the answer you recommend (1 = the first option) with `--pick-why` in one line, links as
+  chips. They are written into the body as labelled lines (What:, Why now:, "<answer> cost:", My pick:), so every
+  other reader sees plain text. `--body` adds free text above them. Text renders as safe Markdown: **bold**,
+  `code`, lists, links; PR and Q#N references become chips.
 - Title: one line under 140 chars that stands on its own. Details in `--body` (`-` reads stdin),
   links with `--link label=https://…`. No chatter: if the user would not act on it or want to know
   it tomorrow, do not post it.
@@ -232,7 +240,8 @@ guild ask list [--owner X] [--all] [--json]; guild ask show N    # show has the 
 A page published as a claude.ai artifact lives on one Anthropic account; its source and its bridge link outlive it.
 Keep the source in `<pages folder>/<slug>/`, the folder your role names (never /tmp), register it with
 `bridge page add <slug> --title "…" --source <pages folder>/<slug> [--url <claude.ai artifact url>]`, and after
-each publish run `bridge page set-url <slug> <url>`. In pins (`bridge pin --link`), notes, feed posts and reports
+each publish run `bridge page set-url <slug> <url>`. `page add` writes the shared doc style (code highlighting,
+link, path and evidence roles, no borders) into the page's HTML file once; publish the file after it, or republish. In pins (`bridge pin --link`), notes, feed posts and reports
 refer to it as `http://127.0.0.1:8765/p/<slug>`, which redirects to the current artifact. Colleagues get the
 claude.ai link itself; then mark the page `bridge page share <slug>`. `bridge pages` lists them,
 `bridge page archive <slug>` retires one.

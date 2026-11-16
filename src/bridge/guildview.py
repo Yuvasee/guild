@@ -4,7 +4,7 @@ import sqlite3
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import cast
+from typing import TypedDict, cast
 
 from bridge.activity import RunningShell, SessionActivity
 from bridge.board import (
@@ -23,7 +23,7 @@ from bridge.compaction import read_context_death
 from bridge.config import Config
 from bridge.enrich import load_enrichment
 from bridge.errlog import log_error
-from bridge.feed import DELIVERY_MARKS, OPEN_KINDS, RELAYED_ANSWER, USER_CONVERSATION, resolve_tab
+from bridge.feed import DELIVERY_MARKS, OPEN_KINDS, PICK_LABEL, RELAYED_ANSWER, USER_CONVERSATION, resolve_tab
 from bridge.host_workers import HOST_KIND_PREFIX
 from bridge.leads import TINTS, Lead, find_lead_on_surface, is_conversation_locked, list_lead_work, list_leads
 from bridge.refs import map_ref_to_label
@@ -50,7 +50,7 @@ _SIGNATURE_RE = re.compile(r"\s*([^:()\n]{1,60}?)\s*(?:\(([^:()\n]{1,60})\))?\s*
 _UNNAMED_TASK_RE = re.compile(r"worker brief|your brief", re.I)
 _HOST_STATUS_TO_TAB = {"active": "active", "idle": "completed"}
 NOTHING_FOR_ME = "nothing for me"
-_SECTION_LABELS = r"What|Why now|Cost|Cost of [\w' -]{1,40}|[A-Z][\w'-]*(?: [\w'-]+){0,2} cost"
+_SECTION_LABELS = rf"What|Why now|{PICK_LABEL}|Cost|Cost of [\w' -]{{1,40}}|[A-Z][\w'-]*(?: [\w'-]+){{0,2}} cost"
 _ROLLUP_ORDER = ("stuck", "working", "waiting", "unknown", "rest")
 
 
@@ -588,6 +588,62 @@ def map_body_to_sections(body: str, options: list[str]) -> list[dict[str, object
     return sections
 
 
+class CardFact(TypedDict):
+    label: str
+    text: str
+
+
+class CardOption(TypedDict):
+    label: str
+    cost: str | None
+    pick: bool
+
+
+class DecisionCard(TypedDict):
+    intro: str | None
+    facts: list[CardFact]
+    options: list[CardOption]
+    pick_why: str | None
+
+
+def map_sections_to_card(sections: list[dict[str, object]], options: list[str]) -> DecisionCard | None:
+    """A question whose body has labelled sections, as a card: the facts, each answer with its cost, the recommended
+    answer marked; None for a body with no labels, which the page shows as text."""
+    if not any(section["label"] for section in sections):
+        return None
+    intro: list[str] = []
+    facts: list[CardFact] = []
+    costs: dict[str, str] = {}
+    picked: str | None = None
+    pick_why: str | None = None
+    by_length = sorted(options, key=len, reverse=True)
+    for section in sections:
+        label, text = section["label"], str(section["text"])
+        if not label:
+            intro.append(text)
+            continue
+        named = next((o for o in options if label in (o, f"{o} cost")), None)
+        if named is not None and named not in costs:
+            costs[named] = text
+            continue
+        chosen = (
+            next((o for o in by_length if re.match(rf"{re.escape(o)}(?!\w)", text)), None)
+            if label == PICK_LABEL
+            else None
+        )
+        if chosen is not None and picked is None:
+            picked = chosen
+            pick_why = text[len(chosen) :].lstrip(" .:;,\u2014\u2013-").strip() or None
+            continue
+        facts.append({"label": str(label), "text": text})
+    return {
+        "intro": "\n\n".join(intro) or None,
+        "facts": facts,
+        "options": [{"label": o, "cost": costs.get(o), "pick": o == picked} for o in options],
+        "pick_why": pick_why,
+    }
+
+
 def _map_open_posts_to_needs(conn: sqlite3.Connection, config: Config, now: int) -> list[dict[str, object]]:
     """A question leaves only when its answer has reached the session, or the owner dismisses it. A claim to type it
     counts as offered so a hook does not deliver it too, but it has not arrived until the typing is over."""
@@ -616,6 +672,7 @@ def _map_open_posts_to_needs(conn: sqlite3.Connection, config: Config, now: int)
         if is_conversation_locked(conn, config, str(row["from_conversation"])):
             continue
         options: list[str] = json.loads(row["options"]) if row["options"] else []
+        sections = map_body_to_sections(str(row["body"]), options) if row["body"] else []
         delivering = row["answer_message_id"] is not None and row["resolved_at"] is not None
         colleague = load_draft_entry(conn, config, int(row["id"]))
         needs.append(
@@ -628,7 +685,8 @@ def _map_open_posts_to_needs(conn: sqlite3.Connection, config: Config, now: int)
                 "from": row["from_handle"],
                 "text": row["text"],
                 "urgent": bool(row["urgent"]),
-                "sections": map_body_to_sections(str(row["body"]), options) if row["body"] else [],
+                "sections": sections,
+                "card": map_sections_to_card(sections, options),
                 "links": json.loads(row["links"]) if row["links"] else [],
                 "options": options,
                 **({"colleague": colleague} if colleague is not None else {}),

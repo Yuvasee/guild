@@ -2,14 +2,19 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
+from collections.abc import Generator
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from test_capacity import add_session
 
-from bridge.config import PageLink, Watcher, map_toml_to_config
-from bridge.status_watchers import MAX_FILE_BYTES, read_watcher
+from bridge.config import Config, PageLink, Watcher, map_toml_to_config
+from bridge.db import connect
+from bridge.status_watchers import MAX_FILE_BYTES, alert_watchers, read_watcher
 
 STUBS = """
 const element = () => new Proxy(function () {}, {
@@ -295,3 +300,125 @@ def test_section_nav_drops_hidden_sections_and_marks_the_one_under_the_bar(tmp_p
     path.write_text(STUBS + script.group(1) + checks)
     done = subprocess.run([node, str(path)], capture_output=True, text=True, timeout=20, check=False)
     assert done.returncode == 0, done.stderr
+
+
+ALERT_CONFIG = Config(assistant_handle="aide", watcher_alert_to="tooling", watcher_escalate_after_min=60)
+MIN = 60_000
+
+
+@pytest.fixture
+def conn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[sqlite3.Connection]:
+    monkeypatch.setenv("BRIDGE_STATE_DIR", str(tmp_path))
+    c = connect(tmp_path / "bridge.db")
+    add_session(c, "tooling", "TAB-T", "idle", 0, pid=901)
+    add_session(c, "aide", "TAB-A", "idle", 0, pid=902)
+    yield c
+    c.close()
+
+
+def _job(tmp_path: Path, status: str, at: int, summary: str = "3 checks", detail: str = "") -> Config:
+    path = tmp_path / "job.json"
+    run = datetime.fromtimestamp(at / 1000, UTC).isoformat()
+    fields = {"name": "nightly sync", "status": status, "last_run_utc": run, "summary": summary, "detail": detail}
+    path.write_text(json.dumps(fields))
+    return replace(ALERT_CONFIG, watchers=(Watcher(path=str(path)),))
+
+
+def _told(conn: sqlite3.Connection) -> list[tuple[str, str]]:
+    rows = conn.execute(
+        "SELECT r.handle, m.body FROM messages m JOIN message_recipients r ON r.message_id = m.id ORDER BY m.id"
+    )
+    return [(str(handle), str(body)) for handle, body in rows]
+
+
+def test_an_ok_watcher_tells_nobody(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    assert alert_watchers(conn, _job(tmp_path, "ok", NOW), NOW) == []
+    assert _told(conn) == []
+
+
+def test_leaving_ok_tells_once_then_the_assistant_once_then_both_hear_it_is_back(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    alert_watchers(conn, _job(tmp_path, "ok", NOW), NOW)
+    config = _job(tmp_path, "failed", NOW + MIN, summary="2 of 3 checks failed", detail="db unreachable")
+    assert len(alert_watchers(conn, config, NOW + MIN)) == 1
+    [(handle, body)] = _told(conn)
+    assert handle == "tooling"
+    assert re.fullmatch(
+        r"nightly sync watch: failed: 2 of 3 checks failed \(since [\d-]+ [\d:]+\)\. db unreachable", body
+    )
+
+    for minutes in (30, 60):
+        config = _job(tmp_path, "failed", NOW + minutes * MIN, summary="3 of 3 checks failed")
+        assert alert_watchers(conn, config, NOW + minutes * MIN) == [], "a new summary is not a new alert"
+    config = _job(tmp_path, "failed", NOW + 61 * MIN, summary="3 of 3 checks failed")
+    assert len(alert_watchers(conn, config, NOW + 61 * MIN)) == 1, "escalation counts from when it left ok"
+    handle, body = _told(conn)[-1]
+    assert handle == "aide"
+    assert body.startswith("nightly sync watch is still not ok after 60 min: failed: 3 of 3 checks failed (since ")
+    assert re.search(r"tooling was told at [\d-]+ [\d:]+\.$", body)
+    assert alert_watchers(conn, _job(tmp_path, "failed", NOW + 200 * MIN), NOW + 200 * MIN) == []
+
+    assert len(alert_watchers(conn, _job(tmp_path, "ok", NOW + 201 * MIN), NOW + 201 * MIN)) == 2
+    back = _told(conn)[-2:]
+    assert sorted(h for h, _ in back) == ["aide", "tooling"]
+    assert all(re.fullmatch(r"nightly sync watch is back to ok \(not ok since [\d-]+ [\d:]+\)\.", b) for _, b in back)
+    assert alert_watchers(conn, _job(tmp_path, "ok", NOW + 202 * MIN), NOW + 202 * MIN) == []
+    assert conn.execute("SELECT count(*) FROM signal_posts").fetchone()[0] == 0
+
+    assert len(alert_watchers(conn, _job(tmp_path, "failed", NOW + 203 * MIN), NOW + 203 * MIN)) == 1
+    assert _told(conn)[-1][0] == "tooling", "a new spell is told again"
+
+
+def test_back_to_ok_before_the_escalation_tells_only_the_first_one(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    alert_watchers(conn, _job(tmp_path, "failed", NOW), NOW)
+    alert_watchers(conn, _job(tmp_path, "ok", NOW + 5 * MIN), NOW + 5 * MIN)
+    assert [h for h, _ in _told(conn)] == ["tooling", "tooling"]
+
+
+def test_stale_and_missing_count_as_not_ok(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    config = _job(tmp_path, "ok", NOW - 30 * MIN)
+    assert len(alert_watchers(conn, config, NOW)) == 1
+    assert re.match(
+        r"nightly sync watch: stale: last run [\d-]+ [\d:]+, over its 20-min limit \(since ", _told(conn)[0][1]
+    )
+    (tmp_path / "job.json").unlink()
+    assert alert_watchers(conn, config, NOW + MIN) == [], "stale to missing is the same spell"
+    missing = replace(config, watchers=(Watcher(path=str(tmp_path / "gone.json"), name="backup"),))
+    alert_watchers(conn, missing, NOW + 2 * MIN)
+    assert _told(conn)[-1][1].startswith("backup watch: missing: no status file (since ")
+
+
+def test_off_when_nobody_is_named(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    config = replace(_job(tmp_path, "failed", NOW), watcher_alert_to="")
+    assert alert_watchers(conn, config, NOW) == []
+    assert alert_watchers(conn, config, NOW + 120 * MIN) == []
+    assert _told(conn) == []
+    assert conn.execute("SELECT count(*) FROM signal_posts").fetchone()[0] == 0
+
+
+def test_an_alert_that_reached_nobody_is_tried_again_and_the_assistant_hears_so(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    config = replace(_job(tmp_path, "failed", NOW), watcher_alert_to="nobody-here")
+    assert alert_watchers(conn, config, NOW) == []
+    assert alert_watchers(conn, config, NOW + 60 * MIN) != []
+    assert _told(conn)[-1][1].endswith("nobody-here could not be reached.")
+    assert alert_watchers(conn, replace(config, watcher_alert_to="tooling"), NOW + 61 * MIN) != []
+    assert _told(conn)[-1][0] == "tooling"
+
+
+def test_switching_alerts_off_forgets_the_spell(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    alert_watchers(conn, _job(tmp_path, "failed", NOW), NOW)
+    alert_watchers(conn, replace(_job(tmp_path, "ok", NOW + MIN), watcher_alert_to=""), NOW + MIN)
+    assert len(alert_watchers(conn, _job(tmp_path, "failed", NOW + 2 * MIN), NOW + 2 * MIN)) == 1
+    assert [h for h, _ in _told(conn)] == ["tooling", "tooling"]
+
+
+def test_an_alert_that_gets_through_as_the_escalation_falls_due_is_named_so(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    alert_watchers(conn, replace(_job(tmp_path, "failed", NOW), watcher_alert_to="nobody-here"), NOW)
+    renamed = replace(_job(tmp_path, "failed", NOW + 60 * MIN), watcher_alert_to="tooling")
+    assert len(alert_watchers(conn, renamed, NOW + 60 * MIN)) == 2
+    assert re.search(r"tooling was told at [\d-]+ [\d:]+\.$", _told(conn)[-1][1])

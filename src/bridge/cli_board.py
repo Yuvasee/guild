@@ -1,6 +1,7 @@
 import argparse
 import sqlite3
 import sys
+from collections.abc import Sequence
 from datetime import datetime
 
 from bridge.board import (
@@ -32,6 +33,7 @@ from bridge.feed import (
     TO_ASSISTANT,
     TO_LEAD,
     add_post,
+    build_decision_body,
     find_leads_to_wake,
     map_arg_to_link,
     post_to_board,
@@ -94,6 +96,11 @@ def add_board_commands(sub: "argparse._SubParsersAction[argparse.ArgumentParser]
     p.add_argument("--body", default="", help="details; '-' reads stdin")
     p.add_argument("--link", action="append", default=[], help="label=https://… (repeatable)")
     p.add_argument("--option", action="append", default=[], help="an answer button (repeatable; blocked/decision)")
+    p.add_argument("--what", help="blocked/decision: what is being decided, in plain words; a line of the card")
+    p.add_argument("--why", help="blocked/decision: why it is needed now; a line of the card")
+    p.add_argument("--cost", action=_CostAction, default=[], help="what the --option before it costs; shown under it")
+    p.add_argument("--pick", type=int, help="the answer you recommend, by its number (1 = the first --option)")
+    p.add_argument("--pick-why", help="one line: why that answer")
     p.add_argument(
         "--urgent",
         action="store_true",
@@ -116,6 +123,27 @@ def add_board_commands(sub: "argparse._SubParsersAction[argparse.ArgumentParser]
     p.add_argument("--thread", help="an issue or PR id; posts with the same id form a thread")
     p.add_argument("--link", help="the PR, issue or doc this post points to")
     p.set_defaults(func=cmd_board)
+
+
+class _CostAction(argparse.Action):
+    """Pairs each --cost with the --option given just before it."""
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: str | Sequence[object] | None,
+        option_string: str | None = None,
+    ) -> None:
+        options: list[str] = list(getattr(namespace, "option", None) or [])
+        costs: list[str | None] = list(getattr(namespace, self.dest, None) or [])
+        if not options:
+            parser.error("--cost follows the --option it prices")
+        costs += [None] * (len(options) - len(costs))
+        if costs[-1] is not None:
+            parser.error("one --cost per --option")
+        costs[-1] = str(values)
+        setattr(namespace, self.dest, costs)
 
 
 def reject_locked_sender(conn: sqlite3.Connection, config: Config, me: Party) -> None:
@@ -232,10 +260,21 @@ def cmd_post(args: argparse.Namespace, conn: sqlite3.Connection, config: Config)
     me = current_party(conn)
     if args.kind == POST_RESOLVE:
         return _withdraw_post(conn, me, str(args.title))
-    if args.kind in OPEN_KINDS and not args.body and me.conversation_id in find_lead_conversations(conn):
-        raise UsageError("a question from a lead needs --body: what it is, why now, what each answer costs")
+    structured = bool(args.what or args.why or args.cost or args.pick is not None or args.pick_why)
+    if structured and args.kind not in OPEN_KINDS:
+        raise UsageError("--what, --why, --cost and --pick are for blocked and decision posts")
+    if (
+        args.kind in OPEN_KINDS
+        and not (args.body or args.what or args.why)
+        and me.conversation_id in find_lead_conversations(conn)
+    ):
+        raise UsageError("a question from a lead needs --body, or --what and --why: what it is, why now, each cost")
     body = sys.stdin.read() if args.body == "-" else str(args.body)
     try:
+        if structured:
+            body = build_decision_body(
+                body, args.what, args.why, list(args.option), list(args.cost), args.pick, args.pick_why
+            )
         links = [map_arg_to_link(str(link)) for link in args.link]
         with transaction(conn):
             item_id = add_post(

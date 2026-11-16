@@ -1694,14 +1694,25 @@ def tell_ready_to_merge(conn: sqlite3.Connection, config: Config, now: int) -> l
             continue
         ready = read_overlay(config, "ready-to-merge", "ready to merge")
         text = (
-            f"{row['url']} ({row['title']}) is {ready}: approved on GitHub by "
-            f"{', '.join(map_row_to_approvers(row, config))}, CI green or none, no conflicts, and no comment of "
-            f"{config.owner_name}'s open. Merge it once you judge it safe: gh pr merge {row['url']}. "
-            f"Deploys still need {config.owner_name}."
+            f"{row['url']} ({row['title']}) is {ready}: {map_row_to_approval_words(row, config)}, CI green or none, "
+            f"no conflicts, and no comment of {config.owner_name}'s open. Merge it once you judge it safe: "
+            f"gh pr merge {row['url']}. Deploys still need {config.owner_name}."
         )
         sent.append(tell_owner(conn, owner, text, now))
         conn.execute("UPDATE review_prs SET merge_told_at = ? WHERE ref = ?", (now, row["ref"]))
     return sent
+
+
+def map_row_to_approval_words(row: sqlite3.Row, config: Config) -> str:
+    """Who approved, for a notice: an owner's waiver is no GitHub approval, so a branch rule may still refuse it."""
+    if approvers := map_row_to_approvers(row, config):
+        return f"approved on GitHub by {', '.join(approvers)}"
+    decision = row["approval_waived_decision"]
+    ref = f" ({convert_item_id_to_question_ref(int(decision))})" if decision is not None else ""
+    return (
+        f"no approval on GitHub; {config.owner_name}'s decision{ref} stands in for one, so GitHub may still refuse "
+        "the merge until someone approves it"
+    )
 
 
 class MergeOkRefused(Exception):
