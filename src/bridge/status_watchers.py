@@ -95,6 +95,9 @@ def map_json_to_status(data: object) -> dict[str, object]:
     }
 
 
+STALE_GRACE_MS = 10 * 60_000
+
+
 def alert_watchers(conn: sqlite3.Connection, config: Config, now: int) -> list[tuple[int, Recipient]]:
     """Once per spell away from ok: watcher_alert_to hears it, the assistant hears if it outlasts
     watcher_escalate_after_min, and everyone told hears when it is back. signal_posts keeps the spell, as serve
@@ -135,6 +138,9 @@ def alert_watchers(conn: sqlite3.Connection, config: Config, now: int) -> list[t
             since = int(row[0])
         summary = _summarize(shown)
         alert_key = f"alert {config.watcher_alert_to}"
+        # After the Mac sleeps, every watcher reads stale until its job's next run: wait one grace before telling.
+        if state == "stale" and alert_key not in told and now - since < STALE_GRACE_MS:
+            continue
         if alert_key not in told:
             detail = f" {shown['detail']}" if state == "failed" and shown.get("detail") else ""
             text = f"{name} watch: {state}: {summary} (since {_clock(since)}).{detail}"
