@@ -36,8 +36,6 @@ class PageLink:
     name: str
     url: str
     """http or https only; the page opens it in a new tab."""
-    last: bool = False
-    """Shown after the page's own links instead of before them."""
 
 
 @dataclass(frozen=True)
@@ -410,7 +408,4 @@ def map_table_to_link(table: dict[str, object]) -> PageLink:
     name, url = _str(table, "name", "").strip(), _str(table, "url", "").strip()
     if not name or not url.startswith(("https://", "http://")):
         raise ValueError("each [[links]] needs a name and an http(s) url")
-    last = table.get("last", False)
-    if not isinstance(last, bool):
-        raise ValueError("[[links]] last must be true or false")
-    return PageLink(name=name, url=url, last=last)
+    return PageLink(name=name, url=url)
