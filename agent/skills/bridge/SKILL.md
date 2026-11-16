@@ -214,15 +214,18 @@ guild ask list [--owner X] [--all] [--json]; guild ask show N    # show has the 
 - The session that claimed done cannot verify it. A lead verifies its worker's claim; the assistant or another lead
   verifies a lead's. Workers do not verify.
 - Bridge nags: an open or in-progress ask with no update for 4 hours, or a claim unverified for 1 hour, types a message
-  into its owner's tab. The assistant gets each claim under "To verify", and an open ask under "Asks overdue" only
-  once a reminder to its owner went unanswered or reached no one. While nothing changes it
-  comes again after 4, 8, 16, then every 24 hours; any start, note, wait, claim or verify restarts that clock, and an
-  ask that waits (`guild ask wait --on`) gets none. None go out while the owner is off (night word, dreams,
-  or off hours with no word in 24 h); the ones held go out once, together, when the owner is back. A lead's own
-  unverified claim goes only to the assistant, who verifies it or finds another lead; one nobody was told about
-  stays due. A verified ask closes by itself after 24 hours unless the owner
-  reopens it on the page; a reopen is typed into the owner's tab. Only the assistant closes by hand (`guild ask close
-  N`, or `--dropped '<why>'` for one the owner let go).
+  into its owner's tab. While nothing changes it comes again after 4, 8, 16, then every 24 hours; any start, note,
+  wait, claim or verify restarts that clock. An ask that waits (`guild ask wait --on`) gets none for 3 days; with no
+  update for 3 days, waiting or not, its owner is asked once a day whether it is still current (`guild ask note`, or
+  `wait` again), done (`guild ask done`) or obsolete (`guild ask drop N '<why>'` closes it as dropped, the reason in
+  its history, and tells the assistant). A claim, a lead's own included, reminds its lead from 1 hour; the assistant
+  gets each claim once, under "To verify", after it stayed unverified for 24 hours, and an open ask under "Asks
+  overdue" only once a reminder to its owner went unanswered (one that waits: only when its owner could not be told)
+  or reached no one. None go out
+  while the owner is off (night word, dreams, or off hours with no word in 24 h); the ones held go out once,
+  together, when the owner is back. One nobody was told about stays due. A verified ask closes by itself after 24
+  hours unless the owner reopens it on the page; a reopen is typed into the owner's tab. Only the assistant closes a
+  verified ask by hand (`guild ask close N`, or `--dropped '<why>'` for one the owner let go).
 
 ## Published pages (`bridge page`)
 

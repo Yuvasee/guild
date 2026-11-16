@@ -376,7 +376,7 @@ details td.what { color: var(--faint); font-weight: 400; }
     <div id="replying" hidden></div>
     <div class="body" id="room"></div>
   </section>
-  <section id="asks" class="section" hidden><header><h2>Asks</h2><span class="note">verified ones close by themselves unless you reopen them</span></header><div class="body"></div></section>
+  <section id="asks" class="section" hidden><header><h2>Asks</h2><span class="note">waiting on you, unverified for a day, or overdue; oldest first. Verified ones close by themselves unless you reopen them</span></header><div class="body"></div></section>
 </main>
 <script>
 "use strict";
@@ -392,7 +392,7 @@ const drafts = new Map();
 const lastRendered = new Map();
 let replyTo = null;
 let chatLead = null;
-let state = { now: 0, needs: [], leads: [], room: [], claims: [], colleague_comments: [], asks: { on_you: [], waiting: [], verified: [] } };
+let state = { now: 0, needs: [], leads: [], room: [], claims: [], colleague_comments: [], asks: { attention: [], more: 0, verified: [] } };
 let lastUpdate = 0;
 let offline = false;
 let mismatch = false;
@@ -849,16 +849,15 @@ const askReasons = new Map();
 
 function askMeta(ask, verified) {
   const who = "#" + ask.id + " · " + askOwnerName(ask.owner) + " · ";
-  if (ask.state && ask.state !== "done_claimed") {
-    return who + ask.state.replace("_", " ") + " · " + age(state.now - ask.at) + " old · " + askWaitText(ask.wait);
-  }
-  return verified
-    ? who + "verified " + age(state.now - ask.at) + " ago · closes by itself in " + age(ask.closes_at - state.now)
-    : who + "claimed done by " + ask.by + " " + age(state.now - ask.at) + " ago, not verified yet" + (ask.wait ? " · " + askWaitText(ask.wait) : "");
+  if (verified) return who + "verified " + age(state.now - ask.at) + " ago · closes by itself in " + age(ask.closes_at - state.now);
+  const wait = ask.wait ? " · " + askWaitText(ask.wait) : "";
+  if (ask.why === "to_verify") return who + "claimed done by " + ask.by + " " + age(state.now - ask.done_at) + " ago, not verified yet" + wait;
+  const late = ask.why === "overdue" ? " · no update for " + age(state.now - ask.updated_at) : "";
+  return who + ask.state.replace("_", " ") + " · " + age(state.now - ask.at) + " old" + late + wait;
 }
 
 const askOpen = new Set();
-const askFolded = new Set(["Waiting for verification"]);
+const askFolded = new Set();
 
 function renderAskCard(ask, verified) {
   const card = el("div", "ask" + (askOpen.has(ask.id) ? " open" : ""));
@@ -900,12 +899,12 @@ function renderAskCard(ask, verified) {
 }
 
 function renderAsks() {
-  const asks = { on_you: [], waiting: [], verified: [], ...state.asks };
-  const box = showSection("asks", asks.on_you.length + asks.waiting.length + asks.verified.length);
+  const asks = { attention: [], more: 0, verified: [], ...state.asks };
+  const box = showSection("asks", asks.attention.length + asks.verified.length);
   // A card keeps its node while it is unchanged, so a reason being typed keeps focus; only its ages are rewritten.
   const keep = new Map([...box.children].map((node) => [node.dataset.key, node]));
   const wanted = [];
-  const group = (title, items, verified) => {
+  const group = (title, items, verified, more = 0) => {
     if (!items.length) return;
     let head = keep.get("head:" + title);
     if (!head) {
@@ -918,7 +917,7 @@ function renderAsks() {
       };
     }
     const folded = askFolded.has(title);
-    const text = (folded ? "▸ " : "▾ ") + title + " · " + items.length;
+    const text = (folded ? "▸ " : "▾ ") + title + " · " + (items.length + more);
     if (head.textContent !== text) head.textContent = text;
     wanted.push(head);
     if (folded) return;
@@ -934,14 +933,17 @@ function renderAsks() {
       if (meta.textContent !== text) meta.textContent = text;
       wanted.push(node);
     }
+    if (!more) return;
+    const rest = keep.get("more:" + title + more) || el("div", "note", "and " + more + " more");
+    rest.dataset.key = "more:" + title + more;
+    wanted.push(rest);
   };
   // The Team Leads section is rebuilt only when it changes, so the age on its rows is kept current here.
   for (const word of document.querySelectorAll(".lead .asks[data-oldest]")) {
     const text = leadAsksText(Number(word.dataset.open), Number(word.dataset.oldest));
     if (word.textContent !== text) word.textContent = text;
   }
-  group("Waiting on you", asks.on_you, false);
-  group("Waiting for verification", asks.waiting, false);
+  group("Needs attention", asks.attention, false, asks.more);
   group("Verified", asks.verified, true);
   for (const node of [...box.children]) if (!wanted.includes(node)) node.remove();
   wanted.forEach((node, i) => {

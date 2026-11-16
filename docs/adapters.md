@@ -151,6 +151,8 @@ pages_dir = "~/pages"                     # where published pages' sources live 
 disk_folders = ["~/code/worktrees"]       # measured hourly; Right Hand hears when the disk runs low
 overlay_dir = "~/.config/bridge/house"    # your house texts, below
 people_dir = "~/.config/bridge/people"    # your people file, below
+ask_autoclose_decision = "Q#12"           # your decision that verified asks close by themselves, cited when they do
+asks_panel_max = 10                       # asks the page lists as needing attention (the default); the rest are counted
 ```
 
 **House texts** (`overlay_dir`): one `<slot>.md` per slot replaces or adds a passage of the roles and briefs. A

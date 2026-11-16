@@ -1040,10 +1040,10 @@ options:
 the owner's asks, each taken to verified with evidence of what they would see
 
 ```text
-usage: guild ask [-h] {add,list,show,start,note,wait,done,verify,close,reopen} ...
+usage: guild ask [-h] {add,list,show,start,note,wait,done,verify,close,drop,reopen} ...
 
 positional arguments:
-  {add,list,show,start,note,wait,done,verify,close,reopen}
+  {add,list,show,start,note,wait,done,verify,close,drop,reopen}
     add                 record an ask in the owner's own words
     list                asks not closed, oldest first
     show                one ask with its history
@@ -1054,6 +1054,8 @@ positional arguments:
     done                claim it done; another session verifies
     verify              done_claimed → verified, with evidence of what the owner would see
     close               verified → closed (the assistant only, relaying the owner)
+    drop                close an ask not yet claimed as obsolete, with why (its owner session or
+                        the assistant)
     reopen              back to open: the result is not what the owner asked for
 
 options:
@@ -1199,6 +1201,21 @@ positional arguments:
 options:
   -h, --help     show this help message and exit
   --dropped WHY  close an unfinished ask the owner let go, and why
+```
+
+### guild ask drop
+
+close an ask not yet claimed as obsolete, with why (its owner session or the assistant)
+
+```text
+usage: guild ask drop [-h] id why
+
+positional arguments:
+  id
+  why         why it is no longer wanted; kept in its history
+
+options:
+  -h, --help  show this help message and exit
 ```
 
 ### guild ask reopen

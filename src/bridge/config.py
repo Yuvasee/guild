@@ -140,6 +140,10 @@ class Config:
     """A message the model gives at least this chance of needing the lead now would go at once."""
     shadow_filter_key_file: str = ""
     """File holding the model's API key (~ allowed); read for each call, never copied."""
+    ask_autoclose_decision: str = ""
+    """The owner's decision that verified asks close by themselves (e.g. "Q#12"), cited in each automatic close."""
+    asks_panel_max: int = 10
+    """Asks the page's Asks panel lists as needing attention; past it, the panel says how many more."""
 
     @property
     def owner_name_at_start(self) -> str:
@@ -285,6 +289,8 @@ def map_toml_to_config(raw: dict[str, object]) -> Config:
         shadow_filter_url=_str(raw, "shadow_filter_url", defaults.shadow_filter_url),
         shadow_filter_threshold=_fraction(raw, "shadow_filter_threshold", defaults.shadow_filter_threshold),
         shadow_filter_key_file=_str(raw, "shadow_filter_key_file", defaults.shadow_filter_key_file),
+        ask_autoclose_decision=_str(raw, "ask_autoclose_decision", defaults.ask_autoclose_decision),
+        asks_panel_max=_positive_int(raw, "asks_panel_max", defaults.asks_panel_max),
     )
 
 
@@ -300,6 +306,11 @@ def _fraction(raw: dict[str, object], key: str, default: float) -> float:
     if not isinstance(value, (int, float)) or isinstance(value, bool) or not 0 <= value <= 1:
         raise ValueError(f"{key} must be a number from 0 to 1")
     return float(value)
+def _positive_int(raw: dict[str, object], key: str, default: int) -> int:
+    value = _int(raw, key, default)
+    if value < 1:
+        raise ValueError(f"{key} must be 1 or more")
+    return value
 
 
 def _bool(raw: dict[str, object], key: str, default: bool) -> bool:
