@@ -158,6 +158,10 @@ from bridge.reviews import (
     record_merge_ok,
 )
 from bridge.rewake_marks import prune_rewake_marks
+from bridge.shadow_filter import EVERY_S as SHADOW_EVERY_S
+from bridge.shadow_filter import ask_model as ask_shadow_model
+from bridge.shadow_filter import find_start_id as find_shadow_start_id
+from bridge.shadow_filter import run_shadow_tick
 from bridge.signals import SessionRefs, find_signals, map_enrichment_to_status, map_signal_to_dict
 from bridge.status_watchers import read_watchers
 from bridge.tabinput import map_tree_to_pane_session, run_agterm
@@ -240,6 +244,8 @@ def serve(config: Config, port: int) -> None:
     threading.Thread(target=state.sync_issues_forever, daemon=True).start()
     if config.remotes:
         threading.Thread(target=state.collect_remotes_forever, daemon=True).start()
+    if config.shadow_filter:
+        threading.Thread(target=state.shadow_filter_forever, daemon=True).start()
     if config.worker_host:
         start_worker_api(config)
     server = ThreadingHTTPServer(("127.0.0.1", port), handler)
@@ -465,6 +471,24 @@ class DashboardState:
             except sqlite3.Error as exc:
                 print(f"urgent notification failed: {exc}", flush=True)
             time.sleep(NOTIFY_EVERY_S)
+
+    def shadow_filter_forever(self) -> None:
+        """Its own thread, after delivery: a slow or failing model call holds up nothing else."""
+        url, key_file = self.config.shadow_filter_url, self.config.shadow_filter_key_file
+        after: int | None = None
+        while True:
+            try:
+                with self._connection() as conn:
+                    if after is None:
+                        after = find_shadow_start_id(conn)
+                    after = run_shadow_tick(
+                        conn, self.config, after, now_ms(), lambda state: ask_shadow_model(url, key_file, state)
+                    )
+            except Exception as exc:
+                # Any failure: an escaped exception would end the shadow log until restart.
+                print(f"shadow filter failed: {exc}", flush=True)
+                log_error("shadow filter", traceback.format_exc())
+            time.sleep(SHADOW_EVERY_S)
 
     def start_queued_workers_forever(self) -> None:
         """Workers queued by the laptop cap start, oldest first, as slots free; the lead that asked is told."""

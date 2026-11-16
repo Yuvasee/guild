@@ -133,6 +133,13 @@ class Config:
     """Folder of this install's own texts (house rules), one <slot>.md per named slot; empty uses the generic texts."""
     people_dir: str = ""
     """Local folder whose people.toml holds the keys about people (PEOPLE_KEYS); set, config.toml may not hold them."""
+    shadow_filter: bool = False
+    """Judges each message to a team lead after delivery, as a wake-up filter would, and only logs the verdict."""
+    shadow_filter_url: str = "https://api.typesafe.ai/v1/systemone"
+    shadow_filter_threshold: float = 0.2
+    """A message the model gives at least this chance of needing the lead now would go at once."""
+    shadow_filter_key_file: str = ""
+    """File holding the model's API key (~ allowed); read for each call, never copied."""
 
     @property
     def owner_name_at_start(self) -> str:
@@ -274,6 +281,10 @@ def map_toml_to_config(raw: dict[str, object]) -> Config:
         review_python_paths=_str_list(raw, "review_python_paths", defaults.review_python_paths),
         overlay_dir=_str(raw, "overlay_dir", defaults.overlay_dir),
         people_dir=_str(raw, "people_dir", defaults.people_dir),
+        shadow_filter=_bool(raw, "shadow_filter", defaults.shadow_filter),
+        shadow_filter_url=_str(raw, "shadow_filter_url", defaults.shadow_filter_url),
+        shadow_filter_threshold=_fraction(raw, "shadow_filter_threshold", defaults.shadow_filter_threshold),
+        shadow_filter_key_file=_str(raw, "shadow_filter_key_file", defaults.shadow_filter_key_file),
     )
 
 
@@ -282,6 +293,13 @@ def _int(raw: dict[str, object], key: str, default: int) -> int:
     if not isinstance(value, int) or isinstance(value, bool):
         raise ValueError(f"{key} must be an integer")
     return value
+
+
+def _fraction(raw: dict[str, object], key: str, default: float) -> float:
+    value = raw.get(key, default)
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not 0 <= value <= 1:
+        raise ValueError(f"{key} must be a number from 0 to 1")
+    return float(value)
 
 
 def _bool(raw: dict[str, object], key: str, default: bool) -> bool:
