@@ -1,8 +1,11 @@
 import re
 from dataclasses import dataclass
+from itertools import pairwise
+from pathlib import PurePosixPath
+from urllib.parse import unquote
 
 from bridge.agent_prefix import CLAUDE_PREFIX, LINEAR_ISSUE_TOOLS, TITLE_RULE, is_prefixed, strip_agent_prefix
-from bridge.guard import segment_command
+from bridge.guard import SHELL_KEYWORDS, SHELLS, segment_command
 
 _HEREDOC_SUBSTITUTION_RE = re.compile(r"^\$\(\s*cat\s+<<-?\s*(['\"]?)(\w+)\1[^\n]*\n(.*?)\n\s*\2\s*\)$", re.DOTALL)
 _GIT_GLOBAL_VALUE_OPTIONS = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace"})
@@ -47,6 +50,10 @@ _GIT_COMMIT = _options(
     git=True,
 )
 _GIT_MERGE = _options("message/m file/F strategy/s strategy-option/X into-name cleanup", git=True)
+_GH_LABEL = _options(f"{_GH_GLOBAL} name/n color/c description/d")
+_API_LABELS_RE = re.compile(
+    r"(?:^|/)repos/[^/\s]+/[^/\s]+/(?:(issues/[^/\s?]+)(/labels)?|labels)(?:/([^?\s]*))?/?(?:\?|$)"
+)
 _GH_TITLE_COMMANDS = {
     (group, action): _GH_ISSUE_PR for group in ("pr", "issue") for action in ("create", "new", "edit")
 }
@@ -58,6 +65,86 @@ def find_prefixed_titles(command: str) -> list[str]:
     for tokens, _ in segment_command(command):
         found.extend(t for t in _map_tokens_to_titles(tokens) if is_prefixed(t))
     return found
+
+
+def find_owner_label_writes(command: str, label: str) -> list[str]:
+    """gh commands that would put the owner's label on a PR or issue, take it off, or edit or delete the label itself,
+    also inside a loop, an if or a shell's -c script. Only commands that name it: one that clears every label is undone
+    by the next poll."""
+    wanted = label.strip().casefold()
+    if not wanted:
+        return []
+    found: list[str] = []
+    bodies: list[tuple[int, str]] = []
+    for index, (tokens, _) in enumerate(segment_command(command, bodies)):
+        while tokens and tokens[0] in SHELL_KEYWORDS:
+            tokens = tokens[1:]
+        if not tokens:
+            continue
+        program = PurePosixPath(tokens[0]).name
+        if program in SHELLS:
+            stdin = [text for owner, text in bodies if owner == index]
+            scripts = [script for flag, script in pairwise(tokens[1:]) if re.fullmatch(r"-[a-zA-Z]*c[a-zA-Z]*", flag)]
+            found += [w for script in [*scripts, *stdin] for w in find_owner_label_writes(script, label)]
+        elif program == "eval":
+            found += find_owner_label_writes(" ".join(tokens[1:]), label)
+        elif program == "gh" and _writes_label(tokens[1:], wanted, command.casefold()):
+            found.append(" ".join(tokens))
+    return found
+
+
+def map_label_write_to_denial(label: str, owner: str, command: str) -> str:
+    return (
+        f"bridge: only {owner}'s Publish sets the label {label}: it tells the review bot {owner} reviewed the PR. "
+        f"This command would change it ({command[:120]}). Leave that label alone."
+    )
+
+
+def _writes_label(args: list[str], wanted: str, text: str) -> bool:
+    """text: the whole command, casefolded, for a value the shell or a request body fills in."""
+    group, i = _read_positional(args, 0)
+    if group == "api":
+        found, positional = _scan(args[i:], _GH_API)
+        methods = [value.upper() for key, value in found if key == "method"]
+        fields = [value.partition("=") for key, value in found if key in ("field", "raw-field")]
+
+        def field(*names: str) -> list[str]:
+            return [value for name, _, value in fields if name in names]
+
+        has_input = any(key == "input" for key, _ in found)
+        method = methods[-1] if methods else ("POST" if fields or has_input else "GET")
+        match = _API_LABELS_RE.search(positional[0]) if positional else None
+        if match is None or method in ("GET", "HEAD"):
+            return False
+        issue, on_labels, name = match.groups()
+        if issue and not on_labels:
+            named = field("labels", "labels[]")
+        elif issue:
+            named = [unquote(name or ""), *field("labels", "labels[]")]
+        elif name:
+            named = [unquote(name), *field("new_name")]
+        else:
+            # A repo's labels endpoint with no name creates a label, which puts it on nothing.
+            return False
+        return _names_label(named, wanted, text) or (has_input and wanted in text)
+    action, i = _read_positional(args, i)
+    if group in ("pr", "issue") and action in ("create", "new", "edit"):
+        found, _ = _scan(args[i:], _GH_ISSUE_PR)
+        return _names_label([v for k, v in found if k in ("label", "add-label", "remove-label")], wanted, text)
+    if group == "label" and action in ("edit", "delete", "create"):
+        found, positional = _scan(args[i:], _GH_LABEL)
+        # create changes the label only with --force, which updates one that exists.
+        if action == "create" and not any(a in ("-f", "--force") for a in args[i:]):
+            return False
+        return _names_label([*positional[:1], *(v for k, v in found if k == "name")], wanted, text)
+    return False
+
+
+def _names_label(values: list[str], wanted: str, text: str) -> bool:
+    """gh and the labels endpoint take several labels joined by commas; GitHub matches names ignoring case. A value the
+    shell fills in counts when the command spells the label anywhere, as in LABEL=…; gh … "$LABEL"."""
+    parts = [part.strip().casefold() for value in values for part in _unwrap(value).split(",")]
+    return wanted in parts or (any("$" in part for part in parts) and wanted in text)
 
 
 def find_prefixed_linear_title(tool: str, tool_input: dict[str, object]) -> str | None:
