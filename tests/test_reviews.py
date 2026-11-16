@@ -2470,10 +2470,10 @@ def test_a_sibling_it_merges_after_orders_them_and_a_cycle_of_merge_after_is_nam
     cycle = map_prs_to_dependencies(
         sibling_prs(**{A: {"must_merge": ("Org/app#8",)}, B: {"must_merge": ("Org/app#7",)}}), {}
     )
-    assert cycle[A].sibling_waits == (
+    assert cycle[A].blockers == (
         "waits for Org/app#8 to merge, which merges after this one: a cycle no merge can start",
     )
-    assert "a cycle" in cycle[B].sibling_waits[0]
+    assert "a cycle" in cycle[B].blockers[0]
 
 
 def store_siblings(tmp_path: Path, prs: list[OpenPr]) -> Any:
@@ -2529,5 +2529,25 @@ def test_pr_states_tell_an_issue_and_a_number_that_does_not_exist_from_one_that_
         }
     with mock.patch("bridge.review_github.subprocess.run", side_effect=OSError("gh missing")):
         again = fetch_pr_states(refs)
-    assert again == {"Org/zz#1": None, "Org/zz#2": "ISSUE", "Org/zz#3": "NONE", "Org/gone#1": None}, "final kept"
+    assert again == {"Org/zz#1": None, "Org/zz#2": "ISSUE", "Org/zz#3": None, "Org/gone#1": None}, "only final kept"
     assert run.call_count == 1
+
+
+def test_a_cycle_of_merge_after_keeps_every_sibling_from_merging(tmp_path: Path) -> None:
+    ready = {"approved_by": ("mira",)}
+    prs = sibling_prs(
+        **{A: {**ready, "must_merge": ("Org/app#8",)}, B: {**ready, "must_merge": ("Org/app#7",)}, C: ready}
+    )
+    deps = map_prs_to_dependencies(prs, {})
+    assert "a cycle" in deps[A].blockers[0] and deps[A].sibling_waits == ()
+    conn = store_siblings(tmp_path, prs)
+    can, needs = button(conn, C)
+    assert not can and needs is not None and "goes with Org/app#7, which is not ready" in needs and "a cycle" in needs
+
+
+def test_two_backports_that_name_each_other_are_siblings_not_a_cycle() -> None:
+    bp7 = make_pr(base="release/1", named_prs=("Org/app#8",), must_merge=("Org/app#5", "Org/app#8"))
+    bp8 = make_pr(ref="pr:Org/app#8", number=8, base="release/2", named_prs=("Org/app#7",),
+                  must_merge=("Org/app#5", "Org/app#7"))  # fmt: skip
+    deps = map_prs_to_dependencies([bp7, bp8], {"Org/app#5": "MERGED"}, ("release/*",))
+    assert deps[REF] == Dependencies((), (), ("pr:Org/app#8",))

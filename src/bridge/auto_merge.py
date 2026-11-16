@@ -3,6 +3,7 @@ import sqlite3
 from collections.abc import Sequence
 from typing import Any
 
+from bridge.backport import is_backport_base
 from bridge.board import (
     SYSTEM_CONVERSATION,
     USER_ITEM_MAX_CHARS,
@@ -15,9 +16,17 @@ from bridge.board import (
 from bridge.config import Config
 from bridge.db import transaction
 from bridge.feed import REVIEW_QUEUE, FeedLink, add_post
-from bridge.guard import MergeRefusal, find_standing_rule_block, map_wait_to_reason
-from bridge.review_deps import map_states_to_blockers
-from bridge.review_github import GitHubError, fetch_pr_states, run_gh
+from bridge.guard import GITHUB_STALE_S, MergeRefusal, find_standing_rule_block, map_wait_to_reason
+from bridge.review_deps import map_markdown_to_dependency, map_markdown_to_named_prs, map_states_to_blockers
+from bridge.review_github import (
+    PERSIST_SANDBOX,
+    GitHubError,
+    LiveMergeFacts,
+    fetch_pr_states,
+    map_pr_to_must_merge,
+    read_live_merge_facts,
+    run_gh,
+)
 from bridge.reviews import (
     find_owner,
     list_stacked_on,
@@ -29,6 +38,8 @@ from bridge.reviews import (
 
 SANDBOX_BLOCK = "PERSIST_SANDBOX in its body"
 MERGE_TIMEOUT_S = 120
+LIVE_TIMEOUT_S = 30
+"""The service reads GitHub here, not a 5 s hook."""
 _LOGGED: set[tuple[str, str, str]] = set()
 """(ref, head, line) the service log already has: a dry run or a refusal is logged once per head, not every poll."""
 
@@ -75,33 +86,62 @@ def map_row_to_own_auto_merge_block(config: Config, row: sqlite3.Row, with_sibli
 
 
 def find_live_block(conn: sqlite3.Connection, config: Config, row: sqlite3.Row) -> str | None:
-    """The guard's live check under the standing rule, then the named PRs read again: None, it may merge now."""
-    refusal = find_standing_rule_block(conn, config, row)
+    """The guard's check under the standing rule on GitHub's facts read now, its body read again for PERSIST_SANDBOX
+    and the PRs it names, and the same for each open sibling: None, it may merge now."""
+    if reason := find_live_block_alone(conn, config, row):
+        return reason
+    for sibling in load_open_siblings(conn, row):
+        if reason := find_live_block_alone(conn, config, sibling):
+            return f"goes with {str(sibling['ref']).removeprefix('pr:')}, which is not ready: {reason}"
+    return None
+
+
+def find_live_block_alone(conn: sqlite3.Connection, config: Config, row: sqlite3.Row) -> str | None:
+    if row["held_at"] is not None:
+        return f"held for {config.owner_name}'s review"
+    try:
+        live = read_live_merge_facts(config, str(row["repo"]), int(row["number"]), LIVE_TIMEOUT_S)
+    except GitHubError as exc:
+        return f"GitHub could not be read ({exc})"
+    refusal = find_standing_rule_block(config, row, live)
     if refusal is not None:
         return map_refusal_to_reason(refusal, config)
-    blockers = find_live_dependency_blockers(conn, row)
+    if PERSIST_SANDBOX in live.body:
+        return SANDBOX_BLOCK
+    blockers = find_live_dependency_blockers(conn, config, row, live)
     return blockers[0] if blockers else None
 
 
 def map_refusal_to_reason(refusal: MergeRefusal, config: Config) -> str:
-    if refusal.error:
-        return f"GitHub could not be read ({refusal.error})"
     return "; ".join(map_wait_to_reason(wait, refusal, config.owner_name) for wait in refusal.waits)
 
 
-def find_live_dependency_blockers(conn: sqlite3.Connection, row: sqlite3.Row) -> tuple[str, ...]:
-    """Its named PRs read again, leaving out its siblings: they are open by definition, and ready by the time it
-    comes to this."""
+def find_live_dependency_blockers(
+    conn: sqlite3.Connection, config: Config, row: sqlite3.Row, live: LiveMergeFacts
+) -> tuple[str, ...]:
+    """The PRs its body names now, read again, leaving out its siblings (checked on their own) and the PRs stacked on
+    it; a backport in the queue is never another's main PR."""
+    repo, number = str(row["repo"]), int(row["number"])
+    open_rows = conn.execute("SELECT ref, base, stack_parent FROM review_prs WHERE closed_at IS NULL").fetchall()
+    backports = {
+        str(r["ref"]).removeprefix("pr:").casefold()
+        for r in open_rows
+        if is_backport_base(config.backport_bases, str(r["base"]))
+    }
     siblings = {ref.removeprefix("pr:").casefold() for ref in json.loads(str(row["siblings"] or "[]"))}
-    named = [r for r in json.loads(str(row["named_prs"] or "[]")) if r.casefold() not in siblings]
-    must = [r for r in json.loads(str(row["must_merge"] or "[]")) if r.casefold() not in siblings]
+    node = {"baseRefName": live.base or "", "title": live.title, "body": live.body, "headRefName": live.head}
+    depends_on = map_markdown_to_dependency(live.body, repo, number)
+    named = [r for r in map_markdown_to_named_prs(live.body, repo, number) if r.casefold() not in siblings]
+    must = [
+        r for r in map_pr_to_must_merge(config, repo, number, node, depends_on)
+        if r.casefold() not in siblings | backports
+    ]  # fmt: skip
     if not named and not must:
         return ()
     children: dict[str, list[str]] = {}
-    for child in conn.execute(
-        "SELECT ref, stack_parent FROM review_prs WHERE closed_at IS NULL AND stack_parent IS NOT NULL"
-    ):
-        children.setdefault(str(child["stack_parent"]).casefold(), []).append(str(child["ref"]).casefold())
+    for child in open_rows:
+        if child["stack_parent"]:
+            children.setdefault(str(child["stack_parent"]).casefold(), []).append(str(child["ref"]).casefold())
     skipped = list_stacked_on(children, str(row["ref"]).casefold())
     return map_states_to_blockers(tuple(named), tuple(must), skipped, fetch_pr_states([*named, *must]))
 
@@ -127,6 +167,10 @@ def run_auto_merge(conn: sqlite3.Connection, config: Config, now: int) -> list[t
     if config.auto_merge == "off":
         return []
     dry = config.auto_merge == "dry-run"
+    poll = conn.execute("SELECT ok_at FROM review_poll WHERE id = 1").fetchone()
+    if poll is None or poll["ok_at"] is None or now - int(poll["ok_at"]) > GITHUB_STALE_S * 1000:
+        # A body changed since the last good poll is unknown: PERSIST_SANDBOX or a new PR it names.
+        return []
     sent: list[tuple[int, Recipient]] = []
     for row in list_open_rows(conn):
         ref, head = str(row["ref"]), str(row["head_oid"])
@@ -157,9 +201,18 @@ def log_once(ref: str, head: str, line: str) -> None:
 
 def merge_pr(conn: sqlite3.Connection, config: Config, row: sqlite3.Row, now: int) -> list[tuple[int, Recipient]]:
     ref, url, head = str(row["ref"]), str(row["url"]), str(row["head_oid"])
-    # Recorded before the merge runs, so a crash or a failure never brings the same head back.
+    # Claimed before the merge runs, so a crash or a failure never brings the same head back, and only if nothing
+    # changed while GitHub was read: a hold, a new head, or another round's attempt.
     with transaction(conn):
-        conn.execute("UPDATE review_prs SET auto_merge_oid = ?, auto_merge_error = NULL WHERE ref = ?", (head, ref))
+        claimed = conn.execute(
+            """
+            UPDATE review_prs SET auto_merge_oid = ?1, auto_merge_error = NULL
+            WHERE ref = ?2 AND head_oid = ?1 AND closed_at IS NULL AND held_at IS NULL AND auto_merge_oid IS NOT ?1
+            """,
+            (head, ref),
+        ).rowcount
+    if not claimed:
+        return []
     try:
         run_gh(["pr", "merge", url, "--squash", "--match-head-commit", head], MERGE_TIMEOUT_S)
         merged: Any = json.loads(run_gh(["pr", "view", url, "--json", "state,mergeCommit"]))

@@ -236,15 +236,17 @@ def read_dependency_states(prs: list[OpenPr]) -> dict[str, str | None]:
 @dataclass(frozen=True)
 class Dependencies:
     blockers: tuple[str, ...] = ()
-    """Why it waits on PRs outside its siblings: one named there is open or unread, or one it merges after is not
-    merged."""
+    """Why it waits whatever its siblings do: a PR named outside them is open or unread, one it merges after is not
+    merged, or its merge-after order runs in a cycle."""
     sibling_waits: tuple[str, ...] = ()
-    """Siblings it merges after (its depends_on or a backport's main PR), or a cycle of them."""
+    """Siblings it merges after: its depends_on or a backport's main PR."""
     siblings: tuple[str, ...] = ()
     """Open queue PRs it merges together with: they name each other, directly or through a chain of such pairs."""
 
 
-def map_prs_to_dependencies(prs: list[OpenPr], states: dict[str, str | None]) -> dict[str, Dependencies]:
+def map_prs_to_dependencies(
+    prs: list[OpenPr], states: dict[str, str | None], backport_bases: tuple[str, ...] = ()
+) -> dict[str, Dependencies]:
     """Each open PR's waits on the PRs it names. Two of them naming each other cannot go one before the other, so they
     are siblings: each merges once all are ready, in the order their depends_on gives. Those stacked on a PR are left
     out of its waits: a stack's bottom PR whose body lists the whole stack would otherwise wait for its own children."""
@@ -253,7 +255,9 @@ def map_prs_to_dependencies(prs: list[OpenPr], states: dict[str, str | None]) ->
         if pr.stack_parent:
             children.setdefault(pr.stack_parent.casefold(), []).append(pr.ref.casefold())
     names = {_map_ref_to_key(pr.ref): {r.casefold() for r in (*pr.named_prs, *pr.must_merge)} for pr in prs}
-    must = {_map_ref_to_key(pr.ref): {r.casefold() for r in pr.must_merge} for pr in prs}
+    # Two backports onto different branches name each other: neither is the other's default-branch PR.
+    backports = {_map_ref_to_key(pr.ref) for pr in prs if is_backport_base(backport_bases, pr.base)}
+    must = {_map_ref_to_key(pr.ref): {r.casefold() for r in pr.must_merge} - backports for pr in prs}
     refs = {_map_ref_to_key(pr.ref): pr.ref for pr in prs}
     stacked = {_map_ref_to_key(pr.ref): list_stacked_on(children, pr.ref.casefold()) for pr in prs}
     groups = map_names_to_sibling_groups(names, stacked)
@@ -262,14 +266,22 @@ def map_prs_to_dependencies(prs: list[OpenPr], states: dict[str, str | None]) ->
         key = _map_ref_to_key(pr.ref)
         group = groups.get(key, set()) - {key}
         skipped = stacked[key] | group
-        waits = tuple(
-            f"waits for {refs[other].removeprefix('pr:')} to merge"
-            + (", which merges after this one: a cycle no merge can start" if key in _reach(must, other) else "")
+        strict = tuple(r for r in pr.must_merge if r.casefold() not in backports)
+        # A cycle keeps the whole group from merging: it is a wait of its own, not an order among siblings.
+        cycle = tuple(
+            f"waits for {refs[other].removeprefix('pr:')} to merge, which merges after this one: a cycle no merge can "
+            "start"
             for other in sorted(must[key] & group)
+            if key in _reach(must, other)
+        )
+        order = tuple(
+            f"waits for {refs[other].removeprefix('pr:')} to merge"
+            for other in sorted(must[key] & group)
+            if key not in _reach(must, other)
         )
         found[pr.ref] = Dependencies(
-            map_states_to_blockers(pr.named_prs, pr.must_merge, skipped, states),
-            waits,
+            (*cycle, *map_states_to_blockers(pr.named_prs, strict, skipped, states)),
+            order,
             tuple(sorted(refs[other] for other in group)),
         )
     return found
@@ -1313,7 +1325,7 @@ def poll_review_queue(
         with transaction(conn):
             store_open_prs(conn, prs, now)
             mark_closed(conn, gone, now)
-            store_dependencies(conn, map_prs_to_dependencies(prs, states))
+            store_dependencies(conn, map_prs_to_dependencies(prs, states, config.backport_bases))
     for ref, repo, number, key in list_backports_to_check(conn, config, now)[:BACKPORT_CHECKS_PER_POLL]:
         verdict = check_backport(repo, number, config.backport_bases, time.monotonic() + BACKPORT_CHECK_BUDGET_S)
         with transaction(conn):

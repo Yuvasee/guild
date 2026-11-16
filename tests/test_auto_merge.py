@@ -10,7 +10,7 @@ from test_reviews import CONFIG, REF, add_session, make_pr
 from bridge.auto_merge import SANDBOX_BLOCK, map_db_to_dry_run, map_row_to_auto_merge_block, run_auto_merge
 from bridge.db import connect, transaction
 from bridge.review_github import GitHubError, LiveMergeFacts
-from bridge.reviews import Dependencies, map_prs_to_dependencies, store_dependencies, store_open_prs
+from bridge.reviews import map_prs_to_dependencies, store_dependencies, store_open_prs
 
 ON = replace(CONFIG, auto_merge="on", auto_merge_decision="Q#41", auto_merge_failures_to="lead-x", owner_name="Theo")
 CLEAN = {"approved_by": ("mira",), "bot_cleared": True, "checks": "SUCCESS", "merge_state": "CLEAN"}
@@ -55,7 +55,7 @@ class Gh:
 def run(conn: Any, config: Any = ON, live: LiveMergeFacts = LIVE, gh: Gh | None = None, now: int = 1000) -> Gh:
     gh = gh or Gh()
     with (
-        mock.patch("bridge.guard.read_live_merge_facts", return_value=live),
+        mock.patch("bridge.auto_merge.read_live_merge_facts", return_value=live),
         mock.patch("bridge.auto_merge.run_gh", side_effect=gh),
     ):
         run_auto_merge(conn, config, now)
@@ -151,7 +151,7 @@ def test_the_live_check_refuses_what_the_queue_copy_did_not_see(tmp_path: Path, 
 def test_github_unreadable_merges_nothing(tmp_path: Path) -> None:
     conn = setup(tmp_path)
     with (
-        mock.patch("bridge.guard.read_live_merge_facts", side_effect=GitHubError("gh failed: timeout")),
+        mock.patch("bridge.auto_merge.read_live_merge_facts", side_effect=GitHubError("gh failed: timeout")),
         mock.patch("bridge.auto_merge.run_gh") as gh,
     ):
         run_auto_merge(conn, ON, 1000)
@@ -159,12 +159,40 @@ def test_github_unreadable_merges_nothing(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(("state", "merges"), [("OPEN", 0), (None, 0), ("MERGED", 1)])
-def test_a_named_pr_is_read_again_right_before_merging(tmp_path: Path, state: str | None, merges: int) -> None:
-    conn = setup(tmp_path, make_pr(**CLEAN, named_prs=("Org/lib#3",)))
-    with transaction(conn):
-        store_dependencies(conn, {REF: Dependencies()})
-    with mock.patch("bridge.auto_merge.fetch_pr_states", return_value={"Org/lib#3": state}):
-        assert len(run(conn).merges) == merges
+def test_the_body_is_read_again_right_before_merging_and_each_pr_it_names_now(
+    tmp_path: Path, state: str | None, merges: int
+) -> None:
+    conn = setup(tmp_path)
+    with mock.patch("bridge.auto_merge.fetch_pr_states", return_value={"Org/lib#3": state}) as states:
+        assert len(run(conn, live=replace(LIVE, body="Goes with Org/lib#3.")).merges) == merges
+    assert states.call_args.args[0] == ["Org/lib#3"]
+
+
+def test_persist_sandbox_added_since_the_poll_stops_the_merge(tmp_path: Path) -> None:
+    conn = setup(tmp_path)
+    assert run(conn, live=replace(LIVE, body="<!-- PERSIST_SANDBOX -->")).merges == []
+
+
+def test_a_stale_queue_merges_nothing(tmp_path: Path) -> None:
+    conn = setup(tmp_path)
+    assert run(conn, now=500 + 301_000).merges == []
+
+
+def test_a_hold_placed_while_github_is_read_stops_the_merge(tmp_path: Path) -> None:
+    conn = setup(tmp_path)
+
+    def hold_then_answer(*_: Any) -> LiveMergeFacts:
+        with transaction(conn):
+            conn.execute("UPDATE review_prs SET held_at = 900")
+        return LIVE
+
+    gh = Gh()
+    with (
+        mock.patch("bridge.auto_merge.read_live_merge_facts", side_effect=hold_then_answer),
+        mock.patch("bridge.auto_merge.run_gh", side_effect=gh),
+    ):
+        run_auto_merge(conn, ON, 1000)
+    assert gh.merges == [] and row(conn)["auto_merge_oid"] is None
 
 
 def test_persist_sandbox_tells_the_lead_once_per_head_and_never_merges(tmp_path: Path) -> None:
@@ -190,9 +218,9 @@ def test_the_dry_run_lists_each_open_pr_with_its_verdict(tmp_path: Path) -> None
     draft = make_pr(**CLEAN, ref="pr:Org/app#8", number=8, draft=True)
     conn = setup(tmp_path, make_pr(**CLEAN), draft)
     before = conn.total_changes
-    with mock.patch("bridge.guard.read_live_merge_facts", return_value=LIVE):
+    with mock.patch("bridge.auto_merge.read_live_merge_facts", return_value=LIVE):
         assert map_db_to_dry_run(conn, ON) == [(REF, None), ("pr:Org/app#8", "a draft")]
-    with mock.patch("bridge.guard.read_live_merge_facts", return_value=replace(LIVE, approvers=())):
+    with mock.patch("bridge.auto_merge.read_live_merge_facts", return_value=replace(LIVE, approvers=())):
         assert "not approved" in str(map_db_to_dry_run(conn, ON)[0][1])
     assert conn.total_changes == before
 
@@ -215,6 +243,14 @@ def test_siblings_merge_one_per_round_only_once_all_are_ready(tmp_path: Path) ->
     assert run(waiting).merges == []
 
     conn = setup_siblings(tmp_path / "ready", sibling(7, ("Org/app#8",)), sibling(8, ("Org/app#7",)))
+    not_approved_now = mock.patch(
+        "bridge.auto_merge.read_live_merge_facts", side_effect=lambda config, repo, number, timeout: (
+            replace(LIVE, approvers=()) if number == 8 else LIVE
+        ),
+    )  # fmt: skip
+    with not_approved_now, mock.patch("bridge.auto_merge.run_gh", side_effect=(gh := Gh())):
+        run_auto_merge(conn, ON, 1000)
+    assert gh.merges == [], "a sibling is read live too"
     with mock.patch("bridge.auto_merge.fetch_pr_states") as states:
         first = run(conn).merges
         assert len(first) == 1

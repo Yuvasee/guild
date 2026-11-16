@@ -17,7 +17,7 @@ from bridge.db import transaction
 from bridge.gitinfo import RepoFacts, read_repo_facts
 from bridge.procinfo import process_start_ms
 from bridge.registry import PROC_START_TOLERANCE_MS
-from bridge.review_github import GitHubError, fetch_merge_facts, read_live_merge_facts
+from bridge.review_github import GitHubError, LiveMergeFacts, fetch_merge_facts
 
 # Shell-glob fragments for the hook's fast gate; spacing and `git -C dir push` must still reach Python.
 DEFAULT_TRIGGERS = (
@@ -139,8 +139,6 @@ GITHUB_STALE_S = 300
 MERGE_CHECK_BUDGET_S = 3.8
 MERGE_FACTS_TIMEOUT_S = 3.0
 MERGE_FACTS_MIN_S = 0.3
-STANDING_FACTS_TIMEOUT_S = 30
-"""The auto-merger runs in the service, not in a 5 s hook."""
 READY = "ready"
 HELD = "held"
 DRAFT = "a draft"
@@ -1151,18 +1149,14 @@ def map_live_threads_to_merge_block(row: sqlite3.Row, his_threads: int) -> str |
     return "; ".join([*live, *kept]) or None
 
 
-def find_standing_rule_block(conn: sqlite3.Connection, config: Config, row: sqlite3.Row) -> MergeRefusal | None:
-    """The guard's live check under the owner's standing rule for merging without them, read from GitHub whatever the
-    cache says. Their review is replaced by the rule: a colleague's approval (the review bot's alone or a waiver does
-    not count), the review bot's review of the head without changes asked, GitHub's CLEAN, the head the queue read,
-    and a base that is the default branch or a backport branch. None: it may merge."""
+def find_standing_rule_block(config: Config, row: sqlite3.Row, live: LiveMergeFacts) -> MergeRefusal | None:
+    """The guard's check under the owner's standing rule for merging without them, on facts just read from GitHub.
+    Their review is replaced by the rule: a colleague's approval (the review bot's alone or a waiver does not count),
+    the review bot's review of the head without changes asked, GitHub's CLEAN, the head the queue read, and a base
+    that is the default branch or a backport branch. None: it may merge."""
     ref = str(row["ref"])
     if row["held_at"] is not None:
         return MergeRefusal(ref, (HELD,), row["merge_block"], held_why=row["held_why"])
-    try:
-        live = read_live_merge_facts(config, str(row["repo"]), int(row["number"]), STANDING_FACTS_TIMEOUT_S)
-    except GitHubError as exc:
-        return MergeRefusal(ref, (), row["merge_block"], str(exc))
     block = map_live_threads_to_merge_block(row, live.his_threads)
     facts = MergeFacts(live.draft, bool(live.approvers), live.checks, live.merge_state, block, owner_reviewed=True)
     waits = list(list_merge_waits(facts))

@@ -49,7 +49,7 @@ query($owner: String!, $name: String!, $number: Int!) {
 _MERGE_FACTS_QUERY = """
 query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) { defaultBranchRef { name } pullRequest(number: $number) {
-    isDraft mergeStateStatus baseRefName
+    isDraft mergeStateStatus baseRefName headRefName title body
     commits(last: 1) { nodes { commit { oid statusCheckRollup { state } } } }
     reviews(last: 100) { nodes { state commit { oid } author { __typename login } } }
     reviewThreads(first: 100) { nodes { isResolved comments(first: 1) { nodes { author { login } } } } }
@@ -287,8 +287,8 @@ def map_pr_to_must_merge(config: Config, repo: str, number: int, node: Any, depe
 
 def fetch_pr_states(refs: list[str]) -> dict[str, str | None]:
     """owner/repo#N to OPEN, MERGED or CLOSED, ISSUE or NONE when the number is an issue or nothing at all, or None
-    when it could not be read. All but OPEN and CLOSED are kept for the process's life: a body that names many merged
-    PRs costs one read each."""
+    when it could not be read. MERGED and ISSUE are kept for the process's life: a body that names many merged PRs
+    costs one read each."""
     states: dict[str, str | None] = {r: _FINAL_STATES[r.casefold()] for r in refs if r.casefold() in _FINAL_STATES}
     by_repo: dict[str, list[tuple[str, int]]] = {}
     for ref in refs:
@@ -330,8 +330,8 @@ def fetch_pr_states(refs: list[str]) -> dict[str, str | None]:
                 state = "ISSUE" if node["__typename"] == "Issue" else node["state"]
         except (KeyError, TypeError):
             state = None
-        # A closed PR can be reopened; a merged one and an issue stay what they are.
-        if state in ("MERGED", "ISSUE", NO_SUCH_NUMBER):
+        # A closed PR can be reopened and a missing number is the next one opened; merged and an issue stay so.
+        if state in ("MERGED", "ISSUE"):
             _FINAL_STATES[ref.casefold()] = str(state)
         states[ref] = str(state) if state in ("OPEN", "MERGED", "CLOSED", "ISSUE", NO_SUCH_NUMBER) else None
     return {**dict.fromkeys(refs), **states}
@@ -367,6 +367,9 @@ class LiveMergeFacts:
     head_oid: str | None
     base: str | None
     default_branch: str | None
+    head: str = ""
+    title: str = ""
+    body: str = ""
 
 
 def fetch_merge_facts(
@@ -408,6 +411,9 @@ def read_live_merge_facts(
             head_oid=head_oid or None,
             base=pr.get("baseRefName"),
             default_branch=default.get("name"),
+            head=str(pr.get("headRefName") or ""),
+            title=str(pr.get("title") or ""),
+            body=str(pr.get("body") or ""),
         )
     except (ValueError, KeyError, TypeError, IndexError, AttributeError) as exc:
         raise GitHubError(f"unexpected answer from GitHub: {type(exc).__name__}") from exc
