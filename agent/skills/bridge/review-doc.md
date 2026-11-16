@@ -17,10 +17,12 @@ one-line summaries, and open only what they want to check.
    is and what they already know; `house.md` names the file) and only the doc's **In short** and **What changes and
    why**, and ask it to explain back in its own words what changes, why and how, to list every term that reader
    would not understand, and to list the sentences that could be deleted without losing anything the reader needs to
-   decide or review. A wrong or vague explain-back, any term on that list not explained in the doc, or a sentence
-   on the second list still there, means rewrite and ask a new fresh reader; register only once one gets it right
-   with both lists empty. Say in **Verified and not verified** that it passed (`guild review doc` warns when that
-   line is missing).
+   decide or review. A wrong or vague explain-back, or a flagged term the doc neither explains nor drops, means
+   rewrite and ask a new fresh reader. The deletion list is advice: cut what you agree with; readers differ there,
+   so it never blocks a pass. It passes once a reader's explain-back is right and every term it flagged is explained
+   or gone. At most three readers: if the third still gets it wrong, the doc's structure is the problem, so rework
+   the top rather than polish sentences. Say in **Verified and not verified** that the first reader passed, in which
+   round, and any flagged point you kept with why (`guild review doc` warns when that line is missing).
 
 ## Essence visible, details folded
 
