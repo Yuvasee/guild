@@ -165,7 +165,7 @@ from bridge.shadow_filter import ask_model as ask_shadow_model
 from bridge.shadow_filter import find_start_id as find_shadow_start_id
 from bridge.shadow_filter import run_shadow_tick
 from bridge.signals import SessionRefs, find_signals, map_enrichment_to_status, map_signal_to_dict
-from bridge.status_watchers import read_watchers
+from bridge.status_watchers import alert_watchers, read_watchers
 from bridge.tabinput import map_tree_to_pane_session, run_agterm
 from bridge.wake import WakeWatch
 from bridge.watcher import (
@@ -700,6 +700,7 @@ class DashboardState:
                     ):
                         if not show_notification(text):
                             self._outages.release(cause)
+                    self._alert_watchers(conn)
                 for message_id, recipient in retries:
                     spawn_typed_delivery(message_id, [recipient])
                 spawn_queued_retries()
@@ -708,6 +709,18 @@ class DashboardState:
             except sqlite3.Error as exc:
                 print(f"maintenance failed: {exc}", flush=True)
             time.sleep(MAINTAIN_EVERY_S)
+
+    def _alert_watchers(self, conn: sqlite3.Connection) -> None:
+        try:
+            with transaction(conn):
+                sent = alert_watchers(conn, self.config, now_ms())
+            for message_id, recipient in sent:
+                if recipient.pid:
+                    write_hint(recipient.pid, HINT_SENT)
+                spawn_typed_delivery(message_id, [recipient])
+        except Exception:
+            # Kept apart from the loop's own handling: an escaped error would end maintenance until restart.
+            log_error("watcher alerts", traceback.format_exc())
 
     def _read_stuck_box(self, stuck: StuckDelivery) -> str | None:
         if not stuck.agterm_session or not stuck.surface:

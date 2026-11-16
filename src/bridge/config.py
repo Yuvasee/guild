@@ -105,6 +105,11 @@ class Config:
     dream_timeout_s: int = 150
     """One dream's wall limit: the Mac may go to sleep soon after the night word."""
     watchers: tuple[Watcher, ...] = ()
+    watcher_alert_to: str = ""
+    """Who hears, once, that a watcher left ok and when it is back; empty sends nothing. A lead or the assistant is
+    told at once; another session only at its next turn, as with any peer message."""
+    watcher_escalate_after_min: int = 60
+    """A watcher still not ok this long after it left ok is named to the assistant, once."""
     links: tuple[PageLink, ...] = ()
     work_timezone: str = ""
     """IANA zone of the team's working hours (09-19) for daytime-only nudges; empty is this machine's zone."""
@@ -287,6 +292,8 @@ def map_toml_to_config(raw: dict[str, object]) -> Config:
         dream_model=_str(raw, "dream_model", defaults.dream_model),
         dream_timeout_s=_int(raw, "dream_timeout_s", defaults.dream_timeout_s),
         watchers=tuple(map_table_to_watcher(t) for t in _tables(raw, "watchers")),
+        watcher_alert_to=_str(raw, "watcher_alert_to", defaults.watcher_alert_to).strip(),
+        watcher_escalate_after_min=_positive(raw, "watcher_escalate_after_min", defaults.watcher_escalate_after_min),
         links=tuple(map_table_to_link(t) for t in _tables(raw, "links")),
         work_timezone=_zone(raw, "work_timezone", defaults.work_timezone),
         work_days=_weekdays(raw, "work_days", defaults.work_days),
@@ -434,7 +441,7 @@ def map_table_to_remote(table: dict[str, object]) -> Remote:
 
 def map_table_to_watcher(table: dict[str, object]) -> Watcher:
     path = _str(table, "path", "")
-    if not path or "\0" in path:
+    if not path or "\0" in path or "\n" in path:
         raise ValueError("each [[watchers]] needs a path")
     return Watcher(path=path, name=_str(table, "name", ""))
 

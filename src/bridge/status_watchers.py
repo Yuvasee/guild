@@ -1,11 +1,15 @@
 import json
 import os
+import sqlite3
 import stat
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
-from bridge.config import Watcher
+from bridge.asks import send_from_bridge
+from bridge.board import Recipient
+from bridge.config import Config, Watcher
 
 MAX_FILE_BYTES = 64 * 1024
 DEFAULT_STALE_AFTER_MIN = 20
@@ -89,3 +93,85 @@ def map_json_to_status(data: object) -> dict[str, object]:
         "summary": summary.strip()[:SUMMARY_CHARS] if isinstance(summary, str) else "",
         "detail": detail.strip()[:DETAIL_CHARS] if isinstance(detail, str) else "",
     }
+
+
+def alert_watchers(conn: sqlite3.Connection, config: Config, now: int) -> list[tuple[int, Recipient]]:
+    """Once per spell away from ok: watcher_alert_to hears it, the assistant hears if it outlasts
+    watcher_escalate_after_min, and everyone told hears when it is back. signal_posts keeps the spell, as serve
+    restarts with most deploys. A message that reached nobody is not recorded, so the next round tries again."""
+    # Off, every spell is forgotten: one left open would silence the next spell once alerts are back on.
+    paths = {w.path for w in config.watchers} if config.watcher_alert_to else set[str]()
+    for (key,) in conn.execute("SELECT key FROM signal_posts WHERE substr(key, 1, 8) = 'watcher:'").fetchall():
+        if str(key).split("\n", 1)[0].removeprefix("watcher:") not in paths:
+            conn.execute("DELETE FROM signal_posts WHERE key = ?", (key,))
+    if not config.watcher_alert_to:
+        return []
+    sent: list[tuple[int, Recipient]] = []
+    for watcher in config.watchers:
+        shown = read_watcher(watcher, now)
+        name, state = str(shown["name"]), str(shown["state"])
+        spell = f"watcher:{watcher.path}"
+        row = conn.execute("SELECT posted_at FROM signal_posts WHERE key = ?", (spell,)).fetchone()
+        told = {
+            str(k).rsplit("\n", 1)[1]: int(at)
+            for k, at in conn.execute(
+                "SELECT key, posted_at FROM signal_posts WHERE substr(key, 1, ?) = ?", (len(spell) + 1, spell + "\n")
+            )
+        }
+        if state == "ok":
+            if row is None:
+                continue
+            for handle in sorted({k.split(" ", 1)[1] for k in told}):
+                text = f"{name} watch is back to ok (not ok since {_clock(int(row[0]))})."
+                sent += send_from_bridge(conn, config, handle, text, now)
+            conn.execute("DELETE FROM signal_posts WHERE key = ? OR substr(key, 1, ?) = ?",
+                         (spell, len(spell) + 1, spell + "\n"))  # fmt: skip
+            continue
+        if row is None:
+            # message_id 0: the spell's start is a mark, not a message.
+            conn.execute("INSERT INTO signal_posts (key, message_id, posted_at) VALUES (?, 0, ?)", (spell, now))
+            since = now
+        else:
+            since = int(row[0])
+        summary = _summarize(shown)
+        alert_key = f"alert {config.watcher_alert_to}"
+        if alert_key not in told:
+            detail = f" {shown['detail']}" if state == "failed" and shown.get("detail") else ""
+            text = f"{name} watch: {state}: {summary} (since {_clock(since)}).{detail}"
+            alerted = _send_once(conn, config, f"{spell}\n{alert_key}", config.watcher_alert_to, text, now)
+            if alerted:
+                told[alert_key] = now
+            sent += alerted
+        escalation_key = f"escalation {config.assistant_handle}"
+        if escalation_key not in told and now - since >= config.watcher_escalate_after_min * 60_000:
+            who = (
+                f"{config.watcher_alert_to} was told at {_clock(told[alert_key])}."
+                if alert_key in told
+                else f"{config.watcher_alert_to} could not be reached."
+            )
+            text = (
+                f"{name} watch is still not ok after {(now - since) // 60_000} min: {state}: {summary} "
+                f"(since {_clock(since)}). {who}"
+            )
+            sent += _send_once(conn, config, f"{spell}\n{escalation_key}", config.assistant_handle, text, now)
+    return sent
+
+
+def _send_once(
+    conn: sqlite3.Connection, config: Config, key: str, to: str, text: str, now: int
+) -> list[tuple[int, Recipient]]:
+    sent = send_from_bridge(conn, config, to, text, now)
+    if sent:
+        conn.execute("INSERT INTO signal_posts (key, message_id, posted_at) VALUES (?, ?, ?)", (key, sent[0][0], now))
+    return sent
+
+
+def _summarize(shown: dict[str, object]) -> str:
+    if shown["state"] == "stale":
+        last_run = _clock(cast(int, shown["last_run_at"]))
+        return f"last run {last_run}, over its {shown['stale_after_min']}-min limit"
+    return str(shown.get("why") or shown.get("summary") or shown["state"])
+
+
+def _clock(at_ms: int) -> str:
+    return time.strftime("%m-%d %H:%M", time.localtime(at_ms / 1000))
