@@ -1,13 +1,9 @@
 """Shadow of a wake-up filter for messages to team leads: decides what a filter would hold back and logs it, after the
 message went out as usual. Nothing here changes or delays delivery."""
 
-import http.client
 import json
 import re
 import sqlite3
-import time
-import urllib.error
-import urllib.request
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
@@ -15,6 +11,7 @@ from pathlib import Path
 from typing import cast
 
 from bridge.board import SYSTEM_CONVERSATION, USER_CONVERSATION
+from bridge.classifier import call_model, quotes_customer, scrub
 from bridge.config import Config, state_dir
 
 EVERY_S = 10
@@ -25,38 +22,11 @@ LOG_NAME = "shadow-filter.jsonl"
 LOG_MAX_BYTES = 4_000_000
 """Past this the log moves to .1, replacing the one before: a week of a busy team is about 1 MB."""
 BODY_MAX_CHARS = 1500
-MODEL = "jev-latest"
 NOW = "now"
 BATCH = "batch"
 NOW_KINDS = frozenset({"request", "reply"})
 NOW_POST_TYPES = frozenset({"question", "blocked-tab"})
 _URGENT_RE = re.compile(r"\b(URGENT|STOP)\b")
-_SECRET_RES: tuple[tuple[re.Pattern[str], str | Callable[[re.Match[str]], str]], ...] = (
-    (
-        re.compile(
-            r"\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{16,}"
-            r"|xox[abpr]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+)"
-        ),
-        "[secret]",
-    ),
-    (
-        re.compile(
-            r"(?i)\b(password|passwd|pwd|secret|token|api[_-]?key|authorization)[\"']?\s*[:=]\s*(?:bearer\s+)?\S+"
-        ),
-        r"\1=[secret]",
-    ),
-    (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}"), "Bearer [secret]"),
-    (re.compile(r"(?i)\b(mongodb(\+srv)?|postgres(ql)?|mysql|redis|amqp)://\S+"), "[connection-string]"),
-    (re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"), "[email]"),
-    (
-        re.compile(r"\b[A-Za-z0-9+/]{40,}={0,2}\b"),
-        lambda m: m.group(0) if re.fullmatch(r"[0-9a-f]{40}", m.group(0)) else "[long-token]",
-    ),
-)
-_CUSTOMER_TEXT_RE = re.compile(
-    r"(?im)((customer|user|client) (said|says|wrote|writes|asked|asks)|conversation text|transcript of|\"role\"\s*:"
-    r"|\buser:\s|\bassistant:\s|^\s*(customer|client):|message content:|the (bot|agent) (replied|answered):)"
-)
 TASK = (
     "You triage messages delivered to an AI team lead: a Claude Code session that coordinates worker sessions on a "
     "software team. Each message would wake the lead and cost a full turn. Decide whether the lead must react NOW, "
@@ -130,16 +100,6 @@ def find_now_rule(message: LeadMessage, config: Config) -> str | None:
     return None
 
 
-def scrub(text: str) -> str:
-    for pattern, replacement in _SECRET_RES:
-        text = pattern.sub(replacement, text)
-    return text
-
-
-def quotes_customer(text: str) -> bool:
-    return bool(_CUSTOMER_TEXT_RE.search(text))
-
-
 def map_message_to_state(message: LeadMessage, lead_handles: frozenset[str]) -> str:
     if message.from_conversation == SYSTEM_CONVERSATION:
         sender = "the coordination system (automatic notice)"
@@ -168,50 +128,16 @@ def decide(message: LeadMessage, config: Config, lead_handles: frozenset[str], a
 
 
 def ask_model(url: str, key_file: str, state: str, timeout_s: float = CALL_TIMEOUT_S) -> Verdict:
-    """The key is read for each call and kept nowhere; an error text never carries it."""
-    started = time.monotonic()
-
-    key = ""
-
-    def failed(error: str) -> Verdict:
-        for part in key.split():
-            error = error.replace(part, "[key]")
-        return Verdict(p_now=None, error=error[:200], latency_ms=round((time.monotonic() - started) * 1000))
-
+    reply = call_model(url, key_file, state, cast(dict[str, object], QUESTIONS), timeout_s)
+    if reply.answers is None:
+        return Verdict(p_now=None, error=reply.error, latency_ms=reply.latency_ms)
     try:
-        key = Path(key_file).expanduser().read_text(encoding="utf-8").strip()
-    except (OSError, UnicodeDecodeError) as exc:
-        return failed(f"key file unreadable: {type(exc).__name__}")
-    if not key:
-        return failed("key file empty")
-    body = json.dumps({"state": state, "model": MODEL, "questions": QUESTIONS}).encode()
-    request = urllib.request.Request(
-        url, data=body, method="POST", headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout_s) as response:
-            answer = json.loads(response.read())
-    except urllib.error.HTTPError as exc:
-        try:
-            detail = exc.read().decode(errors="replace")[:300]
-        except (OSError, http.client.HTTPException):
-            detail = ""
-        return failed(f"http {exc.code}: {scrub(detail)}")
-    except TimeoutError:
-        return failed("timeout")
-    except urllib.error.URLError as exc:
-        reason = "timeout" if isinstance(exc.reason, TimeoutError) else str(exc.reason)
-        return failed(reason)
-    except (OSError, ValueError, http.client.HTTPException) as exc:
-        # The name only: a malformed key shows up in the text of some of these.
-        return failed(type(exc).__name__)
-    try:
-        p_now = float(answer["answers"]["reaction"]["probabilities"]["now"])
+        p_now = float(reply.answers["reaction"]["probabilities"]["now"])  # type: ignore[index]
     except (KeyError, TypeError, ValueError):
-        return failed("no probability for 'now' in the answer")
+        return Verdict(p_now=None, error="no probability for 'now' in the answer", latency_ms=reply.latency_ms)
     if not 0 <= p_now <= 1:
-        return failed(f"probability for 'now' out of range: {p_now}")
-    return Verdict(p_now=p_now, error=None, latency_ms=round((time.monotonic() - started) * 1000))
+        return Verdict(p_now=None, error="probability for 'now' out of range", latency_ms=reply.latency_ms)
+    return Verdict(p_now=p_now, error=None, latency_ms=reply.latency_ms)
 
 
 def list_new_lead_messages(conn: sqlite3.Connection, after_id: int, up_to_id: int, now: int) -> list[LeadMessage]:

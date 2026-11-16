@@ -139,7 +139,15 @@ class Config:
     shadow_filter_threshold: float = 0.2
     """A message the model gives at least this chance of needing the lead now would go at once."""
     shadow_filter_key_file: str = ""
-    """File holding the model's API key (~ allowed); read for each call, never copied."""
+    """File holding the classifier's API key (~ allowed); read for each call, never copied; doc_screen uses it too."""
+    doc_screen: bool = False
+    """Sends each visible sentence of a registered review doc to the classifier (shadow_filter_url) and prints the
+    sentences it flags as warnings. Needs shadow_filter_key_file."""
+    doc_in_short_max_bullets: int = 5
+    doc_bullet_max_words: int = 25
+    """For each In short bullet."""
+    doc_sentence_max_words: int = 30
+    """For each sentence of a review doc's visible top: In short and What changes and why, folds left out."""
 
     @property
     def owner_name_at_start(self) -> str:
@@ -285,6 +293,10 @@ def map_toml_to_config(raw: dict[str, object]) -> Config:
         shadow_filter_url=_str(raw, "shadow_filter_url", defaults.shadow_filter_url),
         shadow_filter_threshold=_fraction(raw, "shadow_filter_threshold", defaults.shadow_filter_threshold),
         shadow_filter_key_file=_str(raw, "shadow_filter_key_file", defaults.shadow_filter_key_file),
+        doc_screen=_bool(raw, "doc_screen", defaults.doc_screen),
+        doc_in_short_max_bullets=_positive(raw, "doc_in_short_max_bullets", defaults.doc_in_short_max_bullets),
+        doc_bullet_max_words=_positive(raw, "doc_bullet_max_words", defaults.doc_bullet_max_words),
+        doc_sentence_max_words=_positive(raw, "doc_sentence_max_words", defaults.doc_sentence_max_words),
     )
 
 
@@ -292,6 +304,13 @@ def _int(raw: dict[str, object], key: str, default: int) -> int:
     value = raw.get(key, default)
     if not isinstance(value, int) or isinstance(value, bool):
         raise ValueError(f"{key} must be an integer")
+    return value
+
+
+def _positive(raw: dict[str, object], key: str, default: int) -> int:
+    value = _int(raw, key, default)
+    if value < 1:
+        raise ValueError(f"{key} must be at least 1")
     return value
 
 

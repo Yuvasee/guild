@@ -1,5 +1,6 @@
 import re
 from collections import Counter
+from dataclasses import dataclass, field
 from html.parser import HTMLParser
 
 IN_SHORT = "In short"
@@ -9,8 +10,18 @@ _CHANGES_SINCE_RE = re.compile(r"\bsince (?:the |your |my )?(?:last |previous )?
 _WHERE_TO_LOOK_RE = re.compile(r"^\W*where to look\b", re.I)
 _NOT_FROM_ROOT_RE = re.compile(r"^(?:/|~|…)|(?:^|/)\.{1,3}(?:/|$)")
 _LINE_SUFFIX_RE = re.compile(r":\d[\d,\s\u2013-]*$")
+_WHAT_CHANGES_RE = re.compile(r"^\W*what changes\b", re.I)
+_VERIFIED_RE = re.compile(r"^\W*verified\b", re.I)
+_FIRST_READER_PASSED_RE = re.compile(r"\bfirst[- ]reader\b(?![^.;]*\b(?:not|never|failed|pending)\b)[^.;]*\bpass", re.I)
 _HIDDEN_TAGS = frozenset({"script", "style", "template", "textarea"})
 _ROW_TAGS = ("li", "tr")
+_UNREAD_TAGS = _HIDDEN_TAGS | {"svg", "pre"}
+_BLOCK_TAG_RE = re.compile(
+    r"p|li|[uo]l|t[dhr]|table|div|summary|details|fig(?:ure|caption)|blockquote|d[dt]|h[13-6]|section|hr"
+)
+_SENTENCE_END_RE = re.compile(r"(?<=[.!?])[\"')\]\u201d\u2019]*\s+(?=\S)")
+_ABBREVIATION_END_RE = re.compile(r"(?:\b(?:e\.g|i\.e|vs|etc|cf|approx|no|nr|incl)\.)$", re.I)
+_WORD_RE = re.compile(r"\S*\w\S*")
 
 
 class _DocOutline(HTMLParser):
@@ -87,14 +98,238 @@ class _DocOutline(HTMLParser):
         return self._heading is None and bool(self.headings) and bool(_WHERE_TO_LOOK_RE.match(self.headings[-1]))
 
 
+@dataclass
+class VisibleTop:
+    """What the owner reads before opening anything: In short and What changes and why, without the bodies of folds,
+    diagrams, code blocks and marks. `blocks` are paragraphs, list items, table cells and fold summaries as text."""
+
+    blocks: list[str] = field(default_factory=list[str])
+    bullets: list[str] = field(default_factory=list[str])
+    """In short's top-level list items, each with all of its visible text."""
+
+
+class _TopReader(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.top = VisibleTop()
+        self.verified: list[str] = []
+        self._section = ""
+        self._sections = 0
+        self._in_heading = False
+        self._heading: list[str] = []
+        self._unread = 0
+        self._marks = 0
+        self._span_marks: list[bool] = []
+        self._details: list[list[bool]] = []
+        """Per details element we are in: [has the open attribute, inside its summary now]."""
+        self._lists = 0
+        self._block: list[str] = []
+        self._bullet: list[str] | None = None
+
+    def _reading(self) -> bool:
+        return self._section in ("short", "changes") and not self._unread and not self._marks and not self._folded()
+
+    def _folded(self) -> bool:
+        return any(not opened and not in_summary for opened, in_summary in self._details)
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in _UNREAD_TAGS:
+            self._unread += 1
+            return
+        if self._unread:
+            return
+        if tag == "h2" and not self._folded():
+            if self._in_heading:
+                self._end_heading()
+            self._end_block()
+            self._end_bullet()
+            self._in_heading, self._heading = True, []
+            return
+        if tag == "br":
+            self.handle_data(" ")
+            return
+        if tag == "span":
+            is_mark = "mark" in (dict(attrs).get("class") or "").split()
+            self._span_marks.append(is_mark)
+            self._marks += is_mark
+            return
+        if _BLOCK_TAG_RE.fullmatch(tag):
+            self._end_block()
+        if tag == "details":
+            self._details.append(["open" in dict(attrs), False])
+        elif tag == "summary" and self._details:
+            self._details[-1][1] = True
+        elif tag in ("ul", "ol"):
+            self._lists += 1
+        elif tag == "li" and self._lists == 1 and self._section == "short" and not self._folded():
+            self._end_bullet()
+            self._bullet = []
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "br" and not self._unread:
+            self.handle_data(" ")
+        elif _BLOCK_TAG_RE.fullmatch(tag) and not self._unread:
+            self._end_block()
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in _UNREAD_TAGS:
+            self._unread = max(0, self._unread - 1)
+            return
+        if self._unread:
+            return
+        if tag == "h2" and self._in_heading:
+            self._end_heading()
+            return
+        if tag == "span":
+            if self._span_marks:
+                self._marks -= self._span_marks.pop()
+            return
+        if _BLOCK_TAG_RE.fullmatch(tag):
+            self._end_block()
+        if tag == "summary" and self._details:
+            self._details[-1][1] = False
+        elif tag == "details" and self._details:
+            self._details.pop()
+        elif tag in ("ul", "ol") and self._lists:
+            if self._lists == 1:
+                self._end_bullet()
+            self._lists -= 1
+        elif tag == "li" and self._lists == 1:
+            self._end_bullet()
+
+    def handle_data(self, data: str) -> None:
+        if self._unread:
+            return
+        if self._in_heading:
+            self._heading.append(data)
+        elif self._section == "verified" and not self._marks:
+            self.verified.append(data)
+        elif self._reading():
+            self._block.append(data)
+            if self._bullet is not None:
+                self._bullet.append(data)
+
+    def close(self) -> None:
+        super().close()
+        if self._in_heading:
+            self._end_heading()
+        self._end_block()
+        self._end_bullet()
+
+    def _end_heading(self) -> None:
+        self._in_heading = False
+        text = " ".join("".join(self._heading).split())
+        self._sections += 1
+        if self._sections == 1 and _IN_SHORT_RE.match(text):
+            self._section = "short"
+        elif self._section in ("short", "changes") and _WHAT_CHANGES_RE.match(text):
+            self._section = "changes"
+        elif _VERIFIED_RE.match(text):
+            self._section = "verified"
+        else:
+            self._section = "done" if self._section in ("short", "changes") else ""
+        self._lists = 0
+        self._details = []
+
+    def _end_block(self) -> None:
+        text = " ".join("".join(self._block).split())
+        if text:
+            self.top.blocks.append(text)
+        self._block = []
+        if self._bullet is not None:
+            self._bullet.append(" ")
+        if self._section == "verified":
+            self.verified.append(" ")
+
+    def _end_bullet(self) -> None:
+        if self._bullet is not None:
+            self.top.bullets.append(" ".join("".join(self._bullet).split()))
+            self._bullet = None
+
+
+def read_visible_top(page: bytes) -> tuple[VisibleTop, str]:
+    """The visible top, and the text of the Verified and not verified section."""
+    reader = _TopReader()
+    try:
+        reader.feed(page.decode("utf-8", "replace"))
+        reader.close()
+    except (AssertionError, ValueError):
+        pass
+    return reader.top, " ".join("".join(reader.verified).split())
+
+
+def split_into_sentences(block: str) -> list[str]:
+    sentences: list[str] = []
+    start = 0
+    for match in _SENTENCE_END_RE.finditer(block):
+        if _ABBREVIATION_END_RE.search(block[start : match.start()]):
+            continue
+        sentences.append(block[start : match.start()].strip())
+        start = match.end()
+    sentences.append(block[start:].strip())
+    return [sentence for sentence in sentences if sentence]
+
+
+def count_words(text: str) -> int:
+    return len(_WORD_RE.findall(text))
+
+
+def list_top_sentences(top: VisibleTop) -> list[str]:
+    return [sentence for block in top.blocks for sentence in split_into_sentences(block)]
+
+
+@dataclass(frozen=True)
+class PlainLimits:
+    bullets: int
+    bullet_words: int
+    sentence_words: int
+
+
+def find_plainness_problems(top: VisibleTop, limits: PlainLimits) -> list[str]:
+    problems: list[str] = []
+    if len(top.bullets) > limits.bullets:
+        problems.append(f"{IN_SHORT} has {len(top.bullets)} bullets; at most {limits.bullets}")
+    for bullet in top.bullets:
+        words = count_words(bullet)
+        if words > limits.bullet_words:
+            problems.append(
+                f"an {IN_SHORT} bullet has {words} words, over {limits.bullet_words}; keep the point and fold the "
+                f'rest: "{_shorten(bullet)}"'
+            )
+    for sentence in list_top_sentences(top):
+        words = count_words(sentence)
+        if words > limits.sentence_words:
+            problems.append(
+                f"a sentence above the folds has {words} words, over {limits.sentence_words}; split it or fold it: "
+                f'"{_shorten(sentence)}"'
+            )
+    return problems
+
+
+def _shorten(text: str, words: int = 14) -> str:
+    parts = text.split()
+    return " ".join(parts[:words]) + (" …" if len(parts) > words else "")
+
+
+def find_doc_warnings(verified: str) -> list[str]:
+    if _FIRST_READER_PASSED_RE.search(verified):
+        return []
+    return [
+        "Verified does not say the first reader (with the reader profile) passed: before registering, a fresh reader "
+        "gets the reader profile and only In short and What changes and why, and the doc says it passed"
+    ]
+
+
 def map_row_to_path(text: str) -> str:
     """A row may point at lines (path:12-40); the file is what it names."""
     return _LINE_SUFFIX_RE.sub("", text).rstrip("/")
 
 
-def find_doc_problems(page: bytes, owner_reviewed: bool, owner: str, files: frozenset[str] | None) -> list[str]:
-    """What breaks the spec's order and Where to look rules, one plain line each. `files` holds every file and
-    directory of the commit the doc describes; None when that commit cannot be read, so paths are not looked up."""
+def find_doc_problems(
+    page: bytes, owner_reviewed: bool, owner: str, files: frozenset[str] | None, limits: PlainLimits
+) -> list[str]:
+    """What breaks the spec's order, plainness and Where to look rules, one plain line each. `files` holds every file
+    and directory of the commit the doc describes; None when that commit cannot be read, so paths are not looked up."""
     outline = _DocOutline()
     problems: list[str] = []
     try:
@@ -118,6 +353,7 @@ def find_doc_problems(page: bytes, owner_reviewed: bool, owner: str, files: froz
         problems.append(f"'{CHANGES_SINCE}' is there {len(since)} times; it is one section, the last h2")
     elif since and since[0] != len(headings) - 1:
         problems.append(f"'{headings[since[0] + 1]}' comes after '{CHANGES_SINCE}', which is always the last h2")
+    problems.extend(find_plainness_problems(read_visible_top(page)[0], limits))
     paths = [path for path in (map_row_to_path(row) for row in outline.rows if row) if path]
     for path, count in Counter(paths).items():
         if count > 1:
