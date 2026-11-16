@@ -888,5 +888,5 @@ def test_a_locked_assistant_counts_as_not_told(
 
 def test_the_panel_shows_at_least_one_ask() -> None:
     assert map_toml_to_config({"asks_panel_max": 3}).asks_panel_max == 3
-    with pytest.raises(ValueError, match="asks_panel_max must be 1 or more"):
+    with pytest.raises(ValueError, match="asks_panel_max must be at least 1"):
         map_toml_to_config({"asks_panel_max": 0})

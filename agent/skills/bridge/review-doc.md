@@ -15,10 +15,12 @@ one-line summaries, and open only what they want to check.
    clear. Match its plainness and length, not its subject.
 2. **First reader.** Before `guild review doc`, give a fresh subagent the install's reader profile (who the reader
    is and what they already know; `house.md` names the file) and only the doc's **In short** and **What changes and
-   why**, and ask it to explain back in its own words what changes, why and how, and to list every term that reader
-   would not understand. A wrong or vague explain-back, or any term on that list not explained in the
-   doc, means rewrite and ask a new fresh reader; register only once one gets it right with an empty list. Say in
-   **Verified and not verified** that it passed.
+   why**, and ask it to explain back in its own words what changes, why and how, to list every term that reader
+   would not understand, and to list the sentences that could be deleted without losing anything the reader needs to
+   decide or review. A wrong or vague explain-back, any term on that list not explained in the doc, or a sentence
+   on the second list still there, means rewrite and ask a new fresh reader; register only once one gets it right
+   with both lists empty. Say in **Verified and not verified** that it passed (`guild review doc` warns when that
+   line is missing).
 
 ## Essence visible, details folded
 
@@ -30,6 +32,10 @@ short.
   few minutes.
 - **No walls of text.** A visible paragraph runs to three lines at most. Anything longer becomes bullets or goes into
   a `<details>` under the line it supports.
+- **Short sentences.** No sentence in the visible part of **In short** and **What changes and why** runs over 30
+  words, and each sentence says one thing about the change as it is now: not how the PR got there (an earlier
+  version, a dropped approach), not the review itself (who reviewed, which checks ran; that goes in **Reviews** and
+  **Verified**), and not reassurance with no fact the reader acts on.
 - **Folded blocks.** Each decision, cost or risk, review and update is a folded block (markup below): its summary
   line names it and gives the verdict or handling, and stands alone; the body holds the reasoning, scenarios,
   evidence, code, numbers and findings.
@@ -71,7 +77,7 @@ Use these `h2` headings, in this order, worded as here. Inside a section, use `h
 
 | # | `h2` heading | What it holds |
 |---|---|---|
-| 1 | **In short** | First, two or three plain sentences that tell the story: what the thing being changed is and does today, what goes wrong or is missing, and what this PR makes different. Then five or six bullets, readable in 30 seconds: what the PR does, for whom, why now, what the owner must decide (or "nothing to decide"), and what is not done yet. |
+| 1 | **In short** | First, two or three plain sentences that tell the story: what the thing being changed is and does today, what goes wrong or is missing, and what this PR makes different. Then at most five bullets of at most 25 words each, readable in 30 seconds: what the PR does, for whom, why now, what the owner must decide (or "nothing to decide"), and what is not done yet. |
 | 2 | **What changes and why** | The essence. Before and after, with a diagram, and the reasons as bullets, each with its provenance mark. Small changes as bullets. What it deliberately does not change. |
 | 3 | **How it works** | The mechanism, with diagrams: flow, sequence, data, where it runs. One `h3` per mechanism. Tables for structured facts (what each counter or field means). Extra essence sections, if any (for example, infrastructure the PR needs), go here as `h3`s or as `h2`s right after this one. |
 | 4 | **Decisions** | One folded block per decision. Open ones first, marked `needs-decision`: the summary line is the question and the recommendation; the body has the options, what each costs, and why. Then the ones taken, marked `decided`: the summary line is what was chosen; the body has the alternatives and why. |
@@ -92,9 +98,15 @@ In **Where to look**, each file is named once, by its full path from the repo ro
 a line number after it (`run.py:40-52`) is fine.
 
 `guild review doc` refuses a doc whose first `h2` is not **In short**, that has **Changes since the last review**
-before the owner's review or anywhere but last, or whose **Where to look** names a file twice, gives a path not from
-the repo root, or, when the PR has a review worktree, a path the commit in `pr-head` does not have. Whether the doc
-reads plainly and holds no leftovers of an earlier design no check can tell: that stays the writer's job.
+before the owner's review or anywhere but last, whose **In short** has more than five bullets or a bullet over 25
+words, that has a sentence over 30 words in the visible part of **In short** and **What changes and why** (fold
+bodies, diagrams and code blocks are not counted; the limits are the install's `doc_in_short_max_bullets`,
+`doc_bullet_max_words` and `doc_sentence_max_words`), or whose **Where to look** names a file twice, gives a path
+not from the repo root, or, when the PR has a review worktree, a path the commit in `pr-head` does not have.
+Once registered, where the install has a classifier key, each visible sentence of those two sections is screened for
+telling the PR's history, being about the review process, or stacking subordinate clauses; each flagged sentence is
+printed back quoted, as a warning. The screen misses things and can be wrong: whether the doc reads plainly stays
+the writer's job.
 
 A section with nothing in it says so in one line rather than disappearing, except **Decisions** and **Changes since
 the last review**, which are left out when empty.

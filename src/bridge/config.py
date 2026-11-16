@@ -137,11 +137,19 @@ class Config:
     shadow_filter_threshold: float = 0.2
     """A message the model gives at least this chance of needing the lead now would go at once."""
     shadow_filter_key_file: str = ""
-    """File holding the model's API key (~ allowed); read for each call, never copied."""
+    """File holding the classifier's API key (~ allowed); read for each call, never copied; doc_screen uses it too."""
     ask_autoclose_decision: str = ""
     """The owner's decision that verified asks close by themselves (e.g. "Q#12"), cited in each automatic close."""
     asks_panel_max: int = 10
     """Asks the page's Asks panel lists as needing attention; past it, the panel says how many more."""
+    doc_screen: bool = False
+    """Sends each visible sentence of a registered review doc to the classifier (shadow_filter_url) and prints the
+    sentences it flags as warnings. Needs shadow_filter_key_file."""
+    doc_in_short_max_bullets: int = 5
+    doc_bullet_max_words: int = 25
+    """For each In short bullet."""
+    doc_sentence_max_words: int = 30
+    """For each sentence of a review doc's visible top: In short and What changes and why, folds left out."""
 
     @property
     def owner_name_at_start(self) -> str:
@@ -288,7 +296,11 @@ def map_toml_to_config(raw: dict[str, object]) -> Config:
         shadow_filter_threshold=_fraction(raw, "shadow_filter_threshold", defaults.shadow_filter_threshold),
         shadow_filter_key_file=_str(raw, "shadow_filter_key_file", defaults.shadow_filter_key_file),
         ask_autoclose_decision=_str(raw, "ask_autoclose_decision", defaults.ask_autoclose_decision),
-        asks_panel_max=_positive_int(raw, "asks_panel_max", defaults.asks_panel_max),
+        asks_panel_max=_positive(raw, "asks_panel_max", defaults.asks_panel_max),
+        doc_screen=_bool(raw, "doc_screen", defaults.doc_screen),
+        doc_in_short_max_bullets=_positive(raw, "doc_in_short_max_bullets", defaults.doc_in_short_max_bullets),
+        doc_bullet_max_words=_positive(raw, "doc_bullet_max_words", defaults.doc_bullet_max_words),
+        doc_sentence_max_words=_positive(raw, "doc_sentence_max_words", defaults.doc_sentence_max_words),
     )
 
 
@@ -299,16 +311,18 @@ def _int(raw: dict[str, object], key: str, default: int) -> int:
     return value
 
 
+def _positive(raw: dict[str, object], key: str, default: int) -> int:
+    value = _int(raw, key, default)
+    if value < 1:
+        raise ValueError(f"{key} must be at least 1")
+    return value
+
+
 def _fraction(raw: dict[str, object], key: str, default: float) -> float:
     value = raw.get(key, default)
     if not isinstance(value, (int, float)) or isinstance(value, bool) or not 0 <= value <= 1:
         raise ValueError(f"{key} must be a number from 0 to 1")
     return float(value)
-def _positive_int(raw: dict[str, object], key: str, default: int) -> int:
-    value = _int(raw, key, default)
-    if value < 1:
-        raise ValueError(f"{key} must be 1 or more")
-    return value
 
 
 def _bool(raw: dict[str, object], key: str, default: bool) -> bool:

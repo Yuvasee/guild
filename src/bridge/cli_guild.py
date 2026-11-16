@@ -43,6 +43,7 @@ from bridge.colleague_comments import (
 from bridge.config import Config, Remote, db_path, load_config, state_dir
 from bridge.context_watch import map_screen_to_model_pct
 from bridge.db import connect, now_ms, transaction
+from bridge.doc_screen import screen_doc_for_warnings
 from bridge.dream import (
     FAILED,
     OK,
@@ -116,6 +117,7 @@ from bridge.leads import (
 )
 from bridge.refs import map_text_to_ref
 from bridge.registry import is_english_name, list_sessions, reconcile
+from bridge.review_doc_check import find_doc_warnings, read_visible_top
 from bridge.review_post import (
     ReviewError,
     map_arg_to_ref,
@@ -1256,10 +1258,12 @@ def cmd_review_doc(args: argparse.Namespace, conn: sqlite3.Connection, config: C
     with transaction(conn):
         ref = map_arg_to_ref(conn, str(args.pr))
         source = Path(str(args.file)).expanduser()
-        register_doc(conn, config, ref, source, now_ms())
+        page = register_doc(conn, config, ref, source, now_ms())
         loc = int(conn.execute("SELECT loc FROM review_prs WHERE ref = ?", (ref,)).fetchone()["loc"] or 0)
     print(f"{ref}: document registered")
-    terms = count_doc_terms(source.read_bytes())
+    for warning in find_doc_warnings(read_visible_top(page)[1]) + screen_doc_for_warnings(page, config):
+        print(f"warning: {warning}", file=sys.stderr)
+    terms = count_doc_terms(page)
     if loc >= REVIEW_LARGE_LOC and terms < DOC_MIN_TERMS:
         print(
             f"warning: {terms} click terms for a PR of {loc} lines; {config.owner_name} reads it without knowing the "
