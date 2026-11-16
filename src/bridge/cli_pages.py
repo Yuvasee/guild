@@ -66,7 +66,7 @@ def cmd_page_add(args: argparse.Namespace, conn: sqlite3.Connection, config: Con
         )
         styled = add_doc_style_to_page(page.source_dir)
     if styled is not None:
-        print(f"added the shared doc style to {styled}" + ("; republish it to show" if page.artifact_url else ""))
+        print(styled + ("; republish it to show" if page.artifact_url and styled.startswith("added") else ""))
     if page.artifact_url:
         print(f"{PAGES_BASE_URL}{page.slug} → {page.artifact_url}")
     else:

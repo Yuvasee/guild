@@ -28,7 +28,8 @@
 --ds-add:#aff5b4;--ds-add-bg:#033a16;--ds-del:#ffdcd7;--ds-del-bg:#67060c;--ds-hunk:#79c0ff;--ds-hunk-bg:#0c2d6b}
 
 /* No lines. The script lifts .ds-measure for a moment to see which boxes had a border and tints them instead. */
-:root:not(.ds-measure) body *{border-style:none!important;outline-style:none!important}
+:root:not(.ds-measure) body *:not(.ds-keep,[data-ds-skip],[data-ds-skip] *){border-style:none!important;
+outline-style:none!important}
 :root:not(.ds-measure) hr{height:0!important;background:none!important;margin:1.6em 0}
 :root:not(.ds-measure) table{border-collapse:separate!important;border-spacing:0!important}
 :root body *:focus-visible{outline:2px solid var(--ds-focus)!important;outline-offset:2px}

@@ -530,9 +530,10 @@ function dot(item, tiny) {
 
 // Agent text, never HTML: every piece goes in as text, so markup in it shows as typed. Bold, `code`, lists, links,
 // and PR and Q# references as chips.
-const MD_INLINE = /(`[^`\n]+`)|\*\*([^*\n]+)\*\*|\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<>"')\]]+[^\s<>"')\].,;:!?])|\b(Q#\d+)\b|((?:[\w.-]+\/)?[\w.-]*[A-Za-z][\w.-]*#\d+\b|(?<![\w#&])#\d{2,6}\b)/g;
+const MD_INLINE = /(`[^`\n]+`)|\*\*([^*\n]+)\*\*|\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<>"')\]]+[^\s<>"')\].,;:!?])|\b(Q#\d+)\b|(\b(?:[\w.-]+\/)?[A-Za-z][\w.-]*#\d+\b|(?<![\w#&])#\d{2,6}\b)/g;
 
-function renderInline(text) {
+// Inside an answer button a link would answer the question when opened, so links there stay text.
+function renderInline(text, plain) {
   const parts = [];
   let at = 0;
   for (const m of String(text).matchAll(MD_INLINE)) {
@@ -540,10 +541,11 @@ function renderInline(text) {
     if (m[1]) parts.push(el("code", "", m[1].slice(1, -1)));
     else if (m[2]) {
       const strong = el("strong");
-      strong.append(...renderInline(m[2]));
+      strong.append(...renderInline(m[2], plain));
       parts.push(strong);
     }
-    else if (m[3]) parts.push(linkTo(m[4], m[3]));
+    else if (m[3]) parts.push(plain ? m[3] : linkTo(m[4], m[3]));
+    else if (m[5] && plain) parts.push(shortUrl(m[5]));
     else if (m[5]) parts.push(/^https:\/\/github\.com\/[^/]+\/[^/]+\/(pull|issues)\/\d+$/.test(m[5])
       ? linkTo(m[5], shortUrl(m[5]), "chip") : linkTo(m[5], shortUrl(m[5])));
     else parts.push(el("span", "chip", m[6] || m[7]));
@@ -596,7 +598,7 @@ function renderDecisionCard(need, card, send) {
     for (const words of [option.cost, option.pick ? c.pick_why && "Why: " + c.pick_why : null]) {
       if (!words) continue;
       const cost = el("span", "cost");
-      cost.append(...renderInline(words));
+      cost.append(...renderInline(words, true));
       button.append(cost);
     }
     button.onclick = () => send(option.label);

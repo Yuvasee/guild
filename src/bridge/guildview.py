@@ -626,7 +626,11 @@ def map_sections_to_card(sections: list[dict[str, object]], options: list[str]) 
         if named is not None and named not in costs:
             costs[named] = text
             continue
-        chosen = next((o for o in by_length if text.startswith(o)), None) if label == PICK_LABEL else None
+        chosen = (
+            next((o for o in by_length if re.match(rf"{re.escape(o)}(?!\w)", text)), None)
+            if label == PICK_LABEL
+            else None
+        )
         if chosen is not None and picked is None:
             picked = chosen
             pick_why = text[len(chosen) :].lstrip(" .:;,\u2014\u2013-").strip() or None

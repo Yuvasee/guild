@@ -169,7 +169,7 @@
   }
   function borders() {
     root.classList.add("ds-measure");
-    var all = document.body.getElementsByTagName("*"), tint = [], under = [];
+    var all = document.body.getElementsByTagName("*"), tint = [], under = [], keep = [];
     for (var i = 0; i < all.length; i++) {
       var el = all[i];
       if (!(el instanceof HTMLElement) || BOXLESS.test(el.tagName) ||
@@ -177,18 +177,24 @@
       var cs = getComputedStyle(el), on = ["Top", "Right", "Bottom", "Left"].map(function (s) {
         return cs["border" + s + "Style"] !== "none" && parseFloat(cs["border" + s + "Width"]) > 0;
       });
-      if (on[0] && on[1] && on[2] && on[3]) {
+      if (!(on[0] || on[1] || on[2] || on[3])) continue;
+      // An empty element drawn by its borders (a CSS triangle, a connector line) is a picture, not a frame.
+      if (!el.firstElementChild && !el.textContent.trim()) keep.push(el);
+      else if (on[0] && on[1] && on[2] && on[3]) {
         if (!opaque(cs.backgroundColor) || Math.abs(luma(cs.backgroundColor) - luma(behind(el))) < 10) tint.push(el);
       } else if (on[2] && !on[0] && !on[1] && !on[3] && cs.display === "inline") under.push(el);
     }
     root.classList.remove("ds-measure");
     tint.forEach(function (el) { el.classList.add("ds-tint"); });
     under.forEach(function (el) { el.classList.add("ds-under"); });
+    keep.forEach(function (el) { el.classList.add("ds-keep"); });
   }
 
   function stickyTop() {
     var nav = document.getElementById("bridge-doc-nav");
-    if (nav && /sticky|fixed/.test(getComputedStyle(nav).position)) root.style.setProperty("--ds-sticky-top", nav.offsetHeight + "px");
+    // The side bar is fixed too, but full height: only a bar across the top covers table headers.
+    var top = nav && /sticky|fixed/.test(getComputedStyle(nav).position) && nav.offsetWidth > root.clientWidth / 2;
+    root.style.setProperty("--ds-sticky-top", top ? nav.offsetHeight + "px" : "0px");
   }
 
   function start() {
@@ -197,7 +203,8 @@
     theme(); borders(); links(); inlineCode(); chips(); callouts(); blocks(); stickyTop();
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start); else start();
-  window.addEventListener("load", theme);
+  window.addEventListener("load", function () { theme(); stickyTop(); });
+  window.addEventListener("resize", stickyTop);
   var dark = window.matchMedia && matchMedia("(prefers-color-scheme: dark)");
   if (dark && dark.addEventListener) dark.addEventListener("change", function () { setTimeout(theme, 0); });
 })();

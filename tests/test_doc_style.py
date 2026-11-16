@@ -10,6 +10,7 @@ from test_leads import Team
 from test_status_watchers import STUBS
 
 from bridge.doc_nav import DOC_STYLE_ID, VIEW_ID, build_doc_style, convert_doc_to_viewable
+from bridge.guildview import map_body_to_sections, map_sections_to_card
 from bridge.pages import add_doc_style_to_page
 
 WEB = Path(__file__).parent.parent / "src/bridge/web"
@@ -34,6 +35,7 @@ def test_the_style_draws_no_borders_or_rules() -> None:
     assert not re.search(r"border(?:-(?:top|right|bottom|left))?\s*:\s*(?!0\b|none)", css)
     assert not re.search(r"box-shadow\s*:\s*inset", css)
     assert "border-style:none!important" in css
+    assert "body *:not(.ds-keep,[data-ds-skip],[data-ds-skip] *)" in css, "drawings and opted-out parts keep borders"
 
 
 DOM = """
@@ -88,11 +90,21 @@ def test_the_highlighter_loads_only_for_a_doc_with_a_code_block(tmp_path: Path) 
 def test_registering_a_page_inlines_the_style_once(tmp_path: Path) -> None:
     page = tmp_path / "index.html"
     page.write_text("<!doctype html><html><head><title>t</title></head><body class='x'><p>hi</p></body></html>")
-    assert add_doc_style_to_page(str(tmp_path)) == page
+    page.chmod(0o600)
+    assert add_doc_style_to_page(str(tmp_path)) == f"added the shared doc style to {page}"
+    assert page.stat().st_mode & 0o777 == 0o600
     styled = page.read_text()
     assert styled.startswith("<!doctype html><html><head><title>t</title></head><body class='x'><style id=")
     assert add_doc_style_to_page(str(tmp_path)) is None
     assert page.read_text() == styled and styled.count(f'id="{DOC_STYLE_ID}"') == 1
+
+
+def test_a_page_not_in_utf8_is_registered_unstyled(tmp_path: Path) -> None:
+    page = tmp_path / "index.html"
+    page.write_bytes('<meta charset="windows-1251"><body>\u043f\u0440\u0438\u0432\u0435\u0442</body>'.encode("cp1251"))
+    before = page.read_bytes()
+    assert add_doc_style_to_page(str(tmp_path)) == f"left {page} without the shared doc style: it is not UTF-8"
+    assert page.read_bytes() == before
 
 
 def test_the_cli_says_when_it_styled_a_page(bridge_env: BridgeEnv, spawn_process: SpawnProcess, tmp_path: Path) -> None:
@@ -126,6 +138,14 @@ eq(find(box, (n) => n.tag === "code").map((n) => n.textContent), ["a<b>"]);
 eq(find(box, (n) => n.className === "chip").map((n) => n.textContent), ["Q#12", "acme/web#3", "#405", "acme/web#5"]);
 eq(find(box, (n) => n.tag === "a").map((n) => n.href), ["https://github.com/acme/web/pull/5"]);
 eq(find(box, (n) => n.tag === "li").length, 3);
+const started = Date.now();
+renderInline("a".repeat(2000) + " " + "b-".repeat(1000));
+eq(Date.now() - started < 200, true);
+const card = node("div");
+renderDecisionCard({ card: { intro: null, facts: [], pick_why: "see [plan](https://example.com/p)",
+  options: [{ label: "Ship", cost: "see https://github.com/acme/web/pull/5", pick: true }] } }, card, () => {});
+eq(find(card, (n) => n.tag === "a").length, 0);
+eq(texts(card).join(" ").includes("acme/web#5"), true);
 """
 
 
@@ -173,6 +193,16 @@ def test_decision_fields_reach_the_card_and_old_posts_stay_text(
     }
     assert card["options"] == ["Ship", "Wait", "Drop"]
     assert card["links"] == [{"label": "PR", "url": "https://github.com/acme/web/pull/7"}]
+
+
+def test_a_pick_names_a_whole_answer() -> None:
+    options = ["Ship", "Wait"]
+    body = "My pick: Shipping now would be unsafe; wait."
+    card = map_sections_to_card(map_body_to_sections(body, options), options)
+    assert card is not None and not any(o["pick"] for o in card["options"])
+    assert card["facts"] == [{"label": "My pick", "text": "Shipping now would be unsafe; wait."}]
+    card = map_sections_to_card(map_body_to_sections("My pick: Ship: same risk.", options), options)
+    assert card is not None and card["options"][0]["pick"] and card["pick_why"] == "same risk."
 
 
 def test_decision_fields_are_checked(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:
