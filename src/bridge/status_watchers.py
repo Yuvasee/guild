@@ -96,6 +96,19 @@ def map_json_to_status(data: object) -> dict[str, object]:
 
 
 STALE_GRACE_MS = 10 * 60_000
+SLEPT_GAP_MS = 2 * 60_000
+"""A longer pause between two alert rounds means the Mac slept (rounds run every 30 s)."""
+_awake: dict[str, int] = {}
+"""When this process last ran a round, and since when it has run without a sleep-sized gap."""
+
+
+def note_awake(now: int) -> int:
+    """Since when the Mac has been awake without a gap: a watcher's job gets its turn only once the Mac is up."""
+    last = _awake.get("last")
+    if last is None or now - last > SLEPT_GAP_MS:
+        _awake["since"] = now
+    _awake["last"] = now
+    return _awake["since"]
 
 
 def alert_watchers(conn: sqlite3.Connection, config: Config, now: int) -> list[tuple[int, Recipient]]:
@@ -110,6 +123,7 @@ def alert_watchers(conn: sqlite3.Connection, config: Config, now: int) -> list[t
     if not config.watcher_alert_to:
         return []
     sent: list[tuple[int, Recipient]] = []
+    awake_since = note_awake(now)
     for watcher in config.watchers:
         shown = read_watcher(watcher, now)
         name, state = str(shown["name"]), str(shown["state"])
@@ -138,8 +152,8 @@ def alert_watchers(conn: sqlite3.Connection, config: Config, now: int) -> list[t
             since = int(row[0])
         summary = _summarize(shown)
         alert_key = f"alert {config.watcher_alert_to}"
-        # After the Mac sleeps, every watcher reads stale until its job's next run: wait one grace before telling.
-        if state == "stale" and alert_key not in told and now - since < STALE_GRACE_MS:
+        # After the Mac sleeps, every watcher reads stale until its job's next run: wait one grace of the Mac awake.
+        if state == "stale" and alert_key not in told and now - max(since, awake_since) < STALE_GRACE_MS:
             continue
         if alert_key not in told:
             detail = f" {shown['detail']}" if state == "failed" and shown.get("detail") else ""

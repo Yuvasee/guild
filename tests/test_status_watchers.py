@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 from test_capacity import add_session
 
+from bridge import status_watchers
 from bridge.config import Config, PageLink, Watcher, map_toml_to_config
 from bridge.db import connect
 from bridge.status_watchers import MAX_FILE_BYTES, alert_watchers, read_watcher
@@ -309,6 +310,7 @@ MIN = 60_000
 @pytest.fixture
 def conn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[sqlite3.Connection]:
     monkeypatch.setenv("BRIDGE_STATE_DIR", str(tmp_path))
+    status_watchers._awake.clear()
     c = connect(tmp_path / "bridge.db")
     add_session(c, "tooling", "TAB-T", "idle", 0, pid=901)
     add_session(c, "aide", "TAB-A", "idle", 0, pid=902)
@@ -379,6 +381,7 @@ def test_back_to_ok_before_the_escalation_tells_only_the_first_one(conn: sqlite3
 def test_stale_and_missing_count_as_not_ok(conn: sqlite3.Connection, tmp_path: Path) -> None:
     config = _job(tmp_path, "ok", NOW - 30 * MIN)
     assert alert_watchers(conn, config, NOW) == [], "stale waits one grace: a Mac waking from sleep reads stale"
+    stay_awake(NOW, NOW + 10 * MIN)
     assert len(alert_watchers(conn, config, NOW + 10 * MIN)) == 1
     assert re.match(
         r"nightly sync watch: stale: last run [\d-]+ [\d:]+, over its 20-min limit \(since ", _told(conn)[0][1]
@@ -388,6 +391,20 @@ def test_stale_and_missing_count_as_not_ok(conn: sqlite3.Connection, tmp_path: P
     missing = replace(config, watchers=(Watcher(path=str(tmp_path / "gone.json"), name="backup"),))
     alert_watchers(conn, missing, NOW + 12 * MIN)
     assert _told(conn)[-1][1].startswith("backup watch: missing: no status file (since ")
+
+
+def stay_awake(start: int, end: int) -> None:
+    for at in range(start, end, 30_000):
+        status_watchers.note_awake(at)
+
+
+def test_the_stale_grace_counts_only_time_the_mac_is_awake(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    config = _job(tmp_path, "ok", NOW - 30 * MIN)
+    stay_awake(NOW - MIN, NOW)
+    assert alert_watchers(conn, config, NOW) == [], "a brief wake starts the spell"
+    assert alert_watchers(conn, config, NOW + 16 * MIN) == [], "after a sleep the grace starts again"
+    stay_awake(NOW + 16 * MIN, NOW + 26 * MIN)
+    assert len(alert_watchers(conn, config, NOW + 26 * MIN)) == 1
 
 
 def test_a_stale_watcher_that_runs_again_within_the_grace_tells_nobody(
@@ -413,6 +430,7 @@ def test_an_alert_that_reached_nobody_is_tried_again_and_the_assistant_hears_so(
 ) -> None:
     config = replace(_job(tmp_path, "failed", NOW), watcher_alert_to="nobody-here")
     assert alert_watchers(conn, config, NOW) == []
+    stay_awake(NOW, NOW + 60 * MIN)
     assert alert_watchers(conn, config, NOW + 60 * MIN) != []
     assert _told(conn)[-1][1].endswith("nobody-here could not be reached.")
     assert alert_watchers(conn, replace(config, watcher_alert_to="tooling"), NOW + 61 * MIN) != []
