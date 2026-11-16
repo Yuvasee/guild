@@ -1,6 +1,7 @@
 """Shadow of a wake-up filter for messages to team leads: decides what a filter would hold back and logs it, after the
 message went out as usual. Nothing here changes or delays delivery."""
 
+import http.client
 import json
 import re
 import sqlite3
@@ -38,7 +39,13 @@ _SECRET_RES: tuple[tuple[re.Pattern[str], str | Callable[[re.Match[str]], str]],
         ),
         "[secret]",
     ),
-    (re.compile(r"(?i)\b(password|passwd|pwd|secret|token|api[_-]?key|authorization)\s*[:=]\s*\S+"), r"\1=[secret]"),
+    (
+        re.compile(
+            r"(?i)\b(password|passwd|pwd|secret|token|api[_-]?key|authorization)[\"']?\s*[:=]\s*(?:bearer\s+)?\S+"
+        ),
+        r"\1=[secret]",
+    ),
+    (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}"), "Bearer [secret]"),
     (re.compile(r"(?i)\b(mongodb(\+srv)?|postgres(ql)?|mysql|redis|amqp)://\S+"), "[connection-string]"),
     (re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"), "[email]"),
     (
@@ -47,8 +54,8 @@ _SECRET_RES: tuple[tuple[re.Pattern[str], str | Callable[[re.Match[str]], str]],
     ),
 )
 _CUSTOMER_TEXT_RE = re.compile(
-    r"(?i)(customer (said|wrote|asked)|user (said|wrote|asked)|conversation text|transcript of|\"role\"\s*:"
-    r"|\buser:\s|\bassistant:\s|message content:|the (bot|agent) (replied|answered):)"
+    r"(?im)((customer|user|client) (said|says|wrote|writes|asked|asks)|conversation text|transcript of|\"role\"\s*:"
+    r"|\buser:\s|\bassistant:\s|^\s*(customer|client):|message content:|the (bot|agent) (replied|answered):)"
 )
 TASK = (
     "You triage messages delivered to an AI team lead: a Claude Code session that coordinates worker sessions on a "
@@ -164,7 +171,11 @@ def ask_model(url: str, key_file: str, state: str, timeout_s: float = CALL_TIMEO
     """The key is read for each call and kept nowhere; an error text never carries it."""
     started = time.monotonic()
 
+    key = ""
+
     def failed(error: str) -> Verdict:
+        for part in key.split():
+            error = error.replace(part, "[key]")
         return Verdict(p_now=None, error=error[:200], latency_ms=round((time.monotonic() - started) * 1000))
 
     try:
@@ -181,19 +192,25 @@ def ask_model(url: str, key_file: str, state: str, timeout_s: float = CALL_TIMEO
         with urllib.request.urlopen(request, timeout=timeout_s) as response:
             answer = json.loads(response.read())
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode(errors="replace")[:300]
-        return failed(f"http {exc.code}: {scrub(detail.replace(key, '[key]'))}")
+        try:
+            detail = exc.read().decode(errors="replace")[:300]
+        except (OSError, http.client.HTTPException):
+            detail = ""
+        return failed(f"http {exc.code}: {scrub(detail)}")
     except TimeoutError:
         return failed("timeout")
     except urllib.error.URLError as exc:
         reason = "timeout" if isinstance(exc.reason, TimeoutError) else str(exc.reason)
         return failed(reason)
-    except (OSError, ValueError) as exc:
-        return failed(f"{type(exc).__name__}: {exc}")
+    except (OSError, ValueError, http.client.HTTPException) as exc:
+        # The name only: a malformed key shows up in the text of some of these.
+        return failed(type(exc).__name__)
     try:
         p_now = float(answer["answers"]["reaction"]["probabilities"]["now"])
     except (KeyError, TypeError, ValueError):
         return failed("no probability for 'now' in the answer")
+    if not 0 <= p_now <= 1:
+        return failed(f"probability for 'now' out of range: {p_now}")
     return Verdict(p_now=p_now, error=None, latency_ms=round((time.monotonic() - started) * 1000))
 
 
@@ -258,9 +275,17 @@ def append_rows(rows: list[dict[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists() and path.stat().st_size >= LOG_MAX_BYTES:
         path.replace(path.with_name(LOG_NAME + ".1"))
-    with path.open("a", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row) + "\n")
+    with path.open("ab") as f:
+        if f.tell() > 0 and not _ends_with_newline(path):
+            # A write cut short by a crash: the next row must not join its fragment.
+            f.write(b"\n")
+        f.write("".join(json.dumps(row) + "\n" for row in rows).encode())
+
+
+def _ends_with_newline(path: Path) -> bool:
+    with path.open("rb") as f:
+        f.seek(-1, 2)
+        return f.read(1) == b"\n"
 
 
 def find_start_id(conn: sqlite3.Connection) -> int:
@@ -290,7 +315,11 @@ def read_rows() -> list[dict[str, object]]:
 
 
 def map_rows_to_report(rows: list[dict[str, object]], since_ms: int) -> list[str]:
-    rows = [r for r in rows if isinstance(at := r.get("at"), int) and at >= since_ms]
+    # A tick that failed halfway judges its messages again: the last verdict per delivery counts.
+    recent = {
+        (r.get("message"), r.get("lead")): r for r in rows if isinstance(at := r.get("at"), int) and at >= since_ms
+    }
+    rows = list(recent.values())
     if not rows:
         return ["no decisions logged in this period"]
     messages = {r["message"] for r in rows}
@@ -299,12 +328,14 @@ def map_rows_to_report(rows: list[dict[str, object]], since_ms: int) -> list[str
     model = [r for r in rows if r.get("source") == "model"]
     batched = [r for r in rows if r.get("decision") == BATCH]
     errors = [r for r in model if r.get("error")]
-    latencies = sorted(ms for r in model if isinstance(ms := r.get("latency_ms"), int))
+    # One call per message, though a board post logs a row for each lead.
+    calls = {r.get("message"): ms for r in model if isinstance(ms := r.get("latency_ms"), int)}
+    latencies = sorted(calls.values())
     lines = [
-        f"deliveries to leads: {len(rows)} ({len(messages)} messages)",
+        f"messages to leads: {len(messages)} ({len(rows)} lead deliveries)",
         f"by rule: {sources['rule']} ({', '.join(f'{k} {v}' for k, v in rules.most_common())})",
         f"by model: {len(model)}; skipped (customer text): {sources['skipped']}",
-        f"would batch: {len(batched)} = {_share(len(batched), len(rows))} of deliveries, "
+        f"would batch: {len(batched)} = {_share(len(batched), len(rows))} of lead deliveries, "
         f"{_share(len(batched), len(model))} of model decisions",
     ]
     if latencies:

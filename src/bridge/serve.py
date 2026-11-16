@@ -485,7 +485,8 @@ class DashboardState:
                         conn, self.config, after, now_ms(), lambda state: ask_shadow_model(url, key_file, state)
                     )
             except Exception as exc:
-                # Any failure: an escaped exception would end the shadow log until restart.
+                # Any failure: an escaped exception would end the shadow log until restart. The log says how far it got.
+                after = None
                 print(f"shadow filter failed: {exc}", flush=True)
                 log_error("shadow filter", traceback.format_exc())
             time.sleep(SHADOW_EVERY_S)

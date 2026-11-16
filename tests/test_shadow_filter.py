@@ -131,8 +131,33 @@ def test_secrets_are_scrubbed_before_the_model_sees_the_text(conn: sqlite3.Conne
     assert "[secret]" in state and "[email]" in state and "[connection-string]" in state
 
 
-def test_a_message_quoting_a_customer_is_never_sent_and_logged_now(conn: sqlite3.Connection) -> None:
-    _send(conn, 'the customer said "my card was charged twice"')
+@pytest.mark.parametrize(
+    "body",
+    [
+        'config {"password": "hunter2-invented"}',
+        "Authorization: Bearer hunter2-invented",
+        "curl -H bearer hunter2-invented",
+    ],
+)
+def test_quoted_and_bearer_credentials_are_scrubbed(conn: sqlite3.Connection, body: str) -> None:
+    _send(conn, body)
+    model = FakeModel(0.1)
+
+    run_shadow_tick(conn, CONFIG, 0, NOW, model)
+
+    assert "hunter2" not in model.states[0]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'the customer said "my card was charged twice"',
+        'The customer says "where is my order"',
+        "Ticket:\nCustomer: my card was charged twice",
+    ],
+)
+def test_a_message_quoting_a_customer_is_never_sent_and_logged_now(conn: sqlite3.Connection, body: str) -> None:
+    _send(conn, body)
 
     run_shadow_tick(conn, CONFIG, 0, NOW, _no_call)
 
@@ -188,22 +213,47 @@ def test_a_restart_resumes_where_the_log_left_off_and_skips_old_messages(conn: s
     assert stale not in [r["message"] for r in read_rows()]
 
 
-def test_the_report_counts_rules_model_batches_latency_and_errors() -> None:
+def test_the_report_counts_each_delivery_once_by_rule_model_batch_latency_and_error() -> None:
     rows: list[dict[str, object]] = [
-        {"at": NOW, "message": 1, "source": "rule", "rule": "kind:request", "decision": "now"},
-        {"at": NOW, "message": 2, "source": "model", "decision": "batch", "p_now": 0.1, "latency_ms": 200},
-        {"at": NOW, "message": 2, "source": "model", "decision": "batch", "p_now": 0.1, "latency_ms": 200},
-        {"at": NOW, "message": 3, "source": "model", "decision": "now", "p_now": 0.7, "latency_ms": 300},
-        {"at": NOW, "message": 4, "source": "model", "decision": "now", "latency_ms": 3000, "error": "timeout"},
-        {"at": NOW, "message": 5, "source": "skipped", "decision": "now"},
-        {"at": NOW - 10, "message": 0, "source": "model", "decision": "batch", "latency_ms": 1},
+        {"at": NOW, "message": 1, "lead": "ana", "source": "rule", "rule": "kind:request", "decision": "now"},
+        {"at": NOW, "message": 2, "lead": "ana", "source": "model", "decision": "batch", "p_now": 0.1, "latency_ms": 9},
+        {
+            "at": NOW,
+            "message": 2,
+            "lead": "ana",
+            "source": "model",
+            "decision": "batch",
+            "p_now": 0.1,
+            "latency_ms": 200,
+        },
+        {
+            "at": NOW,
+            "message": 2,
+            "lead": "ben",
+            "source": "model",
+            "decision": "batch",
+            "p_now": 0.1,
+            "latency_ms": 200,
+        },
+        {"at": NOW, "message": 3, "lead": "ana", "source": "model", "decision": "now", "p_now": 0.7, "latency_ms": 300},
+        {
+            "at": NOW,
+            "message": 4,
+            "lead": "ana",
+            "source": "model",
+            "decision": "now",
+            "latency_ms": 3000,
+            "error": "timeout",
+        },
+        {"at": NOW, "message": 5, "lead": "ana", "source": "skipped", "decision": "now"},
+        {"at": NOW - 10, "message": 0, "lead": "ana", "source": "model", "decision": "batch", "latency_ms": 1},
     ]
 
     assert map_rows_to_report(rows, NOW) == [
-        "deliveries to leads: 6 (5 messages)",
+        "messages to leads: 5 (6 lead deliveries)",
         "by rule: 1 (kind:request 1)",
         "by model: 4; skipped (customer text): 1",
-        "would batch: 2 = 33% of deliveries, 50% of model decisions",
+        "would batch: 2 = 33% of lead deliveries, 50% of model decisions",
         "model latency ms: p50 300, p95 3000",
         "model errors (logged as now): 1",
         "  1 x timeout",
@@ -295,6 +345,35 @@ def test_a_missing_key_file_or_bad_answer_is_an_error(api: tuple[str, str], tmp_
     assert ask_model(url, str(tmp_path / "none"), "x").error == "key file unreadable: FileNotFoundError"
     _Api.reply = (200, {"answers": {}})
     assert ask_model(url, key_file, "x").error == "no probability for 'now' in the answer"
+
+
+def test_a_probability_out_of_range_is_an_error(api: tuple[str, str]) -> None:
+    url, key_file = api
+    for bad in (-0.1, 1.5):
+        _Api.reply = (200, {"answers": {"reaction": {"probabilities": {"now": bad}}}})
+        verdict = ask_model(url, key_file, "x")
+        assert verdict.p_now is None and "out of range" in str(verdict.error)
+
+
+def test_a_malformed_key_never_shows_in_the_error(api: tuple[str, str], tmp_path: Path) -> None:
+    url, _ = api
+    key_file = tmp_path / "two-line-key"
+    key_file.write_text("fake-part-one\nfake-part-two\n")
+
+    verdict = ask_model(url, str(key_file), "x")
+
+    assert verdict.p_now is None and verdict.error is not None
+    assert "fake-part" not in verdict.error
+
+
+def test_a_row_cut_short_by_a_crash_does_not_swallow_the_next(conn: sqlite3.Connection) -> None:
+    log_path().parent.mkdir(parents=True, exist_ok=True)
+    log_path().write_text('{"at": 1, "mess')
+    _send(conn, "deployed")
+
+    run_shadow_tick(conn, CONFIG, 0, NOW, FakeModel(0.1))
+
+    assert [r["message"] for r in read_rows()] == [1]
 
 
 def test_config_keys_and_their_defaults() -> None:
