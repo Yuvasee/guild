@@ -84,6 +84,8 @@ from bridge.review_worktree import run_next_worktree_job
 from bridge.rewake_marks import install_waiter_script
 from bridge.serve import DEFAULT_PORT, serve
 from bridge.service import install_service, restart_service, uninstall_service
+from bridge.shadow_filter import map_rows_to_report
+from bridge.shadow_filter import read_rows as read_shadow_rows
 from bridge.tabinput import is_tab_selected, type_when_idle
 from bridge.watcher import read_tree
 from bridge.worker_api import WORKER_API_PORT, convert_bridge_commands_to_gbridge
@@ -171,6 +173,10 @@ def build_parser(config: Config) -> argparse.ArgumentParser:
     p = sub.add_parser("issue-sync", help="move Linear issues forward to match their PRs and live work")
     p.add_argument("--dry-run", action="store_true", help="print the moves without making them")
     p.set_defaults(func=cmd_issue_sync)
+
+    p = sub.add_parser("shadow-report", help="what the shadow wake-up filter decided for messages to leads")
+    p.add_argument("--days", type=float, default=7)
+    p.set_defaults(func=cmd_shadow_report)
 
     p = sub.add_parser("serve", help="run the dashboard web server")
     p.add_argument("--port", type=int, default=DEFAULT_PORT)
@@ -346,6 +352,12 @@ def cmd_issue_sync(args: argparse.Namespace, conn: sqlite3.Connection, config: C
         if recipient.pid:
             write_hint(recipient.pid, HINT_SENT)
     return 1 if report.failed or report.errors else 0
+
+
+def cmd_shadow_report(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
+    for line in map_rows_to_report(read_shadow_rows(), now_ms() - round(float(args.days) * 86_400_000)):
+        print(line)
+    return 0
 
 
 def cmd_install_hooks(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
