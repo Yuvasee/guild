@@ -133,6 +133,10 @@ class Config:
     """Folder of this install's own texts (house rules), one <slot>.md per named slot; empty uses the generic texts."""
     people_dir: str = ""
     """Local folder whose people.toml holds the keys about people (PEOPLE_KEYS); set, config.toml may not hold them."""
+    ask_autoclose_decision: str = ""
+    """The owner's decision that verified asks close by themselves (e.g. "Q#12"), cited in each automatic close."""
+    asks_panel_max: int = 10
+    """Asks the page's Asks panel lists as needing attention; past it, the panel says how many more."""
 
     @property
     def owner_name_at_start(self) -> str:
@@ -274,6 +278,8 @@ def map_toml_to_config(raw: dict[str, object]) -> Config:
         review_python_paths=_str_list(raw, "review_python_paths", defaults.review_python_paths),
         overlay_dir=_str(raw, "overlay_dir", defaults.overlay_dir),
         people_dir=_str(raw, "people_dir", defaults.people_dir),
+        ask_autoclose_decision=_str(raw, "ask_autoclose_decision", defaults.ask_autoclose_decision),
+        asks_panel_max=_int(raw, "asks_panel_max", defaults.asks_panel_max),
     )
 
 

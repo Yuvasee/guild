@@ -15,6 +15,7 @@ from bridge.asks import (
     claim_ask_done,
     close_ask,
     convert_wait_to_text,
+    drop_ask,
     get_ask,
     list_ask_events,
     list_asks,
@@ -94,6 +95,12 @@ def add_ask_commands(sub: "argparse._SubParsersAction[argparse.ArgumentParser]",
     p.add_argument("id", type=int)
     p.add_argument("--dropped", metavar="WHY", help="close an unfinished ask the owner let go, and why")
     p.set_defaults(func=cmd_ask_close)
+    p = ask_sub.add_parser(
+        "drop", help="close an unfinished ask as obsolete, with why (its owner session or the assistant)"
+    )
+    p.add_argument("id", type=int)
+    p.add_argument("why", help="why it is no longer wanted; kept in its history")
+    p.set_defaults(func=cmd_ask_drop)
     p = ask_sub.add_parser("reopen", help="back to open: the result is not what the owner asked for")
     p.add_argument("id", type=int)
     p.add_argument("--why", required=True)
@@ -212,6 +219,14 @@ def cmd_ask_close(args: argparse.Namespace, conn: sqlite3.Connection, config: Co
     return 0
 
 
+def cmd_ask_drop(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
+    actor = current_actor(conn, config)
+    with transaction(conn):
+        ask = drop_ask(conn, int(args.id), actor, str(args.why), now_ms())
+    print(f"#{ask.id} closed as dropped")
+    return 0
+
+
 def cmd_ask_reopen(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
     actor = current_actor(conn, config)
     with transaction(conn):
@@ -267,8 +282,8 @@ def convert_ask_to_text(ask: Ask, now: int, owner_name: str) -> str:
         lines.append(f"  {on} ({ask.wait_by}, {convert_ms_to_age(now - ask.wait_at)} ago): {ask.wait_why}")
     if ask.reopen_why:
         lines.append(f"  reopened: {ask.reopen_why}")
-    if ask.closed_how:
-        lines.append(f"  closed: {ask.closed_how}")
+    if ask.state == "closed":
+        lines.append(f"  closed: {ask.closed_how or 'dropped by its owner session'}")
     return "\n".join(lines)
 
 

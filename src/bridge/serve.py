@@ -547,7 +547,7 @@ class DashboardState:
 
     def nag_asks_once(self, now: int) -> None:
         with self._connection() as conn, transaction(conn):
-            close_settled_asks(conn, now, ASK_AUTOCLOSE_HOURS * 3_600_000)
+            close_settled_asks(conn, now, ASK_AUTOCLOSE_HOURS * 3_600_000, self.config.ask_autoclose_decision)
             sent = send_ask_nags(conn, self.config, now, read_owner_presence(conn, self.config, now).off)
         for message_id, recipient in sent:
             if recipient.pid:

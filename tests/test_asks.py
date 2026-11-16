@@ -10,14 +10,18 @@ from conftest import BridgeEnv, SpawnProcess, http_request
 from test_leads import Team
 
 from bridge.asks import (
+    TOLD_TO_VERIFY,
     Actor,
     AskError,
     add_ask,
     claim_ask_done,
     close_ask,
     close_settled_asks,
+    drop_ask,
+    find_asks_to_verify,
     find_overdue_asks,
     get_ask,
+    is_ask_overdue,
     list_ask_events,
     list_asks,
     map_asks_to_owner_nags,
@@ -32,6 +36,7 @@ from bridge.asks import (
     verify_ask,
     wait_ask,
 )
+from bridge.board import Recipient
 from bridge.capacity import read_owner_presence, record_owner_off, record_owner_on
 from bridge.config import Config
 from bridge.db import connect
@@ -239,13 +244,13 @@ def test_nags_follow_the_clock_and_repeat_once_per_stale_period(conn: sqlite3.Co
 
 def map_overdue_to_texts(conn: sqlite3.Connection, now: int, unreached: list[str] | None = None) -> dict[str, str]:
     asks = find_overdue_asks(conn, now, 4 * HOUR, HOUR)
-    leads = [a for a in asks if a.owner != "aide" and not (a.state == "done_claimed" and a.claim_by == a.owner)]
-    texts = {nag.to: nag.text for nag in map_asks_to_owner_nags(leads, "Theo", now)}
-    to_assistant = map_overdue_to_assistant_nag(asks, "aide", "Theo", now, unreached or [])
+    texts = {nag.to: nag.text for nag in map_asks_to_owner_nags([a for a in asks if a.owner != "aide"], "Theo", now)}
+    to_verify = find_asks_to_verify(conn, now, 24 * HOUR)
+    to_assistant = map_overdue_to_assistant_nag(asks, to_verify, "aide", "Theo", now, unreached or [])
     return texts | ({"aide": to_assistant.text} if to_assistant else {})
 
 
-def test_nag_texts_go_to_each_owner_and_the_assistant_hears_claims_and_unanswered_reminders(
+def test_nag_texts_go_to_each_owner_and_the_assistant_hears_claims_after_a_day_and_unanswered_reminders(
     conn: sqlite3.Connection,
 ) -> None:
     lead_claimed = add_ask(conn, "alex", "aide", "Reload the status page copy", "tab", [], 0).id
@@ -256,27 +261,33 @@ def test_nag_texts_go_to_each_owner_and_the_assistant_hears_claims_and_unanswere
     own = add_ask(conn, "aide", "aide", "Log today's asks", "tab", [], 0).id
     texts = map_overdue_to_texts(conn, 5 * HOUR)
     assert set(texts) == {"alex", "boris", "aide"}
-    assert f"#{lead_claimed} " not in texts["alex"]
+    assert f"#{lead_claimed} done_claimed" in texts["alex"]
+    assert "you claimed it, so another lead or the assistant verifies it" in texts["alex"]
     assert f"guild ask verify {worker_claimed} --evidence" in texts["alex"]
     assert f"#{open_one} open, no update for 5h" in texts["boris"]
     assistant_lines = texts["aide"].splitlines()
     assert assistant_lines[0].startswith("Asks from Theo waiting on you")
     assert assistant_lines[1].startswith(f'#{own} open, no update for 5h: "Log today\'s asks"')
-    assert assistant_lines[2] == "To verify, claimed done (Theo's words):"
-    assert [line.split(" ")[0] for line in assistant_lines[3:]] == [f"#{lead_claimed}", f"#{worker_claimed}"]
-    assert assistant_lines[3].startswith(f"#{lead_claimed} alex done_claimed, claimed by alex 5h ago")
-    assert (
-        f"its owner claimed it, so you or another lead verify: `guild ask verify {lead_claimed}" in assistant_lines[3]
-    )
-    assert "verify:" not in assistant_lines[4]
-    assert "overdue" not in texts["aide"]
+    assert len(assistant_lines) == 2
 
     mark_nagged(conn, [lead_claimed, worker_claimed, open_one, own], 5 * HOUR)
-    later = map_overdue_to_texts(conn, 9 * HOUR)["aide"].splitlines()
+    later = map_overdue_to_texts(conn, 24 * HOUR)["aide"].splitlines()
+    verify_at = later.index(
+        "To verify, claimed done over 24h ago and still not verified; each is sent once (Theo's words):"
+    )
+    assert [line.split(" ")[0] for line in later[verify_at + 1 : verify_at + 3]] == [
+        f"#{lead_claimed}",
+        f"#{worker_claimed}",
+    ]
+    assert later[verify_at + 1].startswith(f"#{lead_claimed} alex done_claimed, claimed by alex 24h ago")
+    assert (
+        f"its owner claimed it, so you or another lead verify: `guild ask verify {lead_claimed}" in later[verify_at + 1]
+    )
+    assert "verify:" not in later[verify_at + 2]
     assert later[-2:] == [
         "Asks overdue: the owner's move, no update for 4h even after a reminder (Theo's words; details sent to each "
         "owner with a live session):",
-        f"#{open_one} boris open, no update for 9h: Answer the vendor",
+        f"#{open_one} boris open, no update for 24h: Answer the vendor",
     ]
 
 
@@ -303,9 +314,112 @@ def test_verified_asks_close_by_themselves_after_the_window(conn: sqlite3.Connec
     ask_id = claimed(conn)
     verify_ask(conn, ask_id, LEAD, EVIDENCE, HOW, 4000)
     assert close_settled_asks(conn, 4000 + 24 * HOUR - 1, 24 * HOUR) == []
-    assert close_settled_asks(conn, 4000 + 24 * HOUR, 24 * HOUR) == [ask_id]
+    assert close_settled_asks(conn, 4000 + 24 * HOUR, 24 * HOUR, "Q#7") == [ask_id]
     ask = get_ask(conn, ask_id)
     assert (ask.state, ask.closed_how) == ("closed", "auto")
+    assert list_ask_events(conn, ask_id)[-1]["note"] == (
+        "closed automatically 24 h after verification, by the owner's standing rule (Q#7)"
+    )
+
+
+def test_a_reopened_ask_is_not_closed_by_itself_and_no_decision_cites_none(conn: sqlite3.Connection) -> None:
+    reopened, kept = claimed(conn), claimed(conn)
+    for ask_id in (reopened, kept):
+        verify_ask(conn, ask_id, LEAD, EVIDENCE, HOW, 4000)
+    reopen_ask(conn, reopened, "aide", "the header still shows the old copy", 5000)
+    assert close_settled_asks(conn, 4000 + 24 * HOUR, 24 * HOUR) == [kept]
+    assert get_ask(conn, reopened).state == "open"
+    assert (
+        list_ask_events(conn, kept)[-1]["note"]
+        == "closed automatically 24 h after verification, by the owner's standing rule"
+    )
+
+
+DAY = 24 * HOUR
+
+
+def test_an_ask_quiet_for_three_days_is_checked_daily_waiting_or_not(conn: sqlite3.Connection) -> None:
+    waits = add_ask(conn, "alex", "aide", "Add the bot to the org", "tab", [], 0).id
+    wait_ask(conn, waits, LEAD, "owner", WAIT_WHY, HOUR)
+    paused = add_ask(conn, "alex", "aide", "Sweep the weekend", "tab", [], 0).id
+    wait_ask(conn, paused, LEAD, None, "Next sweep is on Sunday", HOUR, until=10 * DAY)
+    assert due_ids(conn, HOUR + 3 * DAY - 1) == []
+    remind_at(conn, waits, HOUR + 3 * DAY)
+    assert due_ids(conn, HOUR + 4 * DAY - 1) == []
+    remind_at(conn, waits, HOUR + 4 * DAY)
+    text = map_overdue_to_texts(conn, HOUR + 5 * DAY)["alex"]
+    assert f'#{waits} open, no update for 120h: "Add the bot to the org" (waiting on Theo: {WAIT_WHY})' in text
+    assert "no update for 3 days: is it still current, done or obsolete?" in text
+    for command in (f"guild ask note {waits} ", f"guild ask done {waits} --claim", f"guild ask drop {waits} '<why>'"):
+        assert command in text
+    assert f"#{paused} " not in text
+    wait_ask(conn, waits, LEAD, "owner", "Theo grants the org admin rights on Friday", HOUR + 5 * DAY)
+    assert due_ids(conn, HOUR + 8 * DAY - 1) == []
+
+
+def test_a_stale_ask_gets_the_check_once_it_is_quiet_for_three_days(conn: sqlite3.Connection) -> None:
+    ask_id = add_ask(conn, "alex", "aide", "Fix the export", "tab", [], 0).id
+    assert "is it still current" not in map_overdue_to_texts(conn, 3 * DAY - 1)["alex"]
+    assert "is it still current" in map_overdue_to_texts(conn, 3 * DAY)["alex"]
+    assert is_ask_overdue(get_ask(conn, ask_id), 3 * DAY, 4 * HOUR)
+
+
+def test_an_owner_session_drops_its_obsolete_ask_with_the_reason_in_history(conn: sqlite3.Connection) -> None:
+    ask_id = add_ask(conn, "alex", "aide", "Fix the export", "tab", [], 0).id
+    with pytest.raises(AskError, match="only alex or the assistant drops it"):
+        drop_ask(conn, ask_id, OTHER_LEAD, "the export is gone", HOUR)
+    with pytest.raises(AskError, match="says why"):
+        drop_ask(conn, ask_id, LEAD, " no ", HOUR)
+    dropped = drop_ask(conn, ask_id, LEAD, "the export was removed from the product", HOUR)
+    assert (dropped.state, dropped.closed_how, dropped.closed_at) == ("closed", None, HOUR)
+    last = list_ask_events(conn, ask_id)[-1]
+    assert (last["by"], last["state"], last["note"]) == (
+        "alex",
+        "closed",
+        "dropped: the export was removed from the product",
+    )
+    by_assistant = add_ask(conn, "alex", "aide", "Answer the vendor", "tab", [], 0).id
+    assert drop_ask(conn, by_assistant, ASSISTANT, "the vendor withdrew", HOUR).closed_how == "assistant"
+    verified = claimed(conn)
+    verify_ask(conn, verified, OTHER_LEAD, EVIDENCE, HOW, 4000)
+    with pytest.raises(AskError, match="it is verified and closes by itself"):
+        drop_ask(conn, verified, LEAD, "not needed any more", 5000)
+
+
+def test_cli_drop_closes_and_show_says_so(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:
+    team = make_lead_and_assistant(bridge_env, spawn_process)
+    assert team.guild("ask", "add", "alex", "--words", "Fix the export", pid=team.b).returncode == 0
+    dropped = team.guild("ask", "drop", "1", "the export was removed from the product", pid=team.a)
+    assert dropped.returncode == 0, dropped.stderr
+    assert dropped.stdout.strip() == "#1 closed as dropped"
+    shown = team.guild("ask", "show", "1").stdout
+    assert "closed: dropped by its owner session" in shown
+    assert "alex closed: dropped: the export was removed from the product" in shown
+
+
+def test_the_panel_lists_only_what_needs_attention_oldest_first_capped(conn: sqlite3.Connection) -> None:
+    fresh = add_ask(conn, "alex", "aide", "Fresh one", "tab", [], 10 * DAY).id
+    on_you = add_ask(conn, "alex", "aide", "Waits on the owner", "tab", [], DAY).id
+    wait_ask(conn, on_you, LEAD, "owner", WAIT_WHY, 10 * DAY)
+    approval = add_ask(conn, "alex", "aide", "Waits on approval", "tab", [], 2 * DAY).id
+    wait_ask(conn, approval, LEAD, "approval", "Security has to approve the scope", 10 * DAY)
+    old_wait = add_ask(conn, "boris", "aide", "Waits for days", "tab", [], 3 * DAY).id
+    wait_ask(conn, old_wait, OTHER_LEAD, "release", "Ships with the next release", 3 * DAY)
+    claim = add_ask(conn, "boris", "aide", "Claimed long ago", "tab", [], 4 * DAY).id
+    claim_ask_done(conn, claim, WORKER, "Deployed the new copy to the status page", 5 * DAY)
+    new_claim = add_ask(conn, "boris", "aide", "Claimed just now", "tab", [], 5 * DAY).id
+    claim_ask_done(conn, new_claim, WORKER, "Deployed the new copy to the status page", 10 * DAY)
+    stale = add_ask(conn, "alex", "aide", "No update today", "tab", [], 6 * DAY).id
+    note_ask(conn, stale, LEAD, "Export fix in review", 10 * DAY - 5 * HOUR)
+
+    def panel(config: Config) -> tuple[list[tuple[int, str]], object]:
+        page = map_db_to_asks_page(conn, config, 10 * DAY)
+        return [(a["id"], a["why"]) for a in cast(list[dict[str, object]], page["attention"])], page["more"]
+
+    expected = [(on_you, "on_you"), (old_wait, "overdue"), (claim, "to_verify"), (stale, "overdue")]
+    assert panel(NAG_CONFIG) == (expected, 0)
+    assert panel(Config(assistant_handle="aide", owner_name="Theo", asks_panel_max=2)) == (expected[:2], 2)
+    assert {fresh, approval, new_claim}.isdisjoint(i for i, _ in panel(NAG_CONFIG)[0])
 
 
 def make_lead_and_assistant(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> Team:
@@ -397,7 +511,7 @@ def test_page_shows_asks_and_closes_or_reopens_them(
 
     page = json.loads(http_request(dashboard + "/api/guild"))
     assert [a["id"] for a in page["asks"]["verified"]] == [1, 2]
-    assert [(a["id"], a["by"]) for a in page["asks"]["waiting"]] == [(3, "alex")]
+    assert (page["asks"]["attention"], page["asks"]["more"]) == ([], 0)
     lead = next(lead for lead in page["leads"] if lead["name"] == "alex")
     assert (lead["asks"]["open"], [i["words"] for i in lead["asks"]["items"]]) == (1, ["Answer the vendor"])
 
@@ -436,16 +550,19 @@ def test_a_waiting_ask_is_not_nagged_until_it_moves(conn: sqlite3.Connection) ->
     assert (waiting.wait_on, waiting.wait_by, waiting.wait_at) == ("verifier", "alex", HOUR)
     assert find_overdue_asks(conn, 30 * HOUR, 4 * HOUR, HOUR) == []
     page = map_db_to_asks_page(conn, NAG_CONFIG, 30 * HOUR)
-    assert page["waiting"] == [
+    assert page["attention"] == [
         {
-            "id": claimed_id, "owner": "alex", "words": "Reload the status page copy",
-            "claim": "Deployed the new copy to the status page", "by": "alex", "at": 0,
+            "id": open_id, "owner": "alex", "words": "Add the bot to the org", "state": "open", "why": "on_you",
+            "claim": None, "by": None, "at": 0, "done_at": None, "updated_at": HOUR,
+            "wait": {"on": "owner", "why": WAIT_WHY, "by": "alex", "at": HOUR},
+        },
+        {
+            "id": claimed_id, "owner": "alex", "words": "Reload the status page copy", "state": "done_claimed",
+            "why": "to_verify", "claim": "Deployed the new copy to the status page", "by": "alex", "at": 0,
+            "done_at": 0, "updated_at": HOUR,
             "wait": {"on": "verifier", "why": "boris verifies once the worktree is back", "by": "alex", "at": HOUR},
-        }
+        },
     ]  # fmt: skip
-    assert [(a["id"], a["state"], a["at"]) for a in cast(list[dict[str, object]], page["on_you"])] == [
-        (open_id, "open", 0)
-    ]
     assert list_ask_events(conn, open_id)[-1]["note"] == f"waiting on owner: {WAIT_WHY}"
 
     start_ask(conn, open_id, LEAD, 30 * HOUR)
@@ -504,7 +621,11 @@ def test_reminders_name_the_wait_command(conn: sqlite3.Connection) -> None:
     assert f"waiting on Theo (review, decision, OK)? `guild ask wait {open_id} --on theo '…'`" in texts["alex"]
     assert f"guild ask wait {open_id} --on approval|release" in texts["alex"]
     assert f"guild ask wait {open_id} --until YYYY-MM-DD[THH:MM]" in texts["alex"]
-    assert f"guild ask wait {claimed_id} --on verifier" in texts["aide"]
+    assert "aide" not in texts
+    assert (
+        f"you claimed it, so a lead verifies it: ask one, then `guild ask wait {claimed_id} --on verifier"
+        in (map_overdue_to_texts(conn, 24 * HOUR)["aide"])
+    )
 
 
 def test_cli_wait_shows_in_list_and_show(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:
@@ -553,8 +674,7 @@ def test_a_claim_is_never_late_on_the_page(conn: sqlite3.Connection) -> None:
     lead = cast(dict[str, dict[str, object]], page["by_owner"])["alex"]
     assert lead["overdue"] is False
     assert cast(list[dict[str, object]], lead["items"])[0]["overdue"] is False
-    assert [a["id"] for a in cast(list[dict[str, object]], page["waiting"])] == [ask_id]
-    assert "overdue" not in cast(list[dict[str, object]], page["waiting"])[0]
+    assert [(a["id"], a["why"]) for a in cast(list[dict[str, object]], page["attention"])] == [(ask_id, "to_verify")]
 
 
 def page_item(page: dict[str, object]) -> dict[str, object]:
@@ -567,7 +687,7 @@ def test_a_pause_holds_reminders_until_its_time_and_stays_off_the_owner(conn: sq
     assert (paused.wait_on, paused.wait_until, paused.wait_at) == (None, 40 * HOUR, HOUR)
     assert find_overdue_asks(conn, 39 * HOUR, 4 * HOUR, HOUR) == []
     page = map_db_to_asks_page(conn, NAG_CONFIG, 39 * HOUR)
-    assert page["on_you"] == []
+    assert page["attention"] == []
     pause = {"on": None, "until": 40 * HOUR, "why": "Next sweep is on Sunday", "by": "alex", "at": HOUR}
     assert page_item(page)["wait"] == pause
     assert page_item(page)["overdue"] is False
@@ -642,7 +762,7 @@ def test_a_wait_or_a_claim_stops_the_stale_reminder(conn: sqlite3.Connection) ->
     assert due_ids(conn, 6 * HOUR - 1) == []
     remind_at(conn, done, 6 * HOUR)
     assert get_ask(conn, done).state == "done_claimed"
-    assert waited not in due_ids(conn, 200 * HOUR)
+    remind_at(conn, waited, 5 * HOUR + 72 * HOUR)
 
 
 def test_the_night_holds_reminders_and_the_morning_gets_one(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:
@@ -664,18 +784,39 @@ def test_the_night_holds_reminders_and_the_morning_gets_one(bridge_env: BridgeEn
     assert [get_ask(conn, i).nag_count for i in (first, second)] == [1, 1]
 
 
-def test_a_lead_that_claimed_its_own_ask_is_not_reminded_the_assistant_is(
+def bodies_to(conn: sqlite3.Connection, sent: list[tuple[int, Recipient]], handle: str) -> str:
+    ids = [message_id for message_id, recipient in sent if recipient.handle == handle]
+    return "\n".join(str(conn.execute("SELECT body FROM messages WHERE id = ?", (i,)).fetchone()[0]) for i in ids)
+
+
+def test_a_claim_reaches_its_lead_first_and_the_assistant_once_after_a_day(
     bridge_env: BridgeEnv, spawn_process: SpawnProcess
 ) -> None:
     make_lead_and_assistant(bridge_env, spawn_process)
     conn = bridge_env.connect()
-    ask_id = add_ask(conn, "alex", "old-b", "Fix the export", "tab", [], 0).id
-    claim_ask_done(conn, ask_id, LEAD, "Export fixed in PR 3, deployed", 0)
-    sent = send_ask_nags(conn, Config(assistant_handle="old-b", owner_name="Theo"), HOUR, owner_off=False)
-    assert [recipient.handle for _, recipient in sent] == ["old-b"]
-    body = str(conn.execute("SELECT body FROM messages WHERE id = ?", (sent[0][0],)).fetchone()[0])
-    assert f"guild ask verify {ask_id}" in body
-    assert get_ask(conn, ask_id).nag_count == 1
+    config = Config(assistant_handle="old-b", owner_name="Theo")
+    own_claim = add_ask(conn, "alex", "old-b", "Fix the export", "tab", [], 0).id
+    claim_ask_done(conn, own_claim, LEAD, "Export fixed in PR 3, deployed", 0)
+    waits = add_ask(conn, "alex", "old-b", "Reload the status page copy", "tab", [], 0).id
+    claim_ask_done(conn, waits, WORKER, "Deployed the new copy to the status page", 0)
+    wait_ask(conn, waits, LEAD, "verifier", "boris verifies once the worktree is back", HOUR)
+
+    sent = send_ask_nags(conn, config, HOUR, owner_off=False)
+    assert [recipient.handle for _, recipient in sent] == ["alex"]
+    assert "you claimed it, so another lead or the assistant verifies it" in bodies_to(conn, sent, "alex")
+
+    sent = send_ask_nags(conn, config, 24 * HOUR, owner_off=False)
+    to_assistant = bodies_to(conn, sent, "old-b")
+    assert to_assistant.startswith("To verify, claimed done over 24h ago")
+    assert f"#{own_claim} alex done_claimed" in to_assistant and f"#{waits} alex done_claimed" in to_assistant
+    assert [list_ask_events(conn, i)[-1]["note"] for i in (own_claim, waits)] == [TOLD_TO_VERIFY] * 2
+    for at in (25, 48, 72, 200):
+        assert "old-b" not in [r.handle for _, r in send_ask_nags(conn, config, at * HOUR, owner_off=False)], at
+
+    reopen_ask(conn, own_claim, "aide", "the export still drops a column", 201 * HOUR)
+    claim_ask_done(conn, own_claim, LEAD, "Export fixed again in PR 4, deployed", 202 * HOUR)
+    assert find_asks_to_verify(conn, 226 * HOUR - 1, 24 * HOUR) == []
+    assert [a.id for a in find_asks_to_verify(conn, 226 * HOUR, 24 * HOUR)] == [own_claim]
 
 
 def test_a_lead_hears_of_its_own_claim_when_the_assistant_cannot_be_told(

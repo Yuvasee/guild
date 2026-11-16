@@ -176,7 +176,8 @@ aimed at something another live agent holds. The page lists claims under **Resou
 
 **How:** every request you give goes into a ledger in your own words and stays there until someone other than the
 agent that did the work has checked what you would see, and recorded where and how. Stale asks and unchecked claims
-nag their owner.
+nag their owner; an ask quiet for 3 days is checked daily (still current, done or obsolete), and a verified one closes
+by itself a day later unless you reopen it.
 </details>
 
 <details>
@@ -345,6 +346,7 @@ Full usage and flags: [docs/commands.md](docs/commands.md), or `<command> --help
 | [`guild ask done`](docs/commands.md#guild-ask-done) | claim it done; another session verifies |
 | [`guild ask verify`](docs/commands.md#guild-ask-verify) | done_claimed → verified, with evidence of what the owner would see |
 | [`guild ask close`](docs/commands.md#guild-ask-close) | verified → closed (the assistant only, relaying the owner) |
+| [`guild ask drop`](docs/commands.md#guild-ask-drop) | close an unfinished ask as obsolete, with why (its owner session or the assistant) |
 | [`guild ask reopen`](docs/commands.md#guild-ask-reopen) | back to open: the result is not what the owner asked for |
 | **`guild` · Right Hand** | |
 | [`guild answer`](docs/commands.md#guild-answer) | relay the user's answer to a post in the feed (the assistant only) |

@@ -31,6 +31,13 @@ ASK_VERIFY_HOURS = 1
 """A claimed-done ask unverified this long nags the same way."""
 ASK_AUTOCLOSE_HOURS = 24
 """A verified ask closes by itself this long after, unless the owner reopens it."""
+ASK_CHECK_DAYS = 3
+"""An open or in-progress ask with no update this long, waiting on someone or not, asks its owner once a day whether it
+is still current, done or obsolete."""
+ASK_TO_VERIFY_HOURS = 24
+"""A claim unverified this long reaches the assistant once, under "To verify"."""
+TOLD_TO_VERIFY = "sent to the assistant to verify"
+DAY_MS = 24 * 3_600_000
 Role = Literal["assistant", "lead", "other"]
 
 WORDS_MAX_CHARS = 4000
@@ -238,9 +245,18 @@ def verify_ask(conn: sqlite3.Connection, ask_id: int, by: Actor, evidence: str, 
     return get_ask(conn, ask_id)
 
 
-def close_ask(conn: sqlite3.Connection, ask_id: int, how: str, by: str, at_ms: int, dropped: str | None = None) -> Ask:
-    """Verified is the normal way in; a drop closes an unfinished ask only with the reason it was let go."""
-    if how not in CLOSED_HOW:
+def close_ask(
+    conn: sqlite3.Connection,
+    ask_id: int,
+    how: str | None,
+    by: str,
+    at_ms: int,
+    dropped: str | None = None,
+    note: str | None = None,
+) -> Ask:
+    """Verified is the normal way in; a drop closes an unfinished ask only with the reason it was let go. A drop by the
+    ask's own session has no `how`: the history row names who dropped it."""
+    if how not in CLOSED_HOW and not (how is None and dropped is not None):
         raise ValueError(how)
     ask = get_ask(conn, ask_id)
     if dropped is None:
@@ -259,8 +275,17 @@ def close_ask(conn: sqlite3.Connection, ask_id: int, how: str, by: str, at_ms: i
         f"{_CLEAR_WAIT} WHERE id = ?",
         (how, at_ms, at_ms, ask_id),
     )
-    _log(conn, ask_id, at_ms, by, "closed", f"dropped: {dropped.strip()}" if dropped else how)
+    _log(conn, ask_id, at_ms, by, "closed", f"dropped: {dropped.strip()}" if dropped else note or how)
     return get_ask(conn, ask_id)
+
+
+def drop_ask(conn: sqlite3.Connection, ask_id: int, by: Actor, why: str, at_ms: int) -> Ask:
+    """Its owner session or the assistant lets an unfinished ask go as obsolete, with the reason in its history."""
+    ask = get_ask(conn, ask_id)
+    if by.role != "assistant" and by.handle != ask.owner:
+        raise AskError(f"#{ask_id} is {ask.owner}'s: only {ask.owner} or the assistant drops it")
+    _require(ask, STATES[:3], "drop", hint={"verified": "it is verified and closes by itself"})
+    return close_ask(conn, ask_id, "assistant" if by.role == "assistant" else None, by.handle, at_ms, dropped=why)
 
 
 def reopen_ask(conn: sqlite3.Connection, ask_id: int, by: str, why: str, at_ms: int) -> Ask:
@@ -374,19 +399,49 @@ class Nag:
 
 
 def find_overdue_asks(conn: sqlite3.Connection, now: int, stale_ms: int, verify_ms: int) -> list[Ask]:
-    """Not waiting nor paused; open or in progress with no update, or claimed and not verified; reminded again only
-    when nothing changed for one stale period after the first reminder, two after the second, and so on."""
+    """Not paused; not waiting, and open or in progress with no update, or claimed and not verified; reminded again
+    only when nothing changed for one stale period after the first reminder, two after the second, and so on. An open
+    or in-progress ask quiet for days, waiting or not, is due once a day."""
     rows = conn.execute(
         """
         SELECT * FROM asks
-        WHERE ((state IN ('open', 'in_progress') AND updated_at <= ?1) OR (state = 'done_claimed' AND updated_at <= ?2))
-          AND wait_on IS NULL AND (wait_until IS NULL OR wait_until <= ?3)
+        WHERE (wait_until IS NULL OR wait_until <= ?3)
+          AND ((wait_on IS NULL AND ((state IN ('open', 'in_progress') AND updated_at <= ?1)
+                                     OR (state = 'done_claimed' AND updated_at <= ?2)))
+               OR (state IN ('open', 'in_progress') AND updated_at <= ?4))
         ORDER BY owner, id
         """,
-        (now - stale_ms, now - verify_ms, now),
+        (now - stale_ms, now - verify_ms, now, now - ASK_CHECK_DAYS * DAY_MS),
     )
     asks = [map_row_to_ask(r) for r in rows]
-    return [a for a in asks if a.last_nag_at is None or now - a.last_nag_at >= compute_nag_gap(a.nag_count, stale_ms)]
+    return [a for a in asks if a.last_nag_at is None or now - a.last_nag_at >= _compute_ask_nag_gap(a, now, stale_ms)]
+
+
+def _compute_ask_nag_gap(ask: Ask, now: int, stale_ms: int) -> int:
+    return max(stale_ms, NAG_GAP_MAX_MS) if is_ask_due_check(ask, now) else compute_nag_gap(ask.nag_count, stale_ms)
+
+
+def is_ask_due_check(ask: Ask, now: int) -> bool:
+    return (
+        ask.state in ("open", "in_progress")
+        and not is_ask_paused(ask, now)
+        and now - ask.updated_at >= ASK_CHECK_DAYS * DAY_MS
+    )
+
+
+def find_asks_to_verify(conn: sqlite3.Connection, now: int, after_ms: int) -> list[Ask]:
+    """Claimed this long ago and not verified, waiting on someone or not, and not yet sent to the assistant since that
+    claim: a reopen and a new claim make it due again."""
+    rows = conn.execute(
+        """
+        SELECT * FROM asks a
+        WHERE state = 'done_claimed' AND done_at <= ? AND (wait_until IS NULL OR wait_until <= ?)
+          AND NOT EXISTS (SELECT 1 FROM ask_events e WHERE e.ask_id = a.id AND e.note = ? AND e.at >= a.done_at)
+        ORDER BY id
+        """,
+        (now - after_ms, now, TOLD_TO_VERIFY),
+    )
+    return [map_row_to_ask(r) for r in rows]
 
 
 def compute_nag_gap(nag_count: int, stale_ms: int) -> int:
@@ -394,29 +449,35 @@ def compute_nag_gap(nag_count: int, stale_ms: int) -> int:
 
 
 def map_overdue_to_assistant_nag(
-    asks: list[Ask], assistant: str, owner_name: str, now: int, unreached: list[str]
+    asks: list[Ask], to_verify: list[Ask], assistant: str, owner_name: str, now: int, unreached: list[str]
 ) -> Nag | None:
     """Its own reminders, claims to verify under their own heading, and an ask overdue with a lead only once a reminder
-    to that lead went unanswered or reached no one: a lead reminded of an ask that waits on the owner marks it so."""
-    others = [ask for ask in asks if ask.owner != assistant]
-    to_verify = [ask for ask in others if ask.state == "done_claimed"]
-    overdue = [ask for ask in others if ask.state != "done_claimed" and (ask.nag_count > 0 or ask.owner in unreached)]
+    to that lead went unanswered or reached no one: a lead reminded of an ask that waits on the owner marks it so.
+    Claims come only from `to_verify`, so each reaches the assistant once; they are not counted as reminders."""
+    own = [ask for ask in asks if ask.owner == assistant and ask.state != "done_claimed"]
+    overdue = [
+        ask
+        for ask in asks
+        if ask.owner != assistant and ask.state != "done_claimed" and (ask.nag_count > 0 or ask.owner in unreached)
+    ]
     lines = [f"Not told, no live session: {', '.join(unreached)}"] if unreached else []
-    for nag in map_asks_to_owner_nags([ask for ask in asks if ask.owner == assistant], owner_name, now):
+    for nag in map_asks_to_owner_nags(own, owner_name, now):
         lines.append(nag.text)
     if to_verify:
-        lines.append(f"To verify, claimed done ({owner_name}'s words):")
-        lines.extend(convert_overdue_to_assistant_line(a, now) for a in to_verify)
+        lines.append(
+            f"To verify, claimed done over {ASK_TO_VERIFY_HOURS}h ago and still not verified; each is sent once "
+            f"({owner_name}'s words):"
+        )
+        lines.extend(convert_overdue_to_assistant_line(a, now, assistant) for a in to_verify)
     if overdue:
         lines.append(
             f"Asks overdue: the owner's move, no update for {ASK_STALE_HOURS}h even after a reminder "
             f"({owner_name}'s words; details sent to each owner with a live session):"
         )
-        lines.extend(convert_overdue_to_assistant_line(a, now) for a in overdue)
-    told = [ask for ask in asks if ask.owner == assistant] + to_verify + overdue
-    if not told:
+        lines.extend(convert_overdue_to_assistant_line(a, now, assistant) for a in overdue)
+    if not own and not to_verify and not overdue:
         return None
-    return Nag(assistant, "\n".join(lines), tuple(ask.id for ask in told))
+    return Nag(assistant, "\n".join(lines), tuple(ask.id for ask in own + overdue))
 
 
 def map_asks_to_owner_nags(asks: list[Ask], owner_name: str, now: int) -> list[Nag]:
@@ -435,10 +496,14 @@ def is_claimed_by_owner(ask: Ask) -> bool:
     return ask.state == "done_claimed" and ask.claim_by == ask.owner
 
 
-def convert_overdue_to_assistant_line(ask: Ask, now: int) -> str:
+def convert_overdue_to_assistant_line(ask: Ask, now: int, assistant: str) -> str:
     line = f"#{ask.id} {ask.owner} {ask.state}, {_convert_wait(ask, now)}: {_cut(ask.words, 80)}"
     if not is_claimed_by_owner(ask):
         return line
+    if ask.owner == assistant:
+        return (
+            f"{line} → you claimed it, so a lead verifies it: ask one, then `guild ask wait {ask.id} --on verifier '…'`"
+        )
     verify = f"`guild ask verify {ask.id} --evidence '…' --how '…'`"
     return f"{line} → its owner claimed it, so you or another lead verify: {verify}"
 
@@ -446,6 +511,15 @@ def convert_overdue_to_assistant_line(ask: Ask, now: int) -> str:
 def convert_overdue_to_owner_line(ask: Ask, owner: str, owner_name: str, now: int) -> str:
     head = f'#{ask.id} {ask.state}, {_convert_wait(ask, now)}: "{_cut(ask.words, 160)}"'
     on_owner = map_owner_name_to_wait_on(owner_name) or "owner"
+    if is_ask_due_check(ask, now):
+        waits = convert_wait_to_text(ask, owner_name, now)
+        waits = f" ({waits}: {_cut(ask.wait_why or '', 160)})" if waits else ""
+        return (
+            f"{head}{waits} → no update for {ASK_CHECK_DAYS} days: is it still current, done or obsolete? "
+            f"Current: `guild ask note {ask.id} '<what is left, who waits on whom>'`, or "
+            f"`guild ask wait {ask.id} --on … '…'` if it still waits; done: `guild ask done {ask.id} --claim "
+            f"'<what was done, where it shows>'`; obsolete: `guild ask drop {ask.id} '<why>'` closes it as dropped"
+        )
     if ask.state != "done_claimed":
         return (
             f"{head} → waiting on {owner_name} (review, decision, OK)? `guild ask wait {ask.id} --on {on_owner} '…'` "
@@ -469,42 +543,46 @@ def send_ask_nags(conn: sqlite3.Connection, config: Config, now: int, owner_off:
     if owner_off:
         return []
     hour = 3_600_000
-    found = find_overdue_asks(conn, now, ASK_STALE_HOURS * hour, ASK_VERIFY_HOURS * hour)
-    overdue = [
-        replace(ask, words=map_words_to_sendable(conn, ask.words))
-        for ask in found
-        if not is_owner_locked(conn, config, ask.owner)
-    ]
-    if not overdue:
-        return []
     assistant = config.assistant_handle
+
+    def sendable(asks: list[Ask]) -> list[Ask]:
+        return [
+            replace(ask, words=map_words_to_sendable(conn, ask.words))
+            for ask in asks
+            if not is_owner_locked(conn, config, ask.owner)
+        ]
+
+    found = find_overdue_asks(conn, now, ASK_STALE_HOURS * hour, ASK_VERIFY_HOURS * hour)
+    overdue = sendable([a for a in found if not (a.owner == assistant and a.state == "done_claimed")])
+    to_verify = sendable(find_asks_to_verify(conn, now, ASK_TO_VERIFY_HOURS * hour))
+    if not overdue and not to_verify:
+        return []
     sent: list[tuple[int, Recipient]] = []
     unreached: list[str] = []
     told: set[int] = set()
 
-    def send(nag: Nag) -> bool:
+    def send(nag: Nag) -> set[int] | None:
+        """The asks whose lines were delivered; None when nothing reached the recipient."""
         delivered = send_bodies_from_bridge(conn, config, nag.to, nag.text, now)
-        for body, message_id, recipient in delivered:
-            told.update(set(nag.ask_ids) & {int(i) for i in _ASK_LINE.findall(body)})
-            sent.append((message_id, recipient))
-        return bool(delivered)
+        sent.extend((message_id, recipient) for _, message_id, recipient in delivered)
+        if not delivered:
+            return None
+        return {int(i) for body, _, _ in delivered for i in _ASK_LINE.findall(body)}
 
-    for nag in map_asks_to_owner_nags(
-        [a for a in overdue if a.owner != assistant and not is_claimed_by_owner(a)], config.owner_name, now
-    ):
-        if not send(nag):
+    for nag in map_asks_to_owner_nags([a for a in overdue if a.owner != assistant], config.owner_name, now):
+        lines = send(nag)
+        if lines is None:
             unreached.append(nag.to)
+        else:
+            told.update(lines & set(nag.ask_ids))
     # Last, so it can name every owner that could not be told.
-    to_assistant = map_overdue_to_assistant_nag(overdue, assistant, config.owner_name, now, unreached)
+    to_assistant = map_overdue_to_assistant_nag(overdue, to_verify, assistant, config.owner_name, now, unreached)
     if to_assistant is not None and not is_recipient_locked(conn, config, assistant):
-        send(to_assistant)
-    # Without the assistant, a lead's own claim goes back to the lead, who can still find a verifier.
-    for nag in map_asks_to_owner_nags(
-        [a for a in overdue if a.id not in told and a.owner != assistant and is_claimed_by_owner(a)],
-        config.owner_name,
-        now,
-    ):
-        send(nag)
+        lines = send(to_assistant) or set()
+        told.update(lines & set(to_assistant.ask_ids))
+        for ask in to_verify:
+            if ask.id in lines:
+                _log(conn, ask.id, now, "bridge", None, TOLD_TO_VERIFY)
     # An ask nobody was told about stays due, so its back-off does not grow on reminders nobody got.
     mark_nagged(conn, sorted(told), now)
     return sent
@@ -589,16 +667,19 @@ def mark_nagged(conn: sqlite3.Connection, ask_ids: list[int], now: int) -> None:
     )
 
 
-def close_settled_asks(conn: sqlite3.Connection, now: int, autoclose_ms: int) -> list[int]:
-    """Verified is the normal end; it closes by itself unless reopened within the window."""
+def close_settled_asks(conn: sqlite3.Connection, now: int, autoclose_ms: int, decision: str = "") -> list[int]:
+    """Verified is the normal end; it closes by itself unless reopened within the window. The history row cites the
+    owner's standing decision when the config names it."""
     ids = [
         int(r[0])
         for r in conn.execute(
             "SELECT id FROM asks WHERE state = 'verified' AND verified_at <= ?", (now - autoclose_ms,)
         )
     ]
+    cited = f" ({decision})" if decision else ""
+    note = f"closed automatically {autoclose_ms // 3_600_000} h after verification, by the owner's standing rule{cited}"
     for ask_id in ids:
-        close_ask(conn, ask_id, "auto", "bridge", now)
+        close_ask(conn, ask_id, "auto", "bridge", now, note=note)
     return ids
 
 
@@ -619,12 +700,12 @@ def _cut(text: str, limit: int) -> str:
 
 
 def map_db_to_asks_page(conn: sqlite3.Connection, config: Config, now: int) -> dict[str, object]:
-    """Per owner, what is not verified yet; and the lists the owner looks at: waiting on them, claimed, verified."""
+    """Per owner, what is not verified yet; for the owner, only the asks that need attention (waiting on them, a claim
+    unverified for a day, overdue), oldest first and at most `asks_panel_max`, and the verified ones they may reopen."""
     hour = 3_600_000
     stale_ms = ASK_STALE_HOURS * hour
     by_owner: dict[str, dict[str, object]] = {}
-    on_you: list[dict[str, object]] = []
-    waiting: list[dict[str, object]] = []
+    attention: list[dict[str, object]] = []
     verified: list[dict[str, object]] = []
     asks = list_asks(conn)
     locked = {owner for owner in {a.owner for a in asks} if is_owner_locked(conn, config, owner)}
@@ -642,18 +723,16 @@ def map_db_to_asks_page(conn: sqlite3.Connection, config: Config, now: int) -> d
             )  # fmt: skip
             continue
         wait = _map_ask_to_page_wait(ask, now)
-        if ask.wait_on == "owner":
-            on_you.append(
+        unverified = (
+            ask.state == "done_claimed" and ask.done_at is not None and now - ask.done_at >= ASK_TO_VERIFY_HOURS * hour
+        )
+        why = "on_you" if ask.wait_on == "owner" else "to_verify" if unverified else "overdue" if overdue else None
+        if why is not None:
+            attention.append(
                 {
-                    "id": ask.id, "owner": ask.owner, "words": ask.words, "state": ask.state, "claim": ask.claim,
-                    "by": ask.claim_by, "at": ask.done_at or ask.created_at, "wait": wait,
-                }
-            )  # fmt: skip
-        elif ask.state == "done_claimed":
-            waiting.append(
-                {
-                    "id": ask.id, "owner": ask.owner, "words": ask.words, "claim": ask.claim, "by": ask.claim_by,
-                    "at": ask.done_at, "wait": wait,
+                    "id": ask.id, "owner": ask.owner, "words": ask.words, "state": ask.state, "why": why,
+                    "claim": ask.claim, "by": ask.claim_by, "at": ask.created_at, "done_at": ask.done_at,
+                    "updated_at": ask.updated_at, "wait": wait,
                 }
             )  # fmt: skip
         entry = by_owner.setdefault(ask.owner, {"open": 0, "oldest_at": ask.created_at, "overdue": False, "items": []})
@@ -662,7 +741,13 @@ def map_db_to_asks_page(conn: sqlite3.Connection, config: Config, now: int) -> d
         entry["overdue"] = bool(entry["overdue"]) or overdue
         item = {"id": ask.id, "state": ask.state, "words": ask.words, "at": ask.created_at, "overdue": overdue}
         cast(list[dict[str, object]], entry["items"]).append({**item, "wait": wait})
-    return {"by_owner": by_owner, "on_you": on_you, "waiting": waiting, "verified": verified}
+    shown = max(config.asks_panel_max, 0)
+    return {
+        "by_owner": by_owner,
+        "attention": attention[:shown],
+        "more": max(len(attention) - shown, 0),
+        "verified": verified,
+    }
 
 
 def _map_ask_to_page_wait(ask: Ask, now: int) -> dict[str, object] | None:
@@ -674,7 +759,8 @@ def _map_ask_to_page_wait(ask: Ask, now: int) -> dict[str, object] | None:
 
 
 def is_ask_overdue(ask: Ask, now: int, stale_ms: int) -> bool:
-    """A claim is never overdue: it waits for a verifier, not for its owner."""
-    if ask.wait_on is not None or is_ask_paused(ask, now):
+    """A claim is never overdue: it waits for a verifier, not for its owner. A wait holds it off for days, not for
+    good."""
+    if ask.state not in ("open", "in_progress") or is_ask_paused(ask, now):
         return False
-    return ask.state in ("open", "in_progress") and now - ask.updated_at >= stale_ms
+    return is_ask_due_check(ask, now) or (ask.wait_on is None and now - ask.updated_at >= stale_ms)
