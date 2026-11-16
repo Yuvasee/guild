@@ -21,6 +21,7 @@ from bridge.guard import (
     MergeRefusal,
     find_standing_rule_block,
     load_open_siblings,
+    map_row_to_colleague_block,
     map_row_to_dependency_blockers,
     map_siblings_to_wait,
     map_wait_to_reason,
@@ -56,7 +57,8 @@ def map_row_to_auto_merge_block(config: Config, row: sqlite3.Row, siblings: Sequ
 def map_row_to_own_auto_merge_block(config: Config, row: sqlite3.Row, with_siblings: bool = True) -> str | None:
     """The rule, siblings aside: a colleague approved (the review bot's approval or the owner's
     waiver does not count), CI green or none, the review bot's latest review is of the head and asks for no changes,
-    GitHub says CLEAN, no PR its body names is open, not stacked, a draft or held, and nothing of the owner's open."""
+    GitHub says CLEAN, no PR its body names is open, not stacked, a draft or held, nothing of the owner's open and
+    every colleague's comment answered or resolved."""
     owner = config.owner_name
     if row["closed_at"] is not None:
         return "closed"
@@ -68,6 +70,8 @@ def map_row_to_own_auto_merge_block(config: Config, row: sqlite3.Row, with_sibli
         return f"held for {owner}'s review"
     if row["merge_block"]:
         return f"{owner}'s comments are open ({row['merge_block']})"
+    if colleague := map_row_to_colleague_block(row):
+        return f"a colleague's comments are not processed: {colleague}"
     if not json.loads(str(row["approved_by"] or "[]")):
         return f"no colleague's approval ({config.review_bot_name}'s or a waiver does not count)"
     if not row["bot_cleared"]:

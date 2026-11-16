@@ -64,7 +64,8 @@ ROLE_TEMPLATE = "\n".join(
         f"visible, details folded. A PR doc follows {REVIEW_DOC_SPEC}; reasons OBSERVED, REPRODUCED or FROM CODE.",
         "{reviews}",
         "- Merge your own PR yourself: approved on GitHub ({bot} counts), CI green, no "
-        "conflicts, none of {owner}'s comments open (settle them), you judge it safe. Deploys need {owner}.",
+        "conflicts, none of {owner}'s comments open (settle them), each colleague's comment answered or its thread "
+        "resolved (nits too), you judge it safe. Deploys need {owner}.",
         CLAUDE_RULE,
         "- Pages: source in {pages_dir}/<slug>/, `bridge page add`; cite /p/<slug> (`bridge` skill).",
         "- Notes outlive this chat: `guild notes` (`--write`). Close idle workers with no next job: "

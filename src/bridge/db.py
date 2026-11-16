@@ -846,6 +846,11 @@ MIGRATIONS: tuple[str, ...] = (
     ALTER TABLE review_prs ADD COLUMN auto_merge_oid TEXT;
     ALTER TABLE review_prs ADD COLUMN auto_merge_error TEXT;
     """,
+    # A colleague's threads and comments not yet answered on our side: every merge path waits on them.
+    """
+    ALTER TABLE review_prs ADD COLUMN colleague_threads TEXT;
+    ALTER TABLE review_prs ADD COLUMN colleague_comments TEXT;
+    """,
 )
 
 HOOK_BUSY_TIMEOUT_MS = 200

@@ -1893,6 +1893,7 @@ def test_the_guards_live_read_counts_the_review_bots_approval_only_at_the_head()
             "reviews": {"nodes": [
                 {"state": "APPROVED", "commit": {"oid": review_oid}, "author": {"__typename": "Bot", "login": "bot"}},
             ]},
+            "comments": {"nodes": []},
             "reviewThreads": {"nodes": []},
         }  # fmt: skip
         return json.dumps({"data": {"repository": {"pullRequest": pr}}})

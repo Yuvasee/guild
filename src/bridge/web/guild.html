@@ -1779,6 +1779,7 @@ const QUEUE_APPROVAL_LEFT = {
   "held for your review": "its lead holds it for your own review, so it waits in Open until you comment or review on GitHub or it is published",
   "ready to merge (lead)": "CI green, no conflicts, nothing of yours open: its lead may merge it without your review or a post, and is told so",
   "your comments open": "its lead settles your comments first, then it may merge",
+  "colleague's comments open": "its lead answers each colleague's comment or thread on GitHub first, then it may merge",
   "resolve your threads": "every thread you started has a reply; resolving them is yours",
   "CI red": "it merges once its lead gets CI green",
   "CI pending": "it merges once CI is green",
@@ -1787,7 +1788,7 @@ const QUEUE_APPROVAL_LEFT = {
   "waits on another PR": "a PR its body names merges first, or with it once all are ready",
 };
 
-const QUEUE_APPROVAL_WORD = { "held for your review": "held", "ready to merge (lead)": "ready (lead)", "your comments open": "your comments", "resolve your threads": "your threads", "waits on another PR": "waits on a PR" };
+const QUEUE_APPROVAL_WORD = { "held for your review": "held", "ready to merge (lead)": "ready (lead)", "your comments open": "your comments", "resolve your threads": "your threads", "waits on another PR": "waits on a PR", "colleague's comments open": "colleague's comments" };
 
 function queueApprovalWord(pr) {
   if (!pr.approvers.length && pr.approval_waived) return "waived";
@@ -1810,7 +1811,9 @@ function queueApprovalWhy(pr) {
     ? "only the review bot approved, no person yet" + (pr.merge_state === "BLOCKED" ? ", and " + state.review_bot + " doesn't count for this repo's branch protection" : "") + "; "
     : "";
   const check = pr.backport_check ? "; diff check: " + pr.backport_check.reason + (pr.backport_check.current ? "" : " (older head)") : "";
-  const left = pr.approval_left === "waits on another PR" && pr.waits_on ? pr.waits_on : QUEUE_APPROVAL_LEFT[pr.approval_left];
+  const left = pr.approval_left === "waits on another PR" && pr.waits_on ? pr.waits_on
+    : pr.approval_left === "colleague's comments open" ? "a colleague's comments are not processed: " + pr.colleague_block
+    : QUEUE_APPROVAL_LEFT[pr.approval_left];
   return by + bot + (left || "a draft, its owner marks it ready first") + check;
 }
 

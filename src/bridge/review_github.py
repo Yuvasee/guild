@@ -2,6 +2,7 @@ import contextlib
 import fnmatch
 import json
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import PurePosixPath
@@ -42,7 +43,7 @@ _THREADS_QUERY = """
 query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) { pullRequest(number: $number) {
     reviewThreads(first: 100) { nodes { isResolved
-      comments(first: 1) { nodes { author { login } url pullRequestReview { state } } }
+      comments(first: 1) { nodes { author { __typename login } url pullRequestReview { state } } }
       lastComment: comments(last: 1) { totalCount nodes {
         databaseId author { login } body pullRequestReview { state } } } } }
   } }
@@ -53,8 +54,10 @@ query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) { defaultBranchRef { name } pullRequest(number: $number) {
     isDraft mergeStateStatus baseRefName headRefName title body
     commits(last: 1) { nodes { commit { oid statusCheckRollup { state } } } }
-    reviews(last: 100) { nodes { state commit { oid } author { __typename login } } }
-    reviewThreads(first: 100) { nodes { isResolved comments(first: 1) { nodes { author { login } } } } }
+    reviews(last: 100) { nodes { state body submittedAt commit { oid } author { __typename login } } }
+    comments(last: 100) { nodes { body createdAt author { __typename login } } }
+    reviewThreads(first: 100) { nodes { isResolved comments(first: 1) { nodes { author { __typename login } } }
+      lastComment: comments(last: 1) { nodes { author { login } pullRequestReview { state } } } } }
   } }
 }
 """
@@ -77,6 +80,7 @@ CI_BLOCKED_BY_GITHUB = "CI didn't run: GitHub didn't start the jobs"
 # The merge guard runs inside a 5 s hook: a read cut short must still end in its refusal.
 _MERGE_FACTS_TIMEOUT_S = 3
 PENDING = "PENDING"
+_UNSENT = (PENDING, "DISMISSED")
 REVIEW_LOCKFILES = ("uv.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock")
 APPROVED_STATE = "APPROVED"
 PERSIST_SANDBOX = "PERSIST_SANDBOX"
@@ -114,6 +118,8 @@ class HisThread:
 class ReviewThreads:
     open: int
     his: tuple[HisThread, ...]
+    colleagues: tuple[str, ...] = ()
+    """Who started each colleague's thread still waiting on our side: see map_thread_to_waiting_colleague."""
 
 
 @dataclass(frozen=True)
@@ -366,7 +372,7 @@ def fetch_review_threads(config: Config, repo: str, number: int) -> ReviewThread
         nodes: list[Any] = raw["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
     except (ValueError, KeyError, TypeError) as exc:
         raise GitHubError(f"unexpected answer from GitHub: {type(exc).__name__}") from exc
-    return map_threads_to_review_threads(nodes, config.review_author)
+    return map_threads_to_review_threads(nodes, config.review_author, config.review_bot_logins)
 
 
 class ChecksRunning(Exception):
@@ -388,6 +394,10 @@ class LiveMergeFacts:
     head_oid: str | None
     base: str | None
     default_branch: str | None
+    colleague_threads: tuple[str, ...] = ()
+    """Who started each colleague's thread still waiting on our side."""
+    colleague_comments: tuple[str, ...] = ()
+    """Who wrote each colleague's comment still waiting on our side."""
     head: str = ""
     title: str = ""
     body: str = ""
@@ -395,12 +405,21 @@ class LiveMergeFacts:
 
 def fetch_merge_facts(
     config: Config, repo: str, number: int, timeout_s: float = _MERGE_FACTS_TIMEOUT_S
-) -> tuple[bool, bool, str | None, str | None, int, str | None]:
-    """(draft, approved, CI rollup, merge state, the author's unresolved threads, head commit) of one PR, read live for
-    the merge guard."""
+) -> tuple[bool, bool, str | None, str | None, int, str | None, tuple[str, ...], tuple[str, ...]]:
+    """(draft, approved, CI rollup, merge state, the author's unresolved threads, head commit, colleagues' threads
+    and comments waiting on our side) of one PR, read live for the merge guard."""
     live = read_live_merge_facts(config, repo, number, timeout_s)
     approved = bool(live.approvers) or live.bot_approved
-    return live.draft, approved, live.checks, live.merge_state, live.his_threads, live.head_oid
+    return (
+        live.draft,
+        approved,
+        live.checks,
+        live.merge_state,
+        live.his_threads,
+        live.head_oid,
+        live.colleague_threads,
+        live.colleague_comments,
+    )
 
 
 def read_live_merge_facts(
@@ -430,6 +449,12 @@ def read_live_merge_facts(
             merge_state=pr.get("mergeStateStatus"),
             his_threads=sum(1 for t in threads if not t.get("isResolved") and _map_thread_to_starter(t) == author),
             head_oid=head_oid or None,
+            colleague_threads=list_waiting_colleagues(threads, config.review_author, config.review_bot_logins),
+            colleague_comments=list_unanswered_colleague_comments(
+                [*map(_map_node_to_said, reviews), *map(_map_node_to_said, pr["comments"]["nodes"])],
+                config.review_author,
+                config.review_bot_logins,
+            ),
             base=pr.get("baseRefName"),
             default_branch=default.get("name"),
             head=str(pr.get("headRefName") or ""),
@@ -485,11 +510,89 @@ def _is_check_running(node: Any) -> bool:
     return node.get("conclusion") is None
 
 
-def map_threads_to_review_threads(nodes: list[Any], author: str) -> ReviewThreads:
+def map_threads_to_review_threads(nodes: list[Any], author: str, bots: Sequence[str] = ()) -> ReviewThreads:
     """A thread the owner's pending review opened is a draft only they see: it counts as neither open nor theirs."""
     sent = [t for t in nodes if t and not t.get("isResolved") and _map_thread_to_first_review_state(t) != PENDING]
     his = [t for t in sent if _map_thread_to_starter(t) == author.casefold()]
-    return ReviewThreads(len(sent), tuple(map_thread_to_his_thread(t) for t in his))
+    return ReviewThreads(
+        len(sent), tuple(map_thread_to_his_thread(t) for t in his), list_waiting_colleagues(sent, author, bots)
+    )
+
+
+@dataclass(frozen=True)
+class Said:
+    """A conversation comment or a review: what the colleague-comment rule weighs besides threads."""
+
+    author: str
+    at: int
+    body: str
+    state: str | None = None
+    """A review's verdict; None on a comment."""
+    by_app: bool = False
+
+
+def list_unanswered_colleague_comments(said: Sequence[Said], author: str, bots: Sequence[str]) -> tuple[str, ...]:
+    """The author of each conversation comment or review text by a person other than the owner's account and the
+    review bot with no word from that account after it: a comment or a submitted review, which the owner and the
+    agents share. The account cannot approve its own PR, so its review with no text carries inline replies. An
+    approval's text is the colleague's verdict, not a request; inline comments count by their threads."""
+    ours = author.casefold()
+    ignored = {ours, *(b.casefold() for b in bots)}
+    answered = [
+        s.at
+        for s in said
+        if s.author.casefold() == ours and (s.body.strip() or s.state is not None) and s.state not in _UNSENT
+    ]
+    answered_at = max(answered, default=None)
+    return tuple(
+        s.author
+        for s in sorted(said, key=lambda s: s.at)
+        if s.author
+        and s.author.casefold() not in ignored
+        and not s.by_app
+        and s.body.strip()
+        and s.state not in (APPROVED_STATE, *_UNSENT)
+        and (answered_at is None or answered_at <= s.at)
+    )
+
+
+def _map_node_to_said(node: Any) -> Said:
+    author: Any = node.get("author") or {}
+    return Said(
+        author=str(author.get("login") or ""),
+        at=map_iso_to_ms(node.get("submittedAt") or node.get("createdAt")) or 0,
+        body=str(node.get("body") or ""),
+        state=node.get("state"),
+        by_app=author.get("__typename") == "Bot",
+    )
+
+
+def list_waiting_colleagues(nodes: list[Any], author: str, bots: Sequence[str]) -> tuple[str, ...]:
+    return tuple(
+        login
+        for t in nodes
+        if t and not t.get("isResolved") and (login := map_thread_to_waiting_colleague(t, author, bots))
+    )
+
+
+def map_thread_to_waiting_colleague(thread: Any, author: str, bots: Sequence[str]) -> str | None:
+    """The login of the person who started an unresolved thread whose last sent comment is not from the owner's
+    account, which the owner and the agents share: their reply is our side's answer. None for a thread of the owner's
+    account, the review bot's or an app's, which their own rules cover, and for one answered."""
+    connection: Any = thread.get("comments") or {}
+    comments: list[Any] = connection.get("nodes") or []
+    starter: Any = (comments[0].get("author") if comments else None) or {}
+    login = str(starter.get("login") or "")
+    ours = author.casefold()
+    if not login or starter.get("__typename") == "Bot" or login.casefold() in {ours, *(b.casefold() for b in bots)}:
+        return None
+    last_connection: Any = thread.get("lastComment") or {}
+    last: list[Any] = last_connection.get("nodes") or []
+    node: Any = last[0] if last else {}
+    review: Any = node.get("pullRequestReview") or {}
+    last_author: Any = node.get("author") or {}
+    answered = str(last_author.get("login") or "").casefold() == ours and review.get("state") != PENDING
+    return None if answered else login
 
 
 def _map_thread_to_first_review_state(thread: Any) -> str | None:

@@ -143,6 +143,7 @@ READY = "ready"
 HELD = "held"
 DRAFT = "a draft"
 OWNER_COMMENTS_OPEN = "comments open"
+COLLEAGUE_COMMENTS_OPEN = "colleague's comments open"
 NOT_APPROVED = "not approved"
 NOT_OWNER_REVIEWED = "not reviewed by the owner"
 CI_RED = "CI red"
@@ -987,6 +988,8 @@ class MergeFacts:
     """The owner pressed Publish or recorded a decision: no approval by a colleague or the bot stands in for it."""
     waits_on: str | None = None
     """Why a PR its body names keeps it from merging: see find_dependency_wait."""
+    colleague_block: str | None = None
+    """A colleague's comments our side has not answered: see map_logins_to_colleague_block."""
 
 
 @dataclass(frozen=True)
@@ -1001,6 +1004,7 @@ class MergeRefusal:
     ci_blocked_by: str | None = None
     """Why CI is red when GitHub itself refused to run it at the head, e.g. its billing."""
     waits_on: str | None = None
+    colleague_block: str | None = None
 
 
 def list_merge_waits(facts: MergeFacts) -> tuple[str, ...]:
@@ -1013,6 +1017,8 @@ def list_merge_waits(facts: MergeFacts) -> tuple[str, ...]:
         waits.append(DRAFT)
     if facts.merge_block:
         waits.append(OWNER_COMMENTS_OPEN)
+    if facts.colleague_block:
+        waits.append(COLLEAGUE_COMMENTS_OPEN)
     if facts.waits_on:
         waits.append(WAITS_ON_PR)
     if not facts.owner_reviewed:
@@ -1055,7 +1061,34 @@ def map_row_to_merge_facts(row: sqlite3.Row, merge_block: str | None, waits_on: 
         or row["approval_waived_at"] is not None
         or has_merge_ok_at_head(row),
         waits_on=waits_on,
+        colleague_block=map_row_to_colleague_block(row),
     )
+
+
+def map_row_to_colleague_block(row: sqlite3.Row, live: tuple[Sequence[str], Sequence[str]] | None = None) -> str | None:
+    """From the queue's last read, or from `live` (threads, comments) just read from GitHub."""
+    if live is not None:
+        return map_logins_to_colleague_block(*live)
+    # Read before this rule existed and not since: unknown. A new PR's are read in the poll that first sees it, and
+    # until its threads are, the owner's rule waits on them.
+    if (row["colleague_comments"] is None and row["comments_read_for"] is not None) or (
+        row["colleague_threads"] is None and row["threads_read_for"] is not None
+    ):
+        return "the colleagues' comments are not read yet"
+    return map_logins_to_colleague_block(
+        json.loads(str(row["colleague_threads"] or "[]")), json.loads(str(row["colleague_comments"] or "[]"))
+    )
+
+
+def map_logins_to_colleague_block(threads: Sequence[str], comments: Sequence[str]) -> str | None:
+    """What of the colleagues' is not processed yet, one login per thread or comment; None when nothing is. The owner
+    asked that every colleague's comment be processed before a merge, an approval's or a nit's too."""
+    parts: list[str] = []
+    if threads:
+        parts.append(f"{len(threads)} thread{'s' if len(threads) > 1 else ''} neither resolved nor answered")
+    if comments:
+        parts.append(f"{len(comments)} comment{'s' if len(comments) > 1 else ''} unanswered")
+    return f"{', '.join(parts)} ({', '.join(sorted(set([*threads, *comments])))})" if parts else None
 
 
 def map_row_to_dependency_blockers(row: sqlite3.Row, with_siblings: bool = True) -> list[str]:
@@ -1148,7 +1181,7 @@ def find_merge_blocks(
                 left = deadline - time.monotonic()
                 if left < MERGE_FACTS_MIN_S:
                     raise GitHubError("out of time before reading GitHub")
-                draft, approved, checks, merge_state, his, head_oid = fetch_merge_facts(
+                draft, approved, checks, merge_state, his, head_oid, threads, comments = fetch_merge_facts(
                     config, str(row["repo"]), int(row["number"]), min(left, MERGE_FACTS_TIMEOUT_S)
                 )
             except GitHubError as exc:
@@ -1160,6 +1193,7 @@ def find_merge_blocks(
                         facts.merge_block,
                         ci_blocked_by=find_ci_blocked_by(row, cached_waits, head_oid),
                         waits_on=facts.waits_on,
+                        colleague_block=facts.colleague_block,
                     )
                     if cached_waits
                     else MergeRefusal(ref, (), row["merge_block"], str(exc))
@@ -1175,6 +1209,7 @@ def find_merge_blocks(
                 block,
                 owner_reviewed=facts.owner_reviewed,
                 waits_on=facts.waits_on,
+                colleague_block=map_row_to_colleague_block(row, (threads, comments)),
             )
         waits = list_merge_waits(facts)
         backport: str | None = None
@@ -1195,6 +1230,7 @@ def find_merge_blocks(
                     backport=backport,
                     ci_blocked_by=find_ci_blocked_by(row, waits, head_oid),
                     waits_on=facts.waits_on,
+                    colleague_block=facts.colleague_block,
                 )
             )
     return refusals
@@ -1216,7 +1252,16 @@ def find_standing_rule_block(config: Config, row: sqlite3.Row, live: LiveMergeFa
     if row["held_at"] is not None:
         return MergeRefusal(ref, (HELD,), row["merge_block"], held_why=row["held_why"])
     block = map_live_threads_to_merge_block(row, live.his_threads)
-    facts = MergeFacts(live.draft, bool(live.approvers), live.checks, live.merge_state, block, owner_reviewed=True)
+    colleague = map_row_to_colleague_block(row, (live.colleague_threads, live.colleague_comments))
+    facts = MergeFacts(
+        live.draft,
+        bool(live.approvers),
+        live.checks,
+        live.merge_state,
+        block,
+        owner_reviewed=True,
+        colleague_block=colleague,
+    )
     waits = list(list_merge_waits(facts))
     if not live.bot_cleared:
         waits.append(f"{config.review_bot_name} has not reviewed the head without asking for changes")
@@ -1227,7 +1272,7 @@ def find_standing_rule_block(config: Config, row: sqlite3.Row, live: LiveMergeFa
     base = live.base or ""
     if base != live.default_branch and not is_backport_base(config.backport_bases, base):
         waits.append(f"its base {base or '(unknown)'} is not the default branch")
-    return MergeRefusal(ref, tuple(waits), block) if waits else None
+    return MergeRefusal(ref, tuple(waits), block, colleague_block=colleague) if waits else None
 
 
 def find_ci_blocked_by(row: sqlite3.Row, waits: tuple[str, ...], head_oid: str | None) -> str | None:
@@ -1239,7 +1284,8 @@ def map_merge_blocks_to_lines(refusals: list[MergeRefusal], owner: str, owner_at
     rule = (
         f"{owner_at_start}'s rule: a PR merges once {owner} has reviewed it (Publish or a recorded decision) and it "
         "is approved on GitHub (a colleague or the review bot), CI is "
-        f"green or absent, it is not a draft and has no conflicts, and no comment or thread of {owner}'s is open; "
+        f"green or absent, it is not a draft and has no conflicts, no comment or thread of {owner}'s is open, and "
+        "every colleague's thread is resolved or answered and their comments answered (an approval's text aside); "
         f"settle {owner}'s comments first (fix or answer, and {owner} resolves the threads)."
     )
     lines: list[str] = []
@@ -1269,6 +1315,11 @@ def map_wait_to_reason(wait: str, refusal: MergeRefusal, owner: str) -> str:
         )
     if wait == OWNER_COMMENTS_OPEN:
         return f"{owner}'s comments are open ({refusal.merge_block})"
+    if wait == COLLEAGUE_COMMENTS_OPEN:
+        return (
+            f"a colleague's comments are not processed: {refusal.colleague_block}; answer each on GitHub (a commit "
+            "alone is no answer) or resolve its thread"
+        )
     if wait == NOT_OWNER_REVIEWED:
         return (
             f"{owner} has not reviewed it (no Publish, no recorded decision); a colleague's or the bot's approval "

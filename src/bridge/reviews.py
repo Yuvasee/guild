@@ -29,6 +29,7 @@ from bridge.guard import (
     BLOCKED_ON_GITHUB,
     CI_PENDING,
     CI_RED,
+    COLLEAGUE_COMMENTS_OPEN,
     CONFLICTS,
     GITHUB_STALE_S,
     HELD,
@@ -41,6 +42,7 @@ from bridge.guard import (
     is_approved_row,
     list_merge_waits,
     load_open_siblings,
+    map_row_to_colleague_block,
     map_row_to_dependency_blockers,
     map_row_to_merge_facts,
     map_siblings_to_wait,
@@ -58,6 +60,7 @@ from bridge.review_github import (
     GitHubError,
     OpenPr,
     ReviewThreads,
+    Said,
     add_label,
     fetch_ci_blocked_by,
     fetch_comments,
@@ -66,6 +69,7 @@ from bridge.review_github import (
     fetch_pr_states,
     fetch_review_threads,
     list_loc_excluded,
+    list_unanswered_colleague_comments,
 )
 from bridge.review_marks import convert_reviews_to_text, map_text_to_reviews
 from bridge.review_worktree import (
@@ -373,7 +377,8 @@ def list_refs_with_new_threads(conn: sqlite3.Connection) -> list[tuple[str, str,
     rows = conn.execute(
         """
         SELECT ref, repo, number, threads_key FROM review_prs
-        WHERE closed_at IS NULL AND threads_key IS NOT NULL AND threads_key IS NOT threads_read_for
+        WHERE closed_at IS NULL AND threads_key IS NOT NULL
+          AND (threads_key IS NOT threads_read_for OR colleague_threads IS NULL)
         """
     ).fetchall()
     return [(str(r["ref"]), str(r["repo"]), int(r["number"]), str(r["threads_key"])) for r in rows]
@@ -382,10 +387,18 @@ def list_refs_with_new_threads(conn: sqlite3.Connection) -> list[tuple[str, str,
 def store_review_threads(conn: sqlite3.Connection, ref: str, key: str, threads: ReviewThreads) -> None:
     conn.execute(
         """
-        UPDATE review_prs SET open_threads = ?, his_open_threads = ?, his_threads = ?, threads_read_for = ?
+        UPDATE review_prs SET open_threads = ?, his_open_threads = ?, his_threads = ?, threads_read_for = ?,
+                              colleague_threads = ?
         WHERE ref = ?
         """,
-        (threads.open, len(threads.his), json.dumps([asdict(t) for t in threads.his]), key, ref),
+        (
+            threads.open,
+            len(threads.his),
+            json.dumps([asdict(t) for t in threads.his]),
+            key,
+            json.dumps(threads.colleagues),
+            ref,
+        ),
     )
 
 
@@ -394,7 +407,8 @@ def list_refs_with_new_activity(conn: sqlite3.Connection) -> list[tuple[str, str
     rows = conn.execute(
         """
         SELECT ref, repo, number, updated_at FROM review_prs
-        WHERE closed_at IS NULL AND (comments_read_for IS NULL OR comments_read_for != updated_at)
+        WHERE closed_at IS NULL
+          AND (comments_read_for IS NULL OR comments_read_for != updated_at OR colleague_comments IS NULL)
         """
     ).fetchall()
     return [(str(r["ref"]), str(r["repo"]), int(r["number"]), str(r["updated_at"])) for r in rows]
@@ -416,7 +430,22 @@ def store_comments(
                 (ref, comment.comment_id, comment.created_at, comment.body, comment.url, comment.parent_id,
                  comment.parent_author, comment.author, comment.state, comment.commit_id, comment.review_id),
             )  # fmt: skip
-    conn.execute("UPDATE review_prs SET comments_read_for = ? WHERE ref = ?", (updated_at, ref))
+    conn.execute(
+        "UPDATE review_prs SET comments_read_for = ?, colleague_comments = ? WHERE ref = ?",
+        (updated_at, json.dumps(map_ref_to_colleague_waits(conn, config, ref)), ref),
+    )
+
+
+def map_ref_to_colleague_waits(conn: sqlite3.Connection, config: Config, ref: str) -> tuple[str, ...]:
+    rows = conn.execute(
+        """
+        SELECT author, created_at, body, state FROM review_comments
+        WHERE ref = ? AND author IS NOT NULL AND (comment_id LIKE 'i%' OR comment_id LIKE 'r%')
+        """,
+        (ref,),
+    ).fetchall()
+    said = [Said(str(r["author"]), int(r["created_at"]), str(r["body"]), r["state"]) for r in rows]
+    return list_unanswered_colleague_comments(said, config.review_author, config.review_bot_logins)
 
 
 def is_worth_keeping(config: Config, comment: FetchedComment) -> bool:
@@ -1577,10 +1606,11 @@ def store_merge_blocks(conn: sqlite3.Connection) -> None:
         # The owner's comments reopen the telling, so once they are settled the lead hears it is ready again.
         conn.execute(
             """
-            UPDATE review_prs SET merge_block = ?1, merge_told_at = CASE WHEN ?1 IS NULL THEN merge_told_at END
-            WHERE ref = ?2
+            UPDATE review_prs SET merge_block = ?1,
+                                  merge_told_at = CASE WHEN ?1 IS NULL AND ?2 IS NULL THEN merge_told_at END
+            WHERE ref = ?3
             """,
-            (map_row_to_merge_block(conn, row), row["ref"]),
+            (map_row_to_merge_block(conn, row), map_row_to_colleague_block(row), row["ref"]),
         )
     # Every block is current before any is read: a PR waits on its siblings' blocks.
     for row in conn.execute("SELECT * FROM review_prs WHERE closed_at IS NULL").fetchall():
@@ -1633,6 +1663,7 @@ _APPROVAL_LEFT = {
     NOT_OWNER_REVIEWED: "your review",
     HELD: "held for your review",
     OWNER_COMMENTS_OPEN: "your comments open",
+    COLLEAGUE_COMMENTS_OPEN: "colleague's comments open",
     CI_RED: "CI red",
     CI_PENDING: "CI pending",
     CONFLICTS: "conflicts",
@@ -1701,6 +1732,8 @@ def map_row_to_own_merge_ok_needs(row: sqlite3.Row, with_siblings: bool = True) 
         return "CI is not green"
     if row["merge_state"] == "BLOCKED":
         return "GitHub would refuse it: branch protection wants an approval it does not have yet"
+    if block := map_row_to_colleague_block(row):
+        return f"a colleague's comments are not processed: {block}"
     return None
 
 
@@ -2005,6 +2038,7 @@ def map_row_to_review(conn: sqlite3.Connection, config: Config, row: sqlite3.Row
         "conflict_asked_at": row["conflict_asked_at"] if row["conflict_asked_oid"] == row["head_oid"] else None,
         "base": row["base"],
         "merge_block": row["merge_block"],
+        "colleague_block": map_row_to_colleague_block(row),
         "resolve_threads": resolve_threads,
         "answered_threads": map_row_to_answered_threads(conn, row, now),
         "resolve_is_last": is_resolving_all_that_is_left(row),

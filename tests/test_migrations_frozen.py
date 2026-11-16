@@ -83,6 +83,7 @@ APPLIED = (
     "3be97ddf9811b19d",
     "87d419ed9ce547a4",
     "4258899a12631751",
+    "e8697e65f4f72ef1",
 )
 """One hash per migration that has shipped, in order. A new migration is appended to MIGRATIONS and its hash here."""
 
