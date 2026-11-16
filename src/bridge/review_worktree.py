@@ -1102,7 +1102,7 @@ def map_doc_to_served(conn: sqlite3.Connection, repo: str, number: int) -> bytes
     words = map_row_to_doc_behind(row)
     banner = (
         '<div style="font:14px system-ui,sans-serif;padding:8px 12px;background:#fff3cd;color:#5c4400;'
-        f'border-bottom:1px solid #e0c36a">{words}</div>'
+        f'border-radius:0 0 10px 10px">{words}</div>'
     ).encode()
     body = _BODY_TAG_RE.search(doc)
     return doc[: body.end()] + banner + doc[body.end() :] if body else banner + doc

@@ -113,6 +113,40 @@ def map_arg_to_link(text: str) -> FeedLink:
     return FeedLink(label=label.strip() or parsed.netloc, url=url.strip())
 
 
+PICK_LABEL = "My pick"
+
+
+def build_decision_body(
+    body: str,
+    what: str | None,
+    why: str | None,
+    options: list[str],
+    costs: list[str | None],
+    pick: int | None,
+    pick_why: str | None,
+) -> str:
+    """The body with each field on its own labelled line, the labels the dashboard reads into a card: What, Why now,
+    one "<answer> cost" per priced answer, and My pick naming the recommended answer."""
+    if len(costs) > len(options):
+        raise MessageStateError("each --cost follows the --option it prices")
+    if pick is not None and not 1 <= pick <= len(options):
+        raise MessageStateError(f"--pick is an answer's number, 1 to {len(options)}")
+    if pick_why and pick is None:
+        raise MessageStateError("--pick-why needs --pick")
+    lines = [f"What: {what.strip()}"] if what and what.strip() else []
+    if why and why.strip():
+        lines.append(f"Why now: {why.strip()}")
+    lines += [
+        f"{option.strip()} cost: {cost.strip()}"
+        for option, cost in zip(options, costs, strict=False)
+        if cost and cost.strip()
+    ]
+    if pick is not None:
+        reason = f". {pick_why.strip()}" if pick_why and pick_why.strip() else ""
+        lines.append(f"{PICK_LABEL}: {options[pick - 1].strip()}{reason}")
+    return "\n\n".join(part for part in (body.strip(), "\n".join(lines)) if part)
+
+
 def add_post(
     conn: sqlite3.Connection,
     sender: Party,

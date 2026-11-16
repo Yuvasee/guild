@@ -7,6 +7,7 @@ from bridge.db import now_ms, transaction
 from bridge.identity import current_party
 from bridge.pages import (
     Page,
+    add_doc_style_to_page,
     add_page,
     archive_page,
     build_republish_plan,
@@ -63,6 +64,9 @@ def cmd_page_add(args: argparse.Namespace, conn: sqlite3.Connection, config: Con
         page = add_page(
             conn, str(args.slug), str(args.title), str(args.source), args.url, bool(args.shared), by, now_ms()
         )
+        styled = add_doc_style_to_page(page.source_dir)
+    if styled is not None:
+        print(styled + ("; republish it to show" if page.artifact_url and styled.startswith("added") else ""))
     if page.artifact_url:
         print(f"{PAGES_BASE_URL}{page.slug} → {page.artifact_url}")
     else:
