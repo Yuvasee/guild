@@ -144,9 +144,13 @@ def test_page_words_change_by_the_minute_and_say_why_when_red(tmp_path: Path) ->
     eq(stale.level, "stuck");
     const failed = mapWatcherToLine(
       { ...base, state: "failed", status: "failed", last_run_at: now - 120_000, detail: "502" }, now);
-    eq(failed.words, "last sweep failed 2 min ago, 0 new");
+    eq(failed.words, "checked 2 min ago: 0 new");
     eq(failed.tip.includes("502"), true);
-    eq(failed.short, "failed 2 min ago");
+    eq(failed.short, "0 new");
+    const long = mapWatcherToLine({ ...base, state: "failed", status: "failed", last_run_at: now - 60_000,
+      summary: "nightly sync: 6 jobs fell back to the slow path in the last hour, clears 10:41Z" }, now);
+    eq(long.short.length <= 48 && long.short.endsWith("…"), true);
+    eq(long.words.startsWith("checked 1 min ago: nightly sync: 6 jobs"), true);
     eq(failed.level, "waiting");
     const missing = mapWatcherToLine({ name: "x", path: "p", state: "missing", why: "no status file" }, now);
     eq(missing.words, "no status file");

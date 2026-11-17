@@ -2239,11 +2239,25 @@ function watchAgo(ms) {
   return (minutes < 120 ? minutes + " min" : Math.floor(minutes / 60) + " h") + " ago";
 }
 
+const WATCH_SHORT_CHARS = 48;
+
+function clip(text, max) {
+  return text.length <= max ? text : text.slice(0, max - 1).trimEnd() + "…";
+}
+
 function mapWatcherToLine(watcher, now) {
   const ran = watcher.last_run_at ? watchAgo(now - watcher.last_run_at) : "";
   const summary = watcher.summary ? ", " + watcher.summary : "";
-  const short = { ok: ran, failed: "failed " + ran, stale: "no sweep for " + ran.replace(/ ago$/, "") }[watcher.state];
-  const words = !short ? watcher.why || "no status" : watcher.state === "stale" ? short : "last sweep " + short + summary;
+  // A failed chip names what failed (the job's own summary), not only when it last ran.
+  const failedShort = watcher.summary ? clip(watcher.summary, WATCH_SHORT_CHARS) : "failed";
+  const short = { ok: ran, failed: failedShort, stale: "no sweep for " + ran.replace(/ ago$/, "") }[watcher.state];
+  const words = !short
+    ? watcher.why || "no status"
+    : watcher.state === "stale"
+      ? short
+      : watcher.state === "failed"
+        ? "checked " + ran + ": " + (watcher.summary || "failed")
+        : "last sweep " + ran + summary;
   const tip = [];
   if (watcher.last_run_at) tip.push("Last sweep " + fullTime(watcher.last_run_at) + (watcher.status === "failed" ? ", failed" : ""));
   if (watcher.state === "stale" && watcher.summary) tip.push("It said: " + watcher.summary);
