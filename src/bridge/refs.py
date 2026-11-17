@@ -1,4 +1,7 @@
 import re
+from collections.abc import Iterable
+
+from bridge.config import Config
 
 MAX_SCAN_CHARS = 20_000
 MAX_REFS_PER_TEXT = 20
@@ -83,3 +86,29 @@ def map_ref_to_label(ref: str) -> str:
     if kind in ("pr", "gh-issue") and sep and "/" in repo:
         return f"{map_repo_to_label(repo)}#{number}"
     return value
+
+
+def map_prefixes_to_key_re(prefixes: Iterable[str], ignore_case: bool) -> re.Pattern[str]:
+    alternatives = "|".join(re.escape(p) for p in prefixes)
+    return re.compile(rf"(?<![A-Za-z0-9])(?:{alternatives})-\d+(?!\d)", re.IGNORECASE if ignore_case else 0)
+
+
+def names_issue(prefixes: tuple[str, ...], branch: str, title: str, body: str) -> bool:
+    """A key of a configured team in the branch (any case, as branch names are written) or in the title or body."""
+    if not prefixes:
+        return True
+    return bool(
+        map_prefixes_to_key_re(prefixes, ignore_case=True).search(branch)
+        or map_prefixes_to_key_re(prefixes, ignore_case=False).search(f"{title}\n{body}")
+    )
+
+
+def needs_issue(config: Config, repo: str) -> bool:
+    """A PR of this repo must name an issue: the repo is review_org's and no config list exempts it."""
+    owner, _, _ = repo.partition("/")
+    exempt = {r.casefold() for r in (*config.review_excluded_repos, *config.pr_issue_exempt_repos)}
+    return (
+        bool(config.issue_prefixes and config.review_org)
+        and owner.casefold() == config.review_org.casefold()
+        and (repo.casefold() not in exempt)
+    )

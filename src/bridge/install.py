@@ -29,6 +29,7 @@ _MATCHERS = {"Notification": "permission_prompt", "PreToolUse": "|".join(("Bash"
 _ROBOT_GLOBS = f"*{ROBOT}*|*\\\\ud83e\\\\udd16*"
 # So does any gh command that may set or remove a label: which label is the owner's is read in Python.
 _LABEL_GLOBS = ("*gh*label*", "*gh*create*-*l*", "*gh*new*-*l*")
+_PR_ISSUE_GLOBS = ("*gh*pr*create*", "*gh*pr*new*", "*gh*pr*edit*")
 
 type JsonObject = dict[str, object]
 
@@ -95,7 +96,7 @@ def convert_event_to_command(executable: str, event: str) -> str:
         # exec in a pipeline replaces only its subshell, so exit before the claims gate runs the hook again.
         run = f"printf '%s' \"$p\" | {direct}; exit 0;;"
         return (
-            f'p=$(cat); case "$p" in {_ROBOT_GLOBS}|{"|".join(_LABEL_GLOBS)}) {run} esac; '
+            f'p=$(cat); case "$p" in {_ROBOT_GLOBS}|{"|".join((*_LABEL_GLOBS, *_PR_ISSUE_GLOBS))}) {run} esac; '
             '[ -f "${BRIDGE_STATE_DIR:-$HOME/.local/state/bridge}/claims-active" ] || exit 0; '
             f'case "$p" in {cases}) {run} esac; exit 0'
         )
@@ -110,9 +111,9 @@ def convert_event_to_command(executable: str, event: str) -> str:
 
 
 def list_guard_globs() -> list[str]:
-    """The shell guard's gate: a command matching none of these cannot push, merge, set a robot-prefixed title or
-    change a label."""
-    return [*(convert_trigger_to_glob(t) for t in DEFAULT_TRIGGERS), f"*{ROBOT}*", *_LABEL_GLOBS]
+    """The shell guard's gate: a command matching none of these cannot push, merge, set a robot-prefixed title, change
+    a label or open or edit a PR."""
+    return [*(convert_trigger_to_glob(t) for t in DEFAULT_TRIGGERS), f"*{ROBOT}*", *_LABEL_GLOBS, *_PR_ISSUE_GLOBS]
 
 
 def uninstall_hooks(settings_path: Path) -> None:

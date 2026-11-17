@@ -77,6 +77,8 @@ class Config:
     """Claude plugins turned off for host workers besides the defaults, e.g. one that must have a single poller."""
     review_excluded_repos: tuple[str, ...] = ()
     """owner/repo whose PRs never enter the review queue: no owner queue, no approval gate, no Slack post."""
+    pr_issue_exempt_repos: tuple[str, ...] = ()
+    """owner/repo of review_org whose PRs may name no issue: the guard lets gh pr create pass, the queue marks none."""
     """Base-branch globs (e.g. "release/*") whose PRs need no approval when their diff equals merged default-branch PRs
     they name; empty turns that off."""
     laptop_agent_cap: int = 0
@@ -274,6 +276,7 @@ def map_toml_to_config(raw: dict[str, object]) -> Config:
         review_bot_logins=_str_list(raw, "review_bot_logins", defaults.review_bot_logins),
         backport_bases=_str_list(raw, "backport_bases", defaults.backport_bases),
         review_excluded_repos=_str_list(raw, "review_excluded_repos", defaults.review_excluded_repos),
+        pr_issue_exempt_repos=_str_list(raw, "pr_issue_exempt_repos", defaults.pr_issue_exempt_repos),
         laptop_agent_cap=_int(raw, "laptop_agent_cap", defaults.laptop_agent_cap),
         worker_model=_str(raw, "worker_model", defaults.worker_model),
         worker_host=_str(raw, "worker_host", defaults.worker_host),

@@ -159,6 +159,8 @@ TEAM workspace, named "<Name> · <label>" and tinted in its color; its workers n
   (and `gh api … /merge`) on it. Answer or fix, and let the owner resolve those threads.
 - Linear issues: create one only if a search finds no duplicate; never a sub-issue; rather none than one. Work outside
   the current scope gets one only after the owner confirms through the assistant.
+- When the Linear connector fails, use `guild linear search|show|create|comment|move` (`guild linear -h`). A PR of the
+  review org must name an issue in its branch, title or body: the shell guard refuses a `gh pr create` that names none.
 - Move an issue as you act on it: In Progress at start; In Review only at the PR that closes it, Done when that PR
   merges. A key in a branch or title means In Progress.
 - On GitHub and Linear, each comment and description body you write to colleagues starts with '🤖 Claude:'; a PR, issue

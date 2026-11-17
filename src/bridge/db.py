@@ -857,6 +857,10 @@ MIGRATIONS: tuple[str, ...] = (
     ALTER TABLE review_prs ADD COLUMN review_wait_told TEXT;
     ALTER TABLE review_prs ADD COLUMN bot_threads TEXT;
     """,
+    # Its branch, title and body name no issue of a configured team.
+    """
+    ALTER TABLE review_prs ADD COLUMN issue_missing INTEGER NOT NULL DEFAULT 0;
+    """,
 )
 
 HOOK_BUSY_TIMEOUT_MS = 200
