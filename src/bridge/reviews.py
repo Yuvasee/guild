@@ -112,6 +112,12 @@ BACKPORT_CHECK_BUDGET_S = 20.0
 BACKPORT_CHECKS_PER_POLL = 2
 """Checks run serially before comments and wakes, so a round waits at most this many budgets for them."""
 CI_REREADS_PER_POLL = 5
+CI_RED_STATES = ("FAILURE", "ERROR")
+BOT_WAIT_OWNER_MS = 60 * 60 * 1000
+BOT_WAIT_ASSISTANT_MS = 3 * 60 * 60 * 1000
+BOT_WAIT_OWNER_GRACE_MS = 2 * 60 * 60 * 1000
+"""The owner's time to answer before the assistant hears of it, so a long wait found at once is not both at once."""
+BOT_WAIT_LINKS_MAX = 5
 BACKPORT_RECHECK_MS = 15 * 60_000
 """A refused check runs again this often on the same head: a named PR may merge meanwhile."""
 LOC_RULE = 1
@@ -378,7 +384,7 @@ def list_refs_with_new_threads(conn: sqlite3.Connection) -> list[tuple[str, str,
         """
         SELECT ref, repo, number, threads_key FROM review_prs
         WHERE closed_at IS NULL AND threads_key IS NOT NULL
-          AND (threads_key IS NOT threads_read_for OR colleague_threads IS NULL)
+          AND (threads_key IS NOT threads_read_for OR colleague_threads IS NULL OR bot_threads IS NULL)
         """
     ).fetchall()
     return [(str(r["ref"]), str(r["repo"]), int(r["number"]), str(r["threads_key"])) for r in rows]
@@ -388,7 +394,7 @@ def store_review_threads(conn: sqlite3.Connection, ref: str, key: str, threads: 
     conn.execute(
         """
         UPDATE review_prs SET open_threads = ?, his_open_threads = ?, his_threads = ?, threads_read_for = ?,
-                              colleague_threads = ?
+                              colleague_threads = ?, bot_threads = ?
         WHERE ref = ?
         """,
         (
@@ -397,6 +403,7 @@ def store_review_threads(conn: sqlite3.Connection, ref: str, key: str, threads: 
             json.dumps([asdict(t) for t in threads.his]),
             key,
             json.dumps(threads.colleagues),
+            json.dumps([asdict(t) for t in threads.bot_must_fix]),
             ref,
         ),
     )
@@ -948,6 +955,13 @@ def tell_owner(conn: sqlite3.Connection, owner: Owner, text: str, now: int) -> t
     return result.message_id, recipient
 
 
+def send_to_handle(conn: sqlite3.Connection, handle: str, text: str, now: int) -> tuple[int, Recipient]:
+    recipient = resolve_handle(conn, handle)
+    result = send_message(conn, Party(SYSTEM_CONVERSATION, "bridge"), [recipient], "info", text, now)
+    conn.execute("UPDATE messages SET post_type = ? WHERE id = ?", (REVIEW_QUEUE, result.message_id))
+    return result.message_id, recipient
+
+
 def prune_marks(conn: sqlite3.Connection, now: int) -> None:
     conn.execute("DELETE FROM review_agent_marks WHERE at < ?", (now - MARKS_KEPT_MS,))
     conn.execute("DELETE FROM review_branch_writes WHERE at < ?", (now - BRANCH_WRITES_KEPT_MS,))
@@ -1389,7 +1403,12 @@ def poll_review_queue(
             classify_pending_comments(conn, config, scanned_from)
             prune_marks(conn, now)
         store_merge_blocks(conn)
-        return [*take_comment_wakes(conn, config, now), *tell_ready_to_merge(conn, config, now)]
+        return [
+            *take_comment_wakes(conn, config, now),
+            *tell_ready_to_merge(conn, config, now),
+            *tell_review_waits(conn, config, now),
+            *tell_bot_waits(conn, config, now),
+        ]
 
 
 def list_prs_to_label(conn: sqlite3.Connection, config: Config, prs: list[OpenPr]) -> list[OpenPr]:
@@ -1531,11 +1550,12 @@ def map_row_to_threads_to_resolve(conn: sqlite3.Connection, config: Config, row:
 
 
 def is_resolving_all_that_is_left(row: sqlite3.Row) -> bool:
-    """Nothing but the owner's threads stands between the PR and a merge: ready, approved, green, no conflicts, and no
-    thread of anyone else's open."""
+    """Nothing but the owner's threads stands between the PR and a merge: ready, approved, green, the review bot clear
+    at the head, no conflicts, and no thread of anyone else's open."""
     return (
         not row["draft"]
         and row["checks"] in (None, "SUCCESS")
+        and bool(row["bot_cleared"])
         and bool(json.loads(str(row["approved_by"] or "[]")))
         and row["merge_state"] != "DIRTY"
         and int(row["open_threads"] or 0) == int(row["his_open_threads"] or 0)
@@ -1701,6 +1721,90 @@ def tell_ready_to_merge(conn: sqlite3.Connection, config: Config, now: int) -> l
         sent.append(tell_owner(conn, owner, text, now))
         conn.execute("UPDATE review_prs SET merge_told_at = ? WHERE ref = ?", (now, row["ref"]))
     return sent
+
+
+def tell_review_waits(conn: sqlite3.Connection, config: Config, now: int) -> list[tuple[int, Recipient]]:
+    """Its owner is told once per set of reasons it can fix that keep a PR out of the owner's review order, whatever
+    the head and whatever clears by itself; once the PR is clear they are forgotten, so the next one is told. With no
+    owner it waits for one."""
+    sent: list[tuple[int, Recipient]] = []
+    for row in conn.execute("SELECT * FROM review_prs WHERE closed_at IS NULL").fetchall():
+        wait = find_review_wait(conn, config, row)
+        if wait is None and row["review_wait_told"] is not None:
+            conn.execute("UPDATE review_prs SET review_wait_told = NULL WHERE ref = ?", (row["ref"],))
+        if wait is None or not wait.to_fix or wait.to_fix == row["review_wait_told"]:
+            continue
+        owner = find_owner(conn, config, str(row["ref"]), str(row["repo"]), str(row["head"]))
+        if owner is None:
+            continue
+        text = (
+            f"{row['url']} ({row['title']}) is not in {config.owner_name}'s review order: {wait.reason}. Clear it and "
+            "it gets a place."
+        )
+        sent.append(tell_owner(conn, owner, text, now))
+        conn.execute("UPDATE review_prs SET review_wait_told = ? WHERE ref = ?", (wait.to_fix, row["ref"]))
+    return sent
+
+
+def tell_bot_waits(conn: sqlite3.Connection, config: Config, now: int) -> list[tuple[int, Recipient]]:
+    """The review bot blocking an open PR with no word from our account: its owner is told after an hour, and the
+    assistant after three once the owner had two of them, or had none. Each once until nothing of the bot's waits."""
+    sent: list[tuple[int, Recipient]] = []
+    for row in conn.execute("SELECT * FROM review_prs WHERE closed_at IS NULL").fetchall():
+        ref = str(row["ref"])
+        owner_key, assistant_key = f"bot-wait:{ref}:owner", f"bot-wait:{ref}:assistant"
+        since = None if row["draft"] else find_bot_wait_since(conn, config, row)
+        if since is None:
+            conn.execute("DELETE FROM signal_posts WHERE key IN (?, ?)", (owner_key, assistant_key))
+            continue
+        if now - since < BOT_WAIT_OWNER_MS:
+            continue
+        what = describe_bot_wait(conn, config, row)
+        owner = find_owner(conn, config, ref, str(row["repo"]), str(row["head"]))
+        told = conn.execute("SELECT posted_at FROM signal_posts WHERE key = ?", (owner_key,)).fetchone()
+        if owner is not None and told is None:
+            text = (
+                f"{row['url']} ({row['title']}): {what} has had no answer from our side for over an hour. Fix it and "
+                "push, or reply on each thread why not."
+            )
+            message_id, recipient = tell_owner(conn, owner, text, now)
+            sent.append((message_id, recipient))
+            record_signal_post(conn, owner_key, message_id, now)
+            continue
+        owner_waited = told is not None and now - int(told["posted_at"]) >= BOT_WAIT_OWNER_GRACE_MS
+        if now - since < BOT_WAIT_ASSISTANT_MS or not (owner is None or owner_waited):
+            continue
+        if conn.execute("SELECT 1 FROM signal_posts WHERE key = ?", (assistant_key,)).fetchone():
+            continue
+        whose = (
+            f"its owner {owner.handle} was told {round((now - int(told['posted_at'])) / 3_600_000)} h ago"
+            if owner is not None and told is not None
+            else "no session owns it"
+        )
+        text = f"{row['url']} ({row['title']}): {what} has had no answer from our side for over 3 hours; {whose}."
+        try:
+            message_id, recipient = send_to_handle(conn, config.assistant_handle, text, now)
+        except AddressError as exc:
+            print(f"review bot wait: nobody to tell about {ref}: {exc}", flush=True)
+            continue
+        sent.append((message_id, recipient))
+        record_signal_post(conn, assistant_key, message_id, now)
+    return sent
+
+
+def describe_bot_wait(conn: sqlite3.Connection, config: Config, row: sqlite3.Row) -> str:
+    waiting = [str(t["url"]) for t in map_row_to_bot_threads(row) if t["waiting_since"] is not None]
+    parts = ["review requesting changes on the head"] if find_bot_blocking_review_at(conn, config, row) else []
+    if waiting:
+        threads = "thread" if len(waiting) == 1 else "threads"
+        parts.append(f"{len(waiting)} must-fix {threads} ({', '.join(waiting[:BOT_WAIT_LINKS_MAX])})")
+    return f"{config.review_bot_name}'s {' and '.join(parts)}"
+
+
+def record_signal_post(conn: sqlite3.Connection, key: str, message_id: int, now: int) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO signal_posts (key, message_id, posted_at) VALUES (?, ?, ?)", (key, message_id, now)
+    )
 
 
 def map_row_to_approval_words(row: sqlite3.Row, config: Config) -> str:
@@ -1989,6 +2093,87 @@ def map_row_to_usage_gap(row: sqlite3.Row) -> str | None:
     return None if row["draft"] or not row["usage_missing"] else USAGE_GAP
 
 
+@dataclass(frozen=True)
+class ReviewWait:
+    reason: str
+    to_fix: str
+    """The part its lead has to fix, or empty: CI still running or the bot not yet at a new head clears by itself."""
+
+
+def find_review_wait(conn: sqlite3.Connection, config: Config, row: sqlite3.Row) -> ReviewWait | None:
+    """Why a PR waiting for the owner gets no place in their review order yet: CI is not green, or the review bot,
+    in a repo it reviews, has not cleared its newest commit or has must-fix threads open."""
+    if map_row_to_group(row, config)[0] != WAITING_FOR_YOU:
+        return None
+    waits: list[tuple[str, bool]] = []
+    if row["checks"] not in (None, "SUCCESS"):
+        waits.append((f"waits for CI ({str(row['checks']).lower()})", row["checks"] in CI_RED_STATES))
+    if not row["bot_cleared"] and is_repo_reviewed_by_bot(conn, config, str(row["repo"])):
+        if find_bot_blocking_review_at(conn, config, row) is not None:
+            waits.append((f"{config.review_bot_name} blocking: changes requested", True))
+        else:
+            waits.append((f"{config.review_bot_name} has not reviewed the newest commit", False))
+    if map_row_to_bot_threads(row):
+        waits.append((f"{config.review_bot_name} has must-fix threads open", True))
+    if not waits:
+        return None
+    return ReviewWait("; ".join(reason for reason, _ in waits), "; ".join(reason for reason, fix in waits if fix))
+
+
+def is_repo_reviewed_by_bot(conn: sqlite3.Connection, config: Config, repo: str) -> bool:
+    """The bot has left something on one of its PRs: a repo it never reviews keeps no PR out of the order."""
+    bots = [login.casefold() for login in config.review_bot_logins]
+    if not bots:
+        return False
+    found = conn.execute(
+        f"""
+        SELECT 1 FROM review_comments WHERE ref >= ? AND ref < ? AND lower(author) IN ({",".join("?" * len(bots))})
+        LIMIT 1
+        """,
+        (f"pr:{repo}#", f"pr:{repo}$", *bots),
+    ).fetchone()
+    return found is not None
+
+
+def find_bot_blocking_review_at(conn: sqlite3.Connection, config: Config, row: sqlite3.Row) -> int | None:
+    """When the review bot's latest review, of the head, requested changes; None when it did not. Its approvals are
+    not kept, so the poll's clearance stands over a stale request."""
+    bots = [login.casefold() for login in config.review_bot_logins]
+    if not bots or row["bot_cleared"]:
+        return None
+    latest = conn.execute(
+        f"""
+        SELECT state, commit_id, created_at FROM review_comments
+        WHERE ref = ? AND state IS NOT NULL AND lower(author) IN ({",".join("?" * len(bots))})
+        ORDER BY created_at DESC LIMIT 1
+        """,
+        (row["ref"], *bots),
+    ).fetchone()
+    if latest is None or latest["commit_id"] != row["head_oid"] or latest["state"] != "CHANGES_REQUESTED":
+        return None
+    return int(latest["created_at"])
+
+
+def find_bot_wait_since(conn: sqlite3.Connection, config: Config, row: sqlite3.Row) -> int | None:
+    """Since when the review bot's blocking review of the head, or one of its must-fix threads, has had no word from
+    our account after it."""
+    since = [int(t["waiting_since"]) for t in map_row_to_bot_threads(row) if t["waiting_since"] is not None]
+    blocked_at = find_bot_blocking_review_at(conn, config, row)
+    if (
+        blocked_at is not None
+        and not conn.execute(
+            "SELECT 1 FROM review_comments WHERE ref = ? AND lower(author) = ? AND created_at > ? LIMIT 1",
+            (row["ref"], config.review_author.casefold(), blocked_at),
+        ).fetchone()
+    ):
+        since.append(blocked_at)
+    return min(since, default=None)
+
+
+def map_row_to_bot_threads(row: sqlite3.Row) -> list[dict[str, Any]]:
+    return json.loads(str(row["bot_threads"] or "[]"))
+
+
 def map_row_to_review(conn: sqlite3.Connection, config: Config, row: sqlite3.Row, now: int) -> dict[str, object]:
     ref = str(row["ref"])
     his = [
@@ -2073,6 +2258,7 @@ def map_row_to_review(conn: sqlite3.Connection, config: Config, row: sqlite3.Row
         "backport_check": map_row_to_backport_check(row) if group == BACKPORTS else None,
         "bot_approved": bool(row["bot_approved"]),
         "reviews_ran": list(map_row_to_reviews_ran(row) or ()),
+        "review_wait": wait.reason if (wait := find_review_wait(conn, config, row)) else None,
         "reviews_gap": None
         if group == BACKPORTS
         else "; ".join(g for g in (map_row_to_reviews_gap(row, config), map_row_to_usage_gap(row)) if g) or None,

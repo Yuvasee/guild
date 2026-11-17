@@ -851,6 +851,12 @@ MIGRATIONS: tuple[str, ...] = (
     ALTER TABLE review_prs ADD COLUMN colleague_threads TEXT;
     ALTER TABLE review_prs ADD COLUMN colleague_comments TEXT;
     """,
+    # The last reason its lead was told the PR has no place in the owner's review order, and the review bot's
+    # must-fix threads still open.
+    """
+    ALTER TABLE review_prs ADD COLUMN review_wait_told TEXT;
+    ALTER TABLE review_prs ADD COLUMN bot_threads TEXT;
+    """,
 )
 
 HOOK_BUSY_TIMEOUT_MS = 200

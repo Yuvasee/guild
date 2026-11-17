@@ -7,7 +7,7 @@ from unittest import mock
 
 from conftest import BridgeEnv, SpawnProcess, http_request, wait_for
 from test_leads import Team
-from test_reviews import CONFIG, REF, add_lead, add_session, make_pr
+from test_reviews import CONFIG, REF, add_lead, add_session, comment, make_pr
 
 from bridge.attention import (
     ESTIMATE_RULE,
@@ -25,7 +25,14 @@ from bridge.db import connect
 from bridge.feed import answer_post, deliver_typed, record_failed_delivery
 from bridge.leads import ROLE_TEMPLATE, Lead, convert_lead_to_role
 from bridge.notify import UrgentNotice, release_urgent_notice, show_notification, take_next_urgent_notice
-from bridge.reviews import COMMENTS_OPEN, FIXED, WAITING_FOR_OWNER, map_db_to_reviews, store_open_prs
+from bridge.reviews import (
+    COMMENTS_OPEN,
+    FIXED,
+    WAITING_FOR_OWNER,
+    map_db_to_reviews,
+    store_comments,
+    store_open_prs,
+)
 
 ROLE_MAX_CHARS = 3250
 ONBOARDING = Project("onboarding", ("PROJ-39",))
@@ -243,6 +250,52 @@ def test_page_keeps_to_the_ranking_and_answered_cards_sit_last() -> None:
     assert [pr["ref"] for pr in prs["prs"]] == ["r", "later"]
     attention: Any = page["attention"]
     assert [item["key"] for item in attention["ranking"]] == ["question:3", "question:2", "r"]
+
+
+def test_only_a_pr_with_green_ci_and_the_review_bot_clear_at_its_head_gets_a_place(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "w.db")
+
+    def pr(number: int, repo: str = "Org/app", **changes: Any) -> Any:
+        values = {"ref": f"pr:{repo}#{number}", "repo": repo, "number": number, "loc": number, "bot_cleared": True}
+        return make_pr(**{**values, **changes})
+
+    store_open_prs(
+        conn,
+        [
+            pr(1, checks="PENDING"),
+            pr(2, checks="FAILURE", bot_cleared=False, head_oid="h2"),
+            pr(3, bot_cleared=False, head_oid="h3"),
+            pr(4, bot_cleared=False, head_oid="h4"),
+            pr(5, checks=None),
+            pr(6),
+            pr(7, repo="Org/docs", bot_cleared=False),
+        ],
+        1,
+    )
+    for ref, commit in (("pr:Org/app#3", "h3"), ("pr:Org/app#4", "old")):
+        store_comments(
+            conn, CONFIG, ref, "U", [comment(f"r-{commit}", author="bot", state="CHANGES_REQUESTED", commit=commit)]
+        )
+
+    reviews = map_db_to_reviews(conn, CONFIG, 2)
+    page = map_page_to_ranked_page({"needs": []}, reviews, [])
+
+    waits = {pr["ref"]: pr["review_wait"] for pr in cast(Any, page["reviews"])["prs"]}
+    assert waits == {
+        "pr:Org/app#1": "waits for CI (pending)",
+        "pr:Org/app#2": "waits for CI (failure); ReviewBot has not reviewed the newest commit",
+        "pr:Org/app#3": "ReviewBot blocking: changes requested",
+        "pr:Org/app#4": "ReviewBot has not reviewed the newest commit",
+        "pr:Org/app#5": None,
+        "pr:Org/app#6": None,
+        "pr:Org/docs#7": None,
+    }, "a repo the bot never reviewed keeps no PR out"
+    ranking = cast(Any, page["attention"])["ranking"]
+    assert [(item["key"], item["mark"]) for item in ranking] == [
+        ("pr:Org/app#5", 1), ("pr:Org/app#6", 2), ("pr:Org/docs#7", 3),
+    ]  # fmt: skip
+    listed = [pr["ref"] for pr in cast(Any, page["reviews"])["prs"]]
+    assert listed[:3] == ["pr:Org/app#5", "pr:Org/app#6", "pr:Org/docs#7"], "the waiting ones come below"
 
 
 def test_a_pr_belongs_to_a_project_by_title_or_its_owning_leads_chunk_that_names_it(tmp_path: Path) -> None:
