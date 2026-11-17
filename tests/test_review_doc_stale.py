@@ -31,7 +31,7 @@ from bridge.reviews import (
 DOC_COMMIT = "d0c" * 13 + "d"
 HEAD = "e1e" * 13 + "e"
 
-TOP = "<h2>In short</h2><h2>User story</h2><ol><li>a<li>b<li>c</ol>"
+TOP = "<h2>In short</h2><h2>User story</h2><ol><li>a<li>b<li>c</ol><h2>Verified</h2><p>First reader: passed.</p>"
 
 
 def compare(*files: dict[str, Any], status: str = "ahead", ahead_by: int = 2) -> dict[str, Any]:

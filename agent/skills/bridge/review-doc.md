@@ -14,16 +14,16 @@ the headings and the one-line summaries, and open only what they want to check.
 1. **Read the reference example first**, if this install keeps one (`house.md` names it): a doc the owner called
    clear. Match its plainness and length, not its subject.
 2. **First reader.** Before `guild review doc`, give a fresh subagent the install's reader profile (who the reader is
-   and what they already know; `house.md` names the file) and only the doc's **In short**, **User story** and **What
-   changes and why**, and ask it to retell the user story in its own words, step by step, today and after; to explain
-   back what changes, why and how; to list every term that reader would not understand; and to list the sentences that
-   could be deleted without losing anything the reader needs to decide or review. A wrong retelling of the story, a
-   wrong or vague explain-back, or a flagged term the doc neither explains nor drops, means rewrite and ask a new fresh
-   reader. The deletion list is advice: cut what you agree with; readers differ there, so it never blocks a pass. It
-   passes once a reader's explain-back is right and every term it flagged is explained or gone. At most three readers:
-   if the third still gets it wrong, the doc's structure is the problem, so rework the top rather than polish sentences.
-   Say in **Verified and not verified** that the first reader passed, in which round, and any flagged point you kept
-   with why (`guild review doc` warns when that line is missing).
+   and what they already know; `house.md` names the file), the doc's **In short**, **User story** and **What changes
+   and why**, and the PR's diff, and ask it to retell the user story in its own words, step by step, today and after;
+   to explain back from the doc and the diff what changes, why and how; to list every term that reader would not
+   understand; and to list the sentences that could be deleted without losing anything the reader needs to decide or
+   review. A wrong retelling of the story, a wrong or vague explain-back, or a flagged term the doc neither explains
+   nor drops, means rewrite and ask a new fresh reader. The deletion list is advice: cut what you agree with; readers
+   differ there, so it never blocks a pass. It passes once a reader's explain-back is right and every term it flagged
+   is explained or gone. At most three readers: if the third still gets it wrong, the doc's structure is the problem,
+   so rework the top rather than polish sentences. Say in **Verified and not verified** that the first reader passed,
+   in which round, and any flagged point you kept with why (`guild review doc` refuses the doc without that line).
 
 ## Essence visible, details folded
 

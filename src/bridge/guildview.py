@@ -44,6 +44,7 @@ SILENT_TURN_MS = 30 * 60_000
 REMOTE_LINK_MS = 7 * 24 * 3_600_000
 # The command that starts a run is logged just before it starts, and the two hosts' clocks differ a little.
 REMOTE_LINK_BEFORE_START_MS = 10 * 60_000
+RED_CI_ESCALATE_MS = 2 * 3_600_000
 _MESSAGE_POST_TYPES = (None, "report", "question", "handoff")
 _SIGNATURE_RE = re.compile(r"\s*([^:()\n]{1,60}?)\s*(?:\(([^:()\n]{1,60})\))?\s*:\s*")
 # A worker's tab keeps the brief's first words until its lead names it; those say nothing about the task.
@@ -475,7 +476,8 @@ def post_signals_to_leads(
     conn: sqlite3.Connection, config: Config, signals: list[dict[str, object]], now: int
 ) -> list[Recipient]:
     """Each signal once, by its key, which stays the same while the underlying state does; a stalled review bot also
-    once to the assistant. One that fails is logged and undone alone, so it never holds back the signals after it."""
+    once to the assistant, and red CI on a PR in the owner's queue once more to the assistant when it is still red
+    two hours after its lead was told. One that fails is logged and undone alone, so it never holds back the rest."""
     posted: list[Recipient] = []
     for signal in signals:
         conn.execute("SAVEPOINT signal_post")
@@ -483,6 +485,10 @@ def post_signals_to_leads(
             recipients = [_post_signal_to_lead(conn, config, signal, now)]
             if signal.get("kind") == STALL:
                 recipients.append(_post_signal_to_assistant(conn, config, signal, now))
+            elif is_red_ci_still_unfixed(conn, signal, now):
+                hours = RED_CI_ESCALATE_MS // 3_600_000
+                late = {**signal, "text": f"{signal['text']}: CI still red {hours} h after its lead was told"}
+                recipients.append(_post_signal_to_assistant(conn, config, late, now))
         except Exception:
             conn.execute("ROLLBACK TO signal_post")
             conn.execute("RELEASE signal_post")
@@ -491,6 +497,26 @@ def post_signals_to_leads(
         conn.execute("RELEASE signal_post")
         posted += [r for r in recipients if r is not None]
     return posted
+
+
+def is_red_ci_still_unfixed(conn: sqlite3.Connection, signal: dict[str, object], now: int) -> bool:
+    """A draft's red CI is the author's own business, and a PR off the owner's queue is not waiting on anyone."""
+    key = str(signal["key"])
+    if signal.get("kind") != "ci" or signal.get("severity") == "info":
+        return False
+    told = conn.execute("SELECT posted_at FROM signal_posts WHERE key = ?", (key,)).fetchone()
+    if told is None or now - int(told["posted_at"]) < RED_CI_ESCALATE_MS:
+        return False
+    ref, head = key.rsplit(":ci:", 1)
+    queued = conn.execute(
+        """
+        SELECT 1 FROM review_prs
+        WHERE lower(ref) = lower(?) AND head_oid = ? AND closed_at IS NULL AND draft = 0
+          AND checks IN ('FAILURE', 'ERROR')
+        """,
+        (ref, head),
+    ).fetchone()
+    return queued is not None
 
 
 def _post_signal_to_lead(

@@ -8,7 +8,7 @@ from test_reviews import REF, setup_pr
 
 from bridge.config import Config, map_toml_to_config
 from bridge.db import transaction
-from bridge.review_doc_check import PlainLimits, find_doc_problems, find_doc_warnings, read_visible_top
+from bridge.review_doc_check import PlainLimits, find_doc_problems
 from bridge.review_worktree import DocError, read_registered_doc, register_doc
 
 WHERE = """
@@ -23,6 +23,7 @@ WHERE = """
 """
 
 
+PASSED = "<p>First reader with the reader profile: passed.</p>"
 STORY = (
     "<h2>User story</h2><p>A support agent answers a refund ticket.</p><ol>"
     "<li>Today: they open the order. After: the same.</li>"
@@ -34,7 +35,7 @@ STORY = (
 def make_doc(where: str = WHERE, first: str = "In short", last: str = "") -> bytes:
     sections = ["What changes and why", "How it works", "Costs and risks"]
     body = f"<h2>{first}</h2><p>text</p>{STORY}" + "".join(f"<h2>{title}</h2><p>text</p>" for title in sections)
-    tail = "<h2>Tests</h2><h2>Reviews</h2><p>Codex, Claude</p><h2>Verified and not verified</h2>"
+    tail = f"<h2>Tests</h2><h2>Reviews</h2><p>Codex, Claude</p><h2>Verified and not verified</h2>{PASSED}"
     return f"<html><body>{body}{where}{tail}{last}</body></html>".encode()
 
 
@@ -59,7 +60,7 @@ def test_the_doc_opens_with_in_short() -> None:
     assert problems(make_doc(first="Why")) == [
         "its first h2 is 'Why'; it opens with 'In short', with nothing before it"
     ]
-    assert problems(b"<h1>Doc</h1><p>no sections</p>") == ["it has no h2 headings; it opens with the h2 'In short'"]
+    assert problems(b"<h1>Doc</h1><p>no sections</p>")[0] == "it has no h2 headings; it opens with the h2 'In short'"
     hidden = b"<script>document.write('<h2>Top</h2>')</script>" + make_doc()
     assert problems(hidden) == [], "a heading inside a script is not the doc's"
 
@@ -91,8 +92,8 @@ def test_where_to_look_names_each_file_once_by_its_path_from_the_repo_root() -> 
 
 
 def test_markup_a_browser_shows_is_read_as_it_shows_it() -> None:
-    assert len(problems(b"<h2>Why<h2>In short</h2>" + STORY.encode())) == 2, "a heading left open ends at the next one"
-    story = STORY.encode()
+    story = STORY.encode() + f"<h2>Verified</h2>{PASSED}".encode()
+    assert len(problems(b"<h2>Why<h2>In short</h2>" + story)) == 2, "a heading left open ends at the next one"
     assert len(problems(b"<h2>In short</h2>" + story + b"<h2>Changes since the last review")) == 1, "or at the end"
     unclosed = make_doc(WHERE.replace("<code>tests/test_run.py</code>", "<code>tests/missing.py"))
     assert len(problems(unclosed, files=FILES)) == 1, "a code left open ends with its row"
@@ -190,7 +191,9 @@ def steps(count: int, tag: str = "ol") -> str:
     return f"<h2>User story</h2><{tag}>" + "".join(f"<li>Step {n}.</li>" for n in range(count)) + f"</{tag}>"
 
 
-def make_top(short: str, changes: str = "<p>One plain line.</p>", verified: str = "", story: str = steps(3)) -> bytes:
+def make_top(
+    short: str, changes: str = "<p>One plain line.</p>", verified: str = PASSED, story: str = steps(3)
+) -> bytes:
     rest = "<h2>How it works</h2><p>" + "word " * 60 + "ends here.</p>"
     return (
         f"<html><body><h1>Title</h1><p>{'lead ' * 40}</p><h2>In short</h2>{short}{story}"
@@ -242,7 +245,9 @@ def test_no_sentence_above_the_folds_runs_over_30_words() -> None:
     assert len(problems(make_top("<p>Fine.</p>", broken))) == 1, "a line break does not end a sentence"
     folded_heading = "<details><summary>More</summary><h2>Background</h2></details><p>" + words(31) + "</p>"
     assert len(problems(make_top(folded_heading))) == 1, "a heading in a fold starts no section"
-    unclosed = b"<h2>In short" + STORY.encode() + b"<h2>What changes and why</h2><p>" + words(31).encode() + b"</p>"
+    unclosed = (
+        b"<h2>In short" + STORY.encode() + b"<h2>What changes and why</h2><p>" + words(31).encode() + b"</p>"
+    ) + f"<h2>Verified</h2>{PASSED}".encode()
     assert len(problems(unclosed)) == 1, "a heading left open ends at the next one"
     abbreviations = "<p>Seen in docs, e.g. Alpha and Beta, vs. Gamma, and " + words(22) + "</p>"
     assert len(problems(make_top("<p>Fine.</p>", abbreviations))) == 1, "e.g. and vs. end no sentence"
@@ -261,20 +266,14 @@ def test_the_limits_come_from_config() -> None:
     ]
 
 
-def test_a_missing_first_reader_line_is_a_warning() -> None:
-    _, verified = read_visible_top(
-        make_top("<p>x.</p>", verified="<p>First reader with the reader profile: passed.</p>")
-    )
-    assert find_doc_warnings(verified) == []
-    _, without = read_visible_top(make_top("<p>x.</p>", verified="<p>Unit tests pass. A reader read it.</p>"))
-    (warning,) = find_doc_warnings(without)
-    assert warning.startswith("Verified does not say the first reader (with the reader profile) passed")
-    _, failed = read_visible_top(make_top("<p>x.</p>", verified="<p>The first reader did not pass.</p>"))
-    assert len(find_doc_warnings(failed)) == 1
-    _, cells = read_visible_top(
-        make_top("<p>x.</p>", verified="<table><tr><td>First reader</td><td>passed</td></tr></table>")
-    )
-    assert find_doc_warnings(cells) == []
+def test_a_doc_whose_first_reader_did_not_pass_is_refused() -> None:
+    assert problems(make_top("<p>x.</p>")) == []
+    (refused,) = problems(make_top("<p>x.</p>", verified="<p>Unit tests pass. A reader read it.</p>"))
+    assert refused.startswith("Verified does not say the first reader (with the reader profile) passed")
+    assert "the diff, and explains back what changes and why" in refused
+    assert len(problems(make_top("<p>x.</p>", verified="<p>The first reader did not pass.</p>"))) == 1
+    cells = "<table><tr><td>First reader</td><td>passed</td></tr></table>"
+    assert problems(make_top("<p>x.</p>", verified=cells)) == []
 
 
 def test_the_limits_must_be_at_least_one() -> None:

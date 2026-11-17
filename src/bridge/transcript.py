@@ -45,7 +45,7 @@ def read_last_turn(path: Path) -> LastTurn:
         data = cast(dict[str, object], entry)
         if data.get("isMeta") or data.get("isSidechain"):
             continue
-        text = _text_of(data.get("message"))
+        text = map_message_to_text(data.get("message"))
         if not text:
             continue
         if data.get("type") == "user" and not text.lstrip().startswith(_HARNESS_PREFIXES):
@@ -82,7 +82,7 @@ def read_session_title(path: Path) -> str | None:
     return title or None
 
 
-def _text_of(message: object) -> str | None:
+def map_message_to_text(message: object) -> str | None:
     if not isinstance(message, dict):
         return None
     content = cast(dict[str, object], message).get("content")

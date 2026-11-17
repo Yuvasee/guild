@@ -24,10 +24,12 @@ from bridge.reviews import (
     WAITING_FOR_OWNER,
     WAITING_FOR_YOU,
     map_db_to_reviews,
+    record_signal_post,
 )
 from bridge.workers import WORKER_CAP, LiveWorker, list_live_workers, list_queued_launches
 
 IDLE_FOR_MS = 20 * 60_000
+FOCUS_STALE_MS = 6 * 3_600_000
 PRESENCE_FRESH_MS = 24 * 3_600_000
 SIGNAL_REPEAT_MS = 2 * 3_600_000
 SUGGESTIONS_MAX = 3
@@ -479,6 +481,97 @@ def send_capacity_signals(
             (load.lead.name, load.reason_key, now, delivered[0][0]),
         )
         sent.extend(delivered)
+    return sent
+
+
+def list_ready_asks(conn: sqlite3.Connection, lead: str, now: int) -> list[int]:
+    """The owner's asks this lead holds that wait on nobody: work it can start without anyone."""
+    return [
+        ask.id
+        for ask in list_asks(conn, owner=lead)
+        if ask.state in ("open", "in_progress") and ask.wait_on is None and not is_ask_paused(ask, now)
+    ]
+
+
+def convert_idle_work_to_text(load: LeadLoad, asks: list[int], queue: str | None) -> str:
+    work = [f"asks {', '.join(f'#{n}' for n in asks)} wait on nobody (`guild ask list`)"] if asks else []
+    if queue:
+        work.append(f"your notes' {queue}")
+    return (
+        f"You have been idle {_convert_ms_to_age(cast(int, load.idle_for_ms))} with work waiting: {'; '.join(work)}. "
+        "Start the next item, or mark what blocks it (`guild ask wait`)."
+    )
+
+
+def send_idle_work_nudges(
+    conn: sqlite3.Connection, config: Config, now: int, loads: list[LeadLoad]
+) -> list[tuple[int, Recipient]]:
+    """A lead idle 20 minutes, no worker known active, with an ask that waits on nobody or a QUEUE line in its notes:
+    told once per idle spell, which its last activity names. Held while the owner is off, like the assistant's
+    notices."""
+    if read_owner_presence(conn, config, now).off:
+        return []
+    sent: list[tuple[int, Recipient]] = []
+    for load in loads:
+        if load.idle_for_ms is None or load.idle_for_ms < IDLE_FOR_MS or load.load == "working":
+            continue
+        if load.workers is None or is_room_parked(conn, load.lead.name, now):
+            continue
+        since = now - load.idle_for_ms
+        # Assessed before the write lock: a prompt since then has ended this idle spell.
+        current = conn.execute(
+            """
+            SELECT 1 FROM instances WHERE surface = ? AND ended_at IS NULL AND status = 'idle'
+              AND coalesce(last_activity_at, first_seen_at) = ?
+            """,
+            (load.lead.surface, since),
+        ).fetchone()
+        if current is None:
+            continue
+        key = f"idle-work:{load.lead.name}:{since}"
+        if conn.execute("SELECT 1 FROM signal_posts WHERE key = ?", (key,)).fetchone():
+            continue
+        asks = list_ready_asks(conn, load.lead.name, now)
+        queue = find_backlog_line(read_notes(lead_dir(load.lead.name)))
+        if not asks and not queue:
+            continue
+        delivered = send_from_bridge(conn, config, load.lead.name, convert_idle_work_to_text(load, asks, queue), now)
+        if delivered:
+            record_signal_post(conn, key, delivered[0][0], now)
+            sent.extend(delivered)
+    return sent
+
+
+def send_stale_focus_nudges(conn: sqlite3.Connection, config: Config, now: int) -> list[tuple[int, Recipient]]:
+    """A lead whose focus line is over six hours old and that ended a turn after that: told once per focus line.
+    The per-prompt nudge misses leads, whose turns mostly start with bridge's messages. Held while the owner is off."""
+    if read_owner_presence(conn, config, now).off:
+        return []
+    sent: list[tuple[int, Recipient]] = []
+    rows = conn.execute(
+        """
+        SELECT l.name, l.surface, c.focus, c.focus_at FROM leads l
+        JOIN instances i ON i.surface = l.surface AND i.ended_at IS NULL
+        JOIN conversations c ON c.conversation_id = i.conversation_id
+        WHERE l.retired_at IS NULL AND c.focus IS NOT NULL AND c.focus_at <= ?1 AND c.last_seen_at >= c.focus_at + ?2
+        """,
+        (now - FOCUS_STALE_MS, FOCUS_STALE_MS),
+    ).fetchall()
+    for row in rows:
+        key = f"focus-stale:{row['name']}:{row['focus_at']}"
+        if is_surface_locked(conn, config, row["surface"]):
+            continue
+        if conn.execute("SELECT 1 FROM signal_posts WHERE key = ?", (key,)).fetchone():
+            continue
+        hours = (now - int(row["focus_at"])) // 3_600_000
+        text = (
+            f'Your focus line is {hours} h old: "{row["focus"]}". If it is not what you do now: '
+            '`bridge focus "<your current task>"`.'
+        )
+        delivered = send_from_bridge(conn, config, str(row["name"]), text, now)
+        if delivered:
+            record_signal_post(conn, key, delivered[0][0], now)
+            sent.extend(delivered)
     return sent
 
 

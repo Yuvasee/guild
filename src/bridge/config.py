@@ -57,6 +57,17 @@ class Config:
     """What the owner says at the end of the day: the night's dreams follow."""
     morning_words: tuple[str, ...] = ("Good morning",)
     """What the owner says in the morning to run the morning report (`guild day`)."""
+    confusion_phrases: tuple[str, ...] = (
+        "не понимаю",
+        "непонятно",
+        "не понял",
+        "что это значит",
+        "don't understand",
+        "unclear",
+        "what does … mean",
+        "confusing",
+    )
+    """What `guild stats week` counts as the owner not understanding; … stands for a few words."""
     compact_at_tokens: int = 0
     """Context size at which a session saves notes and, in agterm, bridge compacts it right after; 0 is off."""
     parallel_streams: tuple[str, ...] = ()
@@ -269,6 +280,7 @@ def map_toml_to_config(raw: dict[str, object]) -> Config:
         owner_name=_str(raw, "owner_name", defaults.owner_name),
         night_words=_str_list(raw, "night_words", defaults.night_words),
         morning_words=_str_list(raw, "morning_words", defaults.morning_words),
+        confusion_phrases=_str_list(raw, "confusion_phrases", defaults.confusion_phrases),
         compact_at_tokens=_int(raw, "compact_at_tokens", defaults.compact_at_tokens),
         parallel_streams=_str_list(raw, "parallel_streams", defaults.parallel_streams),
         review_org=_str(raw, "review_org", defaults.review_org),

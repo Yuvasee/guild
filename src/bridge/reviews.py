@@ -114,10 +114,11 @@ BACKPORT_CHECKS_PER_POLL = 2
 CI_REREADS_PER_POLL = 5
 CI_RED_STATES = ("FAILURE", "ERROR")
 BOT_WAIT_OWNER_MS = 60 * 60 * 1000
-BOT_WAIT_ASSISTANT_MS = 3 * 60 * 60 * 1000
-BOT_WAIT_OWNER_GRACE_MS = 2 * 60 * 60 * 1000
+BOT_WAIT_ASSISTANT_MS = 2 * 60 * 60 * 1000
+BOT_WAIT_OWNER_GRACE_MS = 60 * 60 * 1000
 """The owner's time to answer before the assistant hears of it, so a long wait found at once is not both at once."""
 BOT_WAIT_LINKS_MAX = 5
+BOT_ROUND_CAP = 3
 BACKPORT_RECHECK_MS = 15 * 60_000
 """A refused check runs again this often on the same head: a named PR may merge meanwhile."""
 LOC_RULE = 1
@@ -1338,6 +1339,7 @@ def poll_review_queue(
         with transaction(conn):
             record_poll_error(conn, str(exc), now)
         prs = None
+    bot_rounds: dict[str, int] = {}
     if prs is not None:
         excluded = {r.casefold() for r in config.review_excluded_repos}
         prs = [pr for pr in prs if pr.repo.casefold() not in excluded]
@@ -1351,6 +1353,7 @@ def poll_review_queue(
             if isinstance(status, PrStatus) and status.state != "OPEN"
         ]
         states = read_dependency_states(prs)
+        bot_rounds = {pr.ref: pr.bot_rounds for pr in prs}
         with transaction(conn):
             store_open_prs(conn, prs, now)
             mark_closed(conn, gone, now)
@@ -1410,6 +1413,7 @@ def poll_review_queue(
             *tell_review_waits(conn, config, now),
             *tell_bot_waits(conn, config, now),
             *tell_issue_missing(conn, config, now),
+            *tell_bot_round_cap(conn, config, bot_rounds, now),
         ]
 
 
@@ -1750,7 +1754,7 @@ def tell_review_waits(conn: sqlite3.Connection, config: Config, now: int) -> lis
 
 def tell_bot_waits(conn: sqlite3.Connection, config: Config, now: int) -> list[tuple[int, Recipient]]:
     """The review bot blocking an open PR with no word from our account: its owner is told after an hour, and the
-    assistant after three once the owner had two of them, or had none. Each once until nothing of the bot's waits."""
+    assistant after two once the owner had one of them, or had none. Each once until nothing of the bot's waits."""
     sent: list[tuple[int, Recipient]] = []
     for row in conn.execute("SELECT * FROM review_prs WHERE closed_at IS NULL").fetchall():
         ref = str(row["ref"])
@@ -1783,7 +1787,8 @@ def tell_bot_waits(conn: sqlite3.Connection, config: Config, now: int) -> list[t
             if owner is not None and told is not None
             else "no session owns it"
         )
-        text = f"{row['url']} ({row['title']}): {what} has had no answer from our side for over 3 hours; {whose}."
+        hours = BOT_WAIT_ASSISTANT_MS // 3_600_000
+        text = f"{row['url']} ({row['title']}): {what} has had no answer from our side for over {hours} hours; {whose}."
         try:
             message_id, recipient = send_to_handle(conn, config.assistant_handle, text, now)
         except AddressError as exc:
@@ -1818,6 +1823,38 @@ def tell_issue_missing(conn: sqlite3.Connection, config: Config, now: int) -> li
         message_id, recipient = tell_owner(conn, owner, text, now)
         sent.append((message_id, recipient))
         record_signal_post(conn, key, message_id, now)
+    return sent
+
+
+def tell_bot_round_cap(
+    conn: sqlite3.Connection, config: Config, bot_rounds: dict[str, int], now: int
+) -> list[tuple[int, Recipient]]:
+    """From the review bot's third round on, each PR's owner hears once per PR that only defects the PR made get code:
+    one message per owner per poll, listing every PR of theirs newly there."""
+    due: dict[tuple[str, str], tuple[Owner, list[tuple[str, str]]]] = {}
+    for ref, rounds in bot_rounds.items():
+        if (
+            rounds < BOT_ROUND_CAP
+            or conn.execute("SELECT 1 FROM signal_posts WHERE key = ?", (f"bot-round-cap:{ref}",)).fetchone()
+        ):
+            continue
+        row = conn.execute("SELECT * FROM review_prs WHERE ref = ? AND closed_at IS NULL", (ref,)).fetchone()
+        owner = None if row is None else find_owner(conn, config, ref, str(row["repo"]), str(row["head"]))
+        if row is None or owner is None:
+            continue
+        line = f"{row['url']} ({row['title']}): round {rounds}"
+        due.setdefault((owner.handle, owner.conversation_id), (owner, []))[1].append((ref, line))
+    sent: list[tuple[int, Recipient]] = []
+    for owner, prs in due.values():
+        listed = "\n".join(f"- {line}" for _, line in prs)
+        text = (
+            f"{config.review_bot_name} is at round 3 or later on:\n{listed}\nFrom now on, a finding that is not a "
+            "defect the PR introduced gets a follow-up issue or an accepted-risk reply, not code."
+        )
+        message_id, recipient = tell_owner(conn, owner, text, now)
+        sent.append((message_id, recipient))
+        for ref, _ in prs:
+            record_signal_post(conn, f"bot-round-cap:{ref}", message_id, now)
     return sent
 
 

@@ -44,7 +44,13 @@ from bridge.board import (
     send_message,
     write_hint,
 )
-from bridge.capacity import assess_leads, read_owner_presence, send_capacity_signals
+from bridge.capacity import (
+    assess_leads,
+    read_owner_presence,
+    send_capacity_signals,
+    send_idle_work_nudges,
+    send_stale_focus_nudges,
+)
 from bridge.claims import list_claims
 from bridge.colleague_comments import (
     HIMSELF,
@@ -599,6 +605,8 @@ class DashboardState:
             loads = assess_leads(conn, self.config, now, tree)
             with transaction(conn):
                 sent = send_capacity_signals(conn, self.config, now, loads)
+                sent += send_idle_work_nudges(conn, self.config, now, loads)
+                sent += send_stale_focus_nudges(conn, self.config, now)
         for message_id, recipient in sent:
             if recipient.pid:
                 write_hint(recipient.pid, HINT_SENT)

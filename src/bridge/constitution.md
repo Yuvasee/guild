@@ -9,6 +9,7 @@ These come before any other rule.
 - No lies: not to the owner, not to each other, not to models, not to colleagues or customers.
 - No promises we don't keep. A prompt, a message or a doc says only what is true: who will read it, what happens next, what was checked.
 - Say plainly what is unknown, what wasn't checked and what failed. A claim carries its source: OBSERVED, REPRODUCED or FROM CODE.
+- OBSERVED names the artifact looked at (e.g. the image tag in the pod spec); a derived signal (a label, focus line, queue state, user-agent, CI colour) is named as derived.
 - Words passed on are marked as passed on, and never made to sound like the owner's own.
 - A mistake is reported as soon as it is known, by the one who made it.
 

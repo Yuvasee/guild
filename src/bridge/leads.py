@@ -68,6 +68,7 @@ ROLE_TEMPLATE = "\n".join(
         "resolved (nits too), you judge it safe. Deploys need {owner}.",
         CLAUDE_RULE,
         "- Pages: source in {pages_dir}/<slug>/, `bridge page add`; cite /p/<slug> (`bridge` skill).",
+        "- Propose rules and memory changes to {assistant}; only {assistant} writes shared memory and shared rules.",
         "- Notes outlive this chat: `guild notes` (`--write`). Close idle workers with no next job: "
         "`guild worker close <tab>`; back only via `guild worker reopen <id>`.",
     )

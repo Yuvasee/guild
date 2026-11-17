@@ -862,7 +862,7 @@ options:
 </details>
 
 <details>
-<summary><b>What team leads show and keep</b>: <code>work</code>, <code>notes</code>, <code>handover</code>, <code>ack</code>, <code>day</code>, <code>capacity</code></summary>
+<summary><b>What team leads show and keep</b>: <code>work</code>, <code>notes</code>, <code>handover</code>, <code>ack</code>, <code>day</code>, <code>capacity</code>, <code>stats week</code></summary>
 
 ### guild work
 
@@ -990,6 +990,22 @@ usage: guild capacity [-h]
 options:
   -h, --help  show this help message and exit
 ```
+
+### guild stats week
+
+PRs merged, their commits, and how often the owner did not understand
+
+```text
+usage: guild stats week [-h] [--days DAYS]
+
+options:
+  -h, --help   show this help message and exit
+  --days DAYS  how many days back (default 7)
+```
+
+Prints plain lines for a weekly report: the PRs `review_author` merged in `review_org` (count, median commits, how
+many have 20 or more), then a rough count by phrase match (config `confusion_phrases`) of the owner's messages that say
+they did not understand, per day, from the dashboard and the prompts typed in the assistant's tab.
 
 </details>
 

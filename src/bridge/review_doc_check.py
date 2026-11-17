@@ -349,12 +349,13 @@ def _shorten(text: str, words: int = 14) -> str:
     return " ".join(parts[:words]) + (" …" if len(parts) > words else "")
 
 
-def find_doc_warnings(verified: str) -> list[str]:
+def find_first_reader_problems(verified: str) -> list[str]:
     if _FIRST_READER_PASSED_RE.search(verified):
         return []
     return [
         "Verified does not say the first reader (with the reader profile) passed: before registering, a fresh reader "
-        "gets the reader profile and only In short, User story and What changes and why, and the doc says it passed"
+        "gets the reader profile, In short, User story, What changes and why and the diff, and explains back what "
+        "changes and why; wrong or vague means rewrite, and the doc says once it passed"
     ]
 
 
@@ -381,8 +382,9 @@ def find_doc_problems(
         problems.append(f"it has no h2 headings; it opens with the h2 '{IN_SHORT}'")
     elif not _IN_SHORT_RE.match(headings[0]):
         problems.append(f"its first h2 is '{headings[0]}'; it opens with '{IN_SHORT}', with nothing before it")
-    top = read_visible_top(page)[0]
+    top, verified = read_visible_top(page)
     problems.extend(find_story_problems(headings, top.story_steps))
+    problems.extend(find_first_reader_problems(verified))
     since = [index for index, text in enumerate(headings) if _CHANGES_SINCE_RE.search(text)]
     if since and not owner_reviewed:
         problems.append(

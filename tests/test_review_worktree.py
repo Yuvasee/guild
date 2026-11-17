@@ -54,7 +54,7 @@ LONG_AGO = "2026-01-01T00:00:00+00:00"
 
 REVIEWS_CONFIG = Config(required_reviews=("Codex", "Claude"))
 
-TOP = "<h2>In short</h2><h2>User story</h2><ol><li>a<li>b<li>c</ol>"
+TOP = "<h2>In short</h2><h2>User story</h2><ol><li>a<li>b<li>c</ol><h2>Verified</h2><p>First reader: passed.</p>"
 
 
 def config_for(root: Path) -> Config:
@@ -901,7 +901,7 @@ def test_the_page_serves_registered_docs_only_and_sandboxed(
 
     with urllib.request.urlopen(f"{dashboard}/reviews/Org/app/7/doc", timeout=5) as response:
         served = response.read()
-        assert served.endswith(b"<li>c</ol>") and b'<style id="bridge-doc-view">' in served
+        assert served.endswith(b"<p>First reader: passed.</p>") and b'<style id="bridge-doc-view">' in served
         assert response.headers["Content-Security-Policy"] == "sandbox allow-scripts"
         assert response.headers["Cache-Control"] == "no-store"
 

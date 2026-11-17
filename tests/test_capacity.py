@@ -9,6 +9,7 @@ import pytest
 from conftest import BridgeEnv, SpawnProcess
 from test_leads import Team
 
+from bridge.asks import add_ask
 from bridge.capacity import (
     BUSY,
     FINISHED,
@@ -24,6 +25,8 @@ from bridge.capacity import (
     record_owner_off,
     record_owner_on,
     send_capacity_signals,
+    send_idle_work_nudges,
+    send_stale_focus_nudges,
 )
 from bridge.config import Config
 from bridge.db import connect
@@ -287,3 +290,61 @@ def test_a_domain_the_config_names_a_parallel_stream_reads_so_with_its_own_backl
     assert "Next in its domains: 1) PROJ-3" in quinn and "Tooling is a parallel stream" in quinn
     assert "It loads itself from its own backlog; ask it for its list." in fay
     assert all("not a priority project" not in text for text in (eli, quinn, fay))
+
+
+def test_an_idle_lead_with_work_that_waits_on_nobody_is_told_once_per_idle_spell(conn: sqlite3.Connection) -> None:
+    now = WORKDAY_NOON
+    add_lead(conn, "alex", [], since=now - IDLE_FOR_MS)
+
+    def nudge(at: int, workers: int = 0) -> list[str]:
+        sent = send_idle_work_nudges(conn, CONFIG, at, assess_leads(conn, CONFIG, at, tree({"alex": workers})))
+        return [str(conn.execute("SELECT body FROM messages WHERE id = ?", (mid,)).fetchone()[0]) for mid, _ in sent]
+
+    assert nudge(now) == [], "idle with nothing queued is not told"
+    ask = add_ask(conn, "alex", "aide", "words", "tab", [], 1)
+    assert nudge(now - 1) == [], "idle under 20 minutes"
+    unknown = send_idle_work_nudges(conn, CONFIG, now, assess_leads(conn, CONFIG, now, None))
+    assert unknown == [], "with agterm silent its workers may be busy on the ask"
+    conn.execute("UPDATE instances SET status = 'active' WHERE surface = 'alex'")
+    loads = assess_leads(conn, CONFIG, now, tree({"alex": 0}))
+    conn.execute("UPDATE instances SET status = 'idle' WHERE surface = 'alex'")
+    assert send_idle_work_nudges(conn, CONFIG, now, [replace(loads[0], load="idle", idle_for_ms=IDLE_FOR_MS - 5)]) == []
+    assert nudge(now) == [
+        f"You have been idle 20m with work waiting: asks #{ask.id} wait on nobody (`guild ask list`). Start the next "
+        "item, or mark what blocks it (`guild ask wait`)."
+    ]
+    assert nudge(now + HOUR) == [], "once per idle spell"
+    conn.execute("UPDATE asks SET wait_on = 'owner'")
+    conn.execute("UPDATE instances SET last_activity_at = ? WHERE surface = 'alex'", (now + 2 * HOUR,))
+    assert nudge(now + 3 * HOUR) == [], "an ask that waits on someone is no work for it"
+    write_notes(lead_dir("alex"), "- QUEUE: PROJ-8 export, then PROJ-9\n")
+    (queued,) = nudge(now + 3 * HOUR)
+    assert "with work waiting: your notes' - QUEUE: PROJ-8 export, then PROJ-9." in queued
+    conn.execute("UPDATE instances SET last_activity_at = ? WHERE surface = 'alex'", (now + 4 * HOUR,))
+    record_owner_off(conn, "guild dream", now + 4 * HOUR)
+    assert nudge(now + 5 * HOUR) == [], "held while the owner is off"
+
+
+def test_a_leads_focus_line_six_hours_old_with_turns_since_is_told_once_per_focus(conn: sqlite3.Connection) -> None:
+    now = WORKDAY_NOON
+    add_lead(conn, "alex", [])
+    conn.execute(
+        "INSERT INTO conversations (conversation_id, focus, focus_at, first_seen_at, last_seen_at) "
+        "VALUES ('conv-alex', 'PROJ-8 export', ?, 0, ?)",
+        (now - 7 * HOUR, now - 2 * HOUR),
+    )
+
+    def nudge(at: int) -> list[str]:
+        sent = send_stale_focus_nudges(conn, CONFIG, at)
+        return [str(conn.execute("SELECT body FROM messages WHERE id = ?", (mid,)).fetchone()[0]) for mid, _ in sent]
+
+    assert nudge(now) == [], "no turn ended after it went stale"
+    conn.execute("UPDATE conversations SET last_seen_at = ?", (now - HOUR,))
+    assert nudge(now) == [
+        'Your focus line is 7 h old: "PROJ-8 export". If it is not what you do now: '
+        '`bridge focus "<your current task>"`.'
+    ]
+    conn.execute("UPDATE conversations SET last_seen_at = ?", (now,))
+    assert nudge(now + HOUR) == [], "once per focus line"
+    conn.execute("UPDATE conversations SET focus = 'PROJ-9', focus_at = ?", (now - 6 * HOUR - 1,))
+    assert len(nudge(now + HOUR)) == 1, "a new focus line that goes stale is told again"

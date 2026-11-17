@@ -118,7 +118,6 @@ from bridge.leads import (
 from bridge.linear_cli import add_linear_commands
 from bridge.refs import map_text_to_ref
 from bridge.registry import is_english_name, list_sessions, reconcile
-from bridge.review_doc_check import find_doc_warnings, read_visible_top
 from bridge.review_post import (
     ReviewError,
     map_arg_to_ref,
@@ -131,6 +130,7 @@ from bridge.review_post import (
 from bridge.review_worktree import DOC_MIN_TERMS, REVIEW_LARGE_LOC, DocError, count_doc_terms, register_doc
 from bridge.reviews import clear_approval_waiver, find_owner, map_db_to_reviews, record_approval_waiver
 from bridge.start_context import CONSTITUTION_PATH
+from bridge.stats import convert_week_to_lines
 from bridge.tabinput import is_tab_selected, run_agterm, type_when_idle
 from bridge.watcher import find_conversation_tab, map_tree_to_parent, read_screen_tail, read_tree
 from bridge.workers import (
@@ -368,6 +368,12 @@ def build_parser(config: Config) -> argparse.ArgumentParser:
     p = sub.add_parser("day", help=f"{config.owner_name} is on again; how loaded each lead is and its next work")
     p.set_defaults(func=cmd_day)
 
+    p = sub.add_parser("stats", help="numbers for the weekly report")
+    stats_sub = p.add_subparsers(dest="stats_command", required=True)
+    p = stats_sub.add_parser("week", help="PRs merged, their commits, and how often the owner did not understand")
+    p.add_argument("--days", type=int, default=7, help="how many days back (default 7)")
+    p.set_defaults(func=cmd_stats_week)
+
     p = sub.add_parser("dream", help="the night's dreams, in parallel and detached; default: config dream_leads")
     p.add_argument("leads", nargs="*", help="lead names, the assistant's handle, or all; none means config dream_leads")
     waiting = p.add_mutually_exclusive_group()
@@ -560,6 +566,14 @@ def cmd_capacity(args: argparse.Namespace, conn: sqlite3.Connection, config: Con
     loads = assess_leads(conn, config, now, read_tree(config))
     print("dry run: nothing is sent; bridge serve sends these every 5 minutes")
     for line in convert_loads_to_dry_run(conn, config, loads, read_owner_presence(conn, config, now), now):
+        print(line)
+    return 0
+
+
+def cmd_stats_week(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
+    if int(args.days) < 1:
+        raise UsageError("--days is at least 1")
+    for line in convert_week_to_lines(conn, config, now_ms(), int(args.days)):
         print(line)
     return 0
 
@@ -1263,7 +1277,7 @@ def cmd_review_doc(args: argparse.Namespace, conn: sqlite3.Connection, config: C
         page = register_doc(conn, config, ref, source, now_ms())
         loc = int(conn.execute("SELECT loc FROM review_prs WHERE ref = ?", (ref,)).fetchone()["loc"] or 0)
     print(f"{ref}: document registered")
-    for warning in find_doc_warnings(read_visible_top(page)[1]) + screen_doc_for_warnings(page, config):
+    for warning in screen_doc_for_warnings(page, config):
         print(f"warning: {warning}", file=sys.stderr)
     terms = count_doc_terms(page)
     if loc >= REVIEW_LARGE_LOC and terms < DOC_MIN_TERMS:

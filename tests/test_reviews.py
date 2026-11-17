@@ -27,6 +27,7 @@ from bridge.review_github import (
     HisThread,
     OpenPr,
     ReviewThreads,
+    count_review_bot_rounds,
     fetch_ci_blocked_by,
     fetch_comments,
     fetch_merge_facts,
@@ -83,6 +84,7 @@ from bridge.reviews import (
     store_open_prs,
     store_review_threads,
     take_comment_wakes,
+    tell_bot_round_cap,
     tell_bot_waits,
     tell_ready_to_merge,
     tell_review_waits,
@@ -2159,6 +2161,41 @@ def test_a_red_ci_signal_on_a_workers_pr_reaches_its_lead(tmp_path: Path) -> Non
         assert post_signals_to_leads(conn, CONFIG, [signal], 2000) == []
 
 
+def test_red_ci_on_a_queued_pr_reaches_the_assistant_once_two_hours_after_its_lead(tmp_path: Path) -> None:
+    conn = setup_shared_issue_pr(tmp_path)
+    with transaction(conn):
+        add_session(conn, "aide-c", CONFIG.assistant_handle)
+        conn.execute("UPDATE review_prs SET checks = 'FAILURE'")
+    signal: dict[str, object] = {
+        "key": f"{REF}:ci:a1", "kind": "ci", "severity": "action", "text": "app#7 T", "url": "https://x/7",
+        "surface": "s-worker",
+    }  # fmt: skip
+
+    def post(at: int, *signals: dict[str, object]) -> list[str]:
+        with transaction(conn):
+            return [r.handle for r in post_signals_to_leads(conn, CONFIG, list(signals), at)]
+
+    lead = post(1000, signal)
+    early = post(1000 + 2 * HOUR_MS - 1, signal)
+    late = post(1000 + 2 * HOUR_MS, signal)
+    again = post(1000 + 5 * HOUR_MS, signal)
+    pushed = {**signal, "key": f"{REF}:ci:b2"}
+    new_head = post(1000 + 5 * HOUR_MS, pushed)
+    superseded = post(1000 + 8 * HOUR_MS, pushed)
+    with transaction(conn):
+        conn.execute("UPDATE review_prs SET head_oid = 'b2', draft = 1")
+    as_draft = post(1000 + 8 * HOUR_MS, pushed)
+    body = conn.execute("SELECT body FROM messages ORDER BY id DESC LIMIT 1").fetchone()[0]
+    assert lead == ["alex"] and early == [] and again == []
+    assert late == ["aide"]
+    assert new_head == ["alex"] and as_draft == [], "a new head starts over; a draft is not escalated"
+    assert superseded == [], "the queue's head is still a1: the signal is about a commit it has not seen"
+    assert conn.execute("SELECT body FROM messages WHERE body LIKE '%still red%'").fetchone()[0] == (
+        "app#7 T: CI still red 2 h after its lead was told (ci)"
+    )
+    assert body == "app#7 T (ci)"
+
+
 def test_a_ci_stop_by_github_reaches_the_lead_in_its_own_words_and_each_flip_at_one_head_is_news(
     tmp_path: Path,
 ) -> None:
@@ -2749,7 +2786,7 @@ def test_the_review_bots_must_fix_threads_are_kept_with_since_when_they_wait_on_
     ), "an unsent reply is no answer; a bot comment after a reply does not make the thread wait again"
 
 
-def test_the_review_bot_blocking_with_no_answer_tells_its_owner_after_an_hour_and_the_assistant_after_three(
+def test_the_review_bot_blocking_with_no_answer_tells_its_owner_after_an_hour_and_the_assistant_after_two(
     tmp_path: Path,
 ) -> None:
     conn = setup_pr(tmp_path, bot_cleared=True)
@@ -2773,15 +2810,15 @@ def test_the_review_bot_blocking_with_no_answer_tells_its_owner_after_an_hour_an
     waiting(BotThread("https://x/t1", since), BotThread("https://x/t2", None))
     early = told(since + HOUR_MS - 1)
     owner = told(since + HOUR_MS)
-    again = told(since + 2 * HOUR_MS)
-    assistant = told(since + 3 * HOUR_MS)
+    again = told(since + 2 * HOUR_MS - 1)
+    assistant = told(since + 2 * HOUR_MS)
     quiet = told(since + 10 * HOUR_MS)
     waiting(BotThread("https://x/t1", None))
     answered = told(since + 11 * HOUR_MS)
     waiting(BotThread("https://x/t1", since + 11 * HOUR_MS))
     found_late = told(since + 16 * HOUR_MS)
-    owner_had_less_than_two_hours = told(since + 18 * HOUR_MS - 1)
-    escalated = told(since + 18 * HOUR_MS)
+    owner_had_less_than_an_hour = told(since + 17 * HOUR_MS - 1)
+    escalated = told(since + 17 * HOUR_MS)
 
     assert early == []
     assert owner == [
@@ -2796,12 +2833,12 @@ def test_the_review_bot_blocking_with_no_answer_tells_its_owner_after_an_hour_an
         (
             "aide",
             "https://github.com/Org/app/pull/7 (T): ReviewBot's 1 must-fix thread (https://x/t1) has had no answer "
-            "from our side for over 3 hours; its owner worker was told 2 h ago.",
+            "from our side for over 2 hours; its owner worker was told 1 h ago.",
         )
     ]
     assert answered == []
     assert [handle for handle, _ in found_late] == ["worker"], "once answered, the next wait is told again"
-    assert owner_had_less_than_two_hours == [], "a wait found late is not told to both at once"
+    assert owner_had_less_than_an_hour == [], "a wait found late is not told to both at once"
     assert [handle for handle, _ in escalated] == ["aide"]
 
 
@@ -2819,6 +2856,42 @@ def test_the_review_bots_blocking_review_waits_until_our_account_says_a_word_aft
     body = conn.execute("SELECT body FROM messages").fetchone()[0]
     assert len(blocked) == 1 and "ReviewBot's review requesting changes on the head has had no answer" in body
     assert replied == []
+
+
+def test_the_review_bots_rounds_are_the_commits_it_reviewed() -> None:
+    def review(login: str, state: str, oid: str) -> dict[str, object]:
+        return {"state": state, "commit": {"oid": oid}, "author": {"__typename": "Bot", "login": login}}
+
+    nodes = [
+        review("bot", "CHANGES_REQUESTED", "a1"),
+        review("Bot", "COMMENTED", "a1"),
+        review("bot", "APPROVED", "b2"),
+        review("bot", "PENDING", "c3"),
+        review("mira", "COMMENTED", "d4"),
+    ]
+    assert count_review_bot_rounds(nodes, CONFIG) == 2
+
+
+def test_the_review_bots_third_round_tells_each_owner_once_per_pr_in_one_message(tmp_path: Path) -> None:
+    conn = setup_pr(tmp_path)
+    other = "pr:Org/app#8"
+    with transaction(conn):
+        second = tell_bot_round_cap(conn, CONFIG, {REF: 2}, 1000)
+        unowned = tell_bot_round_cap(conn, CONFIG, {REF: 3}, 1000)
+        store_open_prs(conn, [make_pr(), make_pr(ref=other, number=8, title="U", url="https://x/8")], 1500)
+        add_session(conn, "c1", "worker", branch="dev/x")
+        both = tell_bot_round_cap(conn, CONFIG, {REF: 3, other: 9}, 2000)
+        later = tell_bot_round_cap(conn, CONFIG, {REF: 4, other: 10}, 3000)
+    body = conn.execute("SELECT body FROM messages").fetchone()[0]
+    assert second == [] and unowned == [] and later == []
+    assert [recipient.handle for _, recipient in both] == ["worker"]
+    assert body == (
+        "ReviewBot is at round 3 or later on:\n"
+        "- https://github.com/Org/app/pull/7 (T): round 3\n"
+        "- https://x/8 (U): round 9\n"
+        "From now on, a finding that is not a defect the PR introduced gets a follow-up issue or an accepted-risk "
+        "reply, not code."
+    )
 
 
 def test_must_fix_threads_open_keep_a_pr_out_of_the_owners_review_order(tmp_path: Path) -> None:

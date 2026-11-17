@@ -120,7 +120,6 @@ def test_registration_goes_through_when_the_screen_fails_and_prints_the_warnings
     assert read_registered_doc(conn, "Org/app", 7) == DOC and calls
     out, err = capsys.readouterr()
     assert "document registered" in out
-    assert "warning: Verified does not say the first reader (with the reader profile) passed" in err
     assert "warning: the plain-doc screen did not run (http 503: unavailable); the doc is registered" in err
 
 

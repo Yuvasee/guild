@@ -333,6 +333,7 @@ Full usage and flags: [docs/commands.md](docs/commands.md), or `<command> --help
 | [`guild ack`](docs/commands.md#guild-ack) | a lead's one line on a board post; shown faint, delivered to nobody |
 | [`guild day`](docs/commands.md#guild-day) | the owner is on again; how loaded each lead is and its next work |
 | [`guild capacity`](docs/commands.md#guild-capacity) | a dry run of the capacity signal: who has room for planned work now, why, what to suggest |
+| [`guild stats week`](docs/commands.md#guild-stats-week) | PRs merged and their commits, and a rough count of the owner not understanding, for a weekly report |
 | **`guild` · Comments on PRs and issues** | |
 | [`guild comment small`](docs/commands.md#guild-comment-small) | a small one (typo, rename, factual question) you handled |
 | [`guild comment draft`](docs/commands.md#guild-comment-draft) | a substantive one: your draft reply and plan go to the owner, who chooses; bridge posts after |

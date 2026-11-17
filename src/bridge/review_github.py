@@ -158,6 +158,8 @@ class OpenPr:
     bot_approved: bool = False
     bot_cleared: bool = False
     """The review bot's latest review is of the head commit and does not request changes: reviewed, not blocked."""
+    bot_rounds: int = 0
+    """How many commits the review bot reviewed: one round each."""
     body_reviews: tuple[str, ...] | None = None
     """The reviews its body's Reviews section names; None without one."""
     usage_missing: str | None = None
@@ -305,6 +307,7 @@ def map_node_to_open_pr(node: Any, config: Config, known_loc: dict[tuple[str, st
         approved_by=map_reviews_to_approvers(node["reviews"]["nodes"], config),
         bot_approved=is_approved_by_review_bot(node["reviews"]["nodes"], config),
         bot_cleared=is_cleared_by_review_bot(node["reviews"]["nodes"], head_oid, config),
+        bot_rounds=count_review_bot_rounds(node["reviews"]["nodes"], config),
         body_reviews=map_markdown_to_reviews(str(node.get("body") or ""), config.review_names),
         usage_missing=find_missing_usage_section(strip_agent_prefix(str(node["title"])), str(node.get("body") or "")),
         depends_on=depends_on,
@@ -841,6 +844,17 @@ def is_cleared_by_review_bot(nodes: list[Any], head_oid: str, config: Config) ->
         return False
     commit: Any = latest.get("commit") or {}
     return commit.get("oid") == head_oid and latest.get("state") != "CHANGES_REQUESTED"
+
+
+def count_review_bot_rounds(nodes: list[Any], config: Config) -> int:
+    bots = {login.casefold() for login in config.review_bot_logins}
+    commits: set[str] = set()
+    for node in nodes:
+        author: Any = node.get("author") or {}
+        commit: Any = node.get("commit") or {}
+        if str(author.get("login") or "").casefold() in bots and node.get("state") != PENDING:
+            commits.add(str(commit.get("oid")))
+    return len(commits)
 
 
 def map_reviews_to_approvers(nodes: list[Any], config: Config) -> tuple[str, ...]:
