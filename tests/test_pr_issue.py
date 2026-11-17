@@ -379,3 +379,32 @@ def test_the_macs_shell_gate_starts_the_hook_for_pr_create_and_edit(command: str
     env = {"PATH": "/usr/bin:/bin", "BRIDGE_STATE_DIR": str(tmp_path)}
     subprocess.run(["/bin/sh", "-c", gate], input=payload, env=env, text=True, check=True)
     assert ran.read_text() == payload
+
+
+@pytest.mark.parametrize(
+    ("base", "refused"),
+    [
+        ("main", False),
+        ("master", False),
+        ("release/1.4.x", False),
+        ("dev/x", True),
+        ("develop", True),
+        ("$BASE", False),
+    ],
+)
+def test_a_pr_goes_to_main_or_a_release_branch_and_one_on_another_pr_is_sent_to_a_stack(
+    tmp_path: Path, base: str, refused: bool
+) -> None:
+    """dev/x is an open PR's branch: a plain PR on it is still refused, as only `gh stack link` makes a real stack."""
+    conn = connect(tmp_path / "t.db")
+    with transaction(conn):
+        store_open_prs(conn, [make_pr()], 500)
+    for command in (f"gh pr create -t 'ACME-1 Export' -b x --base {base}", f"gh pr edit 8 -B {base}"):
+        text = refusal(command, conn)
+        assert (text is not None and f"base {base} is not main" in text and "gh stack link" in text) is refused
+
+
+def test_the_base_rule_spares_repos_outside_the_org_and_a_pr_with_no_base(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "t.db")
+    assert refusal("gh pr create -t 'ACME-1 Export' -b x --base develop -R Someone/app", conn) is None
+    assert refusal("gh pr create -t 'ACME-1 Export' -b x", conn) is None
