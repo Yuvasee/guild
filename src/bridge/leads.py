@@ -196,7 +196,8 @@ def map_names_to_brief_rules(names: list[str], config: Config) -> str:
     reviews = read_overlay(config, "brief-reviews", BRIEF_REVIEWS_RULE, owner=owner)
     review_doc = (
         f"A PR's review doc follows {REVIEW_DOC_SPEC}: its sections, order and rules. It opens with the plain story "
-        "of what is changed, in full sentences, for a reader who never saw the code; every internal name is a click "
+        "of what is changed, in full sentences, for a reader who never saw the code, then a User story: one person, "
+        "at least three numbered steps, what they do and see today and after the PR; every internal name is a click "
         "term at its first use in each section; one concrete scenario per change. A PR that only enables something "
         "(a flag off by default, an opt-in value, one step of a plan) has a description section 'How this will be "
         "used': the problem today, the plan's numbered steps with links (built / not built), what switches it on "

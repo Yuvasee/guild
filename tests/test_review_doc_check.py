@@ -23,9 +23,17 @@ WHERE = """
 """
 
 
+STORY = (
+    "<h2>User story</h2><p>A support agent answers a refund ticket.</p><ol>"
+    "<li>Today: they open the order. After: the same.</li>"
+    "<li>Today: the refund button errors. After: it is greyed out with a reason.</li>"
+    "<li>Today: they ask a colleague. After: they read the reason and move on.</li></ol>"
+)
+
+
 def make_doc(where: str = WHERE, first: str = "In short", last: str = "") -> bytes:
-    sections = [first, "What changes and why", "How it works", "Costs and risks"]
-    body = "".join(f"<h2>{title}</h2><p>text</p>" for title in sections)
+    sections = ["What changes and why", "How it works", "Costs and risks"]
+    body = f"<h2>{first}</h2><p>text</p>{STORY}" + "".join(f"<h2>{title}</h2><p>text</p>" for title in sections)
     tail = "<h2>Tests</h2><h2>Reviews</h2><p>Codex, Claude</p><h2>Verified and not verified</h2>"
     return f"<html><body>{body}{where}{tail}{last}</body></html>".encode()
 
@@ -59,9 +67,9 @@ def test_the_doc_opens_with_in_short() -> None:
 def test_changes_since_the_last_review_waits_for_the_owners_review_and_comes_last() -> None:
     (refused,) = problems(make_doc(last=SINCE))
     assert "Sam has not reviewed this PR yet" in refused
-    early = make_doc(first="In short</h2><h2>Changes since the last review")
+    early = make_doc(last=SINCE).replace(SINCE.encode(), b"").replace(b"<h2>How", SINCE.encode() + b"<h2>How")
     assert problems(early, reviewed=True) == [
-        "'What changes and why' comes after 'Changes since the last review', which is always the last h2"
+        "'How it works' comes after 'Changes since the last review', which is always the last h2"
     ]
     assert problems(make_doc(last=SINCE + SINCE), reviewed=True) == [
         "'Changes since the last review' is there 2 times; it is one section, the last h2"
@@ -83,15 +91,18 @@ def test_where_to_look_names_each_file_once_by_its_path_from_the_repo_root() -> 
 
 
 def test_markup_a_browser_shows_is_read_as_it_shows_it() -> None:
-    assert len(problems(b"<h2>Why<h2>In short</h2>")) == 1, "a heading left open ends at the next one"
-    assert len(problems(b"<h2>In short</h2><h2>Changes since the last review")) == 1, "or at the end of the file"
+    assert len(problems(b"<h2>Why<h2>In short</h2>" + STORY.encode())) == 2, "a heading left open ends at the next one"
+    story = STORY.encode()
+    assert len(problems(b"<h2>In short</h2>" + story + b"<h2>Changes since the last review")) == 1, "or at the end"
     unclosed = make_doc(WHERE.replace("<code>tests/test_run.py</code>", "<code>tests/missing.py"))
     assert len(problems(unclosed, files=FILES)) == 1, "a code left open ends with its row"
     nested = "<ul><li><code>src/app</code><ul><li>Check retries.</li></ul> then <code>retry()</code>.</li></ul>"
     assert problems(make_doc(WHERE + nested), files=FILES) == [], "the outer row already has its path"
     example = "<textarea><h2>Changes since the last review</h2></textarea><h2>Changes since startup</h2>"
     assert problems(make_doc(last=example)) == [], "a textarea's text and an app's own changes are not that section"
-    assert problems(b"<h2>In short</h2><![bogus]>")[0].startswith("its HTML cannot be read past line 1")
+    assert problems(b"<h2>In short</h2>" + STORY.encode() + b"<![bogus]>")[0].startswith(
+        "its HTML cannot be read past line 1"
+    )
 
 
 def test_a_path_the_commit_lacks_is_refused_and_without_the_commit_nothing_is_looked_up() -> None:
@@ -175,10 +186,14 @@ def test_a_refused_doc_lists_every_problem_names_the_spec_and_is_not_stored(
     assert read_registered_doc(conn, "Org/app", 7) == make_doc(last=SINCE), "after the owner's review, and last"
 
 
-def make_top(short: str, changes: str = "<p>One plain line.</p>", verified: str = "") -> bytes:
+def steps(count: int, tag: str = "ol") -> str:
+    return f"<h2>User story</h2><{tag}>" + "".join(f"<li>Step {n}.</li>" for n in range(count)) + f"</{tag}>"
+
+
+def make_top(short: str, changes: str = "<p>One plain line.</p>", verified: str = "", story: str = steps(3)) -> bytes:
     rest = "<h2>How it works</h2><p>" + "word " * 60 + "ends here.</p>"
     return (
-        f"<html><body><h1>Title</h1><p>{'lead ' * 40}</p><h2>In short</h2>{short}"
+        f"<html><body><h1>Title</h1><p>{'lead ' * 40}</p><h2>In short</h2>{short}{story}"
         f"<h2>What changes and why</h2>{changes}{rest}<h2>Verified and not verified</h2>{verified}</body></html>"
     ).encode()
 
@@ -227,7 +242,7 @@ def test_no_sentence_above_the_folds_runs_over_30_words() -> None:
     assert len(problems(make_top("<p>Fine.</p>", broken))) == 1, "a line break does not end a sentence"
     folded_heading = "<details><summary>More</summary><h2>Background</h2></details><p>" + words(31) + "</p>"
     assert len(problems(make_top(folded_heading))) == 1, "a heading in a fold starts no section"
-    unclosed = b"<h2>In short<h2>What changes and why</h2><p>" + words(31).encode() + b"</p>"
+    unclosed = b"<h2>In short" + STORY.encode() + b"<h2>What changes and why</h2><p>" + words(31).encode() + b"</p>"
     assert len(problems(unclosed)) == 1, "a heading left open ends at the next one"
     abbreviations = "<p>Seen in docs, e.g. Alpha and Beta, vs. Gamma, and " + words(22) + "</p>"
     assert len(problems(make_top("<p>Fine.</p>", abbreviations))) == 1, "e.g. and vs. end no sentence"
@@ -266,3 +281,35 @@ def test_the_limits_must_be_at_least_one() -> None:
     assert map_toml_to_config({"doc_sentence_max_words": 40}).doc_sentence_max_words == 40
     with pytest.raises(ValueError, match="doc_sentence_max_words must be at least 1"):
         map_toml_to_config({"doc_sentence_max_words": 0})
+
+
+def test_a_user_story_of_at_least_three_numbered_steps_comes_right_after_in_short() -> None:
+    assert problems(make_top("<p>Fine.</p>", story=steps(3))) == []
+    (missing,) = problems(make_top("<p>Fine.</p>", story=""))
+    assert missing.startswith("it has no 'User story' h2: right after 'In short'")
+    (short,) = problems(make_top("<p>Fine.</p>", story=steps(2)))
+    assert short.startswith("'User story' has 2 numbered steps; at least 3")
+    late = make_top("<p>Fine.</p>", story="").replace(
+        b"<h2>How it works</h2>", steps(3).encode() + b"<h2>How it works</h2>"
+    )
+    assert problems(late) == ["'User story' comes after 'What changes and why'; it is the h2 right after 'In short'"]
+
+
+def test_only_visible_top_level_items_of_a_numbered_list_count_as_steps() -> None:
+    (bulleted,) = problems(make_top("<p>Fine.</p>", story=steps(3, "ul")))
+    assert "has 0 numbered steps" in bulleted
+    nested = "<h2>User story</h2><ol><li>One.<ol><li>a</li><li>b</li></ol></li><li>Two.</li></ol>"
+    assert "has 2 numbered steps" in problems(make_top("<p>Fine.</p>", story=nested))[0]
+    folded = "<h2>User story</h2><details><summary>Steps</summary>" + steps(3)[19:] + "</details>"
+    assert "has 0 numbered steps" in problems(make_top("<p>Fine.</p>", story=folded))[0]
+    assert problems(make_top("<p>Fine.</p>", story=folded.replace("<details>", "<details open>"))) == []
+    hidden = "<details><summary>More</summary>" + steps(3) + "</details>"
+    assert problems(make_top("<p>Fine.</p>", story=hidden)) == [
+        "'User story' is inside a fold; it is a visible h2, right after 'In short'"
+    ]
+
+
+def test_the_user_storys_sentences_keep_the_plain_doc_limits() -> None:
+    long_step = "<h2>User story</h2><ol><li>" + words(31) + "</li><li>Two.</li><li>Three.</li></ol>"
+    (refused,) = problems(make_top("<p>Fine.</p>", story=long_step))
+    assert refused.startswith("a sentence above the folds has 31 words")

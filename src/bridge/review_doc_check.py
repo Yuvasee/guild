@@ -4,8 +4,11 @@ from dataclasses import dataclass, field
 from html.parser import HTMLParser
 
 IN_SHORT = "In short"
+USER_STORY = "User story"
+MIN_STORY_STEPS = 3
 CHANGES_SINCE = "Changes since the last review"
 _IN_SHORT_RE = re.compile(r"^\W*in short\b", re.I)
+_USER_STORY_RE = re.compile(r"^\W*user story\b", re.I)
 _CHANGES_SINCE_RE = re.compile(r"\bsince (?:the |your |my )?(?:last |previous )?review\b", re.I)
 _WHERE_TO_LOOK_RE = re.compile(r"^\W*where to look\b", re.I)
 _NOT_FROM_ROOT_RE = re.compile(r"^(?:/|~|…)|(?:^|/)\.{1,3}(?:/|$)")
@@ -13,6 +16,7 @@ _LINE_SUFFIX_RE = re.compile(r":\d[\d,\s\u2013-]*$")
 _WHAT_CHANGES_RE = re.compile(r"^\W*what changes\b", re.I)
 _VERIFIED_RE = re.compile(r"^\W*verified\b", re.I)
 _FIRST_READER_PASSED_RE = re.compile(r"\bfirst[- ]reader\b(?![^.;]*\b(?:not|never|failed|pending)\b)[^.;]*\bpass", re.I)
+_TOP_SECTIONS = ("short", "story", "changes")
 _HIDDEN_TAGS = frozenset({"script", "style", "template", "textarea"})
 _ROW_TAGS = ("li", "tr")
 _UNREAD_TAGS = _HIDDEN_TAGS | {"svg", "pre"}
@@ -100,12 +104,15 @@ class _DocOutline(HTMLParser):
 
 @dataclass
 class VisibleTop:
-    """What the owner reads before opening anything: In short and What changes and why, without the bodies of folds,
-    diagrams, code blocks and marks. `blocks` are paragraphs, list items, table cells and fold summaries as text."""
+    """What the owner reads before opening anything: In short, User story and What changes and why, without the bodies
+    of folds, diagrams, code blocks and marks. `blocks` are paragraphs, list items, table cells and fold summaries as
+    text."""
 
     blocks: list[str] = field(default_factory=list[str])
     bullets: list[str] = field(default_factory=list[str])
     """In short's top-level list items, each with all of its visible text."""
+    story_steps: int | None = None
+    """User story's visible top-level items of numbered lists; None when the second h2 is not User story."""
 
 
 class _TopReader(HTMLParser):
@@ -123,11 +130,12 @@ class _TopReader(HTMLParser):
         self._details: list[list[bool]] = []
         """Per details element we are in: [has the open attribute, inside its summary now]."""
         self._lists = 0
+        self._ordered = False
         self._block: list[str] = []
         self._bullet: list[str] | None = None
 
     def _reading(self) -> bool:
-        return self._section in ("short", "changes") and not self._unread and not self._marks and not self._folded()
+        return self._section in _TOP_SECTIONS and not self._unread and not self._marks and not self._folded()
 
     def _folded(self) -> bool:
         return any(not opened and not in_summary for opened, in_summary in self._details)
@@ -161,9 +169,14 @@ class _TopReader(HTMLParser):
             self._details[-1][1] = True
         elif tag in ("ul", "ol"):
             self._lists += 1
-        elif tag == "li" and self._lists == 1 and self._section == "short" and not self._folded():
-            self._end_bullet()
-            self._bullet = []
+            if self._lists == 1:
+                self._ordered = tag == "ol"
+        elif tag == "li" and self._lists == 1 and not self._folded():
+            if self._section == "short":
+                self._end_bullet()
+                self._bullet = []
+            elif self._section == "story" and self._ordered and self.top.story_steps is not None:
+                self.top.story_steps += 1
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag == "br" and not self._unread:
@@ -222,12 +235,15 @@ class _TopReader(HTMLParser):
         self._sections += 1
         if self._sections == 1 and _IN_SHORT_RE.match(text):
             self._section = "short"
-        elif self._section in ("short", "changes") and _WHAT_CHANGES_RE.match(text):
+        elif self._sections == 2 and _USER_STORY_RE.match(text):
+            self._section = "story"
+            self.top.story_steps = 0
+        elif self._section in _TOP_SECTIONS and _WHAT_CHANGES_RE.match(text):
             self._section = "changes"
         elif _VERIFIED_RE.match(text):
             self._section = "verified"
         else:
-            self._section = "done" if self._section in ("short", "changes") else ""
+            self._section = "done" if self._section in _TOP_SECTIONS else ""
         self._lists = 0
         self._details = []
 
@@ -306,6 +322,28 @@ def find_plainness_problems(top: VisibleTop, limits: PlainLimits) -> list[str]:
     return problems
 
 
+def find_story_problems(headings: list[str], steps: int | None) -> list[str]:
+    """`headings` are every h2, folded ones too; `steps` is None when the second visible h2 is not User story."""
+    if steps is None and headings:
+        story = [index for index, text in enumerate(headings) if _USER_STORY_RE.match(text)]
+        if not story:
+            return [
+                f"it has no '{USER_STORY}' h2: right after '{IN_SHORT}', one person's story as numbered steps (an "
+                "<ol>), each what they do and see today and after this PR"
+            ]
+        if story[0] == 0:
+            return []
+        if story[0] == 1:
+            return [f"'{USER_STORY}' is inside a fold; it is a visible h2, right after '{IN_SHORT}'"]
+        return [f"'{USER_STORY}' comes after '{headings[story[0] - 1]}'; it is the h2 right after '{IN_SHORT}'"]
+    if steps is not None and steps < MIN_STORY_STEPS:
+        return [
+            f"'{USER_STORY}' has {steps} numbered steps; at least {MIN_STORY_STEPS}, as items of an <ol> outside "
+            "closed folds, each what the person does and sees today and after this PR"
+        ]
+    return []
+
+
 def _shorten(text: str, words: int = 14) -> str:
     parts = text.split()
     return " ".join(parts[:words]) + (" …" if len(parts) > words else "")
@@ -316,7 +354,7 @@ def find_doc_warnings(verified: str) -> list[str]:
         return []
     return [
         "Verified does not say the first reader (with the reader profile) passed: before registering, a fresh reader "
-        "gets the reader profile and only In short and What changes and why, and the doc says it passed"
+        "gets the reader profile and only In short, User story and What changes and why, and the doc says it passed"
     ]
 
 
@@ -343,6 +381,8 @@ def find_doc_problems(
         problems.append(f"it has no h2 headings; it opens with the h2 '{IN_SHORT}'")
     elif not _IN_SHORT_RE.match(headings[0]):
         problems.append(f"its first h2 is '{headings[0]}'; it opens with '{IN_SHORT}', with nothing before it")
+    top = read_visible_top(page)[0]
+    problems.extend(find_story_problems(headings, top.story_steps))
     since = [index for index, text in enumerate(headings) if _CHANGES_SINCE_RE.search(text)]
     if since and not owner_reviewed:
         problems.append(
@@ -353,7 +393,7 @@ def find_doc_problems(
         problems.append(f"'{CHANGES_SINCE}' is there {len(since)} times; it is one section, the last h2")
     elif since and since[0] != len(headings) - 1:
         problems.append(f"'{headings[since[0] + 1]}' comes after '{CHANGES_SINCE}', which is always the last h2")
-    problems.extend(find_plainness_problems(read_visible_top(page)[0], limits))
+    problems.extend(find_plainness_problems(top, limits))
     paths = [path for path in (map_row_to_path(row) for row in outline.rows if row) if path]
     for path, count in Counter(paths).items():
         if count > 1:
