@@ -280,3 +280,39 @@ def test_a_sibling_merged_after_goes_second_and_a_cycle_never_merges(tmp_path: P
     )
     assert all("a cycle no merge can start" in str(why) for _, why in map_db_to_dry_run(cycle, ON))
     assert run(cycle).merges == []
+
+
+class StackGh(Gh):
+    """GitHub refuses the plain merge for a PR in one of its stacks; merge-async answers from `replies` in turn."""
+
+    def __init__(self, *replies: dict[str, Any]) -> None:
+        super().__init__(fail="gh failed: GraphQL: This pull request is part of a stack and must be merged using ...")
+        self.replies = [json.dumps(r) for r in replies]
+
+    def __call__(self, args: list[str], timeout_s: float = 60) -> str:
+        if args[0] == "api":
+            self.calls.append(args)
+            return self.replies.pop(0)
+        return super().__call__(args, timeout_s)
+
+
+def test_a_pr_in_a_github_stack_merges_through_merge_async_at_its_head(tmp_path: Path) -> None:
+    conn = setup(tmp_path)
+    pending = {"status": "pending", "details": {"uuid": "u-1", "message": "queued"}}
+    gh = StackGh(pending, {"status": "merged", "details": {"sha": "c0ffee1234"}})
+    with mock.patch("bridge.auto_merge.time.sleep"):
+        run(conn, gh=gh)
+    apis = [c for c in gh.calls if c[0] == "api"]
+    assert apis == [
+        ["api", "-X", "PUT", "repos/Org/app/pulls/7/merge-async", "-f", "sha=a1", "-f", "merge_method=squash",
+         "-f", "merge_action=direct_merge"],
+        ["api", "repos/Org/app/pulls/7/merge-async/u-1"],
+    ]  # fmt: skip
+    assert conn.execute("SELECT kind FROM user_items").fetchone()["kind"] == "done"
+
+
+def test_a_failed_stacked_merge_is_told_as_a_failure_with_githubs_reason(tmp_path: Path) -> None:
+    conn = setup(tmp_path)
+    run(conn, gh=StackGh({"status": "failed", "details": {"message": "head moved"}}))
+    assert row(conn)["auto_merge_error"] == "GitHub's stacked merge ended failed: head moved"
+    assert conn.execute("SELECT COUNT(*) FROM user_items WHERE kind = 'done'").fetchone()[0] == 0

@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import time
 from collections.abc import Sequence
 from typing import Any
 
@@ -46,6 +47,10 @@ from bridge.reviews import find_owner, list_stacked_on, tell_owner
 SANDBOX_BLOCK = "PERSIST_SANDBOX in its body"
 MERGE_TIMEOUT_S = 120
 LIVE_TIMEOUT_S = 30
+STACK_REFUSAL = "part of a stack"
+"""GitHub's refusal of the plain merge for a PR in one of its stacks: such a PR merges only through merge-async."""
+ASYNC_POLL_S = 3
+ASYNC_POLLS = 20
 """The service reads GitHub here, not a 5 s hook."""
 _LOGGED: set[tuple[str, str, str]] = set()
 """(ref, head, line) the service log already has: a dry run or a refusal is logged once per head, not every poll."""
@@ -228,7 +233,7 @@ def merge_pr(conn: sqlite3.Connection, config: Config, row: sqlite3.Row, now: in
     if not claimed:
         return []
     try:
-        run_gh(["pr", "merge", url, "--squash", "--match-head-commit", head], MERGE_TIMEOUT_S)
+        merge_on_github(str(row["repo"]), int(row["number"]), url, head)
         merged: Any = json.loads(run_gh(["pr", "view", url, "--json", "state,mergeCommit"]))
         if merged.get("state") != "MERGED":
             raise GitHubError(f"gh pr merge returned, but the PR is {merged.get('state')} (a merge queue?)")
@@ -242,6 +247,36 @@ def merge_pr(conn: sqlite3.Connection, config: Config, row: sqlite3.Row, now: in
     with transaction(conn):
         post_merged(conn, config, row, commit, now)
         return tell_merged(conn, config, row, commit, now)
+
+
+def merge_on_github(repo: str, number: int, url: str, head: str) -> None:
+    try:
+        run_gh(["pr", "merge", url, "--squash", "--match-head-commit", head], MERGE_TIMEOUT_S)
+    except GitHubError as exc:
+        if STACK_REFUSAL not in str(exc):
+            raise
+        merge_stacked(repo, number, head)
+
+
+def merge_stacked(repo: str, number: int, head: str) -> None:
+    """A stacked merge also merges every open PR below it; the rule only lets a stack's bottom PR here, so none does."""
+    path = f"repos/{repo}/pulls/{number}/merge-async"
+    method = ["-f", "merge_method=squash", "-f", "merge_action=direct_merge"]
+    ask = ["api", "-X", "PUT", path, "-f", f"sha={head}", *method]
+    reply: Any = json.loads(run_gh(ask, MERGE_TIMEOUT_S))
+    details: Any = reply.get("details") or {}
+    uuid = str(details.get("uuid") or "")
+    for _ in range(ASYNC_POLLS):
+        status = reply.get("status")
+        if status == "merged":
+            return
+        if status != "pending" or not uuid:
+            details = reply.get("details") or {}
+            message = str(details.get("message") or "no message")[:200]
+            raise GitHubError(f"GitHub's stacked merge ended {status}: {message}")
+        time.sleep(ASYNC_POLL_S)
+        reply = json.loads(run_gh(["api", f"{path}/{uuid}"]))
+    raise GitHubError(f"GitHub's stacked merge was still pending after {ASYNC_POLL_S * ASYNC_POLLS} s")
 
 
 def post_merged(conn: sqlite3.Connection, config: Config, row: sqlite3.Row, commit: str, now: int) -> int:
