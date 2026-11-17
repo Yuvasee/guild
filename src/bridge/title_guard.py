@@ -308,7 +308,8 @@ def find_missing_issue_refusal(
     read_files: bool = True,
 ) -> str | None:
     """Why a gh pr create, or a gh pr edit of a PR's body, would leave a review_org PR naming no issue in its branch,
-    title or body; None when it names one or the guard cannot tell. read_files is False where the command runs on
+    title or body, or aimed at a base other than main or a release branch; None when it is fine or the guard cannot
+    tell. read_files is False where the command runs on
     another machine: a body file there is not read here."""
     if not config.issue_prefixes or not config.review_org or "gh" not in command:
         return None
@@ -372,7 +373,11 @@ def _check_pr_issue(
     selector = positional[2:3]
     if positional[1] == "edit" and selector and (url := _PR_URL_RE.search(selector[0])):
         repo = str(url.group(1))
-    if repo is None or not needs_issue(config, repo):
+    if repo is None:
+        return None
+    if refusal := _check_pr_base(config, repo, values.get("base")):
+        return refusal
+    if not needs_issue(config, repo):
         return None
     title = _read_value(values.get("title"))
     body = _read_body(values, directory, command)
@@ -387,6 +392,21 @@ def _check_pr_issue(
         return None
     fill = any(a in _GH_FILL for a in args) and not (values.get("body") or values.get("body-file"))
     return map_missing_issue_to_refusal(config, f"its branch {head}, title or body", fill)
+
+
+def _check_pr_base(config: Config, repo: str, bases: list[str] | None) -> str | None:
+    """A review_org PR targets main, master or a release branch. One that builds on another PR joins a native GitHub
+    stack through `gh stack link`, which creates it there, so GitHub retargets it to main once the PR below merges; a
+    plain PR on another PR's branch only shows 'can be stacked'. Without --base the default branch is used."""
+    if not bases or repo.partition("/")[0].casefold() != config.review_org.casefold():
+        return None
+    base = bases[-1]
+    if base in ("main", "master") or base.startswith("release/") or _is_shell_value(base):
+        return None
+    return (
+        f"bridge: base {base} is not main or a release/ branch. A PR goes to main; one that builds on another PR "
+        f"joins a GitHub stack instead: `gh stack link <bottom PR or branch> … <your branch>` creates or links it."
+    )
 
 
 def _check_pr_edit(
