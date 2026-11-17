@@ -193,8 +193,8 @@ def store_open_prs(conn: sqlite3.Connection, prs: list[OpenPr], now: int) -> Non
                                     checks, requested, approved_by, bot_approved, others_reviewed, merge_state,
                                     in_merge_queue, commit_oids, updated_at, first_seen_at,
                                     fetched_at, threads_key, loc_rule, body_reviews, depends_on, usage_missing,
-                                    bot_cleared, named_prs, must_merge, persist_sandbox)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    bot_cleared, named_prs, must_merge, persist_sandbox, issue_missing)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (ref) DO UPDATE SET
                 title = excluded.title, url = excluded.url, draft = excluded.draft, head = excluded.head,
                 head_oid = excluded.head_oid, base = excluded.base, stack_parent = excluded.stack_parent,
@@ -202,6 +202,7 @@ def store_open_prs(conn: sqlite3.Connection, prs: list[OpenPr], now: int) -> Non
                 requested = excluded.requested, body_reviews = excluded.body_reviews, depends_on = excluded.depends_on,
                 usage_missing = excluded.usage_missing, named_prs = excluded.named_prs,
                 must_merge = excluded.must_merge, persist_sandbox = excluded.persist_sandbox,
+                issue_missing = excluded.issue_missing,
                 approved_by = excluded.approved_by, bot_approved = excluded.bot_approved,
                 bot_cleared = excluded.bot_cleared,
                 ci_blocked_by = CASE WHEN excluded.checks = 'FAILURE' THEN ci_blocked_by END,
@@ -222,7 +223,7 @@ def store_open_prs(conn: sqlite3.Connection, prs: list[OpenPr], now: int) -> Non
                 pr.merge_state, int(pr.in_merge_queue), json.dumps(pr.commit_oids), pr.updated_at, now, now,
                 map_pr_to_threads_key(pr), LOC_RULE, convert_reviews_to_text(pr.body_reviews), pr.depends_on,
                 pr.usage_missing, int(pr.bot_cleared), json.dumps(pr.named_prs), json.dumps(pr.must_merge),
-                int(pr.persist_sandbox),
+                int(pr.persist_sandbox), int(pr.issue_missing),
             ),
         )  # fmt: skip
         if not pr.open_threads:
@@ -1408,6 +1409,7 @@ def poll_review_queue(
             *tell_ready_to_merge(conn, config, now),
             *tell_review_waits(conn, config, now),
             *tell_bot_waits(conn, config, now),
+            *tell_issue_missing(conn, config, now),
         ]
 
 
@@ -1789,6 +1791,33 @@ def tell_bot_waits(conn: sqlite3.Connection, config: Config, now: int) -> list[t
             continue
         sent.append((message_id, recipient))
         record_signal_post(conn, assistant_key, message_id, now)
+    return sent
+
+
+def tell_issue_missing(conn: sqlite3.Connection, config: Config, now: int) -> list[tuple[int, Recipient]]:
+    """An open PR whose branch, title and body name no issue: its owner is told once per head. With no owner it waits
+    for one; once the PR names an issue the marks are forgotten."""
+    sent: list[tuple[int, Recipient]] = []
+    for row in conn.execute("SELECT * FROM review_prs WHERE closed_at IS NULL").fetchall():
+        ref = str(row["ref"])
+        prefix = f"no-issue:{ref}:"
+        key = f"{prefix}{row['head_oid']}"
+        if not row["issue_missing"]:
+            conn.execute("DELETE FROM signal_posts WHERE substr(key, 1, ?) = ?", (len(prefix), prefix))
+            continue
+        if conn.execute("SELECT 1 FROM signal_posts WHERE key = ?", (key,)).fetchone():
+            continue
+        owner = find_owner(conn, config, ref, str(row["repo"]), str(row["head"]))
+        if owner is None:
+            continue
+        example = f"{config.issue_prefixes[0]}-N" if config.issue_prefixes else "KEY-N"
+        text = (
+            f"{row['url']} ({row['title']}) names no Linear issue; its CI needs one: `guild linear search|create`, "
+            f"then add 'Fixes {example}' to the body."
+        )
+        message_id, recipient = tell_owner(conn, owner, text, now)
+        sent.append((message_id, recipient))
+        record_signal_post(conn, key, message_id, now)
     return sent
 
 
@@ -2217,6 +2246,7 @@ def map_row_to_review(conn: sqlite3.Connection, config: Config, row: sqlite3.Row
         "fixed_at": max(heads) if state == FIXED else None,
         "first_seen_at": row["first_seen_at"],
         "issue_keys": _load_issue_keys_of_pr(conn, ref, str(row["title"]), owner),
+        "issue_missing": bool(row["issue_missing"]),
         "open_threads": int(row["open_threads"] or 0),
         "his_open_threads": int(row["his_open_threads"] or 0),
         "his_last_at": his_last_at,

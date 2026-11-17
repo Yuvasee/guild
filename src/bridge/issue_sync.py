@@ -6,7 +6,7 @@ import sqlite3
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Generator, Iterable
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -19,6 +19,7 @@ from bridge.db import transaction
 from bridge.enrich import read_linear_key
 from bridge.errlog import log_error
 from bridge.feed import resolve_tab
+from bridge.refs import map_prefixes_to_key_re
 from bridge.review_github import GitHubError, run_gh
 from bridge.reviews import find_issue_lead
 
@@ -179,11 +180,6 @@ class Linear(Protocol):
 
 
 FetchPrs = Callable[[Config, int], list[GitHubPr]]
-
-
-def map_prefixes_to_key_re(prefixes: Iterable[str], ignore_case: bool) -> re.Pattern[str]:
-    alternatives = "|".join(re.escape(p) for p in prefixes)
-    return re.compile(rf"(?<![A-Za-z0-9])(?:{alternatives})-\d+(?!\d)", re.IGNORECASE if ignore_case else 0)
 
 
 def map_pr_to_issue_keys(pr: GitHubPr, prefixes: tuple[str, ...]) -> dict[str, bool]:
@@ -687,6 +683,15 @@ class LinearApi:
         if _dig(update, "success") is not True or _dig(update, "issue", "state", "id") != state_id:
             raise LinearError("Linear did not confirm the new state")
         return str(_dig(update, "issue", "state", "name") or "")
+
+    def query(self, query: str, variables: dict[str, object]) -> object:
+        """The answer's data; any error Linear names is raised."""
+        raw = self._post({"query": query, "variables": variables})
+        errors = _dig(raw, "errors")
+        if _dig(errors, 0) is not None:
+            message = str(_dig(errors, 0, "message") or "unknown")
+            raise LinearError(f"linear error: {message[:200]}")
+        return _dig(raw, "data")
 
     def _post(self, payload: dict[str, object]) -> object:
         request = urllib.request.Request(

@@ -10,6 +10,7 @@ from typing import Any, cast
 
 from bridge.agent_prefix import strip_agent_prefix
 from bridge.config import Config
+from bridge.refs import names_issue, needs_issue
 from bridge.review_deps import map_markdown_to_dependency, map_markdown_to_named_prs, map_markdown_to_preconditions
 from bridge.review_marks import find_missing_usage_section, map_markdown_to_reviews
 
@@ -180,6 +181,8 @@ class OpenPr:
     """owner/repo#N of the PRs that must be merged first: depends_on, and a backport's default-branch PRs."""
     preconditions: tuple[str, ...] = ()
     """A blocker for each sentence of its body that holds its merge without naming a PR ('Merge after X is out')."""
+    issue_missing: bool = False
+    """Its branch, title and body name no issue of a configured team."""
     persist_sandbox: bool = False
     """Its body asks to keep its sandbox (PERSIST_SANDBOX): it never merges by itself."""
     labels: tuple[str, ...] = ()
@@ -308,6 +311,8 @@ def map_node_to_open_pr(node: Any, config: Config, known_loc: dict[tuple[str, st
         must_merge=map_pr_to_must_merge(config, repo, number, node, depends_on),
         preconditions=map_markdown_to_preconditions(body, repo, number),
         persist_sandbox=PERSIST_SANDBOX in body,
+        issue_missing=needs_issue(config, repo)
+        and not names_issue(config.issue_prefixes, str(node["headRefName"]), str(node["title"]), body),
         others_reviewed=has_review_by_others(node["latestReviews"]["nodes"], config),
         merge_state=node.get("mergeStateStatus"),
         in_merge_queue=bool(node.get("isInMergeQueue")),

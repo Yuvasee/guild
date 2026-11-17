@@ -2032,6 +2032,11 @@ function renderQueueTableRow(pr) {
     mark.title = pr.held_why + " (" + pr.held_by + ", " + fullTime(pr.held_at) + ")";
     name.append(mark);
   }
+  if (pr.issue_missing) {
+    const mark = el("span", "mark", "no Linear issue");
+    mark.title = "Its branch, title and body name no issue key; its CI needs one";
+    name.append(mark);
+  }
   if (pr.review_wait) {
     const mark = el("span", "mark", pr.review_wait);
     mark.title = "No place in your review order until this clears";

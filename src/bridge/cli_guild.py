@@ -115,6 +115,7 @@ from bridge.leads import (
     sync_lead_terminal,
     write_notes,
 )
+from bridge.linear_cli import add_linear_commands
 from bridge.refs import map_text_to_ref
 from bridge.registry import is_english_name, list_sessions, reconcile
 from bridge.review_doc_check import find_doc_warnings, read_visible_top
@@ -230,6 +231,7 @@ def build_parser(config: Config) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="guild", description="Team leads on top of bridge")
     sub = parser.add_subparsers(dest="command", required=True)
     add_ask_commands(sub, config.owner_name)
+    add_linear_commands(sub)
 
     p = sub.add_parser("leads", help="list team leads")
     p.add_argument("--json", action="store_true")

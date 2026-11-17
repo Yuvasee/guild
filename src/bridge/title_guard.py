@@ -1,15 +1,23 @@
+import os
 import re
+import sqlite3
 from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import PurePosixPath
 from urllib.parse import unquote
 
 from bridge.agent_prefix import CLAUDE_PREFIX, LINEAR_ISSUE_TOOLS, TITLE_RULE, is_prefixed, strip_agent_prefix
-from bridge.guard import SHELL_KEYWORDS, SHELLS, segment_command
+from bridge.config import Config
+from bridge.gitinfo import RepoFacts, read_repo_facts
+from bridge.guard import SHELL_KEYWORDS, SHELLS, RepoReader, segment_command
+from bridge.refs import names_issue, needs_issue
 
 _HEREDOC_SUBSTITUTION_RE = re.compile(r"^\$\(\s*cat\s+<<-?\s*(['\"]?)(\w+)\1[^\n]*\n(.*?)\n\s*\2\s*\)$", re.DOTALL)
 _GIT_GLOBAL_VALUE_OPTIONS = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace"})
 _GH_GLOBAL_VALUE_OPTIONS = frozenset({"-R", "--repo", "--hostname"})
+_PR_URL_RE = re.compile(r"github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)")
+_GH_FILL = frozenset({"--fill", "-f", "--fill-first", "--fill-verbose"})
+_BODY_FILE_MAX_BYTES = 1_000_000
 
 
 @dataclass(frozen=True)
@@ -282,3 +290,201 @@ def _unwrap(value: str) -> str:
 def _first_line(value: str) -> str:
     text = _unwrap(value).lstrip("\n")
     return text.split("\n", 1)[0]
+
+
+@dataclass(frozen=True)
+class _Text:
+    text: str
+    known: bool
+    """False when the shell or a file the guard cannot read fills it in: it may name an issue."""
+
+
+def find_missing_issue_refusal(
+    conn: sqlite3.Connection,
+    config: Config,
+    command: str,
+    cwd: str | None,
+    read_repo: RepoReader | None = None,
+    read_files: bool = True,
+) -> str | None:
+    """Why a gh pr create, or a gh pr edit of a PR's body, would leave a review_org PR naming no issue in its branch,
+    title or body; None when it names one or the guard cannot tell. read_files is False where the command runs on
+    another machine: a body file there is not read here."""
+    if not config.issue_prefixes or not config.review_org or "gh" not in command:
+        return None
+    directory = cwd
+    branch_moved = False
+    depth = 0
+    leading_cds = True
+    prefixes: list[list[str]] = []
+    for index, (tokens, joined_by) in enumerate(segment_command(command, prefixes=prefixes)):
+        depth += {"(": 1, ")": -1}.get(joined_by, 0)
+        while tokens and tokens[0] in SHELL_KEYWORDS:
+            tokens = tokens[1:]
+        if not tokens:
+            continue
+        if tokens[0] == "cd":
+            # Only a cd that surely ran and still holds: one of the cds the command starts with, outside a subshell.
+            sure = leading_cds and depth == 0 and joined_by in (";", "&&", "\n")
+            directory = _change_dir(directory, tokens[1:]) if sure else None
+            continue
+        leading_cds = False
+        if tokens[0] == "git" and any(word in ("checkout", "switch", "branch") for word in tokens[1:]):
+            branch_moved = True
+        elif tokens[0] == "gh":
+            env = dict(w.split("=", 1) for w in prefixes[index] if "=" in w)
+            refusal = _check_pr_issue(
+                conn,
+                config,
+                tokens[1:],
+                env,
+                directory,
+                read_repo or read_repo_facts,
+                command if read_files else "",
+                branch_moved,
+            )
+            if refusal:
+                return refusal
+    return None
+
+
+def _check_pr_issue(
+    conn: sqlite3.Connection,
+    config: Config,
+    args: list[str],
+    env: dict[str, str],
+    directory: str | None,
+    read_repo: RepoReader,
+    command: str,
+    branch_moved: bool,
+) -> str | None:
+    """command: the whole text, to tell a body file it may write first; empty where files are not read."""
+    found, positional = _scan(args, _GH_ISSUE_PR)
+    if positional[:1] != ["pr"] or len(positional) < 2 or positional[1] not in ("create", "new", "edit"):
+        return None
+    if any(a in ("-h", "--help") for a in args):
+        return None
+    values: dict[str, list[str]] = {}
+    for key, value in found:
+        values.setdefault(key, []).append(value)
+    facts = read_repo(directory) if directory else None
+    repo = _read_repo(values.get("repo", [])[-1:] or [env.get("GH_REPO", "")], facts)
+    selector = positional[2:3]
+    if positional[1] == "edit" and selector and (url := _PR_URL_RE.search(selector[0])):
+        repo = str(url.group(1))
+    if repo is None or not needs_issue(config, repo):
+        return None
+    title = _read_value(values.get("title"))
+    body = _read_body(values, directory, command)
+    if positional[1] == "edit":
+        return _check_pr_edit(conn, config, repo, selector, None if branch_moved else facts, values, title, body)
+    head_values = values.get("head")
+    checkout_branch = facts.branch if facts and not branch_moved else None
+    head = head_values[-1].rpartition(":")[2] if head_values else checkout_branch
+    if names_issue(config.issue_prefixes, head or "", title.text, body.text):
+        return None
+    if head is None or _is_shell_value(head) or not (title.known and body.known):
+        return None
+    fill = any(a in _GH_FILL for a in args) and not (values.get("body") or values.get("body-file"))
+    return map_missing_issue_to_refusal(config, f"its branch {head}, title or body", fill)
+
+
+def _check_pr_edit(
+    conn: sqlite3.Connection,
+    config: Config,
+    repo: str,
+    selector: list[str],
+    facts: RepoFacts | None,
+    values: dict[str, list[str]],
+    title: _Text,
+    body: _Text,
+) -> str | None:
+    """Only an edit that replaces the body is judged: the body before it is not stored, so it may hold the key."""
+    if not (values.get("body") or values.get("body-file")) or not body.known:
+        return None
+    row = _find_queue_row(conn, repo, selector[0] if selector else (facts.branch if facts else None))
+    if row is None or row["issue_missing"]:
+        return None
+    new_title = title.text if values.get("title") else str(row["title"])
+    if names_issue(config.issue_prefixes, str(row["head"]), new_title, body.text) or not title.known:
+        return None
+    pr = str(row["ref"]).removeprefix("pr:")
+    return map_missing_issue_to_refusal(config, f"{pr}'s branch {row['head']}, title or new body", False)
+
+
+def map_missing_issue_to_refusal(config: Config, where: str, fill: bool) -> str:
+    keys = ", ".join(f"{p}-…" for p in config.issue_prefixes)
+    team = config.issue_prefixes[0]
+    filled = " With --fill only the branch name is read, not the commit messages: pass --body as well." if fill else ""
+    return (
+        f"bridge: this PR names no issue ({keys}) in {where}; its CI needs one. Find or create one first: "
+        f'`guild linear search "<words>"` / `guild linear create --team {team} --title "…"`, then put '
+        f"'Fixes {team}-N' in the body.{filled}"
+    )
+
+
+def _change_dir(directory: str | None, args: list[str]) -> str | None:
+    if not args:
+        return os.path.expanduser("~")
+    if len(args) != 1 or args[0] == "-" or _is_shell_value(args[0]):
+        return None
+    path = os.path.expanduser(args[0])
+    if os.path.isabs(path):
+        return os.path.normpath(path)
+    return os.path.normpath(os.path.join(directory, path)) if directory else None
+
+
+def _read_repo(values: list[str], facts: RepoFacts | None) -> str | None:
+    value = values[-1] if values else ""
+    if _is_shell_value(value):
+        return None
+    if not value:
+        return facts.repo if facts else None
+    return value.removeprefix("https://").removeprefix("github.com/").strip("/")
+
+
+def _read_value(values: list[str] | None) -> _Text:
+    if not values:
+        return _Text("", True)
+    text = _unwrap(values[-1])
+    return _Text(text, not _is_shell_value(text))
+
+
+def _read_body(values: dict[str, list[str]], directory: str | None, command: str) -> _Text:
+    files = values.get("body-file")
+    if not files:
+        return _read_value(values.get("body"))
+    name = files[-1]
+    # Named twice, the command may write it before gh reads it.
+    if name == "-" or not command or _is_shell_value(name) or command.count(name) > 1:
+        return _Text("", False)
+    path = os.path.expanduser(name)
+    if not os.path.isabs(path):
+        if directory is None:
+            return _Text("", False)
+        path = os.path.join(directory, path)
+    try:
+        with open(path, encoding="utf-8", errors="replace") as file:
+            return _Text(file.read(_BODY_FILE_MAX_BYTES), True)
+    except OSError:
+        return _Text("", False)
+
+
+def _find_queue_row(conn: sqlite3.Connection, repo: str, selector: str | None) -> sqlite3.Row | None:
+    if not selector or _is_shell_value(selector):
+        return None
+    number = selector.lstrip("#")
+    if match := _PR_URL_RE.search(selector):
+        repo, number = str(match.group(1)), str(match.group(2))
+    if number.isdigit():
+        ref = f"pr:{repo}#{number}"
+        return conn.execute(
+            "SELECT * FROM review_prs WHERE lower(ref) = ? AND closed_at IS NULL", (ref.lower(),)
+        ).fetchone()
+    return conn.execute(
+        "SELECT * FROM review_prs WHERE lower(repo) = ? AND head = ? AND closed_at IS NULL", (repo.lower(), selector)
+    ).fetchone()
+
+
+def _is_shell_value(text: str) -> bool:
+    return "$" in text or "`" in text
