@@ -369,7 +369,8 @@ def fetch_pr_states(refs: list[str]) -> dict[str, str | None]:
         answer: Any = json.loads(done.stdout)
         data: Any = answer.get("data") or {}
         errors: list[Any] = answer.get("errors") or []
-        # Not found under a repository that was found: GitHub has no such number there, so it names no PR.
+        # No such number there, or no repository GitHub shows us (a word before '#', like a decision 'Q#12', or a repo
+        # we cannot see, whose merge could never be confirmed): either way the text names no PR to wait for.
         missing: set[str] = {".".join(map(str, e["path"])) for e in errors if e.get("type") == "NOT_FOUND"}
     except (OSError, subprocess.TimeoutExpired, ValueError, AttributeError, KeyError, TypeError):
         data, missing = {}, set()
@@ -377,8 +378,8 @@ def fetch_pr_states(refs: list[str]) -> dict[str, str | None]:
         state: object = None
         try:
             repository: Any = data[repo_alias]
-            node: Any = repository[pr_alias]
-            if node is None and f"{repo_alias}.{pr_alias}" in missing:
+            node: Any = None if repository is None else repository[pr_alias]
+            if node is None and {f"{repo_alias}.{pr_alias}", repo_alias} & missing:
                 state = NO_SUCH_NUMBER
             elif node is not None:
                 state = "ISSUE" if node["__typename"] == "Issue" else node["state"]

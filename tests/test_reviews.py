@@ -2657,7 +2657,7 @@ def test_the_ready_group_waits_for_a_pr_its_body_names_and_a_backport_names_what
     )
 
 
-def test_pr_states_tell_an_issue_and_a_number_that_does_not_exist_from_one_that_could_not_be_read() -> None:
+def test_pr_states_tell_an_issue_a_missing_number_and_a_missing_repo_from_one_that_could_not_be_read() -> None:
     answer = {
         "data": {"r0": {"p0": {"__typename": "PullRequest", "state": "OPEN"}, "p1": {"__typename": "Issue"},
                         "p2": None}, "r1": None},
@@ -2670,7 +2670,7 @@ def test_pr_states_tell_an_issue_and_a_number_that_does_not_exist_from_one_that_
             "Org/zz#1": "OPEN",
             "Org/zz#2": "ISSUE",
             "Org/zz#3": "NONE",
-            "Org/gone#1": None,
+            "Org/gone#1": "NONE",
         }
     with mock.patch("bridge.review_github.subprocess.run", side_effect=OSError("gh missing")):
         again = fetch_pr_states(refs)
