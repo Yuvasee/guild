@@ -2459,6 +2459,36 @@ def test_a_backport_must_merge_after_the_main_prs_it_names_and_persist_sandbox_i
     assert map_node_to_open_pr({**node, "baseRefName": "main", "body": ""}, config).must_merge == ()
 
 
+def test_a_merge_precondition_in_the_body_blocks_the_merge_button_until_edited_out(tmp_path: Path) -> None:
+    node: Any = {
+        "number": 7, "title": "Docs", "url": "u", "isDraft": False, "updatedAt": "U", "headRefName": "docs",
+        "headRefOid": "a1", "baseRefName": "main", "additions": 1, "deletions": 1,
+        "repository": {"nameWithOwner": "Org/app"}, "baseRef": None,
+        "commits": {"nodes": [{"commit": {"oid": "a1", "committedDate": "2026-11-02T11:00:00Z",
+                                          "statusCheckRollup": None}}]},
+        "files": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        "reviewRequests": {"nodes": []}, "reviews": {"nodes": []}, "latestReviews": {"nodes": []},
+        "reviewThreads": {"nodes": []}, "body": "Docs for the warp drive. Merge after the warp drive is deployed.",
+    }  # fmt: skip
+    held = map_node_to_open_pr(node, CONFIG)
+    reason = 'its body says: "Merge after the warp drive is deployed." (edit the body once that is done)'
+    assert held.preconditions == (reason,)
+    conn = setup_pr(tmp_path, approved_by=("mira",))
+    store_blockers(
+        conn, map_prs_to_dependencies([replace(make_pr(), preconditions=held.preconditions)], {})[REF].blockers
+    )
+    assert (merge_ok_view(conn)["can_ok_merge"], merge_ok_view(conn)["merge_ok_needs"]) == (False, reason)
+    with pytest.raises(MergeOkRefused, match="warp drive"), transaction(conn):
+        record_merge_ok(conn, CONFIG, REF, "a1", "theo", 700)
+
+    edited = map_node_to_open_pr({**node, "body": "Docs for the warp drive."}, CONFIG)
+    assert edited.preconditions == ()
+    store_blockers(
+        conn, map_prs_to_dependencies([replace(make_pr(), preconditions=edited.preconditions)], {})[REF].blockers
+    )
+    assert merge_ok_view(conn)["can_ok_merge"]
+
+
 A, B, C = "pr:Org/app#7", "pr:Org/app#8", "pr:Org/lib#3"
 
 

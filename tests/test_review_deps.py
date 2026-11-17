@@ -1,6 +1,11 @@
 import pytest
 
-from bridge.review_deps import map_markdown_to_dependency, map_markdown_to_named_prs, map_states_to_blockers
+from bridge.review_deps import (
+    map_markdown_to_dependency,
+    map_markdown_to_named_prs,
+    map_markdown_to_preconditions,
+    map_states_to_blockers,
+)
 
 DOCS = "Acme-Org/acme-platform-docs"
 APP = "Acme-Org/monorepo"
@@ -119,3 +124,73 @@ def test_a_named_pr_blocks_while_open_or_unread_and_one_it_must_merge_after_unti
 
 def test_a_pr_stacked_on_this_one_blocks_nothing() -> None:
     assert map_states_to_blockers(("Org/app#8",), (), {"org/app#8"}, {"Org/app#8": "OPEN"}) == ()
+
+
+@pytest.mark.parametrize(
+    ("body", "sentence"),
+    [
+        (
+            "Docs for the warp drive.\n\nMerge after the warp drive is deployed.",
+            "Merge after the warp drive is deployed.",
+        ),
+        ("Merge once the flag is on in prod", "Merge once the flag is on in prod"),
+        ("- Merge when the vendor confirms the quota.", "Merge when the vendor confirms the quota."),
+        ("Please merge this only after the freeze ends.", "Please merge this only after the freeze ends."),
+        ("Merge only if the canary stays green.", "Merge only if the canary stays green."),
+        ("**Do not merge until the migration has run.**", "Do not merge until the migration has run."),
+        ("**Merge** only\nwhen the API is deployed.", "Merge only when the API is deployed."),
+        ("Docs.\n\nDO NOT\nMERGE", "DO NOT MERGE"),
+        ("**DO NOT MERGE.** Related: #12.", "DO NOT MERGE."),
+        ("> Warning: do not merge before the freeze ends.", "Warning: do not merge before the freeze ends."),
+        ("Only merge after the vendor\u2019s go-ahead.", "Only merge after the vendor\u2019s go-ahead."),
+        ("Don't merge before Friday.", "Don't merge before Friday."),
+        ("Don\u2019t merge this until legal signs off.", "Don\u2019t merge this until legal signs off."),
+        ("Never merge until the backfill ends.", "Never merge until the backfill ends."),
+        ("## DO NOT MERGE", "DO NOT MERGE"),
+        ("Hold off merging: the API is not out yet.", "Hold off merging: the API is not out yet."),
+        ("Hold off on merging for now.", "Hold off on merging for now."),
+    ],
+)
+def test_each_merge_precondition_in_a_body_is_a_blocker_quoting_its_sentence(body: str, sentence: str) -> None:
+    assert map_markdown_to_preconditions(body, APP, 7) == (
+        f'its body says: "{sentence}" (edit the body once that is done)',
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Merge after #12 is deployed.",
+        "Do not merge until Acme-Org/acme-infra#23 is released.",
+        "Merge once https://github.com/Acme-Org/acme-infra/pull/23 is out.",
+        "<!-- Do not merge until the API is out. -->Docs for the API.",
+        "```\ngit commit -m 'do not merge'\n```",
+        "We merged the parser after review.",
+        "The bot merges it after CI passes.",
+        "Enables auto-merge when the queue is green.",
+        "Adds a do-not-merge label.",
+        "The records merge when their keys match.",
+        "Duplicate records do not merge automatically.",
+        "Merge after the API change in\n#12 is deployed.",
+        "",
+    ],
+)
+def test_a_sentence_naming_a_pr_hidden_or_not_an_instruction_holds_nothing_in_words(body: str) -> None:
+    assert map_markdown_to_preconditions(body, APP, 7) == ()
+
+
+def test_a_sentence_naming_only_this_pr_still_holds_it_and_a_long_one_is_cut() -> None:
+    assert map_markdown_to_preconditions("Do not merge #7 until the API is out.", APP, 7) == (
+        'its body says: "Do not merge #7 until the API is out." (edit the body once that is done)',
+    )
+    (long,) = map_markdown_to_preconditions("Merge after " + "the warp drive " * 20 + "ships.", APP, 7)
+    shown = long.split('"')[1]
+    assert len(shown) == 120 and shown.endswith("\u2026")
+
+
+def test_merge_after_a_pr_stays_a_dependency_that_its_merge_clears() -> None:
+    body = "Merge after #12 is deployed."
+    named = map_markdown_to_named_prs(body, APP, 7)
+    assert named == (f"{APP}#12",) and map_markdown_to_dependency(body, APP, 7) == f"{APP}#12"
+    assert map_states_to_blockers(named, named, set(), {f"{APP}#12": "OPEN"}) == (f"waits for {APP}#12 to merge",)
+    assert map_states_to_blockers(named, named, set(), {f"{APP}#12": "MERGED"}) == ()

@@ -168,6 +168,14 @@ def test_the_body_is_read_again_right_before_merging_and_each_pr_it_names_now(
     assert states.call_args.args[0] == ["Org/lib#3"]
 
 
+def test_a_merge_precondition_written_since_the_poll_stops_the_merge_and_editing_it_out_lets_it_go(
+    tmp_path: Path,
+) -> None:
+    conn = setup(tmp_path)
+    assert run(conn, live=replace(LIVE, body="Merge after the warp drive is deployed.")).merges == []
+    assert len(run(conn, live=replace(LIVE, body="Docs for the warp drive.")).merges) == 1
+
+
 def test_persist_sandbox_added_since_the_poll_stops_the_merge(tmp_path: Path) -> None:
     conn = setup(tmp_path)
     assert run(conn, live=replace(LIVE, body="<!-- PERSIST_SANDBOX -->")).merges == []

@@ -246,8 +246,8 @@ def read_dependency_states(prs: list[OpenPr]) -> dict[str, str | None]:
 @dataclass(frozen=True)
 class Dependencies:
     blockers: tuple[str, ...] = ()
-    """Why it waits whatever its siblings do: a PR named outside them is open or unread, one it merges after is not
-    merged, or its merge-after order runs in a cycle."""
+    """Why it waits whatever its siblings do: its body holds the merge in words, a PR named outside them is open or
+    unread, one it merges after is not merged, or its merge-after order runs in a cycle."""
     sibling_waits: tuple[str, ...] = ()
     """Siblings it merges after: its depends_on or a backport's main PR."""
     siblings: tuple[str, ...] = ()
@@ -290,7 +290,7 @@ def map_prs_to_dependencies(
             if key not in _reach(must, other)
         )
         found[pr.ref] = Dependencies(
-            (*cycle, *map_states_to_blockers(pr.named_prs, strict, skipped, states)),
+            (*pr.preconditions, *cycle, *map_states_to_blockers(pr.named_prs, strict, skipped, states)),
             order,
             tuple(sorted(refs[other] for other in group)),
         )

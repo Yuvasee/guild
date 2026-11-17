@@ -56,6 +56,61 @@ def map_markdown_to_dependency(body: str, repo: str, number: int) -> str | None:
     return found.pop() if len(found) == 1 else None
 
 
+# Anchored at the sentence's start, after marks, a label ('Note:') or 'please': an instruction, not prose such as
+# 'records merge when their keys match'.
+_PRECONDITION_RE = re.compile(
+    r"^[\W_]*(?:\w+(?:\s+\w+)?:\s*)?(?:please\s+)?(?:"
+    r"(?:only\s+)?merge(?:\s+(?:this|it|this\s+PR))?\s+(?:after|once|when|until|only\s+(?:after|when|once|if))\b"
+    r"|(?:don['\u2019]?t|never)\s+merge(?:\s+(?:this|it|this\s+PR))?\s+(?:until|before)\b"
+    r"|do\s+not\s+merge\b|hold\s+off\s+(?:on\s+)?merging\b)",
+    re.I,
+)
+_EMPHASIS_RE = re.compile(r"\*+|(?<!\w)__?|__?(?!\w)")
+_BLOCK_START_RE = re.compile(r"^\s*(?:[-*+>]|#+|\d+[.)])\s+")
+_PRECONDITION_SHOWN_MAX = 120
+
+
+def map_markdown_to_preconditions(body: str, repo: str, number: int) -> tuple[str, ...]:
+    """Why its body says it may not merge yet: each sentence such as 'Merge after the API is deployed' or 'Do not
+    merge', as a blocker that stays until the sentence is edited out. One that names a PR is that PR's wait instead,
+    which its merge clears."""
+    text = _MD_LINK_RE.sub(r"\1", MD_HIDDEN_RE.sub("", body))
+    full = _map_text_to_full_refs(text, repo)
+    found: list[str] = []
+    for block in _map_text_to_blocks(text):
+        for sentence in re.split(r"(?<=[.!?])\s+", _EMPHASIS_RE.sub("", block)):
+            if not _PRECONDITION_RE.search(sentence) or _find_prs(sentence, repo, number, full):
+                continue
+            shown = (
+                sentence
+                if len(sentence) <= _PRECONDITION_SHOWN_MAX
+                else sentence[: _PRECONDITION_SHOWN_MAX - 1].rstrip() + "\u2026"
+            )
+            reason = f'its body says: "{shown}" (edit the body once that is done)'
+            if reason not in found:
+                found.append(reason)
+    return tuple(found)
+
+
+def _map_text_to_blocks(text: str) -> list[str]:
+    """Its paragraphs, list items, quotes and headings, each on one line without its mark: a wrapped line joins the
+    one before it."""
+    blocks: list[str] = []
+    joined = False
+    for line in text.splitlines():
+        if not line.strip():
+            joined = False
+            continue
+        starts = _BLOCK_START_RE.match(line)
+        content = " ".join(line[starts.end() if starts else 0 :].split())
+        if joined and not starts:
+            blocks[-1] += " " + content
+        else:
+            blocks.append(content)
+        joined = True
+    return blocks
+
+
 def map_markdown_to_named_prs(body: str, repo: str, number: int) -> tuple[str, ...]:
     """Every PR its body names, as owner/repo#N, whatever the words around it; never itself. A bare #N is the PR of
     that number the body names in full elsewhere, else this repo's #N. Some may be issues: only GitHub can tell."""
