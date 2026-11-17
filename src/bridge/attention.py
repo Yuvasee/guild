@@ -48,7 +48,7 @@ class QueuedPr:
     issue_keys: tuple[str, ...]
     resolve_threads: int = 0
     not_ready: bool = False
-    """Its reviews are missing, so it does not wait for the owner yet."""
+    """Its reviews are missing, or CI or the review bot has not cleared it, so it does not wait for the owner yet."""
     depends_on: str | None = None
     """The PR its body says it merges only after."""
 
@@ -65,8 +65,9 @@ def map_streams_to_ranking(questions: list[Question], prs: list[QueuedPr], proje
     """PRs only the owner's own answered threads keep from merging, in any group but backports, then urgent
     questions, other questions, PRs with fixes after the owner's comments, other PRs waiting for the owner. A PR with
     the owner's comments still open waits on the lead that owns it, so it is not ranked, like a PR whose reviews are
-    missing, published PRs and drafts in progress. A PR whose parent, its stack base or the PR it merges after, is
-    listed in its group follows that parent, and is not ranked while that parent is not."""
+    missing or that CI or the review bot has not cleared, published PRs and drafts in progress. A PR whose parent,
+    its stack base or the PR it merges after, is listed in its group follows that parent, and is not ranked while
+    that parent is not."""
     parents = map_prs_to_parents(prs)
     blocked_by_each = _map_prs_to_stack_children(prs)
     by_ref = {pr.ref: pr for pr in prs}
@@ -316,6 +317,6 @@ def map_review_to_queued_pr(pr: dict[str, object]) -> QueuedPr:
         stack_parent=str(stack_parent) if stack_parent else None,
         issue_keys=tuple(cast(list[str], pr["issue_keys"])),
         resolve_threads=len(cast(list[object], pr.get("resolve_threads") or [])) if pr.get("resolve_is_last") else 0,
-        not_ready=bool(pr.get("reviews_gap")),
+        not_ready=bool(pr.get("reviews_gap") or pr.get("review_wait")),
         depends_on=str(pr["depends_on"]) if pr.get("depends_on") else None,
     )

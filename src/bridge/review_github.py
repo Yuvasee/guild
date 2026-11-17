@@ -43,9 +43,9 @@ _THREADS_QUERY = """
 query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) { pullRequest(number: $number) {
     reviewThreads(first: 100) { nodes { isResolved
-      comments(first: 1) { nodes { author { __typename login } url pullRequestReview { state } } }
+      comments(first: 1) { nodes { author { __typename login } url body createdAt pullRequestReview { state } } }
       lastComment: comments(last: 1) { totalCount nodes {
-        databaseId author { login } body pullRequestReview { state } } } } }
+        databaseId author { login } body createdAt pullRequestReview { state } } } } }
   } }
 }
 """
@@ -101,6 +101,10 @@ DOCS_AND_ASSETS = (
 )  # fmt: skip
 
 
+BOT_MUST_FIX_MARKS = ("🚫 **BLOCKING", "⚠️ **IMPORTANT")
+"""How the review bot opens a finding that must be fixed before it approves."""
+
+
 class GitHubError(Exception):
     pass
 
@@ -115,11 +119,22 @@ class HisThread:
 
 
 @dataclass(frozen=True)
+class BotThread:
+    """An unresolved thread the review bot opened with a must-fix finding."""
+
+    url: str
+    waiting_since: int | None
+    """When its last comment, not ours, was made, or, under our unsent reply, the thread; None once our account
+    has the last word."""
+
+
+@dataclass(frozen=True)
 class ReviewThreads:
     open: int
     his: tuple[HisThread, ...]
     colleagues: tuple[str, ...] = ()
     """Who started each colleague's thread still waiting on our side: see map_thread_to_waiting_colleague."""
+    bot_must_fix: tuple[BotThread, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -518,8 +533,32 @@ def map_threads_to_review_threads(nodes: list[Any], author: str, bots: Sequence[
     sent = [t for t in nodes if t and not t.get("isResolved") and _map_thread_to_first_review_state(t) != PENDING]
     his = [t for t in sent if _map_thread_to_starter(t) == author.casefold()]
     return ReviewThreads(
-        len(sent), tuple(map_thread_to_his_thread(t) for t in his), list_waiting_colleagues(sent, author, bots)
+        len(sent),
+        tuple(map_thread_to_his_thread(t) for t in his),
+        list_waiting_colleagues(sent, author, bots),
+        tuple(map_thread_to_bot_thread(t, author) for t in sent if is_bot_must_fix_thread(t, bots)),
     )
+
+
+def is_bot_must_fix_thread(thread: Any, bots: Sequence[str]) -> bool:
+    connection: Any = thread.get("comments") or {}
+    comments: list[Any] = connection.get("nodes") or []
+    body = str((comments[0].get("body") if comments else None) or "").lstrip()
+    return _map_thread_to_starter(thread) in {b.casefold() for b in bots} and body.startswith(BOT_MUST_FIX_MARKS)
+
+
+def map_thread_to_bot_thread(thread: Any, author: str) -> BotThread:
+    first_connection: Any = thread.get("comments") or {}
+    first: list[Any] = first_connection.get("nodes") or [{}]
+    last_connection: Any = thread.get("lastComment") or {}
+    last: list[Any] = last_connection.get("nodes") or []
+    node: Any = last[0] if last else {}
+    review: Any = node.get("pullRequestReview") or {}
+    last_author: Any = node.get("author") or {}
+    if str(last_author.get("login") or "").casefold() != author.casefold():
+        return BotThread(str(first[0].get("url") or ""), map_iso_to_ms(node.get("createdAt")))
+    unsent = review.get("state") == PENDING
+    return BotThread(str(first[0].get("url") or ""), map_iso_to_ms(first[0].get("createdAt")) if unsent else None)
 
 
 @dataclass(frozen=True)

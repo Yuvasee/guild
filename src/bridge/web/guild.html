@@ -2032,6 +2032,11 @@ function renderQueueTableRow(pr) {
     mark.title = pr.held_why + " (" + pr.held_by + ", " + fullTime(pr.held_at) + ")";
     name.append(mark);
   }
+  if (pr.review_wait) {
+    const mark = el("span", "mark", pr.review_wait);
+    mark.title = "No place in your review order until this clears";
+    name.append(mark);
+  }
   name.append(" ", el("span", "title", pr.title));
   const stackedOn = pr.stack_parent && state.reviews.prs.find((other) => other.ref === pr.stack_parent);
   name.title = pr.repo + "#" + pr.number + ": " + pr.title + " · " + pr.group_why

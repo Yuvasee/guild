@@ -20,6 +20,7 @@ from bridge.guildview import post_signals_to_leads
 from bridge.review_github import (
     CI_BLOCKED_BY_BILLING,
     CI_BLOCKED_BY_GITHUB,
+    BotThread,
     ChecksRunning,
     FetchedComment,
     GitHubError,
@@ -82,7 +83,9 @@ from bridge.reviews import (
     store_open_prs,
     store_review_threads,
     take_comment_wakes,
+    tell_bot_waits,
     tell_ready_to_merge,
+    tell_review_waits,
 )
 from bridge.serve import list_lead_work_prs
 
@@ -1310,7 +1313,13 @@ def thread(n: int, replies: int = 1, author: str = "me", body: str = "🤖 Claud
 
 def resolve_view(conn: Any, *threads: HisThread, **changes: Any) -> Any:
     pr = make_pr(
-        **{"approved_by": ("bot",), "open_threads": len(threads), "thread_flags": "o" * len(threads), **changes}
+        **{
+            "approved_by": ("bot",),
+            "bot_cleared": True,
+            "open_threads": len(threads),
+            "thread_flags": "o" * len(threads),
+            **changes,
+        }
     )
     with transaction(conn):
         store_open_prs(conn, [pr], 600)
@@ -1326,6 +1335,7 @@ def test_resolving_is_all_that_is_left_only_on_a_ready_approved_green_pr_without
     for changes in (
         {"checks": "FAILURE"},
         {"checks": "PENDING"},
+        {"bot_cleared": False},
         {"approved_by": ()},
         {"draft": True},
         {"merge_state": "DIRTY"},
@@ -2649,3 +2659,183 @@ def test_two_backports_that_name_each_other_are_siblings_not_a_cycle() -> None:
                   must_merge=("Org/app#5", "Org/app#7"))  # fmt: skip
     deps = map_prs_to_dependencies([bp7, bp8], {"Org/app#5": "MERGED"}, ("release/*",))
     assert deps[REF] == Dependencies((), (), ("pr:Org/app#8",))
+
+
+def test_its_owner_is_told_once_per_fixable_reason_a_pr_has_no_place_in_the_owners_review_order(tmp_path: Path) -> None:
+    conn = setup_pr(tmp_path, checks="PENDING", bot_cleared=True)
+    with transaction(conn):
+        add_session(conn, "c1", "worker", branch="dev/x")
+
+    def told(now: int, **changes: Any) -> list[str]:
+        with transaction(conn):
+            if changes:
+                store_open_prs(conn, [make_pr(**changes)], now)
+            sent = tell_review_waits(conn, CONFIG, now)
+        return [
+            str(conn.execute("SELECT body FROM messages WHERE id = ?", (message_id,)).fetchone()[0])
+            for message_id, _ in sent
+        ]
+
+    running = told(1000)
+    red = told(2000, checks="FAILURE", bot_cleared=True)
+    red_again = told(2500)
+    red_new_head = told(3000, checks="FAILURE", bot_cleared=True, head_oid="a2", commits=(("a2", 2000),))
+    store(conn, comment("r1", author="bot", state="CHANGES_REQUESTED", commit="a2"))
+    bot = told(4000, bot_cleared=False, head_oid="a2", commits=(("a2", 2000),))
+    ci_flips = [
+        *told(4100, checks="PENDING", bot_cleared=False, head_oid="a2", commits=(("a2", 2000),)),
+        *told(4200, checks="SUCCESS", bot_cleared=False, head_oid="a2", commits=(("a2", 2000),)),
+    ]
+    clear = told(5000, bot_cleared=True, head_oid="a2", commits=(("a2", 2000),))
+    red_later = told(6000, checks="FAILURE", bot_cleared=True, head_oid="a2", commits=(("a2", 2000),))
+
+    assert running == [], "CI still running clears by itself"
+    assert red == [
+        "https://github.com/Org/app/pull/7 (T) is not in the owner's review order: waits for CI (failure). Clear it "
+        "and it gets a place."
+    ]
+    assert red_again == [] and red_new_head == [], "the same reason, at any head, is told once"
+    assert bot == [
+        "https://github.com/Org/app/pull/7 (T) is not in the owner's review order: ReviewBot blocking: changes "
+        "requested. Clear it and it gets a place."
+    ]
+    assert ci_flips == [], "CI running again changes nothing its owner has to fix"
+    assert clear == []
+    assert len(red_later) == 1, "once it was clear, a new wait is told again"
+
+
+HOUR_MS = 3_600_000
+
+
+def bot_thread_node(
+    body: str,
+    last_login: str = "bot",
+    resolved: bool = False,
+    starter: str = "bot",
+    url: str = "u1",
+    last_state: str = "COMMENTED",
+) -> dict[str, Any]:
+    first = {"author": {"login": starter}, "url": url, "body": body, "createdAt": "2026-11-02T09:00:00Z"}
+    last = {
+        "author": {"login": last_login}, "body": "b", "createdAt": "2026-11-02T10:00:00Z",
+        "pullRequestReview": {"state": last_state},
+    }  # fmt: skip
+    return {"isResolved": resolved, "comments": {"nodes": [first]}, "lastComment": {"totalCount": 2, "nodes": [last]}}
+
+
+def test_the_review_bots_must_fix_threads_are_kept_with_since_when_they_wait_on_our_side() -> None:
+    threads = map_threads_to_review_threads(
+        [
+            bot_thread_node("🚫 **BLOCKING: leaks a token**", url="u1"),
+            bot_thread_node("⚠️ **IMPORTANT: missing test**", last_login="ME", url="u2"),
+            bot_thread_node("💡 **Nice-to-have: rename**", url="u3"),
+            bot_thread_node("🚫 **BLOCKING: old**", resolved=True, url="u4"),
+            bot_thread_node("🚫 **BLOCKING: quoted**", starter="colleague", url="u5"),
+            bot_thread_node("🚫 **BLOCKING: draft answer**", last_login="me", last_state="PENDING", url="u6"),
+        ],
+        "me",
+        ("Bot",),
+    )
+    assert threads.bot_must_fix == (
+        BotThread("u1", 1_793_613_600_000),
+        BotThread("u2", None),
+        BotThread("u6", 1_793_613_600_000 - 3_600_000),
+    ), "an unsent reply is no answer: the thread waits from its start"
+
+
+def test_the_review_bot_blocking_with_no_answer_tells_its_owner_after_an_hour_and_the_assistant_after_three(
+    tmp_path: Path,
+) -> None:
+    conn = setup_pr(tmp_path, bot_cleared=True)
+    with transaction(conn):
+        add_session(conn, "c1", "worker", branch="dev/x")
+        add_session(conn, "c2", "aide")
+    since = 10 * HOUR_MS
+
+    def waiting(*threads: BotThread) -> None:
+        with transaction(conn):
+            store_review_threads(conn, REF, "k", ReviewThreads(len(threads), (), (), threads))
+
+    def told(now: int) -> list[tuple[str, str]]:
+        with transaction(conn):
+            sent = tell_bot_waits(conn, CONFIG, now)
+        return [
+            (recipient.handle, str(conn.execute("SELECT body FROM messages WHERE id = ?", (mid,)).fetchone()[0]))
+            for mid, recipient in sent
+        ]
+
+    waiting(BotThread("https://x/t1", since), BotThread("https://x/t2", None))
+    early = told(since + HOUR_MS - 1)
+    owner = told(since + HOUR_MS)
+    again = told(since + 2 * HOUR_MS)
+    assistant = told(since + 3 * HOUR_MS)
+    quiet = told(since + 10 * HOUR_MS)
+    waiting(BotThread("https://x/t1", None))
+    answered = told(since + 11 * HOUR_MS)
+    waiting(BotThread("https://x/t1", since + 11 * HOUR_MS))
+    found_late = told(since + 16 * HOUR_MS)
+    owner_had_less_than_two_hours = told(since + 18 * HOUR_MS - 1)
+    escalated = told(since + 18 * HOUR_MS)
+
+    assert early == []
+    assert owner == [
+        (
+            "worker",
+            "https://github.com/Org/app/pull/7 (T): ReviewBot's 1 must-fix thread (https://x/t1) has had no answer "
+            "from our side for over an hour. Fix it and push, or reply on each thread why not.",
+        )
+    ]
+    assert again == [] and quiet == []
+    assert assistant == [
+        (
+            "aide",
+            "https://github.com/Org/app/pull/7 (T): ReviewBot's 1 must-fix thread (https://x/t1) has had no answer "
+            "from our side for over 3 hours; its owner worker was told 2 h ago.",
+        )
+    ]
+    assert answered == []
+    assert [handle for handle, _ in found_late] == ["worker"], "once answered, the next wait is told again"
+    assert owner_had_less_than_two_hours == [], "a wait found late is not told to both at once"
+    assert [handle for handle, _ in escalated] == ["aide"]
+
+
+def test_the_review_bots_blocking_review_waits_until_our_account_says_a_word_after_it(tmp_path: Path) -> None:
+    conn = setup_pr(tmp_path)
+    with transaction(conn):
+        add_session(conn, "c1", "worker", branch="dev/x")
+    store(conn, comment("r1", at=1000, author="bot", state="CHANGES_REQUESTED", commit="a1"))
+    with transaction(conn):
+        blocked = tell_bot_waits(conn, CONFIG, 1000 + HOUR_MS)
+    store(conn, comment("r1", at=1000, author="bot", state="CHANGES_REQUESTED", commit="a1"), comment("p2", at=2000))
+    with transaction(conn):
+        conn.execute("DELETE FROM signal_posts")
+        replied = tell_bot_waits(conn, CONFIG, 1000 + 5 * HOUR_MS)
+    body = conn.execute("SELECT body FROM messages").fetchone()[0]
+    assert len(blocked) == 1 and "ReviewBot's review requesting changes on the head has had no answer" in body
+    assert replied == []
+
+
+def test_must_fix_threads_open_keep_a_pr_out_of_the_owners_review_order(tmp_path: Path) -> None:
+    conn = setup_pr(tmp_path, bot_cleared=True)
+    with transaction(conn):
+        store_review_threads(conn, REF, "k", ReviewThreads(1, (), (), (BotThread("u", None),)))
+    view: Any = map_db_to_reviews(conn, CONFIG, 2000)
+    assert view["prs"][0]["review_wait"] == "ReviewBot has must-fix threads open"
+
+
+def test_a_cleared_head_or_a_draft_stops_the_bot_wait_and_a_draft_forgets_what_was_told(tmp_path: Path) -> None:
+    conn = setup_pr(tmp_path, bot_cleared=True)
+    with transaction(conn):
+        add_session(conn, "c1", "worker", branch="dev/x")
+    store(conn, comment("r1", at=1000, author="bot", state="CHANGES_REQUESTED", commit="a1"))
+    with transaction(conn):
+        cleared = tell_bot_waits(conn, CONFIG, 1000 + 5 * HOUR_MS)
+        store_review_threads(conn, REF, "k", ReviewThreads(1, (), (), (BotThread("u", 1000),)))
+        told = tell_bot_waits(conn, CONFIG, 1000 + HOUR_MS)
+        store_open_prs(conn, [make_pr(bot_cleared=True, draft=True, open_threads=1)], 600)
+        as_draft = tell_bot_waits(conn, CONFIG, 1000 + 2 * HOUR_MS)
+        store_open_prs(conn, [make_pr(bot_cleared=True, open_threads=1)], 700)
+        ready_again = tell_bot_waits(conn, CONFIG, 1000 + 2 * HOUR_MS)
+    assert cleared == [], "the bot's approval of the head is not kept as a comment; its clearance stands"
+    assert len(told) == 1 and as_draft == []
+    assert len(ready_again) == 1, "a draft resets the telling"

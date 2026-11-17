@@ -11,12 +11,10 @@ from bridge.board import (
     AddressError,
     Party,
     Recipient,
-    resolve_handle,
-    send_message,
 )
 from bridge.config import Config
 from bridge.db import transaction
-from bridge.feed import REVIEW_QUEUE, FeedLink, add_post
+from bridge.feed import FeedLink, add_post
 from bridge.guard import (
     GITHUB_STALE_S,
     MergeRefusal,
@@ -42,7 +40,7 @@ from bridge.review_github import (
     read_live_merge_facts,
     run_gh,
 )
-from bridge.reviews import find_owner, list_stacked_on, tell_owner
+from bridge.reviews import find_owner, list_stacked_on, send_to_handle, tell_owner
 
 SANDBOX_BLOCK = "PERSIST_SANDBOX in its body"
 MERGE_TIMEOUT_S = 120
@@ -359,10 +357,3 @@ def tell_failure(
             now,
         )
         return []
-
-
-def send_to_handle(conn: sqlite3.Connection, handle: str, text: str, now: int) -> tuple[int, Recipient]:
-    recipient = resolve_handle(conn, handle)
-    result = send_message(conn, Party(SYSTEM_CONVERSATION, "bridge"), [recipient], "info", text, now)
-    conn.execute("UPDATE messages SET post_type = ? WHERE id = ?", (REVIEW_QUEUE, result.message_id))
-    return result.message_id, recipient
