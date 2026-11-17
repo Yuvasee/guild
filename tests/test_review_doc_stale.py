@@ -31,6 +31,8 @@ from bridge.reviews import (
 DOC_COMMIT = "d0c" * 13 + "d"
 HEAD = "e1e" * 13 + "e"
 
+TOP = "<h2>In short</h2><h2>User story</h2><ol><li>a<li>b<li>c</ol>"
+
 
 def compare(*files: dict[str, Any], status: str = "ahead", ahead_by: int = 2) -> dict[str, Any]:
     return {"status": status, "ahead_by": ahead_by, "files": list(files)}
@@ -69,7 +71,7 @@ def test_when_unsure_the_doc_is_stale() -> None:
 
 def register(conn: sqlite3.Connection, tmp_path: Path, commit: str = DOC_COMMIT) -> None:
     source = tmp_path / "doc.html"
-    source.write_text(f'<html><head><meta name="pr-head" content="{commit}"></head><body><h2>In short</h2></body>')
+    source.write_text(f'<html><head><meta name="pr-head" content="{commit}"></head><body>{TOP}</body>')
     register_doc(conn, REVIEWS_CONFIG, REF, source, NOW)
 
 

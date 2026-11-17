@@ -157,7 +157,8 @@ class Config:
     doc_bullet_max_words: int = 25
     """For each In short bullet."""
     doc_sentence_max_words: int = 30
-    """For each sentence of a review doc's visible top: In short and What changes and why, folds left out."""
+    """For each sentence of a review doc's visible top: In short, User story and What changes and why, folds left
+    out."""
     auto_merge: str = "off"
     """off, dry-run (logs what it would merge) or on: bridge merges a queue PR by itself under the owner's standing
     rule (a colleague approved, CI green, the review bot cleared the head, no named PR open)."""

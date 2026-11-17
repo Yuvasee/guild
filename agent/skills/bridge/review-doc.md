@@ -6,23 +6,24 @@ the full version, so change it here first.
 
 **When:** a code PR of 100 lines or more (docs, images, lockfiles and generated files left out). Register it with
 `guild review doc <pr> /path/file.html`, and again after each update.
-**Reader:** the owner, on the Guild page, on a laptop or a phone. They read **In short**, skim the headings and the
-one-line summaries, and open only what they want to check.
+**Reader:** the owner, on the Guild page, on a laptop or a phone. They read **In short** and the **User story**, skim
+the headings and the one-line summaries, and open only what they want to check.
 
 ## Before you write, and before you register
 
 1. **Read the reference example first**, if this install keeps one (`house.md` names it): a doc the owner called
    clear. Match its plainness and length, not its subject.
-2. **First reader.** Before `guild review doc`, give a fresh subagent the install's reader profile (who the reader
-   is and what they already know; `house.md` names the file) and only the doc's **In short** and **What changes and
-   why**, and ask it to explain back in its own words what changes, why and how, to list every term that reader
-   would not understand, and to list the sentences that could be deleted without losing anything the reader needs to
-   decide or review. A wrong or vague explain-back, or a flagged term the doc neither explains nor drops, means
-   rewrite and ask a new fresh reader. The deletion list is advice: cut what you agree with; readers differ there,
-   so it never blocks a pass. It passes once a reader's explain-back is right and every term it flagged is explained
-   or gone. At most three readers: if the third still gets it wrong, the doc's structure is the problem, so rework
-   the top rather than polish sentences. Say in **Verified and not verified** that the first reader passed, in which
-   round, and any flagged point you kept with why (`guild review doc` warns when that line is missing).
+2. **First reader.** Before `guild review doc`, give a fresh subagent the install's reader profile (who the reader is
+   and what they already know; `house.md` names the file) and only the doc's **In short**, **User story** and **What
+   changes and why**, and ask it to retell the user story in its own words, step by step, today and after; to explain
+   back what changes, why and how; to list every term that reader would not understand; and to list the sentences that
+   could be deleted without losing anything the reader needs to decide or review. A wrong retelling of the story, a
+   wrong or vague explain-back, or a flagged term the doc neither explains nor drops, means rewrite and ask a new fresh
+   reader. The deletion list is advice: cut what you agree with; readers differ there, so it never blocks a pass. It
+   passes once a reader's explain-back is right and every term it flagged is explained or gone. At most three readers:
+   if the third still gets it wrong, the doc's structure is the problem, so rework the top rather than polish sentences.
+   Say in **Verified and not verified** that the first reader passed, in which round, and any flagged point you kept
+   with why (`guild review doc` warns when that line is missing).
 
 ## Essence visible, details folded
 
@@ -34,8 +35,8 @@ short.
   few minutes.
 - **No walls of text.** A visible paragraph runs to three lines at most. Anything longer becomes bullets or goes into
   a `<details>` under the line it supports.
-- **Short sentences.** No sentence in the visible part of **In short** and **What changes and why** runs over 30
-  words, and each sentence says one thing about the change as it is now: not how the PR got there (an earlier
+- **Short sentences.** No sentence in the visible part of **In short**, **User story** and **What changes and why** runs
+  over 30 words, and each sentence says one thing about the change as it is now: not how the PR got there (an earlier
   version, a dropped approach), not the review itself (who reviewed, which checks ran; that goes in **Reviews** and
   **Verified**), and not reassurance with no fact the reader acts on.
 - **Folded blocks.** Each decision, cost or risk, review and update is a folded block (markup below): its summary
@@ -57,7 +58,8 @@ sharp but has never seen this code.
   where it lives in the code. A doc for a PR of 100 lines or more has at least 8 of them; `guild review doc` warns
   below that.
 - **Full sentences.** No telegraphic notes or arrows in place of verbs; a reader must not reconstruct the meaning.
-- **One concrete scenario per change.** Who does what, what they see before and after.
+- **One concrete scenario per change.** Who does what, what they see before and after. The main one is the
+  **User story**; a change the story does not reach gets its own scenario in **What changes and why**.
 - **Details folded**, as above: clarity is not length.
 - **A decision you made yourself is marked decided.** An open question the lead settled is moved out of
   `needs-decision` before the doc is registered, so the owner never sees a question that has an answer.
@@ -80,32 +82,35 @@ Use these `h2` headings, in this order, worded as here. Inside a section, use `h
 | # | `h2` heading | What it holds |
 |---|---|---|
 | 1 | **In short** | First, two or three plain sentences that tell the story: what the thing being changed is and does today, what goes wrong or is missing, and what this PR makes different. Then at most five bullets of at most 25 words each, readable in 30 seconds: what the PR does, for whom, why now, what the owner must decide (or "nothing to decide"), and what is not done yet. |
-| 2 | **What changes and why** | The essence. Before and after, with a diagram, and the reasons as bullets, each with its provenance mark. Small changes as bullets. What it deliberately does not change. |
-| 3 | **How it works** | The mechanism, with diagrams: flow, sequence, data, where it runs. One `h3` per mechanism. Tables for structured facts (what each counter or field means). Extra essence sections, if any (for example, infrastructure the PR needs), go here as `h3`s or as `h2`s right after this one. |
-| 4 | **Decisions** | One folded block per decision. Open ones first, marked `needs-decision`: the summary line is the question and the recommendation; the body has the options, what each costs, and why. Then the ones taken, marked `decided`: the summary line is what was chosen; the body has the alternatives and why. |
-| 5 | **Costs and risks** | One folded block per cost or risk: the summary line is what it is and its handling; the body makes it clear without guessing (below). |
-| 6 | **Where to look** | Files in reading order, one row per file with what to check there (its functions too); the local worktree path in a paragraph above them. Kept visible: the owner uses it every time. |
-| 7 | **Tests** | Short: one line per test or group, or a small table (test, what it proves). What no test covers, one line. Detail, if any, folded. |
-| 8 | **Reviews** | One folded block per review that ran (Codex, the review bot, others). Summary line: who, how many findings, the outcome in a few words. Body: each finding one line with its outcome: fixed in `<commit>` / deferred: reason + issue / rejected: reason. Bridge reads this section: until it names every review the install requires (`required_reviews`) the PR is not ready for the owner. |
-| 9 | **Verified and not verified** | `h3` Tested live (required): what ran in a live environment for the PR (a preview, staging) and what it showed, marked `observed`; what could not run there and why. `h3` Verified: what else was run or checked and what it showed, one plain line each with its mark; hashes, run ids and logs folded. `h3` Not verified: what was not, why, and who would notice and when. |
-| 10 | **Changes since the last review** | Only after the owner's own review of this PR (their GitHub review or comments on it, or a review sent from the Guild page), covering what changed since their latest one. Never for other reviewers' rounds or for updates before the owner has looked. Always last; newest first, one folded block per update: what changed in the code and in this doc; commits inside. |
+| 2 | **User story** | One concrete person, named by role (a support agent, a tenant admin; never a real customer or colleague), and what happens to them, as a numbered list (`<ol>`) of at least three steps, outside closed folds. Each step says in plain words what they do and see today and after this PR ("Today: … After: …"); a code name appears only as a term that explains it. A change no user sees still has a person who meets it: the developer running the tests, the engineer on call reading an alert. One short line before the list may set the scene. |
+| 3 | **What changes and why** | The essence. Before and after, with a diagram, and the reasons as bullets, each with its provenance mark; a bullet names the story step it changes ("step 3"). Small changes as bullets. What it deliberately does not change. |
+| 4 | **How it works** | The mechanism, with diagrams: flow, sequence, data, where it runs. One `h3` per mechanism. Tables for structured facts (what each counter or field means). Extra essence sections, if any (for example, infrastructure the PR needs), go here as `h3`s or as `h2`s right after this one. |
+| 5 | **Decisions** | One folded block per decision. Open ones first, marked `needs-decision`: the summary line is the question and the recommendation; the body has the options, what each costs, and why. Then the ones taken, marked `decided`: the summary line is what was chosen; the body has the alternatives and why. |
+| 6 | **Costs and risks** | One folded block per cost or risk: the summary line is what it is and its handling; the body makes it clear without guessing (below). |
+| 7 | **Where to look** | Files in reading order, one row per file with what to check there (its functions too); the local worktree path in a paragraph above them. Kept visible: the owner uses it every time. |
+| 8 | **Tests** | Short: one line per test or group, or a small table (test, what it proves). What no test covers, one line. Detail, if any, folded. |
+| 9 | **Reviews** | One folded block per review that ran (Codex, the review bot, others). Summary line: who, how many findings, the outcome in a few words. Body: each finding one line with its outcome: fixed in `<commit>` / deferred: reason + issue / rejected: reason. Bridge reads this section: until it names every review the install requires (`required_reviews`) the PR is not ready for the owner. |
+| 10 | **Verified and not verified** | `h3` Tested live (required): what ran in a live environment for the PR (a preview, staging) and what it showed, marked `observed`; what could not run there and why. `h3` Verified: what else was run or checked and what it showed, one plain line each with its mark; hashes, run ids and logs folded. `h3` Not verified: what was not, why, and who would notice and when. |
+| 11 | **Changes since the last review** | Only after the owner's own review of this PR (their GitHub review or comments on it, or a review sent from the Guild page), covering what changed since their latest one. Never for other reviewers' rounds or for updates before the owner has looked. Always last; newest first, one folded block per update: what changed in the code and in this doc; commits inside. |
 
-The doc always opens with **In short**, written for a reader with no context: what, why, how. Nothing comes
-before it: no 'changed since' or update box at the top, even right after an update. What changed goes only in
-**Changes since the last review**, which exists only once the owner has reviewed an earlier head, and stays last
-and folded.
+The doc always opens with **In short**, written for a reader with no context: what, why, how, followed at once by the
+**User story**. Nothing comes before In short: no 'changed since' or update box at the top, even right after an update.
+What changed goes only in **Changes since the last review**, which exists only once the owner has reviewed an earlier
+head, and stays last and folded.
 
 In **Where to look**, each file is named once, by its full path from the repo root (`src/app/run.py`, not `run.py`,
 `.../app/run.py` or a home or worktree path). Each row is a list item or table row whose first `<code>` is that path;
 a line number after it (`run.py:40-52`) is fine.
 
-`guild review doc` refuses a doc whose first `h2` is not **In short**, that has **Changes since the last review**
-before the owner's review or anywhere but last, whose **In short** has more than five bullets or a bullet over 25
-words, that has a sentence over 30 words in the visible part of **In short** and **What changes and why** (fold
-bodies, diagrams and code blocks are not counted; the limits are the install's `doc_in_short_max_bullets`,
-`doc_bullet_max_words` and `doc_sentence_max_words`), or whose **Where to look** names a file twice, gives a path
-not from the repo root, or, when the PR has a review worktree, a path the commit in `pr-head` does not have.
-Once registered, where the install has a classifier key, each visible sentence of those two sections is screened for
+`guild review doc` refuses a doc whose first `h2` is not **In short**, whose second `h2` is not **User story** or whose
+story has fewer than three visible top-level items of a numbered list (`<ol>`; bullets, a table, a closed fold's body or
+a nested list do not count), that has **Changes since the last review** before the owner's review or anywhere but last,
+whose **In short** has more than five bullets or a bullet over 25 words, that has a sentence over 30 words in the
+visible part of **In short**, **User story** and **What changes and why** (fold bodies, diagrams and code blocks are not
+counted; the limits are the install's `doc_in_short_max_bullets`, `doc_bullet_max_words` and `doc_sentence_max_words`),
+or whose **Where to look** names a file twice, gives a path not from the repo root, or, when the PR has a review
+worktree, a path the commit in `pr-head` does not have.
+Once registered, where the install has a classifier key, each visible sentence of those three sections is screened for
 telling the PR's history, being about the review process, or stacking subordinate clauses; each flagged sentence is
 printed back quoted, as a warning. The screen misses things and can be wrong: whether the doc reads plainly stays
 the writer's job.
