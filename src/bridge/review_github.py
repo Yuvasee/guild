@@ -124,8 +124,9 @@ class BotThread:
 
     url: str
     waiting_since: int | None
-    """When its last comment, not ours, was made, or, under our unsent reply, the thread; None once our account
-    has the last word."""
+    """When the bot opened it, while nobody has replied or our reply is still an unsent draft; None once it has a
+    sent reply. The bot speaks again only after a reply, and a real objection comes back as a changes-requested review,
+    so a later bot comment does not make it wait again."""
 
 
 @dataclass(frozen=True)
@@ -555,10 +556,11 @@ def map_thread_to_bot_thread(thread: Any, author: str) -> BotThread:
     node: Any = last[0] if last else {}
     review: Any = node.get("pullRequestReview") or {}
     last_author: Any = node.get("author") or {}
+    opened = map_iso_to_ms(first[0].get("createdAt"))
+    url = str(first[0].get("url") or "")
     if str(last_author.get("login") or "").casefold() != author.casefold():
-        return BotThread(str(first[0].get("url") or ""), map_iso_to_ms(node.get("createdAt")))
-    unsent = review.get("state") == PENDING
-    return BotThread(str(first[0].get("url") or ""), map_iso_to_ms(first[0].get("createdAt")) if unsent else None)
+        return BotThread(url, opened if int(last_connection.get("totalCount") or 1) <= 1 else None)
+    return BotThread(url, opened if review.get("state") == PENDING else None)
 
 
 @dataclass(frozen=True)

@@ -2714,19 +2714,24 @@ def bot_thread_node(
     starter: str = "bot",
     url: str = "u1",
     last_state: str = "COMMENTED",
+    comments: int = 2,
 ) -> dict[str, Any]:
     first = {"author": {"login": starter}, "url": url, "body": body, "createdAt": "2026-11-02T09:00:00Z"}
     last = {
         "author": {"login": last_login}, "body": "b", "createdAt": "2026-11-02T10:00:00Z",
         "pullRequestReview": {"state": last_state},
     }  # fmt: skip
-    return {"isResolved": resolved, "comments": {"nodes": [first]}, "lastComment": {"totalCount": 2, "nodes": [last]}}
+    if comments == 1:
+        last = {**first, "pullRequestReview": {"state": "COMMENTED"}}
+    lasts = {"totalCount": comments, "nodes": [last]}
+    return {"isResolved": resolved, "comments": {"nodes": [first]}, "lastComment": lasts}
 
 
 def test_the_review_bots_must_fix_threads_are_kept_with_since_when_they_wait_on_our_side() -> None:
     threads = map_threads_to_review_threads(
         [
-            bot_thread_node("🚫 **BLOCKING: leaks a token**", url="u1"),
+            bot_thread_node("🚫 **BLOCKING: leaks a token**", url="u1", comments=1),
+            bot_thread_node("🚫 **BLOCKING: answered, the bot agreed**", url="u7"),
             bot_thread_node("⚠️ **IMPORTANT: missing test**", last_login="ME", url="u2"),
             bot_thread_node("💡 **Nice-to-have: rename**", url="u3"),
             bot_thread_node("🚫 **BLOCKING: old**", resolved=True, url="u4"),
@@ -2737,10 +2742,11 @@ def test_the_review_bots_must_fix_threads_are_kept_with_since_when_they_wait_on_
         ("Bot",),
     )
     assert threads.bot_must_fix == (
-        BotThread("u1", 1_793_613_600_000),
+        BotThread("u1", 1_793_613_600_000 - 3_600_000),
+        BotThread("u7", None),
         BotThread("u2", None),
         BotThread("u6", 1_793_613_600_000 - 3_600_000),
-    ), "an unsent reply is no answer: the thread waits from its start"
+    ), "an unsent reply is no answer; a bot comment after a reply does not make the thread wait again"
 
 
 def test_the_review_bot_blocking_with_no_answer_tells_its_owner_after_an_hour_and_the_assistant_after_three(
