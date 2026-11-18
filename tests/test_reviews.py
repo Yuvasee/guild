@@ -444,6 +444,21 @@ def test_owners_comment_wakes_the_owner_once_with_text_and_link(tmp_path: Path) 
     assert wake(conn) == []
 
 
+def test_a_review_wake_for_a_workers_pr_reaches_its_lead_too(tmp_path: Path) -> None:
+    conn = setup_pr(tmp_path)
+    with transaction(conn):
+        add_lead(conn, "Alex", "s-alex")
+        add_session(conn, "c-lead", "alex", surface="s-alex", session="tab-alex")
+        add_session(conn, "c1", "worker", branch="dev/x", session="tab-worker")
+        conn.execute("INSERT INTO tab_parents (agterm_session, parent_session) VALUES ('tab-worker', 'tab-alex')")
+    store(conn, comment())
+    sent = wake(conn)
+    assert [r.handle for _, r in sent] == ["worker", "alex"], "a worker may hold the PR for a side task only"
+    lead_body = conn.execute("SELECT body FROM messages WHERE id = ?", (sent[1][0],)).fetchone()[0]
+    assert "Please rename" in lead_body and "Also sent to worker, which holds this PR" in lead_body
+    assert wake(conn) == []
+
+
 def test_a_comment_with_no_owner_waits_for_one(tmp_path: Path) -> None:
     conn = setup_pr(tmp_path)
     store(conn, comment())
@@ -2119,7 +2134,7 @@ def test_a_comment_on_a_pr_whose_issue_another_lead_owns_wakes_the_worker_that_p
     with transaction(conn):
         record_host_pushes(conn, CONFIG, "w-c", [("org/app", "theo/proj-65-retry-budget")], 7)
     store(conn, comment())
-    assert [r.handle for _, r in wake(conn)] == ["worker"]
+    assert [r.handle for _, r in wake(conn)] == ["worker", "alex"], "its own lead too, not the issue's lead"
 
 
 def test_a_live_worker_on_the_branch_keeps_its_pr_and_names_its_lead(tmp_path: Path) -> None:

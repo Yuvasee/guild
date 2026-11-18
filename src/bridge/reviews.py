@@ -826,6 +826,9 @@ def take_comment_wakes(conn: sqlite3.Connection, config: Config, now: int) -> li
         ]
         wake = map_items_to_wake(str(pr["url"]), str(pr["title"]), items, config)
         sent.append(tell_owner(conn, owner, wake, now))
+        if (lead := find_lead_above(conn, config, owner)) is not None:
+            # A worker may hold the PR's claim for a side task, so the lead hears every review too.
+            sent.append(tell_owner(conn, lead, f"{wake}\n\n(Also sent to {owner.handle}, which holds this PR.)", now))
         conn.executemany(
             """
             INSERT INTO colleague_calls (ref, comment_id, owner_handle, owner_lead) VALUES (?, ?, ?, ?)
@@ -1286,6 +1289,16 @@ def _find_lead_from_work(conn: sqlite3.Connection, config: Config, ref: str, hea
             if owner is not None:
                 return owner
     return None
+
+
+def find_lead_above(conn: sqlite3.Connection, config: Config, owner: Owner) -> Owner | None:
+    """The live lead above a worker that owns a PR; None when the owner is a lead itself or has none."""
+    if owner.via == "lead":
+        return None
+    display, surface = find_lead_of(conn, owner.surface)
+    if surface is None or surface == owner.surface:
+        return None
+    return map_lead_to_owner(conn, config, surface, display)
 
 
 def map_lead_to_owner(
