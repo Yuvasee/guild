@@ -1098,10 +1098,14 @@ def map_row_to_dependency_blockers(row: sqlite3.Row, with_siblings: bool = True)
 
 
 def load_open_siblings(conn: sqlite3.Connection, row: sqlite3.Row) -> list[sqlite3.Row]:
-    return conn.execute(
+    """The open PRs this one merges together with. One whose body says it merges after this one is left out: it
+    comes later anyway, so this one need not wait until it is ready too."""
+    me = str(row["ref"]).removeprefix("pr:").casefold()
+    siblings = conn.execute(
         "SELECT * FROM review_prs WHERE closed_at IS NULL AND ref IN (SELECT value FROM json_each(?)) ORDER BY ref",
         (str(row["siblings"] or "[]"),),
     ).fetchall()
+    return [s for s in siblings if me not in {str(r).casefold() for r in json.loads(str(s["must_merge"] or "[]"))}]
 
 
 def map_siblings_to_wait(siblings: Sequence[sqlite3.Row], why_not: Callable[[sqlite3.Row], str | None]) -> str | None:

@@ -2606,6 +2606,13 @@ def test_the_sibling_merged_after_waits_and_the_first_one_gets_the_button(tmp_pa
     assert button(conn, B) == (True, None) and button(conn, C) == (True, None)
 
 
+def test_the_first_of_an_ordered_pair_merges_while_the_one_after_it_is_not_ready_yet(tmp_path: Path) -> None:
+    ready = {"approved_by": ("mira",)}
+    conn = store_siblings(tmp_path, sibling_prs(**{A: {"must_merge": ("Org/app#8",)}, B: ready, C: ready}))
+    assert button(conn, B) == (True, None), "#7 merges after #8, so #8 does not wait for #7 to be ready"
+    assert button(conn, A)[0] is False
+
+
 def queue_view(conn: Any, ref: str) -> dict[str, Any]:
     return next(
         pr for pr in cast(list[dict[str, Any]], map_db_to_reviews(conn, CONFIG, 600)["prs"]) if pr["ref"] == ref
