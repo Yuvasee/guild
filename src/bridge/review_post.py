@@ -609,7 +609,6 @@ def ask_to_clean_up(conn: sqlite3.Connection, config: Config, now: int) -> list[
     return told
 
 
-CONFLICTS_EVERY_MS = 3 * 3_600_000
 WORK_HOURS = (9, 19)
 CONFLICTING = "DIRTY"
 BEHIND = "BEHIND"
@@ -622,15 +621,11 @@ def is_working_time(now: int, config: Config) -> bool:
 
 
 def ask_to_resolve_conflicts(conn: sqlite3.Connection, config: Config, now: int) -> list[tuple[int, Recipient]]:
-    """Every 3 hours of the working week (work_days in work_timezone), the lead owning each PR GitHub calls
-    conflicting, or behind where the base must be merged in, is asked once per head to merge it. GitHub reports BEHIND
-    only where that is required."""
+    """On every poll in working hours (work_days in work_timezone), the lead owning each PR GitHub calls conflicting,
+    or behind where the base must be merged in, is asked once per head to merge it: a PR another merge has just put in
+    conflict is told within a poll. GitHub reports BEHIND only where that is required."""
     if not is_working_time(now, config):
         return []
-    poll = conn.execute("SELECT conflicts_checked_at FROM review_poll WHERE id = 1").fetchone()
-    if poll is None or now - int(poll["conflicts_checked_at"] or 0) < CONFLICTS_EVERY_MS:
-        return []
-    conn.execute("UPDATE review_poll SET conflicts_checked_at = ? WHERE id = 1", (now,))
     told: list[tuple[int, Recipient]] = []
     for row in conn.execute(
         """

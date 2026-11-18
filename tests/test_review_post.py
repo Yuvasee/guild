@@ -909,7 +909,7 @@ def test_working_time_is_the_configured_days_nine_to_seven_in_the_configured_zon
     assert is_working_time(TUESDAY_10 + 4 * 24 * hour - 8 * hour, week)
 
 
-def test_a_conflicting_pr_asks_its_lead_once_per_head_every_three_hours_of_work(tmp_path: Path) -> None:
+def test_a_conflicting_pr_asks_its_lead_once_per_head_on_the_next_poll_in_working_hours(tmp_path: Path) -> None:
     from bridge.review_post import ask_to_resolve_conflicts
 
     conn = setup_pr(tmp_path, merge_state="DIRTY")
@@ -928,12 +928,11 @@ def test_a_conflicting_pr_asks_its_lead_once_per_head_every_three_hours_of_work(
     views: Any = map_db_to_reviews(conn, CONFIG, TUESDAY_10)["prs"]
     assert views[0]["conflict_asked_at"] == TUESDAY_10
     with transaction(conn):
-        assert ask_to_resolve_conflicts(conn, CONFIG, TUESDAY_10 + 3 * hour) == []
+        assert ask_to_resolve_conflicts(conn, CONFIG, TUESDAY_10 + 90_000) == [], "once per head"
         store_open_prs(conn, [make_pr(head_oid="b2", merge_state="DIRTY")], TUESDAY_10)
-        assert ask_to_resolve_conflicts(conn, CONFIG, TUESDAY_10 + 4 * hour) == []
-        assert len(ask_to_resolve_conflicts(conn, CONFIG, TUESDAY_10 + 6 * hour)) == 1
+        assert len(ask_to_resolve_conflicts(conn, CONFIG, TUESDAY_10 + 180_000)) == 1, "a new head: the next poll"
         store_open_prs(conn, [make_pr(head_oid="c3", merge_state="DIRTY")], TUESDAY_10)
-        assert ask_to_resolve_conflicts(conn, CONFIG, TUESDAY_10 + 4 * 24 * hour) == []
+        assert ask_to_resolve_conflicts(conn, CONFIG, TUESDAY_10 + 4 * 24 * hour) == [], "not at night"
 
 
 def test_behind_asks_too_and_drafts_and_clean_prs_do_not(tmp_path: Path) -> None:
@@ -950,7 +949,6 @@ def test_behind_asks_too_and_drafts_and_clean_prs_do_not(tmp_path: Path) -> None
     ):
         with transaction(conn):
             store_open_prs(conn, [make_pr(**changes)], TUESDAY_10)
-            conn.execute("UPDATE review_poll SET conflicts_checked_at = NULL")
             assert ask_to_resolve_conflicts(conn, CONFIG, TUESDAY_10) == []
 
 
