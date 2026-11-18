@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 316" width="880" height="316" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <title>Twenty Claude Code terminals: some working, many waiting for you, some stuck, some forgotten</title>
+  <style>
+    .ink { fill: #1c1c1a; } .muted { fill: #6e6e68; }
+    .work { fill: #e3f1ee; } .wait { fill: #fbf0cf; } .stuck { fill: #f7dcd8; } .lost { fill: #e9e9e6; }
+    .box { fill: #f1f1ee; } .core { fill: #0f6b66; } .coreink { fill: #ffffff; } .soft { fill: #e3f1ee; }
+    .accent { fill: #0f6b66; } .line { stroke: #6e6e68; fill: none; stroke-width: 2; } .arrow { fill: #6e6e68; }
+    @media (prefers-color-scheme: dark) {
+      .ink { fill: #e6edf3; } .muted { fill: #9198a1; }
+      .work { fill: #133a36; } .wait { fill: #3d3416; } .stuck { fill: #4a2420; } .lost { fill: #2a2f36; }
+      .box { fill: #21262d; } .core { fill: #1f8a83; } .soft { fill: #133a36; }
+      .accent { fill: #4cc2b8; } .line { stroke: #9198a1; } .arrow { fill: #9198a1; }
+    }
+  </style>
+  <rect x="0" y="0" width="168" height="58" rx="8" class="work"/>
+  <text x="84.0" y="25" class="ink" font-size="14" font-weight="600" text-anchor="middle">claude #1</text>
+  <text x="84.0" y="44" class="muted" font-size="13" font-weight="400" text-anchor="middle">working</text>
+  <rect x="178" y="0" width="168" height="58" rx="8" class="wait"/>
+  <text x="262.0" y="25" class="ink" font-size="14" font-weight="600" text-anchor="middle">claude #2</text>
+  <text x="262.0" y="44" class="muted" font-size="13" font-weight="400" text-anchor="middle">waiting for you · 2h</text>
+  <rect x="356" y="0" width="168" height="58" rx="8" class="work"/>
+  <text x="440.0" y="25" class="ink" font-size="14" font-weight="600" text-anchor="middle">claude #3</text>
+  <text x="440.0" y="44" class="muted" font-size="13" font-weight="400" text-anchor="middle">working</text>
+  <rect x="534" y="0" width="168" height="58" rx="8" class="stuck"/>
+  <text x="618.0" y="25" class="ink" font-size="14" font-weight="600" text-anchor="middle">claude #4</text>
+  <text x="618.0" y="44" class="muted" font-size="13" font-weight="400" text-anchor="middle">blocked · 9 days</text>
+  <rect x="712" y="0" width="168" height="58" rx="8" class="wait"/>
+  <text x="796.0" y="25" class="ink" font-size="14" font-weight="600" text-anchor="middle">claude #5</text>
+  <text x="796.0" y="44" class="muted" font-size="13" font-weight="400" text-anchor="middle">question?</text>
+  <rect x="0" y="68" width="168" height="58" rx="8" class="lost"/>
+  <text x="84.0" y="93" class="ink" font-size="14" font-weight="600" text-anchor="middle">claude #6</text>
+  <text x="84.0" y="112" class="muted" font-size="13" font-weight="400" text-anchor="middle">idle · 3 weeks</text>
+  <rect x="178" y="68" width="168" height="58" rx="8" class="stuck"/>
+  <text x="262.0" y="93" class="ink" font-size="14" font-weight="600" text-anchor="middle">claude #7</text>
+  <text x="262.0" y="112" class="muted" font-size="13" font-weight="400" text-anchor="middle">CI red</text>
+  <rect x="356" y="68" width="168" height="58" rx="8" class="work"/>
+  <text x="440.0" y="93" class="ink" font-size="14" font-weight="600" text-anchor="middle">claude #8</text>
+  <text x="440.0" y="112" class="muted" font-size="13" font-weight="400" text-anchor="middle">working</text>
+  <rect x="534" y="68" width="168" height="58" rx="8" class="stuck"/>
+  <text x="618.0" y="93" class="ink" font-size="14" font-weight="600" text-anchor="middle">claude #9</text>
+  <text x="618.0" y="112" class="muted" font-size="13" font-weight="400" text-anchor="middle">same branch as #3</text>
+  <rect x="712" y="68" width="168" height="58" rx="8" class="wait"/>
+  <text x="796.0" y="93" class="ink" font-size="14" font-weight="600" text-anchor="middle">claude #10</text>
+  <text x="796.0" y="112" class="muted" font-size="13" font-weight="400" text-anchor="middle">needs review</text>
+  <rect x="0" y="136" width="168" height="58" rx="8" class="work"/>
+  <text x="84.0" y="161" class="ink" font-size="14" font-weight="600" text-anchor="middle">claude #11</text>
+  <text x="84.0" y="180" class="muted" font-size="13" font-weight="400" text-anchor="middle">working</text>
+  <rect x="178" y="136" width="168" height="58" rx="8" class="stuck"/>
+  <text x="262.0" y="161" class="ink" font-size="14" font-weight="600" text-anchor="middle">claude #12</text>
+  <text x="262.0" y="180" class="muted" font-size="13" font-weight="400" text-anchor="middle">blocked by you</text>
+  <rect x="356" y="136" width="168" height="58" rx="8" class="wait"/>
+  <text x="440.0" y="161" class="ink" font-size="14" font-weight="600" text-anchor="middle">claude #13</text>
+  <text x="440.0" y="180" class="muted" font-size="13" font-weight="400" text-anchor="middle">waiting for you · 40m</text>
+  <rect x="534" y="136" width="168" height="58" rx="8" class="lost"/>
+  <text x="618.0" y="161" class="ink" font-size="14" font-weight="600" text-anchor="middle">claude #14</text>
+  <text x="618.0" y="180" class="muted" font-size="13" font-weight="400" text-anchor="middle">idle · 12 days</text>
+  <rect x="712" y="136" width="168" height="58" rx="8" class="wait"/>
+  <text x="796.0" y="161" class="ink" font-size="14" font-weight="600" text-anchor="middle">claude #15</text>
+  <text x="796.0" y="180" class="muted" font-size="13" font-weight="400" text-anchor="middle">deploy?</text>
+  <rect x="0" y="204" width="168" height="58" rx="8" class="work"/>
+  <text x="84.0" y="229" class="ink" font-size="14" font-weight="600" text-anchor="middle">claude #16</text>
+  <text x="84.0" y="248" class="muted" font-size="13" font-weight="400" text-anchor="middle">working</text>
+  <rect x="178" y="204" width="168" height="58" rx="8" class="wait"/>
+  <text x="262.0" y="229" class="ink" font-size="14" font-weight="600" text-anchor="middle">claude #17</text>
+  <text x="262.0" y="248" class="muted" font-size="13" font-weight="400" text-anchor="middle">question?</text>
+  <rect x="356" y="204" width="168" height="58" rx="8" class="lost"/>
+  <text x="440.0" y="229" class="ink" font-size="14" font-weight="600" text-anchor="middle">claude #18</text>
+  <text x="440.0" y="248" class="muted" font-size="13" font-weight="400" text-anchor="middle">forgotten</text>
+  <rect x="534" y="204" width="168" height="58" rx="8" class="work"/>
+  <text x="618.0" y="229" class="ink" font-size="14" font-weight="600" text-anchor="middle">claude #19</text>
+  <text x="618.0" y="248" class="muted" font-size="13" font-weight="400" text-anchor="middle">working</text>
+  <rect x="712" y="204" width="168" height="58" rx="8" class="wait"/>
+  <text x="796.0" y="229" class="ink" font-size="14" font-weight="600" text-anchor="middle">claude #20</text>
+  <text x="796.0" y="248" class="muted" font-size="13" font-weight="400" text-anchor="middle">waiting for you · 1d</text>
+  <rect x="0" y="286" width="136" height="28" rx="14" class="work"/>
+  <text x="68" y="305" class="ink" font-size="13" font-weight="600" text-anchor="middle">working</text>
+  <rect x="150" y="286" width="136" height="28" rx="14" class="wait"/>
+  <text x="218" y="305" class="ink" font-size="13" font-weight="600" text-anchor="middle">waiting for you</text>
+  <rect x="300" y="286" width="136" height="28" rx="14" class="stuck"/>
+  <text x="368" y="305" class="ink" font-size="13" font-weight="600" text-anchor="middle">stuck</text>
+  <rect x="450" y="286" width="136" height="28" rx="14" class="lost"/>
+  <text x="518" y="305" class="ink" font-size="13" font-weight="600" text-anchor="middle">forgotten</text>
+</svg>

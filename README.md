@@ -1,4 +1,63 @@
-# Guild
+<p align="center">
+  <img alt="Guild's eye: an orange almond, an amber iris, a dark slit pupil" src="docs/images/eye.svg" width="160">
+</p>
+
+<h1 align="center">Guild</h1>
+
+<p align="center"><b>One eye, twenty agents.</b><br>
+Stop juggling terminals. Read one feed.</p>
+
+## The problem
+
+It starts with one agent and a phone. You ask, the agent thinks, you scroll. Then it asks a question and waits for
+you, while you wait for it. Both are expensive, and both are mostly idle.
+
+Agents got stronger. First you ran three or four streams in parallel, with you at every gate. Now each agent finishes
+a real task alone, so you run fifteen or twenty. Your job is no longer the work. It is deciding where to look.
+
+<img alt="Twenty Claude Code terminals: a few working, many waiting for you, some blocked or on the same branch, some idle for weeks or forgotten" src="docs/images/twenty-terminals.svg">
+
+So you open twenty terminals and become the bottleneck. Your attention is like an eye: powerful, but it looks one
+way at a time. Everything outside its beam:
+
+- **waits**: an agent sits idle on your answer; a question waits for days;
+- **drifts**: agents finish and nobody reviews; priorities are guessed, not set;
+- **collides**: two agents on one branch; two fixes for one bug;
+- and **you find out last**: "What is this?" "Why is it red?"
+
+## The idea
+
+Guild's real job is to tell the eye where to look next. Every event that needs you goes into one feed: a question
+from an agent, a PR ready for review, red CI, an alert, an idle agent, a colleague's comment, a deploy that needs your
+OK. Guild ranks it by the priorities you set, and you look at the top three.
+
+<img alt="Signals from agents, CI and colleagues go through your priorities, set with Right Hand, and come out as a ranked list of three: answer a question, review a fix, review another" src="docs/images/the-idea.svg">
+
+## The org
+
+To feed that list, Guild is a tiny company in your terminal.
+
+<img alt="You at the top; Right Hand under you; five team leads (Alex · Checkout, Boris · Search, Charlie · Mobile, Denis · Platform, Eli · Tooling), each with up to five workers" src="docs/images/org-tree.svg">
+
+- **You** set priorities and make the decisions only you can make.
+- **Right Hand** is the one agent you talk to. It routes your words and brings you one question at a time. It never
+  writes code.
+- **Team leads** each own a domain. They brief workers, route and verify. Managers never implement.
+- **Workers** do the actual work, up to five per team lead, one task each.
+
+## Build your own harness
+
+Take these from Guild:
+
+1. **One feed for you.** Every event that needs your attention, ranked.
+2. **Shaped for your attention.** Most signal per glance: pages, not walls of text.
+3. **One priority list.** Shared by all agents; you change it as you go.
+4. **A tree of agents.** Managers don't code: they brief, route, verify.
+5. **Specialised leads.** Each owns a domain; domains shift over time.
+6. **Evidence on every claim.** Observed, reproduced or from code; spot-checked.
+7. **Agents talk and claim.** Leads message each other and claim what they touch.
+
+## What it looks like
 
 **Lead a group of Claude Code team leads from one page.** Each team lead runs its own team of agent workers. You are
 the engineering director.
@@ -11,7 +70,7 @@ the engineering director.
 <sub>Demo data. macOS only · needs [agterm](https://github.com/umputun/agterm) and
 [Claude Code](https://github.com/anthropics/claude-code) · MIT</sub>
 
-## Why
+## How you work with it
 
 Running several agents is easy. Staying in charge of them while you switch context all day is the hard part. Guild
 gives an engineering group's usual structure to agents in one terminal: team leads who own projects, workers under
