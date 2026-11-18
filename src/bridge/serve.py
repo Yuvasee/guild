@@ -932,10 +932,10 @@ class DashboardState:
             )
             return cursor.rowcount > 0
 
-    def answer_item(self, item_id: int, answer: str) -> tuple[bool, str]:
+    def answer_item(self, item_id: int, answer: str, ask: bool = False) -> tuple[bool, str]:
         try:
             with self._connection() as conn, transaction(conn):
-                result, asked = reply_on_card(conn, item_id, answer, self.config.user_alias or "user", now_ms())
+                result, asked = reply_on_card(conn, item_id, answer, self.config.user_alias or "user", now_ms(), ask)
         except MessageStateError as exc:
             return False, str(exc)
         self._deliver(result, result.recipients)
@@ -1382,7 +1382,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if data is None or not isinstance(data.get("answer"), str):
                 self._json(400, {"ok": False, "detail": "expected {answer: string}"})
                 return
-            ok, detail = self.state.answer_item(int(match.group(1)), str(data["answer"]))
+            ok, detail = self.state.answer_item(int(match.group(1)), str(data["answer"]), data.get("ask") is True)
             self._json(200 if ok else 409, {"ok": ok, "detail": detail})
         elif match := re.fullmatch(r"/api/colleague-replies/(\d{1,12})", self.path):
             data = self._read_json()

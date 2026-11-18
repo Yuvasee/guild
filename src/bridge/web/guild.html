@@ -689,8 +689,8 @@ function renderNeedCard(need) {
   title.append(need.text);
   card.append(title);
   const actions = el("div", "actions");
-  const send = async (answer) => {
-    const done = await post("/api/items/" + need.id + "/answer", { answer });
+  const send = async (answer, ask = false) => {
+    const done = await post("/api/items/" + need.id + "/answer", { answer, ask });
     if (done.ok && done.detail === "asked") {
       // The card stays as it was, so its node and box stay too; text typed since sending is not this question.
       if (input.value.trim() === answer) { input.value = ""; drafts.delete(need.id); }
@@ -714,7 +714,11 @@ function renderNeedCard(need) {
   input.onkeydown = (event) => {
     if (event.key === "Enter" && input.value.trim()) send(input.value.trim());
   };
-  actions.append(input);
+  // Enter answers and closes the card; asking back, which keeps it open, is its own button.
+  const askBack = el("button", "dismiss", "Ask back");
+  askBack.title = "Send this as a question to " + need.from + "; the card stays open until you choose";
+  askBack.onclick = () => { if (input.value.trim()) send(input.value.trim(), true); };
+  actions.append(input, askBack);
   const dismiss = el("button", "dismiss", "Dismiss");
   dismiss.onclick = async () => {
     await post("/api/items/" + need.id + "/resolve");

@@ -176,19 +176,34 @@ def guild_needs(base: str) -> list[dict[str, object]]:
     return json.loads(http_request(base + "/api/guild"))["needs"]
 
 
-def answer_on_page(base: str, item_id: object, answer: str) -> str:
-    sent = json.loads(http_request(base + f"/api/items/{item_id}/answer", post=True, data={"answer": answer}))
+def answer_on_page(base: str, item_id: object, answer: str, ask: bool = False) -> str:
+    data = {"answer": answer, "ask": ask}
+    sent = json.loads(http_request(base + f"/api/items/{item_id}/answer", post=True, data=data))
     return str(sent["detail"])
 
 
-def test_a_question_on_the_card_reaches_the_session_and_keeps_the_card_open(
+def test_free_text_on_the_card_answers_and_closes_it_even_with_a_question_mark(
     bridge_env: BridgeEnv, spawn_process: SpawnProcess, dashboard: str
 ) -> None:
     pids = start(bridge_env, spawn_process, agterm_tabs=False)
     bridge_env.cli("post", "decision", "Ship v2?", "--option", "Ship", "--option", "Wait", pid=pids["a"])
     [item] = state(dashboard)["items"]  # type: ignore[misc]
 
-    asked = answer_on_page(dashboard, item["id"], "Why does it happen? Keep it simple.")
+    assert answer_on_page(dashboard, item["id"], "Ship, but why not Friday? Fine either way.") == "sent"
+    context = prompt(bridge_env, pids["a"], "conv-a", "next")
+    assert 'Answer to your decision Q#1 "Ship v2?": Ship, but why not Friday? Fine either way.' in context
+    [answered] = state(dashboard)["items"]  # type: ignore[misc]
+    assert answered["answer"] and answered["resolved_at"]
+
+
+def test_ask_back_on_the_card_reaches_the_session_and_keeps_the_card_open(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess, dashboard: str
+) -> None:
+    pids = start(bridge_env, spawn_process, agterm_tabs=False)
+    bridge_env.cli("post", "decision", "Ship v2?", "--option", "Ship", "--option", "Wait", pid=pids["a"])
+    [item] = state(dashboard)["items"]  # type: ignore[misc]
+
+    asked = answer_on_page(dashboard, item["id"], "Why does it happen? Keep it simple.", ask=True)
     context = prompt(bridge_env, pids["a"], "conv-a", "next")
     [card] = guild_needs(dashboard)
 

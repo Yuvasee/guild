@@ -232,13 +232,14 @@ def answer_post(
     return sent
 
 
-def reply_on_card(conn: sqlite3.Connection, item_id: int, text: str, user: str, at_ms: int) -> tuple[SendResult, bool]:
-    """True when the reply was a question: it reaches the session and the post stays open. Any '?' typed counts, as
-    the owner's questions often end in a sentence and a post closed without a choice costs more than one left open.
-    It goes on the board so the page's room shows it and the session's reply."""
+def reply_on_card(
+    conn: sqlite3.Connection, item_id: int, text: str, user: str, at_ms: int, ask: bool = False
+) -> tuple[SendResult, bool]:
+    """Text typed on a card is the owner's answer and closes it; only the card's own 'Ask back' button sends a
+    question, which reaches the session and leaves the post open, on the board so the page's room shows it."""
     text = _check_answer(text)
     row = _load_answerable_post(conn, item_id, user)
-    if "?" not in text or text in (json.loads(row["options"]) if row["options"] else []):
+    if not ask:
         return answer_post(conn, item_id, text, user, at_ms), False
     recipient = resolve_tab(conn, str(row["from_conversation"]), str(row["from_handle"]))
     body = (
