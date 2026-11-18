@@ -86,6 +86,13 @@ Or take mine whole. It's below.
   <img alt="The Guild page: one question waiting for you, four team leads with their workers, issues and PRs" src="docs/images/guild-light.png">
 </picture>
 
+**Every PR in flight on one screen. Numbers tell you where to look first.**
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/guild-prs-dark.png">
+  <img alt="The PR list on the Guild page: Open PRs numbered 1, 2, 3 in your review order with doc links and Publish to Slack buttons, then Ready to merge (lead), Backports (lead merges), Published and Drafts in progress" src="docs/images/guild-prs-light.png">
+</picture>
+
 <sub>Demo data.</sub>
 
 ## How you work with it
