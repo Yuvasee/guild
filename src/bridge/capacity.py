@@ -13,6 +13,7 @@ from bridge.compaction import read_context_full
 from bridge.config import Config
 from bridge.enrich import load_enrichment
 from bridge.leads import Lead, LeadWork, is_surface_locked, lead_dir, list_lead_work, list_leads, read_notes
+from bridge.procinfo import read_process_table
 from bridge.refs import map_ref_to_label, map_text_to_ref
 from bridge.review_post import is_working_time
 from bridge.reviews import (
@@ -26,7 +27,13 @@ from bridge.reviews import (
     map_db_to_reviews,
     record_signal_post,
 )
-from bridge.workers import WORKER_CAP, LiveWorker, list_live_workers, list_queued_launches
+from bridge.workers import (
+    WORKER_CAP,
+    LiveWorker,
+    list_live_workers,
+    list_queued_launches,
+    map_processes_to_live_work,
+)
 
 IDLE_FOR_MS = 20 * 60_000
 FOCUS_STALE_MS = 6 * 3_600_000
@@ -533,13 +540,30 @@ def send_idle_work_nudges(
             continue
         asks = list_ready_asks(conn, load.lead.name, now)
         queue = find_backlog_line(read_notes(lead_dir(load.lead.name)))
-        if not asks and not queue:
+        if (not asks and not queue) or is_waiting_on_own_run(conn, load.lead.surface):
             continue
         delivered = send_from_bridge(conn, config, load.lead.name, convert_idle_work_to_text(load, asks, queue), now)
         if delivered:
             record_signal_post(conn, key, delivered[0][0], now)
             sent.extend(delivered)
     return sent
+
+
+def is_waiting_on_own_run(conn: sqlite3.Connection, surface: str | None) -> bool:
+    """A lead whose tab still runs a command it started in the background (a test suite, a deploy) waits on it: its
+    Claude idles at the prompt meanwhile, which is not room for new work."""
+    rows = read_process_table() if surface else None
+    if rows is None:
+        return False
+    pids = {
+        int(row["pid"])
+        for row in conn.execute(
+            "SELECT pid FROM instances WHERE surface = ? AND ended_at IS NULL AND pid IS NOT NULL", (surface,)
+        )
+    }
+    session = conn.execute("SELECT agterm_session FROM surfaces WHERE surface = ?", (surface,)).fetchone()
+    tab = str(session["agterm_session"]) if session is not None and session["agterm_session"] else ""
+    return bool(map_processes_to_live_work(rows, pids, tab))
 
 
 def send_stale_focus_nudges(conn: sqlite3.Connection, config: Config, now: int) -> list[tuple[int, Recipient]]:

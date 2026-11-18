@@ -4,6 +4,7 @@ from collections.abc import Generator
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest import mock
 
 import pytest
 from conftest import BridgeEnv, SpawnProcess
@@ -31,6 +32,7 @@ from bridge.capacity import (
 from bridge.config import Config
 from bridge.db import connect
 from bridge.leads import LeadWork, lead_dir, set_lead_domains, write_notes
+from bridge.procinfo import ProcessRow
 from bridge.reviews import PUBLISHED, WAITING_FOR_OWNER, WAITING_FOR_YOU
 from bridge.workers import queue_worker_launch
 
@@ -309,6 +311,12 @@ def test_an_idle_lead_with_work_that_waits_on_nobody_is_told_once_per_idle_spell
     loads = assess_leads(conn, CONFIG, now, tree({"alex": 0}))
     conn.execute("UPDATE instances SET status = 'idle' WHERE surface = 'alex'")
     assert send_idle_work_nudges(conn, CONFIG, now, [replace(loads[0], load="idle", idle_for_ms=IDLE_FOR_MS - 5)]) == []
+    suite = [
+        ProcessRow(500, 104, "/bin/zsh -c source ~/.claude/shell-snapshots/snapshot-zsh-1.sh && pytest"),
+        ProcessRow(501, 500, "python -m pytest -q"),
+    ]
+    with mock.patch("bridge.capacity.read_process_table", return_value=suite):
+        assert nudge(now) == [], "waiting on its own background run, such as a test suite, is not idle"
     assert nudge(now) == [
         f"You have been idle 20m with work waiting: asks #{ask.id} wait on nobody (`guild ask list`). Start the next "
         "item, or mark what blocks it (`guild ask wait`)."
