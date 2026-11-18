@@ -14,6 +14,7 @@ from bridge.review_github import (
     UNKNOWN_DIFF,
     DocDiff,
     GitHubError,
+    count_own_commits_since,
     fetch_doc_diff,
     is_comment_line,
     map_compare_to_doc_diff,
@@ -264,5 +265,21 @@ def test_the_poll_compares_each_doc_and_head_once_and_a_failed_compare_reads_as_
     ):
         poll_review_queue(conn, config, NOW, None, None)
         poll_review_queue(conn, config, NOW, None, None)
-    assert fetched.call_args_list == [mock.call("Org/app", DOC_COMMIT, HEAD)]
+    assert fetched.call_args_list == [mock.call("Org/app", DOC_COMMIT, HEAD, 7)]
     assert view(conn, config)["doc_behind"] == "doc older than code (doc at d0cd0cd0c, PR at e1ee1ee1e)"
+
+
+def test_a_merge_of_the_base_counts_nothing_against_the_doc() -> None:
+    own = {"filename": "app/svc.py", "patch": "@@ -3,2 +3,3 @@\n+    retry()"}
+    from_base = {"filename": "other/big.py", "patch": "@@ -1 +1,3 @@\n+a = 1\n+b = 2\n+c = 3"}
+    diff = map_compare_to_doc_diff(compare(own, from_base, ahead_by=13), {"app/svc.py"}, 1)
+    assert diff == DocDiff(1, 1, False), "the base's file and commits are not the PR's change"
+    assert map_compare_to_doc_diff(compare(from_base, ahead_by=12), {"app/svc.py"}, 0) == DocDiff(0, 0, True)
+    commits = [
+        {"sha": "d0c", "parents": [{}]},
+        {"sha": "a11", "parents": [{}]},
+        {"sha": "m1", "parents": [{}, {}]},
+        {"sha": "b22", "parents": [{}]},
+    ]
+    assert count_own_commits_since(commits, "d0c") == 2, "merges left out"
+    assert count_own_commits_since(commits, "zzz") is None

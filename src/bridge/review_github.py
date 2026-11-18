@@ -755,10 +755,11 @@ def count_code_lines_in_patch(path: str, patch: str) -> int:
     return sum(1 for line in patch.splitlines() if line[:1] in ("+", "-") and not is_comment_line(path, line[1:]))
 
 
-def map_compare_to_doc_diff(raw: Any) -> DocDiff:
+def map_compare_to_doc_diff(raw: Any, own_files: set[str] | None = None, own_commits: int | None = None) -> DocDiff:
     """From GitHub's compare of the doc's commit with the head. A file GitHub gives no patch for (binary, too large)
     counts in full and is never only comments; a file renamed from or to code is never only comments; a list GitHub
-    cut short has no line count."""
+    cut short has no line count. With the PR's own files and its own commits since the doc, a merge of the base
+    counts for nothing: only what the PR itself changes is the doc's business."""
     status = raw.get("status")
     if status == "identical":
         return DocDiff(0, 0, True)
@@ -770,6 +771,8 @@ def map_compare_to_doc_diff(raw: Any) -> DocDiff:
     for row in files:
         path = str(row.get("filename") or "")
         previous = str(row.get("previous_filename") or path)
+        if own_files is not None and path not in own_files and previous not in own_files:
+            continue
         if row.get("status") == "renamed" and not (is_docs_file(path) and is_docs_file(previous)):
             complete = False
         if is_docs_file(path) and is_docs_file(previous):
@@ -781,13 +784,30 @@ def map_compare_to_doc_diff(raw: Any) -> DocDiff:
             complete = False
             lines += int(row.get("additions") or 0) + int(row.get("deletions") or 0)
     cut = len(files) >= COMPARE_FILES_MAX
-    return DocDiff(int(raw.get("ahead_by") or 0), None if cut else lines, complete and lines == 0)
+    commits = own_commits if own_commits is not None else int(raw.get("ahead_by") or 0)
+    return DocDiff(commits, None if cut else lines, complete and lines == 0)
 
 
-def fetch_doc_diff(repo: str, doc_commit: str, head: str) -> DocDiff:
+def count_own_commits_since(commits: list[Any], doc_commit: str) -> int | None:
+    """The PR's own commits after the doc's, merges left out; None when the doc's commit is not among them."""
+    shas = [str(c.get("sha") or "") for c in commits]
+    at = next((i for i, sha in enumerate(shas) if sha.startswith(doc_commit)), None)
+    if at is None:
+        return None
+    return sum(1 for c in commits[at + 1 :] if len(c.get("parents") or []) < 2)
+
+
+def fetch_doc_diff(repo: str, doc_commit: str, head: str, number: int | None = None) -> DocDiff:
     try:
         raw: Any = json.loads(run_gh(["api", f"repos/{repo}/compare/{doc_commit}...{head}"]))
-        return map_compare_to_doc_diff(raw)
+        if number is None:
+            return map_compare_to_doc_diff(raw)
+        pages: Any = json.loads(
+            run_gh(["api", "--paginate", "--slurp", f"repos/{repo}/pulls/{number}/commits?per_page=100"])
+        )
+        own = count_own_commits_since([c for page in pages for c in page], doc_commit)
+        files = {str(f["path"]) for f in fetch_all_files(repo, number)}
+        return map_compare_to_doc_diff(raw, files, own)
     except (ValueError, KeyError, TypeError, AttributeError) as exc:
         raise GitHubError(f"unexpected answer from GitHub: {type(exc).__name__}") from exc
 

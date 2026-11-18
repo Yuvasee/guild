@@ -1407,7 +1407,7 @@ def poll_review_queue(
             store_ci_blocked_by(conn, ref, head, blocked_by)
     for ref, repo, doc_commit, head in list_docs_to_compare(conn):
         try:
-            diff = fetch_doc_diff(repo, doc_commit, head)
+            diff = fetch_doc_diff(repo, doc_commit, head, int(ref.rpartition("#")[2]))
         except GitHubError as exc:
             # Recorded as unknown, so a commit GitHub no longer has is not asked for each poll: the doc reads as behind.
             print(f"review doc compare of {ref} failed: {exc}", flush=True)
