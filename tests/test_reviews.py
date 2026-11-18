@@ -1970,6 +1970,16 @@ def test_a_backport_gets_the_merge_button_and_its_press_satisfies_the_guard(tmp_
     assert list_merge_waits(map_row_to_merge_facts(row, None)) == ()
 
 
+def test_a_merge_ok_for_a_pr_that_keeps_a_sandbox_says_merging_deletes_it(tmp_path: Path) -> None:
+    conn = setup_pr(tmp_path, approved_by=("mira",), bot_cleared=True, persist_sandbox=True)
+    assert merge_ok_view(conn)["persist_sandbox"] is True
+    with transaction(conn):
+        add_session(conn, "c1", "worker", branch="dev/x")
+        message_id, _ = record_merge_ok(conn, CONFIG, REF, "a1", "theo", 700)
+    body = conn.execute("SELECT body FROM messages WHERE id = ?", (message_id,)).fetchone()[0]
+    assert "PERSIST_SANDBOX" in body and "deletes sandbox pr-7" in body and "dispatch it again from main" in body
+
+
 def test_docs_and_images_are_not_lines_of_code_so_a_docs_only_pr_gets_no_document() -> None:
     files = [
         {"path": "guild-docs/README.md", "additions": 400, "deletions": 50},

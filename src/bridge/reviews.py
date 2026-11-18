@@ -2042,6 +2042,11 @@ def map_merge_ok_to_text(config: Config, row: sqlite3.Row, no_owner: bool) -> st
         f"{config.owner_name_at_start} OKs merging {url} ({row['title']}) at {oid}: they pressed Merge on the Guild "
         f"page, as it is approved and CI is green. A new commit voids this OK."
     )
+    if row["persist_sandbox"]:
+        given += (
+            f" Its body asks to keep its persistent sandbox (PERSIST_SANDBOX): merging closes the PR and deletes "
+            f"sandbox pr-{row['number']}, so dispatch it again from main afterwards if it is still needed."
+        )
     if no_owner:
         return (
             f"{given} No session owns it, so it came to you: find its lead and pass this on, to merge it now through "
@@ -2322,6 +2327,7 @@ def map_row_to_review(conn: sqlite3.Connection, config: Config, row: sqlite3.Row
         "merge_path": row["merge_path"],
         "head_oid": row["head_oid"],
         "can_ok_merge": can_ok_merge(config, row, siblings),
+        "persist_sandbox": bool(row["persist_sandbox"]),
         "merge_ok_needs": map_row_to_merge_ok_needs(row, siblings),
         "merge_blocked_by_github": map_row_to_merge_blocked_by_github(row),
         "merge_ok": load_merge_ok(conn, ref, str(row["head_oid"])),
