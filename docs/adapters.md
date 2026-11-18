@@ -119,6 +119,12 @@ Set `watcher_alert_to = "<handle>"` and a watcher that leaves ok (failed, stale,
 session once, by bridge; still not ok after `watcher_escalate_after_min` (default 60), the assistant hears it once too,
 and everyone told hears when it is back to ok. Empty, the default, tells nobody.
 
+A failed status with `"needs_owner": true` is also a Needs-you card on the page, with its summary, for as long as
+the file reads so: for what only the owner's hands can fix, such as a login.
+
+`worker_host_watcher = "<watcher name>"` names the watcher of `worker_host`'s Claude: while it reads failed,
+`guild worker` starts the worker on this Mac and says why. Stale or missing, the worker goes to the host as usual.
+
 ## Team rules: defaults you can change
 
 Some rules are a way of working rather than a mechanism. They ship as defaults, written into the lead role and the

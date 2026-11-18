@@ -673,6 +673,7 @@ function renderNeedCard(need) {
     const card = el("div", "card" + (need.type === "lead-down" ? " stuck" : ""));
     card.append(el("div", "title", need.text));
     if (need.body) card.append(el("div", "body", need.body));
+    if (need.type === "watcher") return card;
     const actions = el("div", "actions");
     const go = el("button", "", "Go to tab");
     go.onclick = () => jump(need.surface);

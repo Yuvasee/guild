@@ -67,6 +67,16 @@ def test_cwd_map_follows_symlinks_and_home(tmp_path: Path, monkeypatch: pytest.M
     assert map_cwd_to_host_path(tmp_path / "link", {"~/real": "/h/real"}) == "/h/real"
 
 
+def test_worker_host_watcher_must_name_a_watcher() -> None:
+    watchers = [{"path": "~/claude-devbox.json", "name": "Claude · devbox"}]
+    config = map_toml_to_config({"worker_host_watcher": "Claude · devbox", "watchers": watchers})
+    assert config.worker_host_watcher == "Claude · devbox"
+    with pytest.raises(ValueError, match="exactly one"):
+        map_toml_to_config({"worker_host_watcher": "Claude · elsewhere", "watchers": watchers})
+    with pytest.raises(ValueError, match="exactly one"):
+        map_toml_to_config({"worker_host_watcher": "Claude · devbox", "watchers": watchers * 2})
+
+
 def test_config_reads_worker_host_settings() -> None:
     config = map_toml_to_config({"worker_host": "devbox", "worker_path_map": {"~/app": "/home/dev/app"}})
 

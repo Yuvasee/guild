@@ -2,6 +2,7 @@ import json
 import re
 import shlex
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -110,6 +111,43 @@ def test_guild_worker_starts_claude_without_chrome_and_briefs_it_on_the_browser(
     assert "codex exec ... </dev/null" in brief
     assert BROWSER_RULE in brief
     assert "review doc gets a section headed Reviews" in brief
+
+
+@pytest.mark.parametrize(
+    ("status", "where"),
+    [("failed", "local"), ("ok", "host"), ("missing", "host")],
+)
+def test_a_worker_starts_on_this_mac_while_the_hosts_claude_watcher_reads_failed(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess, status: str, where: str
+) -> None:
+    team = Team(bridge_env, spawn_process)
+    raw = json.loads(bridge_env.stub_tree.read_text())
+    raw["result"]["tree"]["workspaces"][0]["sessions"].append({"id": "TAB-W", "name": "Task", "status": "active"})
+    bridge_env.stub_tree.write_text(json.dumps(raw))
+    status_file = bridge_env.root / "claude-devbox.json"
+    if status != "missing":
+        run = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        fields = {"status": status, "last_run_utc": run, "summary": "weekly limit until 07:00"}
+        status_file.write_text(json.dumps(fields))
+    config_path = Path(bridge_env.env["BRIDGE_CONFIG"])
+    config_path.write_text(
+        'worker_host = "devbox"\nworker_host_watcher = "Claude · devbox"\n'
+        + config_path.read_text()
+        + f'[[watchers]]\nname = "Claude · devbox"\npath = "{status_file}"\n'
+    )
+    env = dict(bridge_env.env, CLAUDE_PID=str(team.a), AGTERM_SESSION_ID="TAB-A")
+
+    done = subprocess.run(
+        [str(VENV_BIN / "guild"), "worker", "Task", "--cwd", str(bridge_env.root), "--prompt", "Fix the thing"],
+        env=env, capture_output=True, text=True, timeout=30, check=False,
+    )  # fmt: skip
+
+    if where == "local":
+        assert done.returncode == 0, done.stderr
+        assert "starting 'Task' on this Mac: Claude · devbox reads failed: weekly limit until 07:00" in done.stdout
+        assert "session new" in bridge_env.stub_log.read_text()
+    else:
+        assert "'devbox' is not a [[remotes]] name" in done.stderr, "it went for the host"
 
 
 def test_lead_role_and_skill_say_no_browser_unless_the_task_says_so() -> None:
