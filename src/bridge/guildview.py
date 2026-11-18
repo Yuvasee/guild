@@ -46,6 +46,7 @@ REMOTE_LINK_MS = 7 * 24 * 3_600_000
 # The command that starts a run is logged just before it starts, and the two hosts' clocks differ a little.
 REMOTE_LINK_BEFORE_START_MS = 10 * 60_000
 RED_CI_ESCALATE_MS = 2 * 3_600_000
+WORKER_HOLDS_KINDS = ("pr", "gh-issue", "issue")
 _MESSAGE_POST_TYPES = (None, "report", "question", "handoff")
 _SIGNATURE_RE = re.compile(r"\s*([^:()\n]{1,60}?)\s*(?:\(([^:()\n]{1,60})\))?\s*:\s*")
 # A worker's tab keeps the brief's first words until its lead names it; those say nothing about the task.
@@ -87,6 +88,11 @@ def map_db_to_guild(
     tabs_fresh = tree is not None and (tree_at is None or now - tree_at <= TABS_STALE_MS)
     activity_fresh = activity is not None and (activity_at is None or now - activity_at <= ACTIVITY_STALE_MS)
     by_surface = {s.surface: s for s in sessions}
+    focus_of = {s.conversation_id: s.focus for s in sessions if s.conversation_id}
+    holds_of: dict[str, list[dict[str, object]]] = {}
+    for conversation_id, claim in _load_active_claims_by_holder(conn, config, now, url_of):
+        if claim["kind"] in WORKER_HOLDS_KINDS:
+            holds_of.setdefault(conversation_id, []).append({"label": claim["label"], "url": claim["url"]})
     enrichment = load_enrichment(conn, now)
     leads: list[dict[str, object]] = []
     needs: list[dict[str, object]] = _map_open_posts_to_needs(conn, config, now)
@@ -138,7 +144,16 @@ def map_db_to_guild(
             if tabs_fresh and _worker_is_gone(str(state["state"]), tab, instance is not None, now):
                 continue
             surface = instance["surface"] if instance else None
-            workers.append({"task": tab.get("name"), "surface": surface, "host": host, **state})
+            workers.append(
+                {
+                    "task": tab.get("name"),
+                    "surface": surface,
+                    "host": host,
+                    "focus": focus_of.get(worker_conversation) if worker_conversation else None,
+                    "holds": holds_of.get(worker_conversation, []) if worker_conversation else [],
+                    **state,
+                }
+            )
         if session is None or session.status in ("offline", "ended"):
             own = {"state": "stuck", "why": "no live session"}
             needs.append(
@@ -980,22 +995,32 @@ def _convert_resource_to_label(resource: str) -> str:
 def _load_active_claims(
     conn: sqlite3.Connection, config: Config, now: int, url_of: Callable[[str], str]
 ) -> list[dict[str, object]]:
+    active = [claim for _, claim in _load_active_claims_by_holder(conn, config, now, url_of)]
+    return sorted(active, key=lambda claim: (claim["kind"] in ("pr", "branch"), str(claim["resource"])))
+
+
+def _load_active_claims_by_holder(
+    conn: sqlite3.Connection, config: Config, now: int, url_of: Callable[[str], str]
+) -> list[tuple[str, dict[str, object]]]:
     """Only claims in force: a lapsed one is for its holder to settle, and the user is not asked."""
-    active: list[dict[str, object]] = []
+    active: list[tuple[str, dict[str, object]]] = []
     for row in list_claims(conn):
         if is_conversation_locked(conn, config, str(row["holder_conversation"])):
             continue
         if not row["live"] or int(row["expires_at"]) < now:
             continue
         active.append(
-            {
-                "resource": row["resource"],
-                "kind": str(row["resource"]).partition(":")[0],
-                "label": _convert_resource_to_label(str(row["resource"])),
-                "holder": row["holder_handle"],
-                "reason": row["reason"],
-                "acquired_at": row["acquired_at"],
-                "url": url_of(str(row["resource"])),
-            }
+            (
+                str(row["holder_conversation"]),
+                {
+                    "resource": row["resource"],
+                    "kind": str(row["resource"]).partition(":")[0],
+                    "label": _convert_resource_to_label(str(row["resource"])),
+                    "holder": row["holder_handle"],
+                    "reason": row["reason"],
+                    "acquired_at": row["acquired_at"],
+                    "url": url_of(str(row["resource"])),
+                },
+            )
         )
-    return sorted(active, key=lambda claim: (claim["kind"] in ("pr", "branch"), str(claim["resource"])))
+    return active
