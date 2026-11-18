@@ -131,6 +131,13 @@ def test_close_finds_the_tab_by_agterm_id(worker: Worker) -> None:
     assert worker.closed_tabs() == [f"session close --target {WORKER_TAB}"]
 
 
+def test_close_takes_the_pane_id_bridge_sessions_shows_but_only_for_my_own_child(worker: Worker) -> None:
+    assert worker.guild("worker", "close", "PANE-B", session="TAB-ELSE").returncode == 2
+    assert worker.closed_tabs() == []
+    assert worker.close("PANE-B").returncode == 0
+    assert worker.closed_tabs() == [f"session close --target {WORKER_TAB}"]
+
+
 def test_a_tab_that_is_not_my_child_is_refused(worker: Worker) -> None:
     done = worker.guild("worker", "close", "Task one", session="TAB-ELSE")
 

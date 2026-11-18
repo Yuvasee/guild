@@ -1006,7 +1006,17 @@ def _read_child_tab(conn: sqlite3.Connection, config: Config, parent: str, wante
     tree = read_tree(config)
     if tree is None:
         raise UsageError("agterm is not reachable, so the tab cannot be checked")
-    return map_tree_to_child_tab(tree, parent, wanted)
+    try:
+        return map_tree_to_child_tab(tree, parent, wanted)
+    except UsageError:
+        # `bridge sessions` names a worker by its handle and pane id; the tree knows only its tab id and title.
+        row = conn.execute(
+            "SELECT agterm_session FROM surfaces WHERE (handle = ?1 OR surface = ?1) AND agterm_session IS NOT NULL",
+            (wanted,),
+        ).fetchone()
+        if row is None or row["agterm_session"] == wanted:
+            raise
+        return map_tree_to_child_tab(tree, parent, str(row["agterm_session"]))
 
 
 def cmd_worker_attach(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
