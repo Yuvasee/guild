@@ -1,5 +1,5 @@
 <p align="center">
-  <img alt="Guild's eye: an orange almond, an amber iris, a dark slit pupil" src="docs/images/eye.svg" width="160">
+  <img alt="Guild's eye, a nod to the Eye of Sauron: an orange almond, an amber iris, a dark slit pupil" src="docs/images/eye.svg" width="160">
 </p>
 
 <h1 align="center">Guild</h1>
@@ -17,8 +17,8 @@ a real task alone, so you run fifteen or twenty. Your job is no longer the work.
 
 <img alt="Twenty Claude Code terminals: a few working, many waiting for you, some blocked or on the same branch, some idle for weeks or forgotten" src="docs/images/twenty-terminals.svg">
 
-So you open twenty terminals and become the bottleneck. Your attention is like an eye: powerful, but it looks one
-way at a time. Everything outside its beam:
+So you open twenty terminals and become the bottleneck. Your attention is the Eye of Sauron: it sees everything, but
+only where it looks, and it looks one way at a time. Everything outside its beam:
 
 - **waits**: an agent sits idle on your answer; a question waits for days;
 - **drifts**: agents finish and nobody reviews; priorities are guessed, not set;
