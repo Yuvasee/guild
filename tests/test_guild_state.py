@@ -443,6 +443,29 @@ def test_resources_list_environments_before_branches_and_prs(
     assert [(c["kind"], c["label"]) for c in claims] == [("env", "staging"), ("branch", "feat-x"), ("pr", "web#9")]
 
 
+def test_a_worker_shows_its_focus_and_the_prs_and_issues_it_holds_but_not_its_leads(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    team = Team(bridge_env, spawn_process)
+    team.enroll()
+    for resource in ("pr:acme/web#3141", "issue:ACME-12", "branch:acme/web:feat-x", "env:staging"):
+        assert bridge_env.cli("claim", resource, "--reason", "why", "--offline", pid=team.b).returncode == 0
+    assert bridge_env.cli("claim", "pr:acme/web#9", "--reason", "why", "--offline", pid=team.a).returncode == 0
+    assert bridge_env.cli("focus", "fixing review comments on web#3141", pid=team.b).returncode == 0
+    now = int(time.time() * 1000)
+    tab: dict[str, object] = {"id": "TAB-B", "name": "Review fixes", "parent": "TAB-A", "status": "active"}
+    tree: dict[str, object] = {"workspaces": [{"name": "Alex · Data", "sessions": [tab]}]}
+    with bridge_env.connect() as conn:
+        guild = map_db_to_guild(conn, Config(), now, lambda ref: f"https://example.test/{ref}", tree, now, {}, now)
+
+    [worker] = cast(list[dict[str, Any]], guild["leads"])[0]["workers"]
+    assert (worker["task"], worker["focus"]) == ("Review fixes", "fixing review comments on web#3141")
+    assert worker["holds"] == [
+        {"label": "web#3141", "url": "https://example.test/pr:acme/web#3141"},
+        {"label": "ACME-12", "url": "https://example.test/issue:ACME-12"},
+    ]
+
+
 def test_page_has_a_favicon_no_external_loads_and_never_says_idle() -> None:
     page = (Path(__file__).parent.parent / "src/bridge/web/guild.html").read_text()
 

@@ -189,8 +189,14 @@ header .end { margin-left: auto; }
 .lead .word.you { color: var(--you); font-weight: 600; }
 .lead .word.stuck { color: var(--stuck); font-weight: 600; }
 .lead .word.unknown { color: var(--faint); }
-.lead .dots { display: flex; gap: 4px; align-items: center; margin-left: 4px; }
-.lead .dots button { display: flex; padding: 2px 1px; border-radius: 50%; }
+/* One line per worker: the PRs it holds never shrink, so their numbers stay findable; a long focus is cut instead. */
+.lead .worker { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 10px; padding: 1px 12px 1px 26px; font-size: 12px; line-height: 20px; color: var(--soft); white-space: nowrap; min-width: 0; }
+.lead .worker .task { display: flex; align-items: center; gap: 6px; flex: none; color: var(--ink); }
+.lead .worker .task:hover { text-decoration: underline; text-underline-offset: 2px; text-decoration-color: var(--faint); }
+.lead .worker .refs { display: flex; gap: 0 8px; flex: none; }
+.lead .worker .ref a { font-weight: 500; }
+.lead .worker .focus { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.lead .worker + .chunk, .lead .worker + .quiet { margin-top: 4px; }
 .lead .cap { font-size: 12px; color: var(--faint); white-space: nowrap; }
 .lead .cap.full { color: var(--stuck); font-weight: 600; }
 .lead .quiet { font-size: 13px; color: var(--faint); padding: 6px 12px; }
@@ -897,19 +903,6 @@ function renderLeadRow(lead) {
     who.append(words);
   }
   if (lead.asks) who.append(renderLeadAsks(lead.asks));
-  if (lead.workers.length) {
-    const dots = el("span", "dots");
-    for (const worker of lead.workers) {
-      const button = el("button");
-      const where = worker.host ? " (on " + worker.host + ")" : "";
-      button.title = worker.task + where + ": " + (worker.why || worker.state);
-      button.setAttribute("aria-label", button.title);
-      button.append(el("span", "dot tiny " + worker.state + (worker.host ? " host" : "")));
-      button.onclick = () => jump(worker.surface);
-      dots.append(button);
-    }
-    who.append(dots);
-  }
   if (lead.worker_count) {
     const full = lead.worker_count >= lead.worker_cap;
     const cap = el("span", full ? "cap full" : "cap", lead.worker_count + "/" + lead.worker_cap + " workers");
@@ -921,10 +914,26 @@ function renderLeadRow(lead) {
   const head = el("div", "head");
   head.append(who, el("span", "colhead", "Linear"), el("span", "colhead", "PRs"));
   const block = el("div", "lead");
-  block.append(head);
+  block.append(head, ...lead.workers.map(renderWorkerLine));
   if (lead.work.length) block.append(...lead.work.map(renderChunk));
   else block.append(el("div", "quiet", "No work declared"));
   return block;
+}
+
+function renderWorkerLine(worker) {
+  const line = el("div", "worker");
+  const task = el("button", "task");
+  const where = worker.host ? " (on " + worker.host + ")" : "";
+  task.title = "Go to tab" + where + ": " + (worker.why || worker.state);
+  task.append(el("span", "dot tiny " + worker.state + (worker.host ? " host" : "")), worker.task || "worker");
+  task.onclick = () => jump(worker.surface);
+  line.append(task, renderRefs(worker.holds || []));
+  if (worker.focus) {
+    const focus = el("span", "focus", worker.focus);
+    focus.title = worker.focus;
+    line.append(focus);
+  }
+  return line;
 }
 
 function leadAsksText(open, oldestAt) {
