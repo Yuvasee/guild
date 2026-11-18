@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Guild</title>
-<link id="favicon" rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='%23888'/%3E%3C/svg%3E">
+<link id="favicon" rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M.5 8Q8 -.5 15.5 8Q8 16.5 .5 8Z' fill='%23e8590c'/%3E%3Ccircle cx='8' cy='8' r='3.3' fill='%23f5a000'/%3E%3Cellipse cx='8' cy='8' rx='0.9' ry='3' fill='%231b1b1b'/%3E%3Ccircle cx='13' cy='13' r='2.6' fill='%23888' stroke='%23fff' stroke-width='.8'/%3E%3C/svg%3E">
 <style>
 :root {
   color-scheme: light dark;
@@ -33,10 +33,12 @@ a:hover { text-decoration-color: currentColor; }
 button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
 [hidden] { display: none !important; }
 
-/* The page's only heading: its name, a dot that says what the tab icon says, and when it last heard from bridge. */
+/* The page's only heading: the Guild's eye, its name, a dot that says what the tab icon's corner says, and when it
+   last heard from bridge. */
 #top { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 14px; margin-bottom: 10px; }
 #brand { display: flex; align-items: center; gap: 9px; margin: 0; font-size: 21px; font-weight: 700; letter-spacing: .01em; color: var(--ink); }
 #brand .pulse { width: 9px; height: 9px; border-radius: 50%; background: #9a9a94; }
+#brand .logo { width: 30px; height: 30px; flex: none; }
 #top .warn { font-size: 13px; font-weight: 600; color: var(--stuck); }
 #top .end { margin-left: auto; display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 6px 10px; min-width: 0; }
 #fresh { font-size: 12px; color: var(--faint); }
@@ -398,7 +400,7 @@ details td.what { color: var(--faint); font-weight: 400; }
 </head>
 <body>
 <main>
-  <div id="top"><h1 id="brand"><span class="pulse"></span>Guild</h1><span id="warn" class="warn">Connecting…</span><span class="end"><span id="watchers"></span><span id="pages"><a href="/pinned"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="5"/><path d="M12 13v8"/></svg>Pinned</a><a href="/dreams"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg>Dreams</a><details id="links" class="pop" hidden><summary>Links ▾</summary><div class="panel"></div></details></span><span id="fresh"></span><span id="alive" class="alive"></span></span></div>
+  <div id="top"><h1 id="brand"><svg class="logo" viewBox="0 0 16 16" aria-hidden="true"><path d="M.5 8Q8 -.5 15.5 8Q8 16.5 .5 8Z" fill="#e8590c"/><circle cx="8" cy="8" r="3.3" fill="#f5a000"/><ellipse cx="8" cy="8" rx="0.9" ry="3" fill="#1b1b1b"/></svg>Guild<span class="pulse"></span></h1><span id="warn" class="warn">Connecting…</span><span class="end"><span id="watchers"></span><span id="pages"><a href="/pinned"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="5"/><path d="M12 13v8"/></svg>Pinned</a><a href="/dreams"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg>Dreams</a><details id="links" class="pop" hidden><summary>Links ▾</summary><div class="panel"></div></details></span><span id="fresh"></span><span id="alive" class="alive"></span></span></div>
   <nav id="sections" aria-label="Sections"></nav>
 
   <!--
@@ -1411,10 +1413,13 @@ function getColor(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
+const EYE_SVG = "<path d='M.5 8Q8 -.5 15.5 8Q8 16.5 .5 8Z' fill='#e8590c'/><circle cx='8' cy='8' r='3.3' fill='#f5a000'/><ellipse cx='8' cy='8' rx='0.9' ry='3' fill='#1b1b1b'/>";
+
 function setFavicon(color) {
   const pulse = document.querySelector("#brand .pulse");
   if (pulse) pulse.style.background = color;
-  const svg = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='6' fill='" + color + "'/></svg>";
+  const svg = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'>" + EYE_SVG +
+    "<circle cx='13' cy='13' r='2.6' fill='" + color + "' stroke='#fff' stroke-width='.8'/></svg>";
   document.getElementById("favicon").href = "data:image/svg+xml," + encodeURIComponent(svg);
 }
 
