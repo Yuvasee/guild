@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import cast
 
 from bridge.agent_prefix import LINEAR_ISSUE_TOOLS, ROBOT
-from bridge.artifacts import ARTIFACT_TOOL
+from bridge.artifacts import ARTIFACT_TOOL, DRIVE_CREATE_TOOL
 from bridge.config import state_dir
 from bridge.guard import DEFAULT_TRIGGERS, convert_trigger_to_glob
 from bridge.hooks import ARTIFACT_HOOK, HOOK_EVENTS
@@ -51,7 +51,7 @@ def install_hooks(
         groups.append(group)
         hooks[event] = groups
     artifact: JsonObject = {
-        "matcher": ARTIFACT_TOOL,
+        "matcher": f"{ARTIFACT_TOOL}|{DRIVE_CREATE_TOOL}",
         "hooks": [
             {"type": "command", "command": f"{shlex.quote(executable)} {ARTIFACT_HOOK}", "timeout": HOOK_TIMEOUT_S}
         ],

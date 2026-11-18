@@ -310,7 +310,27 @@ def test_install_adds_one_artifact_hook_outside_the_hint_gate(tmp_path: Path) ->
     install_hooks(settings, "/u/bin/bridge-hook")
     install_hooks(settings, "/u/bin/bridge-hook")
     groups = json.loads(settings.read_text())["hooks"]["PostToolUse"]
-    artifact = [g for g in groups if g.get("matcher") == "Artifact"]
+    artifact = [g for g in groups if g.get("matcher") == "Artifact|mcp__claude_ai_Google_Drive__create_file"]
     assert [g["hooks"][0]["command"] for g in artifact] == ["/u/bin/bridge-hook ArtifactPublish"]
     uninstall_hooks(settings)
     assert "PostToolUse" not in json.loads(settings.read_text())["hooks"]
+
+
+def test_hook_pins_a_file_the_drive_connector_created_with_a_link_built_from_its_id(bridge_env: BridgeEnv) -> None:
+    with bridge_env.connect() as conn:
+        add_tab(conn, "conv-x", "xavi", "Xavi · Right Hand")
+    created = {"id": "f1Ab", "title": "Talk draft", "mimeType": "application/vnd.google-apps.presentation"}
+    other = {"id": "f2Cd", "title": "notes.txt", "mimeType": "text/plain"}
+    for response in ([{"type": "text", "text": json.dumps(created)}], other, "not json"):
+        payload = {
+            "hook_event_name": "PostToolUse", "tool_name": "mcp__claude_ai_Google_Drive__create_file",
+            "tool_input": {"title": "x"}, "session_id": "conv-x", "tool_response": response,
+        }  # fmt: skip
+        assert bridge_env.hook("ArtifactPublish", payload, None).returncode == 0
+    with bridge_env.connect() as conn:
+        pins = sorted((p.title, p.body, p.pinned_by) for p in list_pins(conn))
+    assert pins == [
+        ("Talk draft", "https://docs.google.com/presentation/d/f1Ab/edit", "xavi"),
+        ("notes.txt", "https://drive.google.com/file/d/f2Cd/view", "xavi"),
+    ]
+    assert not (bridge_env.state_dir / "errors.log").exists()

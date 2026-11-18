@@ -14,6 +14,12 @@ from bridge.pins import Pin, PinError, record_artifact_publish
 from bridge.registry import map_env_to_surface
 
 ARTIFACT_TOOL = "Artifact"
+DRIVE_CREATE_TOOL = "mcp__claude_ai_Google_Drive__create_file"
+_DRIVE_EDITORS = {
+    "application/vnd.google-apps.document": "document",
+    "application/vnd.google-apps.presentation": "presentation",
+    "application/vnd.google-apps.spreadsheet": "spreadsheets",
+}
 UNKNOWN_SESSION = "a session bridge never saw"
 # A result with no structured payload still says where it went: "Published <path> at <url> (Version …".
 _PUBLISHED_AT = re.compile(r"\bPublished \S.*? at (https://claude\.ai/(?:code/)?artifact/[A-Za-z0-9_-]+)")
@@ -69,6 +75,26 @@ def map_tool_call_to_publish(tool_input: object, tool_response: object) -> Artif
     return ArtifactPublish(url, Path(path).stem if isinstance(path, str) and path else url)
 
 
+def map_drive_create_to_publish(tool_response: object) -> ArtifactPublish | None:
+    """The created file's link, built from its id: the connector's answer carries no view URL."""
+    created = _as_object(tool_response)
+    if created is None:
+        try:
+            created = _as_object(json.loads(_map_response_to_text(tool_response)))
+        except ValueError:
+            return None
+    if created is None or not isinstance(file_id := created.get("id"), str) or not file_id:
+        return None
+    editor = _DRIVE_EDITORS.get(str(created.get("mimeType") or ""))
+    url = (
+        f"https://docs.google.com/{editor}/d/{file_id}/edit"
+        if editor
+        else f"https://drive.google.com/file/d/{file_id}/view"
+    )
+    title = created.get("title")
+    return ArtifactPublish(url, title if isinstance(title, str) and title.strip() else url)
+
+
 def _as_object(value: object) -> dict[str, object] | None:
     return cast(dict[str, object], value) if isinstance(value, dict) else None
 
@@ -85,10 +111,15 @@ def _map_response_to_text(response: object) -> str:
 def capture_artifact_publish(
     conn: sqlite3.Connection, config: Config, payload: Mapping[str, object], env: Mapping[str, str], at_ms: int
 ) -> Pin | None:
-    """Pins what a session's Artifact tool published, unless its tab or workspace is private (🔒)."""
-    if payload.get("tool_name") != ARTIFACT_TOOL:
+    """Pins what a session's Artifact tool published or its Google Drive connector created, unless its tab or
+    workspace is private (🔒)."""
+    tool = payload.get("tool_name")
+    if tool == ARTIFACT_TOOL:
+        publish = map_tool_call_to_publish(payload.get("tool_input"), payload.get("tool_response"))
+    elif tool == DRIVE_CREATE_TOOL:
+        publish = map_drive_create_to_publish(payload.get("tool_response"))
+    else:
         return None
-    publish = map_tool_call_to_publish(payload.get("tool_input"), payload.get("tool_response"))
     if publish is None:
         return None
     tab = find_conversation_tab(conn, str(payload.get("session_id") or ""))
