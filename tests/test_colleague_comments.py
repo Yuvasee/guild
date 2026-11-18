@@ -507,3 +507,17 @@ def test_the_page_shows_only_what_needs_attention(tmp_path: Path) -> None:
     with transaction(conn):
         mark_closed(conn, [REF], NOW)
     assert not any(e["needs_attention"] for e in feed(conn).values())
+
+
+def test_a_draft_or_an_edited_reply_with_an_unfilled_slot_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn, _, item = drafted(tmp_path, monkeypatch, comment("p1", author="mira"), comment("p2", author="mira"))
+    for text in ("Fixed in <sha>.", "See <link>", "Tracked in ACME-xxxx", "TODO: answer"):
+        with transaction(conn), pytest.raises(UsageError, match="fill it in"):
+            record_draft(conn, CONFIG, REF, "p2", text, "plan", LEAD, NOW)
+    with transaction(conn):
+        record_draft(conn, CONFIG, REF, "p2", "Fixed in a1b2c3d, tracked in ACME-12.", "plan", LEAD, NOW)
+    with transaction(conn), pytest.raises(UsageError, match="<sha>"):
+        claim_choice(conn, item, "edited", "Fixed in <sha>.", now_ms())
+    assert feed(conn)["p1"]["status"] != "edited"
