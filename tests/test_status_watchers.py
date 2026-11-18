@@ -15,7 +15,8 @@ from test_capacity import add_session
 from bridge import status_watchers
 from bridge.config import Config, PageLink, Watcher, map_toml_to_config
 from bridge.db import connect
-from bridge.status_watchers import MAX_FILE_BYTES, alert_watchers, read_watcher
+from bridge.guildview import map_db_to_guild
+from bridge.status_watchers import MAX_FILE_BYTES, alert_watchers, find_owner_needs, read_watcher
 
 STUBS = """
 const element = () => new Proxy(function () {}, {
@@ -53,6 +54,7 @@ def test_fresh_ok_sweep_is_ok(tmp_path: Path) -> None:
         "stale_after_min": 20,
         "summary": "0 new",
         "detail": "",
+        "needs_owner": False,
     }
 
 
@@ -70,6 +72,41 @@ def test_failed_sweep_is_failed_and_keeps_its_detail(tmp_path: Path) -> None:
     watcher = _write(tmp_path, last_run_utc="2026-11-04T11:58:00Z", status="failed", detail="Sentry 502")
     shown = read_watcher(watcher, NOW)
     assert (shown["state"], shown["detail"]) == ("failed", "Sentry 502")
+
+
+@pytest.mark.parametrize(
+    ("fields", "cards"),
+    [
+        ({"status": "failed", "needs_owner": True}, [{"type": "watcher", "text": "Claude · devbox: login needed"}]),
+        ({"status": "failed"}, []),
+        ({"status": "failed", "needs_owner": "yes"}, []),
+        ({"status": "ok", "needs_owner": True}, []),
+        ({"status": "failed", "needs_owner": True, "last_run_utc": "2026-11-04T10:00:00Z"}, []),
+    ],
+)
+def test_only_a_fresh_failed_watcher_that_asks_for_the_owner_is_a_needs_you_card(
+    tmp_path: Path, fields: dict[str, object], cards: list[dict[str, object]]
+) -> None:
+    watcher = _write(
+        tmp_path,
+        **{"name": "Claude · devbox", "summary": "login needed", "last_run_utc": "2026-11-04T11:58:00Z", **fields},
+    )
+    assert find_owner_needs((watcher,), NOW) == [{**c, "path": watcher.path} for c in cards]
+
+
+def test_the_owner_card_is_among_the_pages_needs_while_failed_and_gone_once_ok(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    watcher = _write(
+        tmp_path, name="Claude · devbox", status="failed", summary="login needed", needs_owner=True,
+        last_run_utc="2026-11-04T11:58:00Z",
+    )  # fmt: skip
+    config = Config(watchers=(watcher,))
+    needs = map_db_to_guild(conn, config, NOW, lambda ref: "")["needs"]
+    card = {"type": "watcher", "path": watcher.path, "text": "Claude · devbox: login needed"}
+    assert card in needs  # type: ignore[operator]
+    _write(tmp_path, name="Claude · devbox", status="ok", summary="ok", last_run_utc="2026-11-04T11:59:00Z")
+    assert map_db_to_guild(conn, config, NOW, lambda ref: "")["needs"] == []
 
 
 def test_missing_file_keeps_the_configured_name(tmp_path: Path) -> None:

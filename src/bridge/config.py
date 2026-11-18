@@ -100,6 +100,8 @@ class Config:
     """A [[remotes]] name where `guild worker` runs Claude by default, in tmux; empty runs workers on this Mac."""
     worker_path_map: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
     """Local checkout (~ allowed) to the same checkout's absolute path on worker_host."""
+    worker_host_watcher: str = ""
+    """The [[watchers]] name that watches worker_host's Claude; while it reads failed, workers start on this Mac."""
     review_post_dry_run: bool = True
     """Writes the Slack post to a log instead of sending it."""
     review_channel_id: str = ""
@@ -275,7 +277,7 @@ def map_toml_to_config(raw: dict[str, object]) -> Config:
     prefixes = cast(list[object], raw_prefixes) if isinstance(raw_prefixes, list) else None
     if prefixes is None or not all(isinstance(p, str) for p in prefixes):
         raise ValueError("issue_prefixes must be a list of strings")
-    return Config(
+    config = Config(
         issue_prefixes=tuple(str(p) for p in prefixes),
         agtermctl=_str(raw, "agtermctl", defaults.agtermctl),
         user_alias=_str(raw, "user_alias", defaults.user_alias),
@@ -300,6 +302,7 @@ def map_toml_to_config(raw: dict[str, object]) -> Config:
         worker_model=_str(raw, "worker_model", defaults.worker_model),
         worker_host=_str(raw, "worker_host", defaults.worker_host),
         worker_path_map=MappingProxyType(map_table_to_worker_path_map(_str_table(raw, "worker_path_map"))),
+        worker_host_watcher=_str(raw, "worker_host_watcher", defaults.worker_host_watcher),
         review_post_dry_run=_bool(raw, "review_post_dry_run", defaults.review_post_dry_run),
         review_ignored_posts=_str_list(raw, "review_ignored_posts", defaults.review_ignored_posts),
         agent_prefix_from_ms=_int(raw, "agent_prefix_from_ms", defaults.agent_prefix_from_ms),
@@ -349,6 +352,10 @@ def map_toml_to_config(raw: dict[str, object]) -> Config:
         auto_merge_decision=_str(raw, "auto_merge_decision", defaults.auto_merge_decision),
         auto_merge_failures_to=_str(raw, "auto_merge_failures_to", defaults.auto_merge_failures_to),
     )
+    named = [w for w in config.watchers if w.name == config.worker_host_watcher]
+    if config.worker_host_watcher and len(named) != 1:
+        raise ValueError(f"worker_host_watcher {config.worker_host_watcher!r} must name exactly one [[watchers]] entry")
+    return config
 
 
 def _weekday_or_none(raw: dict[str, object], key: str) -> int | None:

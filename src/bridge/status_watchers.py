@@ -56,6 +56,15 @@ def read_watcher(watcher: Watcher, now: int) -> dict[str, object]:
     return {**shown, **status, "name": name, "state": state}
 
 
+def find_owner_needs(watchers: tuple[Watcher, ...], now: int) -> list[dict[str, object]]:
+    """A failed watcher whose job says only the owner's hands can fix it is a Needs-you card while it reads so."""
+    return [
+        {"type": "watcher", "path": shown["path"], "text": f"{shown['name']}: {shown['summary'] or 'failed'}"}
+        for shown in read_watchers(watchers, now)
+        if shown["state"] == "failed" and shown.get("needs_owner")
+    ]
+
+
 def _read_up_to(fd: int, limit: int) -> bytes:
     chunks: list[bytes] = []
     size = 0
@@ -92,6 +101,7 @@ def map_json_to_status(data: object) -> dict[str, object]:
         "stale_after_min": stale_after,
         "summary": summary.strip()[:SUMMARY_CHARS] if isinstance(summary, str) else "",
         "detail": detail.strip()[:DETAIL_CHARS] if isinstance(detail, str) else "",
+        "needs_owner": fields.get("needs_owner") is True,
     }
 
 

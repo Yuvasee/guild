@@ -131,6 +131,7 @@ from bridge.review_worktree import DOC_MIN_TERMS, REVIEW_LARGE_LOC, DocError, co
 from bridge.reviews import clear_approval_waiver, find_owner, map_db_to_reviews, record_approval_waiver
 from bridge.start_context import CONSTITUTION_PATH
 from bridge.stats import convert_week_to_lines
+from bridge.status_watchers import read_watcher
 from bridge.tabinput import is_tab_selected, run_agterm, type_when_idle
 from bridge.watcher import find_conversation_tab, map_tree_to_parent, read_screen_tail, read_tree
 from bridge.weekly_task import send_weekly_task
@@ -718,7 +719,10 @@ def cmd_worker(args: argparse.Namespace, conn: sqlite3.Connection, config: Confi
         raise UsageError(map_workers_to_cap_refusal(live, WORKER_CAP, now_ms()))
     cwd = Path(os.path.abspath(os.path.expanduser(args.cwd or os.getcwd())))
     if config.worker_host and not args.local:
-        return _start_host_worker(conn, config, me.handle, parent, name, prompt, cwd)
+        down = find_down_worker_host(config, now_ms())
+        if down is None:
+            return _start_host_worker(conn, config, me.handle, parent, name, prompt, cwd)
+        print(f"starting {name!r} on this Mac: {down}")
     brief = state_dir() / "worker-briefs" / f"{uuid.uuid4().hex}.md"
     brief.parent.mkdir(parents=True, exist_ok=True)
     brief.write_text(build_worker_brief(conn, config, prompt, f"bridge send {me.handle}"))
@@ -736,6 +740,18 @@ def cmd_worker(args: argparse.Namespace, conn: sqlite3.Connection, config: Confi
     session_id = start_worker_tab(conn, config, parent, name, cwd, command)
     print(f"tab {session_id}: {name}")
     return _await_worker_start(config, session_id)
+
+
+def find_down_worker_host(config: Config, now: int) -> str | None:
+    """Why worker_host cannot run Claude now, by its watcher; None when it can or nothing watches it. A stale or
+    missing status says nothing about the host, so only a failed one keeps workers here."""
+    watcher = next((w for w in config.watchers if w.name == config.worker_host_watcher), None)
+    if not config.worker_host_watcher or watcher is None:
+        return None
+    shown = read_watcher(watcher, now)
+    if shown["state"] != "failed":
+        return None
+    return f"{shown['name']} reads failed: {shown['summary'] or 'no summary'}"
 
 
 def build_worker_brief(

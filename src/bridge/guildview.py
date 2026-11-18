@@ -31,6 +31,7 @@ from bridge.registry import list_sessions
 from bridge.remote import REMOTE_STALE_AFTER_MS
 from bridge.reviews import find_lead_of
 from bridge.signals import CI_STOPPED, STALL, map_enrichment_to_status
+from bridge.status_watchers import find_owner_needs
 from bridge.watcher import BLOCKED_AFTER_S
 from bridge.workers import WORKER_CAP
 
@@ -168,6 +169,7 @@ def map_db_to_guild(
         )
     needs.extend(_load_undelivered_to_needs(conn, config))
     needs.extend(_load_assistant_undelivered_to_needs(conn, config))
+    needs.extend(find_owner_needs(config.watchers, now))
     return {
         "now": now,
         "tabs_at": tree_at,
