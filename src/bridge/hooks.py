@@ -11,7 +11,6 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import cast
 
-from bridge.artifacts import capture_artifact_publish
 from bridge.board import (
     HINT_SENT,
     INJECT_BUDGET_BYTES,
@@ -96,7 +95,6 @@ from bridge.registry import (
     take_english_name_nudge,
     take_focus_nudge,
 )
-from bridge.reviews import record_host_pushes
 from bridge.rewake import run_rewake
 from bridge.start_context import (
     KEEP_COMMAND,
@@ -216,6 +214,8 @@ def run_artifact_hook() -> int:
         config = load_config()
         conn = connect(db_path(), HOOK_BUSY_TIMEOUT_MS)
         try:
+            from bridge.artifacts import capture_artifact_publish  # noqa: PLC0415: only this hook needs it
+
             with transaction(conn, retry_busy_timeout_ms=HOOK_RETRY_BUSY_TIMEOUT_MS):
                 capture_artifact_publish(conn, config, payload, os.environ, time.time_ns() // 1_000_000)
         finally:
@@ -282,6 +282,8 @@ def handle_pre_tool_use(
             if t.action == "git push" and len(parts := t.key.split(":", 2)) == 3 and parts[0] == "branch"
         ]
         if host_checkout is not None and conversation_id and pushed:
+            from bridge.reviews import record_host_pushes  # noqa: PLC0415: a third of every hook's start-up otherwise
+
             with transaction(conn):
                 record_host_pushes(conn, config, conversation_id, pushed, time.time_ns() // 1_000_000)
         return _note("\n".join(waived)) if waived else ""

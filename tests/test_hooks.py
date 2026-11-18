@@ -190,6 +190,9 @@ def test_concurrent_hooks_from_many_sessions(bridge_env: BridgeEnv, spawn_proces
 
 
 def test_hook_latency(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:
+    load, cpus = os.getloadavg()[0], os.cpu_count() or 1
+    if load > cpus:
+        pytest.skip(f"load {load:.0f} on {cpus} CPUs: the timing would measure the machine, not the hook")
     pid = spawn_process()
     payload = {"session_id": "conv-l", "cwd": str(bridge_env.root), "prompt": "ABC-1 PR #12"}
     bridge_env.hook("SessionStart", {**payload, "source": "startup"}, pid)
