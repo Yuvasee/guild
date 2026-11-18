@@ -259,6 +259,50 @@ def test_a_stale_queue_reads_github_once_and_an_unreadable_pr_is_refused(tmp_pat
     fetch.assert_not_called()
 
 
+def test_a_wait_on_a_body_sentence_holds_only_while_the_body_read_live_still_says_it(tmp_path: Path) -> None:
+    from test_reviews import CONFIG, make_pr
+
+    from bridge.db import connect
+    from bridge.review_deps import map_markdown_to_preconditions
+    from bridge.review_github import GitHubError
+    from bridge.reviews import store_open_prs
+
+    held_body = "Adds the warp drive. Do not merge until the reactor is cooled."
+    [said] = map_markdown_to_preconditions(held_body, "Acme/Web", 13)
+    web = repo(tmp_path / "web")
+    conn = connect(tmp_path / "t.db")
+    with transaction(conn):
+        store_open_prs(
+            conn,
+            [make_pr(ref=f"pr:Acme/Web#{n}", repo="Acme/Web", number=n, head=f"feat/{n}") for n in (12, 13)],
+            500,
+        )
+        conn.execute("""UPDATE review_prs SET approved_by = '["mira"]', reviewed_at = 600""")
+        conn.execute("INSERT OR REPLACE INTO review_poll (id, ok_at) VALUES (1, 1000)")
+
+    def blocks(number: int, body: str | Exception) -> list[str]:
+        targets = map_command_to_targets(f"gh pr merge {number}", str(web))
+        with (
+            mock.patch("bridge.guard.fetch_pr_body", side_effect=[body]) as read,
+            mock.patch("bridge.guard.fetch_merge_facts", side_effect=GitHubError("gh failed: timeout")),
+        ):
+            refusals = find_merge_blocks(conn, CONFIG, targets, 1000)
+        assert read.call_args.args[:2] == ("Acme/Web", 13)
+        return [refusal.waits_on or "" for refusal in refusals]
+
+    with transaction(conn):
+        conn.execute("UPDATE review_prs SET dep_blockers = ? WHERE number = 13", (json.dumps([said]),))
+    assert blocks(13, held_body) == [said]
+    assert blocks(13, "Adds the warp drive.") == []
+    [stale] = blocks(13, GitHubError("gh failed: timeout"))
+    assert stale.startswith(said) and "as of the queue's last poll: reading Acme/Web#13 (gh failed: timeout)" in stale
+
+    with transaction(conn):
+        conn.execute("UPDATE review_prs SET siblings = ? WHERE number = 12", (json.dumps(["pr:Acme/Web#13"]),))
+    assert blocks(12, held_body) == [f"goes with Acme/Web#13, which is not ready: {said}"]
+    assert blocks(12, "Adds the warp drive.") == []
+
+
 def test_a_merge_refused_for_ci_github_would_not_run_names_github_only_at_the_head_it_was_read_for(
     tmp_path: Path,
 ) -> None:
