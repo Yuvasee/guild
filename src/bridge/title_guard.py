@@ -7,6 +7,7 @@ from pathlib import PurePosixPath
 from urllib.parse import unquote
 
 from bridge.agent_prefix import CLAUDE_PREFIX, LINEAR_ISSUE_TOOLS, TITLE_RULE, is_prefixed, strip_agent_prefix
+from bridge.colleague_comments import SUBSTANTIVE, list_unhandled_colleague_comments
 from bridge.config import Config
 from bridge.gitinfo import RepoFacts, read_repo_facts
 from bridge.guard import SHELL_KEYWORDS, SHELLS, RepoReader, segment_command
@@ -50,6 +51,7 @@ _GH_ISSUE_PR = _options(
     "template/T recover add-assignee remove-assignee add-label remove-label add-project remove-project add-reviewer "
     "remove-reviewer"
 )
+_GH_PR_ANSWER = _options(f"{_GH_GLOBAL} body/b body-file/F")
 _GH_MERGE = _options(f"{_GH_GLOBAL} subject/t body/b body-file/F author-email/A match-head-commit")
 _GH_API = _options(f"{_GH_GLOBAL} method/X header/H field/F raw-field/f input jq/q template/t preview/p cache")
 _GIT_COMMIT = _options(
@@ -61,6 +63,9 @@ _GIT_MERGE = _options("message/m file/F strategy/s strategy-option/X into-name c
 _GH_LABEL = _options(f"{_GH_GLOBAL} name/n color/c description/d")
 _API_LABELS_RE = re.compile(
     r"(?:^|/)repos/[^/\s]+/[^/\s]+/(?:(issues/[^/\s?]+)(/labels)?|labels)(?:/([^?\s]*))?/?(?:\?|$)"
+)
+_API_ANSWER_RE = re.compile(
+    r"(?:https://api\.github\.com)?/?repos/([\w.-]+/[\w.-]+)/(pulls|issues)/(\d+)/(comments|reviews)(?:/(\d+)/replies)?/?(?:\?.*)?"
 )
 _GH_TITLE_COMMANDS = {
     (group, action): _GH_ISSUE_PR for group in ("pr", "issue") for action in ("create", "new", "edit")
@@ -313,12 +318,39 @@ def find_missing_issue_refusal(
     another machine: a body file there is not read here."""
     if not config.issue_prefixes or not config.review_org or "gh" not in command:
         return None
+    for call in _list_gh_calls(command, cwd):
+        refusal = _check_pr_issue(
+            conn,
+            config,
+            call.args,
+            call.env,
+            call.directory,
+            read_repo or read_repo_facts,
+            command if read_files else "",
+            call.branch_moved,
+        )
+        if refusal:
+            return refusal
+    return None
+
+
+@dataclass(frozen=True)
+class _GhCall:
+    args: list[str]
+    env: dict[str, str]
+    directory: str | None
+    branch_moved: bool
+
+
+def _list_gh_calls(command: str, cwd: str | None) -> list[_GhCall]:
+    """Each gh command's arguments, its env prefix and the directory it runs in, when a leading cd surely set it."""
+    calls: list[_GhCall] = []
     directory = cwd
     branch_moved = False
     depth = 0
     leading_cds = True
     prefixes: list[list[str]] = []
-    for index, (tokens, joined_by) in enumerate(segment_command(command, prefixes=prefixes)):
+    for index, (tokens, joined_by) in enumerate(segment_command(command, prefixes=prefixes, redirections=[])):
         depth += {"(": 1, ")": -1}.get(joined_by, 0)
         while tokens and tokens[0] in SHELL_KEYWORDS:
             tokens = tokens[1:]
@@ -334,19 +366,8 @@ def find_missing_issue_refusal(
             branch_moved = True
         elif tokens[0] == "gh":
             env = dict(w.split("=", 1) for w in prefixes[index] if "=" in w)
-            refusal = _check_pr_issue(
-                conn,
-                config,
-                tokens[1:],
-                env,
-                directory,
-                read_repo or read_repo_facts,
-                command if read_files else "",
-                branch_moved,
-            )
-            if refusal:
-                return refusal
-    return None
+            calls.append(_GhCall(tokens[1:], env, directory, branch_moved))
+    return calls
 
 
 def _check_pr_issue(
@@ -430,6 +451,118 @@ def _check_pr_edit(
         return None
     pr = str(row["ref"]).removeprefix("pr:")
     return map_missing_issue_to_refusal(config, f"{pr}'s branch {row['head']}, title or new body", False)
+
+
+def find_colleague_reply_refusal(
+    conn: sqlite3.Connection, config: Config, command: str, cwd: str | None, read_repo: RepoReader | None = None
+) -> str | None:
+    """Why a comment, review or thread reply on a review_org PR would answer a colleague's comment no call handles
+    yet: a reply in its thread, or anything posted on the PR outside a thread. As of the queue's last read of GitHub;
+    None when the guard cannot tell which PR or thread."""
+    if not config.review_org or "gh" not in command:
+        return None
+    for call in _list_gh_calls(command, cwd):
+        target = _map_gh_call_to_answer(conn, call, read_repo or read_repo_facts)
+        if target is None:
+            continue
+        ref, thread = target
+        if ref.removeprefix("pr:").partition("/")[0].casefold() != config.review_org.casefold():
+            continue
+        row = conn.execute(
+            "SELECT ref FROM review_prs WHERE lower(ref) = ? AND closed_at IS NULL", (ref.lower(),)
+        ).fetchone()
+        if row is None:
+            continue
+        ref = str(row["ref"])
+        if refusal := _check_colleague_answer(conn, config, ref, thread):
+            return refusal
+    return None
+
+
+def _map_gh_call_to_answer(
+    conn: sqlite3.Connection, call: _GhCall, read_repo: RepoReader
+) -> tuple[str, str | None] | None:
+    """(the PR's ref, the inline comment replied to or None for a post outside any thread) of a gh command that
+    posts on a PR; None for any other command or one whose PR, thread or body the guard cannot read."""
+    if any(a in ("-h", "--help") or a.startswith("--delete-last") for a in call.args):
+        return None
+    if call.args[:1] == ["api"]:
+        return _map_api_call_to_answer(call, read_repo)
+    found, positional = _scan(call.args, _GH_PR_ANSWER)
+    if positional[:1] != ["pr"] or positional[1:2] not in (["comment"], ["review"]):
+        return None
+    keys = {key for key, _ in found}
+    if positional[1] == "review" and not keys & {"body", "body-file"}:
+        return None
+    facts = read_repo(call.directory) if call.directory else None
+    repo = _read_repo([v for k, v in found if k == "repo"][-1:] or [call.env.get("GH_REPO", "")], facts)
+    branch = facts.branch if facts and not call.branch_moved else None
+    selector = positional[2] if len(positional) > 2 else branch
+    if repo is None and selector and (url := _PR_URL_RE.search(selector)):
+        repo = str(url.group(1))
+    row = _find_queue_row(conn, repo, selector) if repo else None
+    return (str(row["ref"]), None) if row is not None else None
+
+
+def _map_api_call_to_answer(call: _GhCall, read_repo: RepoReader) -> tuple[str, str | None] | None:
+    found, positional = _scan(call.args[1:], _GH_API)
+    if not positional:
+        return None
+    path = positional[0]
+    if "{owner}" in path or "{repo}" in path:
+        facts = read_repo(call.directory) if call.directory else None
+        current = _read_repo([call.env.get("GH_REPO", "")], facts)
+        if current is None:
+            return None
+        owner, _, name = current.partition("/")
+        path = path.replace("{owner}", owner).replace("{repo}", name)
+    match = _API_ANSWER_RE.fullmatch(path)
+    fields = [v for k, v in found if k in ("field", "raw-field")]
+    has_input = any(k == "input" for k, _ in found)
+    methods = [v.upper() for k, v in found if k == "method"]
+    method = methods[-1] if methods else ("POST" if fields or has_input else "GET")
+    if match is None or method != "POST" or _is_shell_value(path):
+        return None
+    repo, group, number, kind, replied_to = match.groups()
+    ref = f"pr:{repo}#{number}"
+    if replied_to:
+        return ref, f"p{replied_to}"
+    named = dict(v.split("=", 1) for v in fields if "=" in v)
+    if group == "pulls" and kind == "comments":
+        parent = named.get("in_reply_to", "")
+        return (ref, f"p{parent}") if not has_input and parent.isdigit() else None
+    # With --input the fields go to the query string and the file is the body.
+    if group == "pulls" and (has_input or not named.get("body")):
+        return None
+    return ref, None
+
+
+def _check_colleague_answer(conn: sqlite3.Connection, config: Config, ref: str, thread: str | None) -> str | None:
+    pending = list_unhandled_colleague_comments(conn, ref)
+    if thread is not None:
+        replied = conn.execute(
+            "SELECT comment_id, parent_id FROM review_comments WHERE ref = ? AND comment_id = ?", (ref, thread)
+        ).fetchone()
+        if replied is None:
+            return None
+        root = replied["parent_id"] or replied["comment_id"]
+        pending = [e for e in pending if root in (e["comment_id"], e["parent_id"])]
+    if not pending:
+        return None
+    first = pending[0]
+    url = first["url"]
+    if first["status"] == SUBSTANTIVE:
+        how = f"it requests changes: `guild comment draft {url}`"
+    else:
+        how = (
+            f'`guild comment small {url} "what I did"` if it is a typo, rename or factual question; '
+            f"else `guild comment draft {url}`"
+        )
+    more = f" ({len(pending) - 1} more like it on this PR: `guild comment list`)" if len(pending) > 1 else ""
+    return (
+        f"bridge: {first['author']}'s comment {url} is not handled: {how} ({config.owner_name} chooses; bridge "
+        f"posts).{more}"
+    )
 
 
 def map_missing_issue_to_refusal(config: Config, where: str, fill: bool) -> str:

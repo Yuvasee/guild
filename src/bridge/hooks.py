@@ -116,6 +116,7 @@ from bridge.start_context import (
     write_pending_start,
 )
 from bridge.title_guard import (
+    find_colleague_reply_refusal,
     find_missing_issue_refusal,
     find_owner_label_writes,
     find_prefixed_linear_title,
@@ -230,8 +231,9 @@ def run_artifact_hook() -> int:
 def handle_pre_tool_use(
     conn: sqlite3.Connection, payload: dict[str, object], config: Config, host_checkout: HostRepoReader | None = None
 ) -> str:
-    """Denies a robot-prefixed title, a change to the owner's label, a PR that would name no issue, or a shell command
-    that would mutate a resource another live session has claimed.
+    """Denies a robot-prefixed title, a change to the owner's label, a PR that would name no issue, an answer to a
+    colleague's comment no call handles yet, or a shell command that would mutate a resource another live session has
+    claimed.
 
     host_checkout is set for a host worker: git facts come from its report, and a merge it names no PR for is refused.
     """
@@ -256,6 +258,9 @@ def handle_pre_tool_use(
         missing_issue = find_missing_issue_refusal(conn, config, command, cwd, host_checkout, read_files=False)
     if missing_issue:
         return _deny(missing_issue)
+    where = cwd if host_checkout is not None else cwd or os.getcwd()
+    if reply := find_colleague_reply_refusal(conn, config, command, where, host_checkout):
+        return _deny(reply)
     unreadable: list[Unreadable] = []
     if host_checkout is None:
         targets = map_command_to_targets(command, _str(payload, "cwd") or os.getcwd(), unreadable)
