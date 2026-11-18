@@ -68,6 +68,7 @@ _PRECONDITION_RE = re.compile(
 _EMPHASIS_RE = re.compile(r"\*+|(?<!\w)__?|__?(?!\w)")
 _BLOCK_START_RE = re.compile(r"^\s*(?:[-*+>]|#+|\d+[.)])\s+")
 _PRECONDITION_SHOWN_MAX = 120
+PRECONDITION_PREFIX = 'its body says: "'
 
 
 def map_markdown_to_preconditions(body: str, repo: str, number: int) -> tuple[str, ...]:
@@ -86,7 +87,7 @@ def map_markdown_to_preconditions(body: str, repo: str, number: int) -> tuple[st
                 if len(sentence) <= _PRECONDITION_SHOWN_MAX
                 else sentence[: _PRECONDITION_SHOWN_MAX - 1].rstrip() + "\u2026"
             )
-            reason = f'its body says: "{shown}" (edit the body once that is done)'
+            reason = f'{PRECONDITION_PREFIX}{shown}" (edit the body once that is done)'
             if reason not in found:
                 found.append(reason)
     return tuple(found)

@@ -234,6 +234,10 @@ def run_gh(args: list[str], timeout_s: float = _GH_TIMEOUT_S) -> str:
     return done.stdout
 
 
+def fetch_pr_body(repo: str, number: int, timeout_s: float) -> str:
+    return run_gh(["api", f"repos/{repo}/pulls/{number}", "--jq", '.body // ""'], timeout_s)
+
+
 def add_label(repo: str, number: int, label: str) -> None:
     """Creates the label in the repo first when adding it fails, then adds it once more."""
     add = ["api", "-X", "POST", f"repos/{repo}/issues/{number}/labels", "-f", f"labels[]={label}"]

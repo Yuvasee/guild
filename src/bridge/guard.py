@@ -4,7 +4,7 @@ import os
 import re
 import sqlite3
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path, PurePosixPath
@@ -17,7 +17,8 @@ from bridge.db import transaction
 from bridge.gitinfo import RepoFacts, read_repo_facts
 from bridge.procinfo import process_start_ms
 from bridge.registry import PROC_START_TOLERANCE_MS
-from bridge.review_github import GitHubError, LiveMergeFacts, fetch_merge_facts
+from bridge.review_deps import PRECONDITION_PREFIX, map_markdown_to_preconditions
+from bridge.review_github import GitHubError, LiveMergeFacts, fetch_merge_facts, fetch_pr_body
 
 # Shell-glob fragments for the hook's fast gate; spacing and `git -C dir push` must still reach Python.
 DEFAULT_TRIGGERS = (
@@ -139,6 +140,7 @@ GITHUB_STALE_S = 300
 MERGE_CHECK_BUDGET_S = 3.8
 MERGE_FACTS_TIMEOUT_S = 3.0
 MERGE_FACTS_MIN_S = 0.3
+BODY_READ_TIMEOUT_S = 1.5
 READY = "ready"
 HELD = "held"
 DRAFT = "a draft"
@@ -1091,9 +1093,14 @@ def map_logins_to_colleague_block(threads: Sequence[str], comments: Sequence[str
     return f"{', '.join(parts)} ({', '.join(sorted(set([*threads, *comments])))})" if parts else None
 
 
-def map_row_to_dependency_blockers(row: sqlite3.Row, with_siblings: bool = True) -> list[str]:
-    """Its waits on PRs outside its siblings, then, with_siblings, on the siblings it merges after."""
+def map_row_to_dependency_blockers(
+    row: sqlite3.Row, with_siblings: bool = True, live: Mapping[str, Sequence[str]] | None = None
+) -> list[str]:
+    """Its waits on PRs outside its siblings, then, with_siblings, on the siblings it merges after. `live`: by ref,
+    the preconditions of a body just read from GitHub, in place of the queue's."""
     outside: list[str] = json.loads(str(row["dep_blockers"] or "[]"))
+    if live is not None and (fresh := live.get(str(row["ref"]))) is not None:
+        outside = [*fresh, *(b for b in outside if not b.startswith(PRECONDITION_PREFIX))]
     return [*outside, *json.loads(str(row["sibling_waits"] or "[]"))] if with_siblings else outside
 
 
@@ -1121,20 +1128,21 @@ def find_dependency_wait(
     row: sqlite3.Row,
     why_not: Callable[[sqlite3.Row], str | None] | None = None,
     siblings: Sequence[sqlite3.Row] | None = None,
+    live: Mapping[str, Sequence[str]] | None = None,
 ) -> str | None:
     """The one dependency rule every merge path reads (the queue's Ready group and its lead's guard, the Merge button,
     the auto-merger): a PR its body names that must merge first and has not, or a sibling (a PR it names that names it
     back) not ready by `why_not`, the caller's own rule; by default the lead's merge rule. Siblings are judged on the
     queue's last read, so a sibling that just turned ready lets the others through only after the next poll."""
-    if blockers := map_row_to_dependency_blockers(row):
+    if blockers := map_row_to_dependency_blockers(row, live=live):
         return blockers[0]
     found = load_open_siblings(conn, row) if siblings is None else siblings
-    return map_siblings_to_wait(found, why_not or find_lead_wait_alone)
+    return map_siblings_to_wait(found, why_not or (lambda sibling: find_lead_wait_alone(sibling, live)))
 
 
-def find_lead_wait_alone(row: sqlite3.Row) -> str | None:
+def find_lead_wait_alone(row: sqlite3.Row, live: Mapping[str, Sequence[str]] | None = None) -> str | None:
     """What keeps a PR from its lead's merge, its siblings aside."""
-    if blockers := map_row_to_dependency_blockers(row, with_siblings=False):
+    if blockers := map_row_to_dependency_blockers(row, with_siblings=False, live=live):
         return blockers[0]
     waits = list_merge_waits(map_row_to_merge_facts(row, row["merge_block"]))
     # A backport whose diff check passed at this head needs no approval, as the guard's own check of it finds.
@@ -1176,7 +1184,7 @@ def find_merge_blocks(
         if row["held_at"] is not None:
             refusals.append(MergeRefusal(ref, (HELD,), row["merge_block"], held_why=row["held_why"]))
             continue
-        facts = map_row_to_merge_facts(row, row["merge_block"], find_dependency_wait(conn, row))
+        facts = map_row_to_merge_facts(row, row["merge_block"], find_live_dependency_wait(conn, row, deadline))
         # A fresh cache may still be one poll behind a CI rerun or an approval, so a refusal is confirmed live first.
         cached_waits = list_merge_waits(facts) if fresh else ()
         head_oid: str | None = row["head_oid"]
@@ -1238,6 +1246,36 @@ def find_merge_blocks(
                 )
             )
     return refusals
+
+
+def find_live_dependency_wait(conn: sqlite3.Connection, row: sqlite3.Row, deadline: float) -> str | None:
+    """find_dependency_wait, but a wait on a sentence of a PR's body, its own or a sibling's, holds only if the body
+    read from GitHub now still says it: the queue's copy has lagged an edit by minutes. A body that cannot be read
+    keeps the queue's sentence, said to be as of its last poll."""
+    wait = find_dependency_wait(conn, row)
+    if wait is None or PRECONDITION_PREFIX not in wait:
+        return wait
+    siblings = load_open_siblings(conn, row)
+    live: dict[str, tuple[str, ...]] = {}
+    unread: list[str] = []
+    for pr in (row, *siblings):
+        stored = map_row_to_dependency_blockers(pr, with_siblings=False)
+        if not any(b.startswith(PRECONDITION_PREFIX) for b in stored):
+            continue
+        repo, number = str(pr["repo"]), int(pr["number"])
+        try:
+            left = deadline - time.monotonic()
+            if left < MERGE_FACTS_MIN_S:
+                raise GitHubError("out of time before reading GitHub")
+            body = fetch_pr_body(repo, number, min(left, BODY_READ_TIMEOUT_S))
+        except GitHubError as exc:
+            unread.append(f"{repo}#{number} ({exc})")
+            continue
+        live[str(pr["ref"])] = map_markdown_to_preconditions(body, repo, number)
+    wait = find_dependency_wait(conn, row, siblings=siblings, live=live)
+    if wait is not None and PRECONDITION_PREFIX in wait and unread:
+        return f"{wait}; the body text is as of the queue's last poll: reading {', '.join(unread)} live failed"
+    return wait
 
 
 def map_live_threads_to_merge_block(row: sqlite3.Row, his_threads: int) -> str | None:
