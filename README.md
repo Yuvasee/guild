@@ -1,87 +1,113 @@
 <p align="center">
-  <img alt="Guild's eye: an orange almond, an amber iris, a dark slit pupil" src="docs/images/eye.svg" width="160">
+  <img alt="Guild's eye, a nod to the Eye of Sauron: an orange almond, an amber iris, a dark slit pupil" src="docs/images/eye.svg" width="160">
 </p>
 
 <h1 align="center">Guild</h1>
 
 <p align="center"><b>One eye, twenty agents.</b><br>
-Stop juggling terminals. Read one feed.</p>
+Your attention is the Eye of Sauron. Guild tells it where to look.</p>
 
-## The problem
+## Still doing this? 😏
 
-It starts with one agent and a phone. You ask, the agent thinks, you scroll. Then it asks a question and waits for
-you, while you wait for it. Both are expensive, and both are mostly idle.
+One agent. One human. One phone.
 
-Agents got stronger. First you ran three or four streams in parallel, with you at every gate. Now each agent finishes
-a real task alone, so you run fifteen or twenty. Your job is no longer the work. It is deciding where to look.
+```text
+$ claude
+> refactor the billing module
+✻ Thinking… (4m 12s)
+? Should I also update the tests? (y/n)
+  ▌ waiting for you since 11 min
+```
+
+The agent waits 11 minutes for you. You scroll your feed for 11 minutes. Both very expensive, both mostly idle.
+
+## Then you opened twenty terminals
+
+Agents got strong. Each one finishes a real task alone now, so you run fifteen, twenty of them. Your job is no longer
+the work. Your job is deciding where to look.
 
 <img alt="Twenty Claude Code terminals: a few working, many waiting for you, some blocked or on the same branch, some idle for weeks or forgotten" src="docs/images/twenty-terminals.svg">
 
-So you open twenty terminals and become the bottleneck. Your attention is like an eye: powerful, but it looks one
-way at a time. Everything outside its beam:
+Congrats: you are the bottleneck.
 
-- **waits**: an agent sits idle on your answer; a question waits for days;
-- **drifts**: agents finish and nobody reviews; priorities are guessed, not set;
-- **collides**: two agents on one branch; two fixes for one bug;
-- and **you find out last**: "What is this?" "Why is it red?"
+## The Eye
+
+Your attention is the Eye of Sauron: it sees everything, but only where it looks, and it looks one way at a time.
+One beam. Twenty agents. Everything off the beam:
+
+- ⏳ **waits**: an agent idles on your answer; a question sits for days;
+- 🌀 **drifts**: agents finish and nobody reviews; priorities get guessed, not set;
+- 💥 **collides**: two agents, one branch; two fixes, one bug;
+- 🙈 and **you find out last**: "What is this?" "Why do I see this?" "Why is it red?" **"WTF?!"**
 
 ## The idea
 
-Guild's real job is to tell the eye where to look next. Every event that needs you goes into one feed: a question
-from an agent, a PR ready for review, red CI, an alert, an idle agent, a colleague's comment, a deploy that needs your
-OK. Guild ranks it by the priorities you set, and you look at the top three.
+Guild has one job: tell the Eye where to look next.
+
+Everything that needs you lands in one feed: a question from an agent, a PR ready for review, red CI, an alert, an
+idle agent, a colleague's comment, a deploy waiting for your OK. Guild ranks it by the priorities you set. You look at
+the top three. That's it.
 
 <img alt="Signals from agents, CI and colleagues go through your priorities, set with Right Hand, and come out as a ranked list of three: answer a question, review a fix, review another" src="docs/images/the-idea.svg">
 
 ## The org
 
-To feed that list, Guild is a tiny company in your terminal.
+To feed that list, Guild runs a tiny company in your terminal. Everyone in it is an AI, except you.
 
-<img alt="You at the top; Right Hand under you; five team leads (Alex · Checkout, Boris · Search, Charlie · Mobile, Denis · Platform, Eli · Tooling), each with up to five workers" src="docs/images/org-tree.svg">
+<img alt="You at the top, human; under you, all AI: Right Hand, then five team leads with example names and domains (Alex, e.g. Checkout; Boris, e.g. Search; Charlie, e.g. Mobile; Denis, e.g. Platform; Eli, e.g. Tooling), each with up to five workers. Names and domains are examples: you name your leads and pick their domains" src="docs/images/org-tree.svg">
 
-- **You** set priorities and make the decisions only you can make.
+- **You** set the priorities and make the calls only you can make.
 - **Right Hand** is the one agent you talk to. It routes your words and brings you one question at a time. It never
   writes code.
 - **Team leads** each own a domain. They brief workers, route and verify. Managers never implement.
-- **Workers** do the actual work, up to five per team lead, one task each.
+- **Workers** do the actual work: up to five per lead, one task each.
 
 ## Build your own harness
 
-Take these from Guild:
+I believe the right harness is the one you build for yourself. Someone else's never quite fits, and that includes
+mine. So be bold: write your own, and steal these ideas. They're battle-tested.
 
-1. **One feed for you.** Every event that needs your attention, ranked.
-2. **Shaped for your attention.** Most signal per glance: pages, not walls of text.
-3. **One priority list.** Shared by all agents; you change it as you go.
-4. **A tree of agents.** Managers don't code: they brief, route, verify.
-5. **Specialised leads.** Each owns a domain; domains shift over time.
-6. **Evidence on every claim.** Observed, reproduced or from code; spot-checked.
-7. **Agents talk and claim.** Leads message each other and claim what they touch.
+1. 👁 **One feed for you.** Every event that needs your attention, ranked.
+2. 💎 **Shaped for your attention.** Most signal per glance: pages, not walls of text.
+3. 📋 **One priority list.** Shared by all agents; you change it as you go.
+4. 🌳 **A tree of agents.** Managers don't code: they brief, route, verify.
+5. 🎯 **Specialised leads.** Each owns a domain; domains shift over time.
+6. 🔍 **Evidence on every claim.** Observed, reproduced or from code; spot-checked.
+7. 🤝 **Agents talk and claim.** Leads message each other and claim what they touch.
+
+Or take mine whole. It's below.
 
 ## What it looks like
 
-**Lead a group of Claude Code team leads from one page.** Each team lead runs its own team of agent workers. You are
-the engineering director.
+**One page. Every lead, every worker, and whatever needs you on top.**
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/guild-dark.png">
   <img alt="The Guild page: one question waiting for you, four team leads with their workers, issues and PRs" src="docs/images/guild-light.png">
 </picture>
 
-<sub>Demo data. macOS only · needs [agterm](https://github.com/umputun/agterm) and
-[Claude Code](https://github.com/anthropics/claude-code) · MIT</sub>
+**Every PR in flight on one screen. Numbers tell you where to look first.**
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/guild-prs-dark.png">
+  <img alt="The PR list on the Guild page: Open PRs numbered 1, 2, 3 in your review order with doc links and Publish to Slack buttons, then Ready to merge (lead), Backports (lead merges), Published and Drafts in progress" src="docs/images/guild-prs-light.png">
+</picture>
+
+<sub>Demo data.</sub>
 
 ## How you work with it
 
-Running several agents is easy. Staying in charge of them while you switch context all day is the hard part. Guild
-gives an engineering group's usual structure to agents in one terminal: team leads who own projects, workers under
-them, and you at the top, with one page that shows what needs you.
+Starting agents is easy. Staying in charge of them while you switch context all day is the hard part.
 
-You choose how much you are involved, per project and per decision: anything from full vibe coding, where team leads
-plan, build, test and merge on their own, to explicit rules, checkpoints and review points where they stop and wait
-for you. Go deep on one project when it needs you; let the rest run. Your conversation with Right Hand is never
-blocked: questions for you queue up on the page while you keep talking.
+So Guild gives you a crew: team leads who own projects, workers under them, you on top, and one page that shows what
+needs you.
 
-**You type no commands.** You talk to Right Hand and to your team leads in plain words, and they run everything. The
+You choose how hands-on you are, per project and per decision. Full vibe coding, where leads plan, build, test and
+merge on their own. Or rules, checkpoints and review points where they stop and wait for you. Go deep on one project
+when it needs you; let the rest run. And Right Hand never makes you wait: questions for you queue up on the page while
+you keep talking.
+
+**You type no commands.** You talk to Right Hand and your team leads in plain words, and they run everything. The
 commands in this README only show how it works.
 
 ## In 30 seconds
@@ -92,26 +118,26 @@ commands in this README only show how it works.
 <td valign="top"><img alt="agterm holds Right Hand and the team leads, each with nested worker tabs; bridge, a local service, takes their state from Claude Code hooks, delivers messages and answers into their tabs, keeps notes across compaction, and serves the Guild page where you answer; adapters are optional" src="docs/images/overview.svg"></td>
 </tr>
 <tr>
-<td valign="top"><sub>The group in agterm: Right Hand, four team leads, their workers.</sub></td>
+<td valign="top"><sub>The crew in agterm: Right Hand, four team leads, their workers.</sub></td>
 <td valign="top"><sub>How it fits together: bridge in the middle carries every report, message and answer.</sub></td>
 </tr>
 </table>
 
-- **Team leads.** A team lead is what Claude Code was before Guild: one window doing the work. Now it does not stop
-  for you at every step. It takes tasks, splits them across workers, tests, verifies and merges, and asks you only what
-  it cannot decide. Each one owns a project and lives in its own named, tinted agterm tab.
-- **Workers.** A team lead opens a worker tab for each separate task, nested under it, and checks its result.
-- **Right Hand.** The one tab you talk to. It routes your words to the right team lead, and it streams back what is
+- **Team leads.** A team lead is what Claude Code was before Guild: one window doing the work. Except now it doesn't
+  stop for you at every step. It takes tasks, splits them across workers, tests, verifies, merges, and asks you only
+  what it can't decide. Each one owns a project and lives in its own named, tinted agterm tab.
+- **Workers.** A team lead opens a worker tab for each separate task, nested under its own, and checks the result.
+- **Right Hand.** The one tab you talk to. It routes your words to the right team lead and streams back what's
   happening in every team: decisions made, work finished, problems found.
-- **bridge** is the switchboard underneath: a small local service. Every agent reports its state to it through Claude
+- **bridge** is the switchboard underneath, a small local service. Every agent reports its state to it through Claude
   Code hooks; every message, answer and reminder goes out through it, typed into the right agterm tab; it serves the
-  page. Agents talk to each other through it on a board and in direct messages, with no relaying by you.
+  page. Agents talk to each other through it, on a board and in direct messages. You relay nothing.
 - **Compaction with keep notes.** When an agent's context fills up, it saves what must survive, bridge compacts it and
-  gives the notes back, so a team lead keeps going for days.
+  hands the notes back. A team lead keeps going for days.
 - **Everything else is optional**: a task tracker, a review chat, remote hosts, the GitHub PR queue.
 
 <details>
-<summary><b>See it update</b>: a question arrives, you answer it, the team lead reports back (12 s)</summary>
+<summary><b>See it move</b>: a question arrives, you answer it, the team lead reports back (12 s)</summary>
 
 <img alt="The Guild page updating: Boris's question appears under Needs you, is answered with Tonight and leaves, and Boris's report appears in Team chat" src="docs/images/guild-live.gif">
 </details>
@@ -127,19 +153,19 @@ commands in this README only show how it works.
    ```
 
 Claude Code follows [SETUP.md](SETUP.md): it checks what you have, installs Guild, starts the dashboard, and opens
-Right Hand and your first team lead in their own tabs. It asks you only what it cannot know: your name and what the
-first team lead should own. From then on, talk to Right Hand.
+Right Hand and your first team lead in their own tabs. It asks only what it can't know: your name and what the first
+team lead should own. From then on, talk to Right Hand.
 
 ## Concepts
 
 <details>
 <summary><b>Team leads</b>: one autonomous owner per project</summary>
 
-**Why:** you cannot hold five projects in your head, and you should not have to start each one again every morning.
-A team lead holds one project for you, for days, and only brings you what needs you.
+**Why:** you can't hold five projects in your head, and you shouldn't have to restart each one every morning. A team
+lead holds one project for you, for days, and brings you only what needs you.
 
 **How:** a team lead is a Claude Code session with a name, a scope and notes that outlive its conversations. Each new
-session in its tab starts with the constitution, its role, its notes and the group's state. It declares its main chunks
+session in its tab starts with the constitution, its role, its notes and the crew's state. It declares its main chunks
 of work with their issues and PRs, and the page shows exactly those. It coordinates more than it types: separate tasks
 go to workers.
 </details>
@@ -147,45 +173,45 @@ go to workers.
 <details>
 <summary><b>Workers</b>: one tab per task, under its team lead</summary>
 
-**Why:** one session doing five things loses track of all of them. A worker does one thing in its own context, in
+**Why:** one session doing five things loses track of all five. A worker does one thing in its own context, in
 parallel, and the team lead stays free to coordinate and check.
 
 **How:** a team lead opens a worker in a new agterm tab nested under its own, with a brief, and confirms it really
-started. Workers report back over bridge. A team lead runs a bounded number of them (five) and
-closes them when their job is done, keeping the line that resumes each.
+started. Workers report back over bridge. A team lead runs at most five and closes them when their job is done,
+keeping the line that resumes each.
 </details>
 
 <details>
 <summary><b>Right Hand</b>: your one conversation, both ways</summary>
 
-**Why:** talking to every team lead yourself is exactly the context switching Guild exists to remove.
+**Why:** talking to every team lead yourself is exactly the context switching Guild exists to kill.
 
 **How:** you talk to Right Hand in its tab. It passes your words to the right team lead, relays your answers, brings
 you one question at a time with a recommendation, and keeps the project priority that orders the page. It also
-streams the group back to you: what each team decided, finished or got stuck on, and what it checked itself versus
+streams the crew back to you: what each team decided, finished or got stuck on, and what it checked itself versus
 what it took on a team lead's word.
 
-Your chat with Right Hand is never blocked by a pending question: questions wait on the page under **Needs you**, and
-when you answer one in chat instead, Right Hand relays it and the question closes.
+A pending question never blocks your chat with Right Hand: questions wait on the page under **Needs you**, and when
+you answer one in chat instead, Right Hand relays it and the question closes.
 </details>
 
 <details>
 <summary><b>The constitution</b>: the few rules that come before every other</summary>
 
-**Why:** roles, notes and house rules change all the time. A handful of rules should not, and should win when anything
-else conflicts with them.
+**Why:** roles, notes and house rules change all the time. A handful of rules shouldn't, and they come first
+whenever anything else in Guild's prompts conflicts with them.
 
 **How:** five short articles: honesty, the best outcome for the company and its customers, good faith, signal hygiene,
-simplicity.
-Every team lead, Right Hand and every worker loads its full text at start and again after each compaction, ahead of
-its role or brief. It lives in [src/bridge/constitution.md](src/bridge/constitution.md); edit it to make it yours.
+simplicity. Every team lead, Right Hand and every worker loads the full text at start and again after each compaction,
+ahead of its role or brief. It lives in [src/bridge/constitution.md](src/bridge/constitution.md); edit it to make it
+yours.
 </details>
 
 <details>
 <summary><b>The board and direct messages</b>: agents talk to each other (core, always on)</summary>
 
-**Why:** most questions one team has, another team can answer. If every one of them goes through you, you are the
-bottleneck.
+**Why:** most questions one team has, another team can answer. If every one of them goes through you, you're the
+bottleneck again.
 
 **How:** the board is a shared channel for heads-ups, questions, reports and handoffs; direct messages go to one agent.
 A message is typed into the recipient's tab once it is idle, or reaches it at its next tool call. Every team lead sees
@@ -199,29 +225,29 @@ write all of it on the page as **Team chat**.
 <details>
 <summary><b>Needs you</b>: the only queue you must read</summary>
 
-**Why:** your attention is the scarcest thing in the group. It should go to decisions only you can make, in the order
-that matters, and a pending decision should never stop your conversation: you keep talking while questions queue up.
+**Why:** your attention is the scarcest thing in the crew. It goes to decisions only you can make, in the order that
+matters, and a pending decision never stops your conversation: you keep talking while questions queue up.
 
-**How:** when a team lead cannot go on without you, it posts a question with what, why now and what each answer costs,
-and answer buttons. The page shows these under **Needs you**. Click an answer, or answer Right Hand in chat and it
-relays your words; either way the answer is typed straight into the asking tab and the question closes. The
-page numbers the top three across questions and PRs: urgent questions, other questions oldest first, then PRs by
-project priority. An urgent question also raises a macOS notification.
+**How:** when a team lead can't go on without you, it posts a question with what, why now and what each answer costs,
+plus answer buttons. The page shows these under **Needs you**. Click an answer, or answer Right Hand in chat and it
+relays your words; either way the answer is typed straight into the asking tab and the question closes. The page
+numbers the top three across questions and PRs: urgent questions, other questions oldest first, then PRs by project
+priority. An urgent question also raises a macOS notification.
 </details>
 
 <details>
-<summary><b>Focus</b>: one line per agent on what it is doing now</summary>
+<summary><b>Focus</b>: one line per agent on what it's doing now</summary>
 
 **Why:** a glance should tell you what every agent is on, without reading its tab.
 
-**How:** each agent keeps a one-line focus; the page and the other agents read it, and bridge reminds an agent whose
+**How:** each agent keeps a one-line focus; the page and the other agents read it, and bridge nags an agent whose
 focus is missing or stale.
 </details>
 
 <details>
 <summary><b>Claims</b>: no two agents on the same branch or environment</summary>
 
-**Why:** parallel agents collide: two pushes to one branch, a deploy during someone's load test.
+**Why:** parallel agents collide: two pushes to one branch, a deploy in the middle of someone's load test.
 
 **How:** before touching a PR, branch, environment, path or issue another agent may use, an agent claims it; a second
 claimant is refused and told who holds it. A hook also refuses `git push`, PR merges and configured deploy commands
@@ -240,9 +266,9 @@ by itself a day later unless you reopen it.
 </details>
 
 <details>
-<summary><b>Compaction and keep notes</b>: long-running agents that do not forget</summary>
+<summary><b>Compaction and keep notes</b>: long-running agents that don't forget</summary>
 
-**Why:** a team lead that loses its decisions at every compaction cannot own a project for days.
+**Why:** a team lead that loses its decisions at every compaction can't own a project for days.
 
 **How:** with `compact_at_tokens` set, an agent near that context size is told to save what must survive: decisions,
 exact ids, open promises, the next step. bridge then types `/compact` into its tab and, after compaction, gives the
@@ -253,7 +279,7 @@ last dream back; workers get the constitution.
 <details>
 <summary><b>Dreams</b>: each night, a team lead's day turns into memory</summary>
 
-**Why:** notes keep facts; they do not keep what the day felt like: what nagged, what went wrong, what you cared about.
+**Why:** notes keep facts. They don't keep what the day felt like: what nagged, what went wrong, what you cared about.
 
 **How:** when you say good night, Right Hand starts the dreams: each team lead's day (conversation, messages, notes,
 work) goes to `claude -p`, which writes a short dream that comes back beside the role at the next start, and proposes
@@ -275,8 +301,8 @@ lists the ones it must name.
 
 ## Adapters
 
-Everything outside the Mac is optional and replaceable. [docs/adapters.md](docs/adapters.md) has each interface and a
-guide for having your own coding agent write an adapter.
+Every outside service except Claude Code itself is optional and swappable. [docs/adapters.md](docs/adapters.md) has
+each interface and a guide for having your own coding agent write an adapter.
 
 | Adapter | What it does | Default | Built in |
 | --- | --- | --- | --- |
@@ -285,8 +311,8 @@ guide for having your own coding agent write an adapter.
 | Code host | PR state, PR claims, the merge guard, the review queue | GitHub, through a signed-in `gh` | GitHub; a guide for GitLab, Gitea or plain git |
 | Remote hosts (`[[remotes]]`) | runs in tmux sessions on other machines | none | ssh + tmux |
 
-Without an adapter, its column, chip or button is simply absent. The board and direct messages are not adapters: they
-are core and always on.
+No adapter, no column, chip or button: it's simply absent. The board and direct messages are not adapters: they are
+core and always on.
 
 ## Why agterm
 
@@ -299,17 +325,19 @@ macOS terminal built for coding agents, with a control CLI (`agtermctl`). Guild 
 - jump to the tab behind any row on the page.
 
 Without agterm, sessions still register and appear on the dashboard, but nothing is typed into tabs: messages wait for
-each session's next tool call, and the group features (team lead tabs, workers, automatic compaction) do not work.
+each session's next tool call, and the crew features (team lead tabs, workers, automatic compaction) don't work.
 Tested with agterm 0.39.
 
 ## Limits
+
+Read these before you hand it your accounts.
 
 - macOS only: launchd, macOS notifications and process inspection are assumed.
 - Claude Code only for the agents: Guild reads its hooks and session files. Other agents are not supported.
 - One Mac, one person. The dashboard listens on 127.0.0.1 with no login; anything that can reach that port can post.
 - Agents act with your accounts: `gh`, your tracker, your chat. The guards are a safety net, not a sandbox.
 - Agents also get every claude.ai connector of the account Claude Code is signed in with (a tracker, a chat, a
-  drive); disconnect any you do not want them to use.
+  drive); disconnect any you don't want them to use.
 - State is a SQLite file in `~/.local/state/bridge`; nothing leaves the Mac except calls to the services you configure.
 - Built for and used in one person's daily work. Expect rough edges; commands and config may change.
 
@@ -473,3 +501,5 @@ project directory, start `claude`, and ask Right Hand to make it a team lead (`g
 ## License
 
 [MIT](LICENSE)
+
+<sub>macOS only · needs [agterm](https://github.com/umputun/agterm) and [Claude Code](https://github.com/anthropics/claude-code) · MIT</sub>
