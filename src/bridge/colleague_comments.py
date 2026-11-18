@@ -272,6 +272,17 @@ def _list_open_entries(conn: sqlite3.Connection, config: Config) -> list[dict[st
     return [entry for entry in entries if entry["status"] in _OPEN_STATUSES]
 
 
+def list_unhandled_colleague_comments(conn: sqlite3.Connection, ref: str) -> list[dict[str, object]]:
+    """The PR's colleague comments the page shows as needing attention with no call yet, oldest first: neither marked
+    small, nor drafted for the owner, nor answered in their thread."""
+    rows = conn.execute(
+        _FEED_SQL + " WHERE c.verdict = ? AND c.ref = ? AND p.closed_at IS NULL ORDER BY c.created_at", (COLLEAGUE, ref)
+    ).fetchall()
+    entries = [map_row_to_feed_entry(row) for row in rows]
+    mark_needs_attention(conn, entries)
+    return [e for e in entries if e["needs_attention"] and e["status"] in (UNDECIDED, SUBSTANTIVE)]
+
+
 def latch_held_breaches(conn: sqlite3.Connection, now: int) -> None:
     """A commit GitHub shows on the PR, or an agent's reply to the comment, made while its reply waits for the owner.
     A local commit is no breach until it is pushed; a commit made before the hold and pushed during it is missed."""
