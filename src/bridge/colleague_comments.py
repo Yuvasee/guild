@@ -378,6 +378,22 @@ class ChosenReply:
     """The text of an earlier try that failed: GitHub may have taken it anyway."""
 
 
+_PLACEHOLDER_RE = re.compile(
+    r"<(?!/?(?:details|summary|br|code|pre|sub|sup|kbd|b|i|em|strong|p|ul|ol|li)\b)[a-z][a-z0-9 _.-]{0,30}>"
+    r"|\b[A-Z]{2,}-[xX#?]{2,}\b|\b(?:TODO|TBD|FIXME|XXX)\b"
+)
+
+
+def find_placeholders(text: str) -> list[str]:
+    """Template slots a reply still holds, such as '<sha>', 'ACME-xxxx' or 'TODO': text no colleague should receive."""
+    return list(dict.fromkeys(match.group(0) for match in _PLACEHOLDER_RE.finditer(text)))
+
+
+def _refuse_placeholders(text: str, what: str) -> None:
+    if found := find_placeholders(text):
+        raise UsageError(f"the {what} still holds {', '.join(found)}: fill it in before it goes to a colleague")
+
+
 def record_draft(
     conn: sqlite3.Connection,
     config: Config,
@@ -395,6 +411,7 @@ def record_draft(
         raise UsageError("the reply file is empty")
     if len(draft) > DRAFT_MAX_CHARS:
         raise UsageError(f"the draft is {len(draft)} characters; keep it under {DRAFT_MAX_CHARS}")
+    _refuse_placeholders(draft, "draft")
     if not plan:
         raise UsageError('say what you plan to do: --plan "…"')
     if len(plan) > NOTE_MAX_CHARS:
@@ -450,6 +467,8 @@ def claim_choice(conn: sqlite3.Connection, item_id: int, choice: str, edited: st
             raise UsageError("the edited reply is empty")
         if len(reply) > DRAFT_MAX_CHARS:
             raise UsageError(f"the reply is {len(reply)} characters; keep it under {DRAFT_MAX_CHARS}")
+    if reply is not None:
+        _refuse_placeholders(reply, "reply")
     conn.execute(
         "UPDATE colleague_calls SET choice = ?, reply = ?, chosen_at = ?, reply_error = NULL WHERE item_id = ?",
         (choice, reply, now, item_id),

@@ -133,6 +133,7 @@ from bridge.start_context import CONSTITUTION_PATH
 from bridge.stats import convert_week_to_lines
 from bridge.tabinput import is_tab_selected, run_agterm, type_when_idle
 from bridge.watcher import find_conversation_tab, map_tree_to_parent, read_screen_tail, read_tree
+from bridge.weekly_task import send_weekly_task
 from bridge.workers import (
     WORKER_CAP,
     ChildTab,
@@ -581,6 +582,9 @@ def cmd_stats_week(args: argparse.Namespace, conn: sqlite3.Connection, config: C
 def cmd_day(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
     with transaction(conn):
         record_owner_on(conn, "guild day", now_ms())
+        weekly = send_weekly_task(conn, config, now_ms())
+    if weekly:
+        print(weekly)
     loads = assess_leads(conn, config, now_ms(), read_tree(config))
     print(convert_loads_to_team_line(loads))
     for load in loads:
@@ -1002,7 +1006,17 @@ def _read_child_tab(conn: sqlite3.Connection, config: Config, parent: str, wante
     tree = read_tree(config)
     if tree is None:
         raise UsageError("agterm is not reachable, so the tab cannot be checked")
-    return map_tree_to_child_tab(tree, parent, wanted)
+    try:
+        return map_tree_to_child_tab(tree, parent, wanted)
+    except UsageError:
+        # `bridge sessions` names a worker by its handle and pane id; the tree knows only its tab id and title.
+        row = conn.execute(
+            "SELECT agterm_session FROM surfaces WHERE (handle = ?1 OR surface = ?1) AND agterm_session IS NOT NULL",
+            (wanted,),
+        ).fetchone()
+        if row is None or row["agterm_session"] == wanted:
+            raise
+        return map_tree_to_child_tab(tree, parent, str(row["agterm_session"]))
 
 
 def cmd_worker_attach(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:

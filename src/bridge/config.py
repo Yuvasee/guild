@@ -128,6 +128,13 @@ class Config:
     """IANA zone of the team's working hours (09-19) for daytime-only nudges; empty is this machine's zone."""
     work_days: tuple[int, ...] = (0, 1, 2, 3, 4)
     """Working days as datetime.weekday() counts them: Monday is 0."""
+    weekly_task_day: int | None = None
+    """The weekday (Monday is 0) whose `guild day` sends the weekly task, or the next day's when that one did not
+    run; None sends nothing."""
+    weekly_task_to: str = ""
+    """The lead or the assistant the weekly task goes to."""
+    weekly_task_file: str = ""
+    """The task's text; '{week}' in it becomes the week, e.g. 2026-w47."""
     review_bot_name: str = "ReviewBot"
     """The review bot as people name it: its approval counts, and a review doc's Reviews section may name it."""
     required_reviews: tuple[str, ...] = ()
@@ -313,6 +320,9 @@ def map_toml_to_config(raw: dict[str, object]) -> Config:
         links=tuple(map_table_to_link(t) for t in _tables(raw, "links")),
         work_timezone=_zone(raw, "work_timezone", defaults.work_timezone),
         work_days=_weekdays(raw, "work_days", defaults.work_days),
+        weekly_task_day=_weekday_or_none(raw, "weekly_task_day"),
+        weekly_task_to=_str(raw, "weekly_task_to", defaults.weekly_task_to),
+        weekly_task_file=_str(raw, "weekly_task_file", defaults.weekly_task_file),
         review_bot_name=_str(raw, "review_bot_name", defaults.review_bot_name),
         required_reviews=_str_list(raw, "required_reviews", defaults.required_reviews),
         review_stall_status=_str(raw, "review_stall_status", defaults.review_stall_status),
@@ -339,6 +349,15 @@ def map_toml_to_config(raw: dict[str, object]) -> Config:
         auto_merge_decision=_str(raw, "auto_merge_decision", defaults.auto_merge_decision),
         auto_merge_failures_to=_str(raw, "auto_merge_failures_to", defaults.auto_merge_failures_to),
     )
+
+
+def _weekday_or_none(raw: dict[str, object], key: str) -> int | None:
+    value = raw.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 6:
+        raise ValueError(f"{key} must be a weekday from 0 (Monday) to 6 (Sunday)")
+    return value
 
 
 def _int(raw: dict[str, object], key: str, default: int) -> int:
