@@ -220,20 +220,20 @@ def get_live_page(conn: sqlite3.Connection, slug: str) -> Page:
 _CITED_PAGE = re.compile(rf"/p/([a-z0-9-]{{1,{SLUG_MAX_CHARS}}})")
 
 
-def find_unpublished_citations(conn: sqlite3.Connection, text: str) -> list[str]:
-    """Slugs a text links to under /p/ that would not open a page: unknown, archived, or with no artifact link yet."""
+def find_unready_citations(conn: sqlite3.Connection, text: str) -> list[str]:
+    """Slugs a text links to under /p/ that would not open a page: unknown, archived, or with no local HTML file."""
     unready: list[str] = []
     for slug in dict.fromkeys(_CITED_PAGE.findall(text)):
         page = find_page(conn, slug)
-        if page is None or page.archived_at is not None or not page.artifact_url:
+        if page is None or page.archived_at is not None or find_html_file(Path(page.source_dir).expanduser()) is None:
             unready.append(slug)
     return unready
 
 
-def map_unpublished_citations_to_error(slugs: list[str]) -> str:
+def map_unready_citations_to_error(slugs: list[str]) -> str:
     return (
-        f"/p/{slugs[0]} is not published yet: publish the page, run `bridge page set-url {slugs[0]} <artifact url>`, "
-        "check the link opens, then send it"
+        f"/p/{slugs[0]} opens nothing: register it with `bridge page add` and put its index.html in the source "
+        "folder, check the link opens, then send it"
         + (f" (also not ready: {', '.join('/p/' + s for s in slugs[1:])})" if slugs[1:] else "")
     )
 
@@ -270,11 +270,23 @@ def _map_row_to_page(row: sqlite3.Row) -> Page:
     )
 
 
-def find_redirect(page: Page | None) -> str | None:
-    """Where /p/<slug> sends the browser; re-checked here because the Location header comes from the database."""
-    if page is None or page.archived_at is not None or page.artifact_url is None:
+def map_request_path_to_page_file(path: str) -> tuple[str, str] | None:
+    """(slug, file path inside the page's folder) for /p/<slug>/<file>; None for anything else."""
+    bare = urllib.parse.unquote(urllib.parse.urlsplit(path).path)
+    match = re.fullmatch(r"/p/([^/]+)/(.+)", bare)
+    if match is None or _SLUG.fullmatch(match.group(1)) is None or len(match.group(1)) > SLUG_MAX_CHARS:
         return None
-    return page.artifact_url if is_artifact_url(page.artifact_url) else None
+    return match.group(1), match.group(2)
+
+
+def find_page_file(page: Page, inner: str) -> Path | None:
+    """A file inside the page's own folder; None for anything outside it, such as '../'."""
+    try:
+        root = Path(page.source_dir).expanduser().resolve()
+        found = (root / inner).resolve()
+    except (OSError, RuntimeError):
+        return None
+    return found if found.is_relative_to(root) and found.is_file() else None
 
 
 def map_request_path_to_slug(path: str) -> str | None:
@@ -288,19 +300,12 @@ def map_request_path_to_slug(path: str) -> str | None:
     return match.group(1)
 
 
-def map_unpublished_page_to_html(page: Page) -> str:
+def map_sourceless_page_to_html(page: Page) -> str:
     e = html.escape
-    html_file = find_html_file(Path(page.source_dir))
-    file_line = (
-        f"<p>Publish <code>{e(str(html_file))}</code> with the Artifact tool, then "
-        f"<code>bridge page set-url {e(page.slug)} &lt;url&gt;</code>.</p>"
-        if html_file is not None
-        else '<p class="todo">The source holds neither index.html nor a single .html file.</p>'
-    )
     at = datetime.fromtimestamp(page.updated_at / 1000)
     body = (
-        f'<article class="pin"><h2>Not published yet</h2>'
-        f"<p>Source: <code>{e(page.source_dir)}</code></p>{file_line}"
+        f'<article class="pin"><h2>No local file to show</h2>'
+        f"<p>Source: <code>{e(page.source_dir)}</code> holds neither index.html nor a single .html file.</p>"
         f'<div class="meta">registered by {e(page.created_by)} · updated '
         f'<time datetime="{at.isoformat(timespec="seconds")}">{e(at.strftime("%b %-d, %H:%M"))}</time></div></article>'
     )

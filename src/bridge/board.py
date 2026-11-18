@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from bridge.config import state_dir
-from bridge.pages import find_unpublished_citations, map_unpublished_citations_to_error
+from bridge.pages import find_unready_citations, map_unready_citations_to_error
 
 BODY_MAX_CHARS = 2000
 PREVIEW_MAX_CHARS = 200
@@ -113,8 +113,8 @@ def send_message(
         raise MessageStateError("empty message")
     if len(body) > BODY_MAX_CHARS:
         raise MessageStateError(f"message is {len(body)} chars; keep it under {BODY_MAX_CHARS}")
-    if unready := find_unpublished_citations(conn, body):
-        raise MessageStateError(map_unpublished_citations_to_error(unready))
+    if unready := find_unready_citations(conn, body):
+        raise MessageStateError(map_unready_citations_to_error(unready))
     if reply_to is not None:
         parent = conn.execute("SELECT thread_id FROM messages WHERE id = ?", (reply_to,)).fetchone()
         if parent is None:
@@ -289,8 +289,8 @@ def convert_item_id_to_question_ref(item_id: int) -> str:
 def add_user_item(conn: sqlite3.Connection, sender: Party, severity: str, text: str, at_ms: int) -> int:
     if len(text) > USER_ITEM_MAX_CHARS:
         raise MessageStateError(f"keep it to one line under {USER_ITEM_MAX_CHARS} chars (got {len(text)})")
-    if unready := find_unpublished_citations(conn, text):
-        raise MessageStateError(map_unpublished_citations_to_error(unready))
+    if unready := find_unready_citations(conn, text):
+        raise MessageStateError(map_unready_citations_to_error(unready))
     cursor = conn.execute(
         """
         INSERT INTO user_items (created_at, from_conversation, from_handle, severity, text, source)

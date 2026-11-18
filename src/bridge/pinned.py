@@ -91,8 +91,6 @@ def map_page_to_html(page: Page) -> str:
         f'<span class="id" title="source: {e(page.source_dir)}">/p/{e(page.slug)}</span>',
         "shared" if page.shared else "private",
     ]
-    if not page.artifact_url:
-        meta.append('<span class="todo">not published</span>')
     meta.append(f"by {e(page.created_by)}")
     meta.append(f"updated {map_ms_to_clock_html(page.updated_at)}")
     return (

@@ -19,7 +19,7 @@ from bridge.pages import (
     is_page_path,
     list_pages,
     map_request_path_to_slug,
-    map_unpublished_page_to_html,
+    map_sourceless_page_to_html,
     set_page_url,
     share_page,
 )
@@ -168,7 +168,7 @@ def test_republish_plan_names_each_live_page_file_and_flags_a_lost_source(
     try:
         lines, problems = build_republish_plan(list_pages(conn))
         assert [line.slug for line in lines] == ["alpha"] and [p.split(":")[0] for p in problems] == ["beta", "gone"]
-        assert "neither index.html" in map_unpublished_page_to_html(list_pages(conn)[1])
+        assert "neither index.html" in map_sourceless_page_to_html(list_pages(conn)[1])
     finally:
         beta.chmod(0o755)
 
@@ -207,16 +207,15 @@ def test_list_and_unpublished_pages_escape_agent_text(conn: sqlite3.Connection, 
     page = add_page(conn, "xss", "<script>alert(1)</script>", str(source), None, True, "a&b", 1000)
 
     card = map_page_to_html(page)
-    single = map_unpublished_page_to_html(page)
+    single = map_sourceless_page_to_html(page)
 
     for text in (card, single):
         assert "<script>alert" not in text and "<b>dir</b>" not in text
         assert "&lt;script&gt;alert(1)&lt;/script&gt;" in text and "&lt;b&gt;dir&lt;/b&gt;" in text
         assert "<!--PAGE-" not in text
-    assert 'href="/p/xss"' in card and "shared" in card and "not published" in card and "by a&amp;b" in card
+    assert 'href="/p/xss"' in card and "shared" in card and "not published" not in card and "by a&amp;b" in card
     assert '<span class="badge">Page</span>' in card and 'class="pin page"' in card
-    assert "Not published yet" in single and "registered by a&amp;b" in single
-    assert "bridge page set-url xss &lt;url&gt;" in single
+    assert "No local file to show" in single and "registered by a&amp;b" in single
     assert "<title>&lt;script&gt;alert(1)&lt;/script&gt;</title>" in single
 
 
@@ -242,7 +241,7 @@ def test_cli_registers_lists_and_plans(bridge_env: BridgeEnv, spawn_process: Spa
 
     added = bridge_env.cli("page", "add", "weekly", "--title", "Weekly", "--source", str(source), pid=pid)
     assert added.returncode == 0, added.stderr
-    assert "http://127.0.0.1:8765/p/weekly → not published yet" in added.stdout
+    assert f"http://127.0.0.1:8765/p/weekly → {source.resolve() / 'index.html'}" in added.stdout
     shared = bridge_env.cli(
         "page", "add", "notes", "--title", "Notes", "--source", str(other), "--url", ARTIFACT, "--shared", pid=pid
     )
@@ -285,21 +284,32 @@ def request_without_redirect(url: str) -> tuple[int, str | None, str]:
         connection.close()
 
 
-def test_routes_redirect_list_and_explain(bridge_env: BridgeEnv, dashboard: str, tmp_path: Path) -> None:
+def test_routes_serve_the_local_page_and_its_folder_never_a_hosted_copy(
+    bridge_env: BridgeEnv, dashboard: str, tmp_path: Path
+) -> None:
     source = make_source(tmp_path, "src", "index.html")
+    (source / "img").mkdir()
+    (source / "img" / "a.svg").write_text("<svg/>")
+    (tmp_path / "secret.txt").write_text("outside")
+    empty = make_source(tmp_path, "empty", "index.html")
     with closing(bridge_env.connect()) as db:
         add_page(db, "live", "Live <i>page</i>", str(source), ARTIFACT, True, "alex", 1000)
-        add_page(db, "draft", "Draft", str(source), None, False, "alex", 1000)
+        add_page(db, "draft", "Draft", str(empty), None, False, "alex", 1000)
         add_page(db, "old", "Old", str(source), ARTIFACT, False, "alex", 1000)
         archive_page(db, "old", 2000)
         assert find_page(db, "old") is not None
+    (empty / "index.html").unlink()
 
-    assert request_without_redirect(dashboard + "/p/live") == (302, ARTIFACT, "")
-    assert request_without_redirect(dashboard + "/p/live/")[:2] == (302, ARTIFACT)
-    status, location, draft = request_without_redirect(dashboard + "/p/draft")
-    assert (status, location) == (200, None)
-    assert "Not published yet" in draft and str(source.resolve()) in draft
-    status, _, old = request_without_redirect(dashboard + "/p/old")
+    assert request_without_redirect(dashboard + "/p/live") == (302, "/p/live/", "")
+    assert request_without_redirect(dashboard + "/p/live/") == (200, None, "<!doctype html><title>x</title>")
+    assert request_without_redirect(dashboard + "/p/live/img/a.svg") == (200, None, "<svg/>")
+    for outside in ("/p/live/../secret.txt", "/p/live/%2e%2e/secret.txt", "/p/live/nope.png"):
+        status, location, body = request_without_redirect(dashboard + outside)
+        assert (status, location) == (404, None) and "outside" not in body, outside
+    status, location, draft = request_without_redirect(dashboard + "/p/draft/")
+    assert (status, location) == (404, None)
+    assert "No local file to show" in draft and str(empty.resolve()) in draft
+    status, _, old = request_without_redirect(dashboard + "/p/old/")
     assert status == 410 and "was archived" in old
     status, _, missing = request_without_redirect(dashboard + "/p/%3Cscript%3E")
     assert status == 404 and "<script>" not in missing and "is not a registered page" in missing
@@ -321,35 +331,38 @@ def test_a_message_post_or_pin_citing_a_page_that_would_not_open_is_refused(
     team.enroll()
     source = make_source(tmp_path, "src", "index.html")
     with closing(bridge_env.connect()) as db:
-        add_page(db, "draft", "Draft", str(source), None, False, "alex", 1000)
-        add_page(db, "live", "Live", str(source), ARTIFACT, False, "alex", 1000)
+        empty = make_source(tmp_path, "empty", "index.html")
+        add_page(db, "draft", "Draft", str(empty), None, False, "alex", 1000)
+        add_page(db, "live", "Live", str(source), None, False, "alex", 1000)
+    (empty / "index.html").unlink()
 
     refused = bridge_env.cli("send", "alex", "see http://127.0.0.1:8765/p/draft and /p/nope", pid=team.b)
     posted = bridge_env.cli("post", "done", "report: /p/draft", pid=team.b)
     sent = bridge_env.cli("send", "alex", "see /p/live", pid=team.b)
 
-    assert refused.returncode != 0 and "/p/draft is not published yet" in refused.stderr
-    assert "set-url draft" in refused.stderr and "/p/nope" in refused.stderr
-    assert posted.returncode != 0 and "/p/draft is not published yet" in posted.stderr
+    assert refused.returncode != 0 and "/p/draft opens nothing" in refused.stderr
+    assert "bridge page add" in refused.stderr and "/p/nope" in refused.stderr
+    assert posted.returncode != 0 and "/p/draft opens nothing" in posted.stderr
     assert sent.returncode == 0, sent.stderr
-    with closing(bridge_env.connect()) as db, pytest.raises(PinError, match="not published yet"):
+    with closing(bridge_env.connect()) as db, pytest.raises(PinError, match="opens nothing"):
         add_pin(db, "Draft", "link", "/p/draft", None, "xavi", 2000)
 
 
-def test_opening_an_unpublished_page_tells_its_owner_once(
+def test_opening_a_page_with_no_local_file_tells_its_owner_once(
     bridge_env: BridgeEnv, spawn_process: SpawnProcess, dashboard: str, tmp_path: Path
 ) -> None:
     team = Team(bridge_env, spawn_process)
     team.enroll()
     with closing(bridge_env.connect()) as db:
-        add_page(db, "draft", "Draft", str(make_source(tmp_path, "src", "index.html")), None, False, "alex", 1000)
+        add_page(db, "draft", "Draft", str(src := make_source(tmp_path, "src", "index.html")), None, False, "alex", 1)
+    (src / "index.html").unlink()
 
     for _ in range(2):
-        assert request_without_redirect(dashboard + "/p/draft")[0] == 200
+        assert request_without_redirect(dashboard + "/p/draft/")[0] == 404
 
     with closing(bridge_env.connect()) as db:
         told = db.execute(
             "SELECT m.body FROM messages m JOIN message_recipients r ON r.message_id = m.id"
             " WHERE m.from_handle = 'bridge' AND r.handle = 'alex' AND m.body LIKE '%''draft''%'"
         ).fetchall()
-    assert len(told) == 1 and "set-url draft" in told[0][0]
+    assert len(told) == 1 and "holds no index.html" in told[0][0]

@@ -34,7 +34,7 @@ from bridge.config import Config, state_dir
 from bridge.db import now_ms, transaction
 from bridge.errlog import log_error
 from bridge.leads import find_lead_conversations, is_conversation_locked, is_surface_locked, list_leads
-from bridge.pages import find_unpublished_citations, map_unpublished_citations_to_error
+from bridge.pages import find_unready_citations, map_unready_citations_to_error
 from bridge.procinfo import pid_alive, process_start_ms
 from bridge.refs import extract_refs
 from bridge.registry import PROC_START_TOLERANCE_MS, RECENT_REF_TURNS, current_ref_sql
@@ -164,8 +164,8 @@ def add_post(
     if not title:
         raise MessageStateError("empty title")
     cited = "\n".join([title, body, *(link.url for link in links)])
-    if unready := find_unpublished_citations(conn, cited):
-        raise MessageStateError(map_unpublished_citations_to_error(unready))
+    if unready := find_unready_citations(conn, cited):
+        raise MessageStateError(map_unready_citations_to_error(unready))
     if len(title) > USER_ITEM_MAX_CHARS:
         raise MessageStateError(
             f"keep the title under {USER_ITEM_MAX_CHARS} chars (got {len(title)}); details go in --body"

@@ -1,5 +1,6 @@
 import hashlib
 import json
+import mimetypes
 import os
 import re
 import sqlite3
@@ -8,6 +9,7 @@ import sys
 import threading
 import time
 import traceback
+import urllib.parse
 from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import asdict, replace
@@ -100,11 +102,13 @@ from bridge.notify import release_urgent_notice, show_notification, take_next_ur
 from bridge.outage import OutageNotices
 from bridge.pages import (
     Page,
+    find_html_file,
     find_page,
-    find_redirect,
+    find_page_file,
     map_missing_page_to_html,
+    map_request_path_to_page_file,
     map_request_path_to_slug,
-    map_unpublished_page_to_html,
+    map_sourceless_page_to_html,
 )
 from bridge.pinned import (
     PinnedRequest,
@@ -224,6 +228,7 @@ MAX_POST_BYTES = 16_384
 GIL_SWITCH_INTERVAL_S = 0.0005
 PAGES_ON_PINNED = "/pinned?kind=page"
 UNPUBLISHED_TOLD_EVERY_MS = 30 * 60_000
+_HTML = "text/html; charset=utf-8"
 
 
 def serve(config: Config, port: int) -> None:
@@ -292,32 +297,43 @@ class DashboardState:
         with self._connection() as conn:
             return map_dreamers_to_page(resolve_dreamers(conn, self.config, [ALL]))
 
-    def page_response(self, path: str) -> tuple[int, str | None, str]:
-        """Status, redirect target and HTML for /p/<slug>; /p/ sends to the pages on Pinned."""
+    def page_response(self, path: str) -> tuple[int, str | None, str, bytes]:
+        """Status, redirect target, content type and body for /p/<slug>: the page's own local files, never a hosted
+        copy. /p/<slug> moves to /p/<slug>/ so the page's relative links reach its folder; /p/ sends to Pinned."""
         slug = map_request_path_to_slug(path)
+        inner = None if slug is not None else map_request_path_to_page_file(path)
         if slug == "":
-            return 302, PAGES_ON_PINNED, ""
+            return 302, PAGES_ON_PINNED, "", b""
         with self._connection() as conn:
-            page = find_page(conn, slug) if slug is not None else None
+            name = slug if slug is not None else inner[0] if inner is not None else None
+            page = find_page(conn, name) if name is not None else None
         if page is None or page.archived_at is not None:
             archived = page is not None
-            return (410 if archived else 404), None, map_missing_page_to_html(slug, archived)
-        target = find_redirect(page)
-        if target is not None:
-            return 302, target, ""
-        self._tell_owner_of_unpublished_page(page)
-        return 200, None, map_unpublished_page_to_html(page)
+            return (410 if archived else 404), None, _HTML, map_missing_page_to_html(name, archived).encode()
+        if inner is not None:
+            found = find_page_file(page, inner[1])
+            if found is None:
+                return 404, None, _HTML, map_missing_page_to_html(name, False).encode()
+            return 200, None, mimetypes.guess_type(found.name)[0] or "application/octet-stream", found.read_bytes()
+        if not urllib.parse.urlsplit(path).path.endswith("/"):
+            query = urllib.parse.urlsplit(path).query
+            return 302, f"/p/{page.slug}/" + (f"?{query}" if query else ""), "", b""
+        html_file = find_html_file(Path(page.source_dir).expanduser())
+        if html_file is None:
+            self._tell_owner_of_sourceless_page(page)
+            return 404, None, _HTML, map_sourceless_page_to_html(page).encode()
+        return 200, None, _HTML, html_file.read_bytes()
 
-    def _tell_owner_of_unpublished_page(self, page: Page) -> None:
-        """Whoever opened it was handed a dead link; its owner hears so, once per page per half hour."""
+    def _tell_owner_of_sourceless_page(self, page: Page) -> None:
+        """Whoever opened it saw nothing, so its owner hears so, once per page per half hour."""
         now = now_ms()
         with self._lock:
             if now - self._unpublished_told.get(page.slug, 0) < UNPUBLISHED_TOLD_EVERY_MS:
                 return
             self._unpublished_told[page.slug] = now
         text = (
-            f"Your page '{page.slug}' was just opened from its stable link, but it isn't published yet, so the reader "
-            f"saw a 'not published' notice. Publish it, then `bridge page set-url {page.slug} <artifact url>`."
+            f"Your page '{page.slug}' was just opened from its stable link, but its source {page.source_dir} holds "
+            "no index.html (or single .html file), so the reader saw nothing. Put the page there."
         )
         with self._connection() as conn, transaction(conn):
             send_from_bridge(conn, self.config, page.created_by, text, now)
@@ -1341,11 +1357,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
         elif self.path == "/dreams":
             self._send(200, "text/html; charset=utf-8", self.state.dreams_page().encode())
         elif self.path == "/p" or self.path.startswith(("/p/", "/p?")):
-            status, target, page = self.state.page_response(self.path)
+            status, target, content_type, body = self.state.page_response(self.path)
             if target is not None:
                 self._redirect(target)
             else:
-                self._send(status, "text/html; charset=utf-8", page.encode())
+                self._send(status, content_type, body)
         elif self.path == "/api/guild":
             self._json(200, self.state.guild_snapshot())
         elif self.path == "/api/state":

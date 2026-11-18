@@ -852,7 +852,7 @@ def test_a_wait_citing_an_unpublished_page_does_not_sink_the_daily_check(
     wait_ask(conn, ask_id, LEAD, "approval", "Security approves the scope on /p/missing-page", HOUR)
     sent = send_ask_nags(conn, Config(assistant_handle="old-b", owner_name="Theo"), HOUR + 3 * DAY, owner_off=False)
     assert [recipient.handle for _, recipient in sent] == ["alex"]
-    assert "approves the scope on (page missing-page, not published)" in bodies_to(conn, sent, "alex")
+    assert "approves the scope on (page missing-page, no local file)" in bodies_to(conn, sent, "alex")
 
 
 def test_words_citing_an_unpublished_page_do_not_sink_the_reminder(
@@ -865,7 +865,7 @@ def test_words_citing_an_unpublished_page_do_not_sink_the_reminder(
     sent = send_ask_nags(conn, Config(assistant_handle="old-b", owner_name="Theo"), 5 * HOUR, owner_off=False)
     assert [recipient.handle for _, recipient in sent] == ["alex"]
     body = str(conn.execute("SELECT body FROM messages WHERE id = ?", (sent[0][0],)).fetchone()[0])
-    assert "Make (page missing-page, not published) show the spec" in body
+    assert "Make (page missing-page, no local file) show the spec" in body
     assert [get_ask(conn, i).nag_count for i in (cites, plain)] == [1, 1]
 
 

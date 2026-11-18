@@ -11,9 +11,9 @@ from datetime import datetime
 from bridge.errors import UsageError
 from bridge.pages import (
     ARTIFACT_SOURCE,
-    find_unpublished_citations,
+    find_unready_citations,
     is_page_path,
-    map_unpublished_citations_to_error,
+    map_unready_citations_to_error,
 )
 
 PIN_KINDS = ("cmd", "link", "note")
@@ -273,8 +273,8 @@ def add_pin(
     conn: sqlite3.Connection, title: str, kind: str, body: str, source: str | None, pinned_by: str, now: int
 ) -> Pin:
     title, body, source = check_pin_fields(title, kind, body, source)
-    if unready := find_unpublished_citations(conn, f"{title}\n{body}"):
-        raise PinError(map_unpublished_citations_to_error(unready))
+    if unready := find_unready_citations(conn, f"{title}\n{body}"):
+        raise PinError(map_unready_citations_to_error(unready))
     cursor = conn.execute(
         "INSERT INTO pins (title, kind, body, source, pinned_by, created_at) VALUES (?, ?, ?, ?, ?, ?)",
         (title, kind, body, source, pinned_by, now),

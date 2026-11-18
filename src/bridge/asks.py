@@ -18,7 +18,7 @@ from bridge.board import (
 from bridge.config import Config
 from bridge.feed import TO_ASSISTANT
 from bridge.leads import is_surface_locked
-from bridge.pages import find_unpublished_citations
+from bridge.pages import find_unready_citations
 
 STATES = ("open", "in_progress", "done_claimed", "verified", "closed")
 CLOSED_HOW = ("auto", "owner", "assistant")
@@ -675,9 +675,9 @@ def send_bodies_from_bridge(
 
 
 def map_words_to_sendable(conn: sqlite3.Connection, words: str) -> str:
-    """A message citing an unpublished /p/ page is refused, so the owner's words name it without the link."""
-    for slug in find_unpublished_citations(conn, words):
-        words = re.sub(rf"/p/{re.escape(slug)}(?![a-z0-9-])", f"(page {slug}, not published)", words)
+    """A message citing a /p/ page that opens nothing is refused, so the owner's words name it without the link."""
+    for slug in find_unready_citations(conn, words):
+        words = re.sub(rf"/p/{re.escape(slug)}(?![a-z0-9-])", f"(page {slug}, no local file)", words)
     return words
 
 

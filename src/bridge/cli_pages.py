@@ -1,6 +1,7 @@
 import argparse
 import sqlite3
 import sys
+from pathlib import Path
 
 from bridge.config import Config
 from bridge.db import now_ms, transaction
@@ -11,6 +12,7 @@ from bridge.pages import (
     add_page,
     archive_page,
     build_republish_plan,
+    find_html_file,
     list_pages,
     set_page_url,
     share_page,
@@ -66,14 +68,14 @@ def cmd_page_add(args: argparse.Namespace, conn: sqlite3.Connection, config: Con
         )
         styled = add_doc_style_to_page(page.source_dir)
     if styled is not None:
-        print(styled + ("; republish it to show" if page.artifact_url and styled.startswith("added") else ""))
-    if page.artifact_url:
-        print(f"{PAGES_BASE_URL}{page.slug} → {page.artifact_url}")
+        print(styled)
+    html_file = find_html_file(Path(page.source_dir).expanduser())
+    if html_file is not None:
+        print(f"{PAGES_BASE_URL}{page.slug} → {html_file}")
     else:
         print(
-            f"{PAGES_BASE_URL}{page.slug} → not published yet. The link opens nothing until you publish the page and "
-            f"run `bridge page set-url {page.slug} <artifact url>`; bridge refuses messages, posts and pins citing it "
-            "before then."
+            f"{PAGES_BASE_URL}{page.slug} → no index.html in {page.source_dir} yet. The link opens nothing until it "
+            "is there; bridge refuses messages, posts and pins citing it before then."
         )
     return 0
 
