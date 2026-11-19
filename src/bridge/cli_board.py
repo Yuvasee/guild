@@ -1,4 +1,5 @@
 import argparse
+import re
 import sqlite3
 import sys
 from collections.abc import Sequence
@@ -256,6 +257,22 @@ def cmd_show(args: argparse.Namespace, conn: sqlite3.Connection, config: Config)
     return 0
 
 
+CARD_LINE_MAX_CHARS = 160
+CARD_LINE_MAX_SENTENCES = 2
+_SENTENCE_END_RE = re.compile(r"[.!?](?:\s+|$)")
+
+
+def find_card_line_problem(words: str | None) -> str | None:
+    """A long field with no line break or bullet reads as a wall on the card; length alone is fine (the owner's word:
+    it is the layout, not the amount). A nudge, never a refusal."""
+    text = str(words or "").strip()
+    if "\n" in text:
+        return None
+    if len(text) > CARD_LINE_MAX_CHARS or len(_SENTENCE_END_RE.findall(text)) > CARD_LINE_MAX_SENTENCES:
+        return f"is one block of {len(text)} characters"
+    return None
+
+
 def cmd_post(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
     me = current_party(conn)
     if args.kind == POST_RESOLVE:
@@ -269,6 +286,17 @@ def cmd_post(args: argparse.Namespace, conn: sqlite3.Connection, config: Config)
         and me.conversation_id in find_lead_conversations(conn)
     ):
         raise UsageError("a question from a lead needs --body, or --what and --why: what it is, why now, each cost")
+    for flag, words in [
+        ("--what", args.what),
+        ("--why", args.why),
+        ("--pick-why", args.pick_why),
+        *(("--cost", c) for c in args.cost),
+    ]:
+        if problem := find_card_line_problem(words):
+            print(
+                f"warning: {flag} {problem}; break it into lines or '- ' bullets so the card reads well",
+                file=sys.stderr,
+            )
     body = sys.stdin.read() if args.body == "-" else str(args.body)
     try:
         if structured:
