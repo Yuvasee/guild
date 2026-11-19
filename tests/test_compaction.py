@@ -9,6 +9,7 @@ from bridge.compaction import (
     CONTINUE_PROMPT,
     ContextReading,
     estimate_pending_tokens,
+    map_screen_to_box_lines,
     map_screen_to_draft,
     map_screen_to_idle,
     read_context_tokens,
@@ -211,6 +212,19 @@ def test_screen_is_idle_only_with_an_empty_prompt_and_nothing_in_the_way() -> No
     assert not map_screen_to_idle(IDLE.replace("\u276f\u00a0\n", "\u276f\u00a0\n  second line of a draft\n"))
     assert not map_screen_to_idle(IDLE + "\u276f half-typed below an old prompt\n")
     assert not map_screen_to_idle("\u276f No, exit\n  Yes, I trust this folder\n Enter to confirm · Esc to cancel\n")
+
+
+def test_an_empty_line_in_the_box_is_kept_where_the_draft_drops_it() -> None:
+    under_empty = IDLE.replace("\u276f\u00a0\n", "\u276f\u00a0\n  /compact\n")
+    two_empty = IDLE.replace("\u276f\u00a0\n", "\u276f\u00a0\n   \n")
+
+    assert map_screen_to_draft(under_empty) == "/compact"
+    assert map_screen_to_box_lines(under_empty) == ["", "/compact"]
+    assert map_screen_to_draft(two_empty) == ""
+    assert map_screen_to_box_lines(two_empty) == ["", ""]
+    assert not map_screen_to_idle(two_empty)
+    assert map_screen_to_box_lines(IDLE) == [""]
+    assert map_screen_to_box_lines(TORN) == [""], "a torn box's blank rows are not its lines"
 
 
 def test_in_agterm_bridge_types_compact_then_continue(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:

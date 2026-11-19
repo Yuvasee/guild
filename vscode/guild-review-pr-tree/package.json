@@ -1,0 +1,22 @@
+{
+  "name": "guild-review-pr-tree",
+  "displayName": "Review window: PR file tree",
+  "description": "In a review-*.code-workspace window, opens the GitHub Pull Request side bar so the PR's changed-files tree is in view.",
+  "version": "0.0.2",
+  "publisher": "guild",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "main": "./extension.js",
+  "activationEvents": [
+    "*"
+  ],
+  "extensionDependencies": [
+    "GitHub.vscode-pull-request-github"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Yuvasee/guild"
+  }
+}

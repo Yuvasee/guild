@@ -156,6 +156,9 @@ Claude Code follows [SETUP.md](SETUP.md): it checks what you have, installs Guil
 Right Hand and your first team lead in their own tabs. It asks only what it can't know: your name and what the first
 team lead should own. From then on, talk to Right Hand.
 
+Reviewing in VS Code? Install the small local extension in [vscode/guild-review-pr-tree](vscode/guild-review-pr-tree):
+a PR opened from the page then shows its own changed-files tree straight away.
+
 ## Concepts
 
 <details>

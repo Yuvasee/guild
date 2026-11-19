@@ -25,7 +25,15 @@ from bridge.feed import (
     tell_of_undelivered_tab,
 )
 from bridge.guildview import _load_undelivered_to_needs  # pyright: ignore[reportPrivateUsage]
-from bridge.tabinput import CLEAR_KEYS, ENTER_BUDGET_S, SUBMIT_RETRIES, is_claude_vim, judge_box, type_when_idle
+from bridge.tabinput import (
+    CLEAR_KEYS,
+    ENTER_BUDGET_S,
+    SUBMIT_RETRIES,
+    is_claude_vim,
+    judge_box,
+    map_lines_to_clear_keys,
+    type_when_idle,
+)
 
 ENTER = "\r"
 PROMPT = chr(0x276F)
@@ -93,11 +101,23 @@ class FakeClaudeBox:
             self.boxes[session] = ""
         elif key == "\x7f":
             self.boxes[session] = text[:-1]
-        elif key == CLEAR_KEYS:
-            self.boxes[session] = ""
+        elif key and set(key) <= {"\x0b", "\x15"}:
+            self.boxes[session] = _apply_kills(text, key)
         else:
             self.boxes[session] = text + key
         return "ok"
+
+
+def _apply_kills(text: str, keys: str) -> str:
+    """Ctrl-K and Ctrl-U as Claude Code takes them with the cursor at the box's end: Ctrl-K finds nothing after it,
+    Ctrl-U empties the last line, or on an empty one takes the line break before it."""
+    lines = text.split("\n")
+    for key in keys:
+        if key == "\x15" and lines[-1]:
+            lines[-1] = ""
+        elif key == "\x15" and len(lines) > 1:
+            lines.pop()
+    return "\n".join(lines)
 
 
 class LateText(FakeClaudeBox):
@@ -1205,6 +1225,68 @@ def test_a_stray_key_in_the_box_is_cleared_and_the_text_typed(tmp_path: Path) ->
     assert fake.typed == [".", "\x7f", CLEAR_KEYS, "hello", ENTER]
     assert fake.submitted == ["hello"]
     assert unsure == []
+
+
+def test_a_stray_key_under_an_empty_line_is_cleared_with_the_line(tmp_path: Path) -> None:
+    fake = FakeClaudeBox({"S": "\n."})
+
+    result = _type(tmp_path, fake, wait_s=10, may_probe_box=lambda: True)
+
+    assert result == "typed"
+    assert fake.typed == [".", "\x7f", map_lines_to_clear_keys(2), "hello", ENTER]
+    assert fake.submitted == ["hello"]
+
+
+def test_nothing_is_typed_into_a_box_of_empty_lines(tmp_path: Path) -> None:
+    fake = FakeClaudeBox({"S": "\n"})
+
+    result = _type(tmp_path, fake, command="/compact", wait_s=3, may_probe_box=lambda: True, vim=True)
+
+    assert result == "timeout"
+    assert fake.typed == []
+
+
+def test_compact_under_an_empty_line_is_cleared_and_typed_again_before_its_enter(tmp_path: Path) -> None:
+    fake = FakeClaudeBox({"S": "\n/compact"})
+
+    result = _type(tmp_path, fake, command="/compact", wait_s=10, vim=True)
+
+    assert result == "typed"
+    assert fake.typed == [map_lines_to_clear_keys(2), "/compact", ENTER]
+    assert fake.submitted == ["/compact"]
+
+
+def test_compact_is_not_typed_again_once_unwanted_while_the_box_emptied(tmp_path: Path) -> None:
+    class Clears(FakeClaudeBox):
+        cleared = False
+
+        def run(self, _: Config, args: list[str]) -> str | None:
+            self.cleared = self.cleared or args[-1] == map_lines_to_clear_keys(2)
+            return super().run(_, args)
+
+    fake = Clears({"S": "\n/compact"})
+
+    result = _type(tmp_path, fake, command="/compact", wait_s=10, vim=True, still_wanted=lambda: not fake.cleared)
+
+    assert result == "unwanted"
+    assert fake.typed == [map_lines_to_clear_keys(2)]
+
+
+def test_compact_that_lands_under_an_empty_line_again_gets_no_enter_and_ends_stuck(tmp_path: Path) -> None:
+    class LandsUnderAnEmptyLine(FakeClaudeBox):
+        def run(self, _: Config, args: list[str]) -> str | None:
+            result = super().run(_, args)
+            if args[-1] == "/compact":
+                self.boxes["S"] = "\n/compact"
+            return result
+
+    fake = LandsUnderAnEmptyLine()
+
+    result = _type(tmp_path, fake, command="/compact", wait_s=10, vim=True)
+
+    assert result == "stuck"
+    assert fake.typed == ["/compact", map_lines_to_clear_keys(2), "/compact"]
+    assert fake.submitted == []
 
 
 def test_a_half_typed_compact_is_cleared_when_vim_shows_insert(tmp_path: Path) -> None:
