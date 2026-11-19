@@ -149,6 +149,10 @@ def test_a_pr_stacked_on_this_one_blocks_nothing() -> None:
         ("## DO NOT MERGE", "DO NOT MERGE"),
         ("Hold off merging: the API is not out yet.", "Hold off merging: the API is not out yet."),
         ("Hold off on merging for now.", "Hold off on merging for now."),
+        ("Keep unmerged until after the night deploy.", "Keep unmerged until after the night deploy."),
+        ("Keep this PR unmerged for now.", "Keep this PR unmerged for now."),
+        ("Don't merge yet: the bucket is not there.", "Don't merge yet: the bucket is not there."),
+        ("Docs.\n\nguild: hold", "guild: hold"),
     ],
 )
 def test_each_merge_precondition_in_a_body_is_a_blocker_quoting_its_sentence(body: str, sentence: str) -> None:
@@ -170,6 +174,8 @@ def test_each_merge_precondition_in_a_body_is_a_blocker_quoting_its_sentence(bod
         "Enables auto-merge when the queue is green.",
         "Adds a do-not-merge label.",
         "The records merge when their keys match.",
+        "Hold the old export until the new one is out.",
+        "We keep unmerged branches for a week.",
         "Duplicate records do not merge automatically.",
         "Merge after the API change in\n#12 is deployed.",
         "",

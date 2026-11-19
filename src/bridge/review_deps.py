@@ -62,7 +62,10 @@ _PRECONDITION_RE = re.compile(
     r"^[\W_]*(?:\w+(?:\s+\w+)?:\s*)?(?:please\s+)?(?:"
     r"(?:only\s+)?merge(?:\s+(?:this|it|this\s+PR))?\s+(?:after|once|when|until|only\s+(?:after|when|once|if))\b"
     r"|(?:don['\u2019]?t|never)\s+merge(?:\s+(?:this|it|this\s+PR))?\s+(?:until|before)\b"
-    r"|do\s+not\s+merge\b|hold\s+off\s+(?:on\s+)?merging\b)",
+    r"|do\s+not\s+merge\b|hold\s+off\s+(?:on\s+)?merging\b"
+    r"|(?:don['\u2019]?t|never)\s+merge(?:\s+(?:this|it|this\s+PR))?\s+yet\b"
+    r"|keep(?:\s+(?:this|it|this\s+PR))?\s+unmerged\b"
+    r"|hold\W*$)",
     re.I,
 )
 _EMPHASIS_RE = re.compile(r"\*+|(?<!\w)__?|__?(?!\w)")
