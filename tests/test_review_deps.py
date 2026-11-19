@@ -153,6 +153,16 @@ def test_a_pr_stacked_on_this_one_blocks_nothing() -> None:
         ("Keep this PR unmerged for now.", "Keep this PR unmerged for now."),
         ("Don't merge yet: the bucket is not there.", "Don't merge yet: the bucket is not there."),
         ("Docs.\n\nguild: hold", "guild: hold"),
+        ("Merge after #12 is deployed.", "Merge after #12 is deployed."),
+        (
+            "Do not merge until Acme-Org/acme-infra#23 is released.",
+            "Do not merge until Acme-Org/acme-infra#23 is released.",
+        ),
+        ("Merge after the API change in\n#12 is deployed.", "Merge after the API change in #12 is deployed."),
+        (
+            "**Merge gate:** merge only after the operator runs a build that includes #7.",
+            "Merge gate: merge only after the operator runs a build that includes #7.",
+        ),
     ],
 )
 def test_each_merge_precondition_in_a_body_is_a_blocker_quoting_its_sentence(body: str, sentence: str) -> None:
@@ -164,8 +174,6 @@ def test_each_merge_precondition_in_a_body_is_a_blocker_quoting_its_sentence(bod
 @pytest.mark.parametrize(
     "body",
     [
-        "Merge after #12 is deployed.",
-        "Do not merge until Acme-Org/acme-infra#23 is released.",
         "Merge once https://github.com/Acme-Org/acme-infra/pull/23 is out.",
         "<!-- Do not merge until the API is out. -->Docs for the API.",
         "```\ngit commit -m 'do not merge'\n```",
@@ -177,7 +185,6 @@ def test_each_merge_precondition_in_a_body_is_a_blocker_quoting_its_sentence(bod
         "Hold the old export until the new one is out.",
         "We keep unmerged branches for a week.",
         "Duplicate records do not merge automatically.",
-        "Merge after the API change in\n#12 is deployed.",
         "",
     ],
 )

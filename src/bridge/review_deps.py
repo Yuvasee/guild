@@ -68,6 +68,11 @@ _PRECONDITION_RE = re.compile(
     r"|hold\W*$)",
     re.I,
 )
+_DEPLOY_WORDS_RE = re.compile(
+    r"\b(?:runs?|running|ran|deploy(?:s|ed|ing)?|appl(?:y|ies|ied)|roll(?:s|ed)?\s+out|releas(?:e|es|ed)|"
+    r"upgrad(?:e|es|ed)|install(?:s|ed)?|is\s+live|goes\s+live)\b",
+    re.I,
+)
 _EMPHASIS_RE = re.compile(r"\*+|(?<!\w)__?|__?(?!\w)")
 _BLOCK_START_RE = re.compile(r"^\s*(?:[-*+>]|#+|\d+[.)])\s+")
 _PRECONDITION_SHOWN_MAX = 120
@@ -83,7 +88,11 @@ def map_markdown_to_preconditions(body: str, repo: str, number: int) -> tuple[st
     found: list[str] = []
     for block in _map_text_to_blocks(text):
         for sentence in re.split(r"(?<=[.!?])\s+", _EMPHASIS_RE.sub("", block)):
-            if not _PRECONDITION_RE.search(sentence) or _find_prs(sentence, repo, number, full):
+            if not _PRECONDITION_RE.search(sentence):
+                continue
+            # A sentence naming a PR is that PR's wait, unless what it waits for is a run or a deploy, which no merge
+            # of that PR can tell: 'merge only after the team runs the chart from #12'.
+            if _find_prs(sentence, repo, number, full) and not _DEPLOY_WORDS_RE.search(sentence):
                 continue
             shown = (
                 sentence
