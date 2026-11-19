@@ -1538,7 +1538,7 @@ def test_a_grey_compact_in_an_empty_box_is_probed_and_compact_typed_over_it(tmp_
     result = _type(tmp_path, fake, command="/compact", wait_s=10, may_probe_box=lambda: True, vim=True)
 
     assert result == "typed"
-    assert fake.typed == [".", "\x7f", "/compact", ENTER]
+    assert fake.typed == [".", "\x7f", ".", "\x7f", "/compact", ENTER]
     assert fake.submitted == ["/compact"]
 
 
@@ -1561,7 +1561,7 @@ def test_a_grey_message_that_reads_as_another_messages_text_gets_no_enter_and_th
     result = _type(tmp_path, fake, OWN_TEXT, wait_s=20, may_probe_box=lambda: True, own_pattern=OWN_PATTERN, **left)
 
     assert result == "typed"
-    assert fake.typed == [".", "\x7f", OWN_TEXT, ENTER]
+    assert fake.typed == [".", "\x7f", ".", "\x7f", OWN_TEXT, ENTER]
     assert fake.submitted == [OWN_TEXT]
     assert recorded == [False]
 
@@ -1644,3 +1644,26 @@ def test_no_probe_key_on_another_messages_text_once_the_user_comes_to_the_tab_du
     assert fake.typed == []
     assert settled == [False]
     assert fake.boxes["S"] == OTHER_TEXT
+
+
+def test_no_probe_key_on_another_messages_text_replaced_by_a_draft_during_its_claim(tmp_path: Path) -> None:
+    fake = FakeClaudeBox({"S": OTHER_TEXT})
+    settled: list[bool] = []
+
+    def claim_left_unsent(box: str) -> Callable[[bool], None] | None:
+        fake.boxes["S"] = "my private draft"
+        return settled.append
+
+    result = _type(
+        tmp_path,
+        fake,
+        OWN_TEXT,
+        wait_s=6,
+        may_probe_box=lambda: True,
+        own_pattern=OWN_PATTERN,
+        claim_left_unsent=claim_left_unsent,
+    )
+
+    assert settled == [False]
+    assert fake.boxes["S"] == "my private draft"
+    assert result == "draft"

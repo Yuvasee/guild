@@ -315,8 +315,12 @@ def type_when_idle(
                         if again is not None and map_screen_to_draft(again) == box and not held(again) and allowed():
                             # Left by a try that died or by older code: unchanged this long, nobody is typing it.
                             settle = claim_left_unsent(box)
-                            # The claim can wait on the database while the user comes to the tab.
-                            proof = _prove_typed(config, target, box, allowed) if settle is not None else None
+                            proof = "unproven"
+                            if settle is not None:
+                                # The claim can wait on the database while the user comes to the tab or edits the box.
+                                now = _read_screen(config, target)
+                                if now is not None and map_screen_to_draft(now) == box and not held(now):
+                                    proof = _prove_typed(config, target, box, allowed)
                             if settle is not None and proof != "typed":
                                 # Grey text that reads as that message was never typed: the message goes out again.
                                 settle(False)
@@ -387,19 +391,21 @@ def type_when_idle(
             if idle and idle_before:
                 with _pane_lock(pane):
                     again = _read_screen(config, target)
-                    # The user may have come to the tab since the probe and typed the same text for real.
-                    if suggested is not None and (may_probe_box is None or not may_probe_box()):
-                        suggested = None
-                    # Idle, or still the suggestion the probe found.
-                    if again is not None and (
-                        (map_screen_to_idle(again) and not held(again))
-                        or (
-                            suggested
-                            and map_screen_to_draft(again) == suggested
-                            and not held(again)
-                            and not is_box_padded(again)
-                        )
+                    grey: str | None = None
+                    if (
+                        again is not None
+                        and suggested is not None
+                        and map_screen_to_draft(again) == suggested
+                        and not held(again)
+                        and not is_box_padded(again)
                     ):
+                        # Proven again under this lock: since the last probe the same text may have been typed for real.
+                        grey = _prove_typed(config, target, suggested, may_probe_box)
+                        if grey == "unknown":
+                            return "failed"
+                        if grey != "suggestion":
+                            suggested = None
+                    if again is not None and ((map_screen_to_idle(again) and not held(again)) or grey == "suggestion"):
                         # The tab can switch conversations during the screen read; the claim keeps a hook from also
                         # delivering.
                         if not still_wanted() or (claim is not None and not claim()):
