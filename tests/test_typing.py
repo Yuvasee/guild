@@ -92,6 +92,9 @@ class FakeClaudeBox:
             shown, left = self.lag.get(session, (text, 0))
             self.lag[session] = (shown if left else text, self.lagging_reads)
         if session in self.suggestions:
+            # Enter does nothing on the grey text; any other key replaces it.
+            if key == ENTER:
+                return "ok"
             self.suggestions.discard(session)
             text = ""
         if key == ENTER and self.dropped_enters:
@@ -451,7 +454,7 @@ def test_a_tab_in_a_turn_whose_spinner_names_no_esc_gets_no_keys(tmp_path: Path)
     assert fake.typed == []
 
 
-def test_its_own_unsent_text_from_an_earlier_try_gets_only_the_enter(tmp_path: Path) -> None:
+def test_its_own_unsent_text_from_an_earlier_try_is_probed_and_gets_only_the_enter(tmp_path: Path) -> None:
     fake = FakeClaudeBox({"S": OWN_TEXT})
     claims: list[bool] = []
 
@@ -464,7 +467,7 @@ def test_its_own_unsent_text_from_an_earlier_try_gets_only_the_enter(tmp_path: P
     result = _type(tmp_path, fake, retry_text, may_probe_box=lambda: True, claim=claim, own_pattern=OWN_PATTERN)
 
     assert result == "typed"
-    assert fake.typed == [ENTER]
+    assert fake.typed == [".", "\x7f", ENTER]
     assert fake.submitted == [OWN_TEXT]
     assert claims == [True]
 
@@ -473,10 +476,10 @@ def test_its_own_text_an_older_typer_left_with_a_screens_glyphs_gets_only_the_en
     left = OWN_TEXT.replace("look", f"look {RULE} {PROMPT} {RULE}")
     fake = FakeClaudeBox({"S": left})
 
-    result = _type(tmp_path, fake, left, claim=lambda: True)
+    result = _type(tmp_path, fake, left, claim=lambda: True, may_probe_box=lambda: True)
 
     assert result == "typed"
-    assert fake.typed == [ENTER]
+    assert fake.typed == [".", "\x7f", ENTER]
     assert fake.submitted == [left]
 
 
@@ -610,7 +613,7 @@ def test_another_messages_text_left_unsent_gets_enter_alone_and_then_this_one_is
     result = _type(tmp_path, fake, OWN_TEXT, wait_s=20, may_probe_box=lambda: True, own_pattern=OWN_PATTERN, **left)
 
     assert result == "typed"
-    assert fake.typed == [ENTER, OWN_TEXT, ENTER]
+    assert fake.typed == [".", "\x7f", ENTER, OWN_TEXT, ENTER]
     assert fake.submitted == [OTHER_TEXT, OWN_TEXT]
     assert recorded == [True]
 
@@ -652,7 +655,7 @@ def test_another_messages_text_whose_enter_does_not_take_gets_it_once(tmp_path: 
     result = _type(tmp_path, fake, OWN_TEXT, wait_s=12, may_probe_box=lambda: True, own_pattern=OWN_PATTERN, **left)
 
     assert result == "draft"
-    assert fake.typed == [ENTER] * (SUBMIT_RETRIES + 1)
+    assert fake.typed == [".", "\x7f", *[ENTER] * (SUBMIT_RETRIES + 1)]
     assert fake.boxes["S"] == OTHER_TEXT
     assert recorded == [False]
 
@@ -678,7 +681,7 @@ def test_no_more_enters_on_another_messages_text_once_the_user_comes_to_the_tab(
     result = _type(tmp_path, fake, OWN_TEXT, wait_s=10, may_probe_box=may_probe_box, own_pattern=OWN_PATTERN, **left)
 
     assert result == "draft"
-    assert fake.typed == [ENTER]
+    assert fake.typed == [".", "\x7f", ENTER]
     assert recorded == [False]
 
 
@@ -1511,3 +1514,133 @@ def test_no_probe_after_the_clear_once_the_footer_leaves_insert(tmp_path: Path) 
 
     assert result == "failed"
     assert fake.typed == [".", "\x7f", CLEAR_KEYS]
+
+
+class GreySuggestion(FakeClaudeBox):
+    """Claude Code's grey suggestion: an empty box shows a recent command, which any key replaces, Enter leaves as it
+    is, and which comes back when a key empties the box; after a submit a turn starts first."""
+
+    def __init__(self, suggestion: str, **kw: Any) -> None:
+        super().__init__({"S": suggestion}, suggestions={"S"}, **kw)
+        self.suggestion = suggestion
+
+    def run(self, _: Config, args: list[str]) -> str | None:
+        result = super().run(_, args)
+        if args[:2] == ["session", "type"] and args[-1] != ENTER and self.boxes["S"] == "":
+            self.boxes["S"] = self.suggestion
+            self.suggestions.add("S")
+        return result
+
+
+def test_a_grey_compact_in_an_empty_box_is_probed_and_compact_typed_over_it(tmp_path: Path) -> None:
+    fake = GreySuggestion("/compact")
+
+    result = _type(tmp_path, fake, command="/compact", wait_s=10, may_probe_box=lambda: True, vim=True)
+
+    assert result == "typed"
+    assert fake.typed == [".", "\x7f", "/compact", ENTER]
+    assert fake.submitted == ["/compact"]
+
+
+def test_a_grey_compact_no_probe_may_check_gets_no_enter_and_is_unproven(tmp_path: Path) -> None:
+    fake = GreySuggestion("/compact")
+
+    result = _type(tmp_path, fake, command="/compact", wait_s=3, may_probe_box=lambda: False, vim=True)
+
+    assert result == "unproven"
+    assert fake.typed == []
+
+
+def test_a_grey_message_that_reads_as_another_messages_text_gets_no_enter_and_this_one_is_typed(
+    tmp_path: Path,
+) -> None:
+    fake = GreySuggestion(OTHER_TEXT.replace("\n", " "))
+    recorded: list[bool] = []
+    left = _left_unsent(recorded)
+
+    result = _type(tmp_path, fake, OWN_TEXT, wait_s=20, may_probe_box=lambda: True, own_pattern=OWN_PATTERN, **left)
+
+    assert result == "typed"
+    assert fake.typed == [".", "\x7f", OWN_TEXT, ENTER]
+    assert fake.submitted == [OWN_TEXT]
+    assert recorded == [False]
+
+
+def test_compact_typed_by_an_earlier_try_is_probed_and_gets_its_enter(tmp_path: Path) -> None:
+    fake = FakeClaudeBox({"S": "/compact"})
+
+    result = _type(tmp_path, fake, command="/compact", wait_s=10, may_probe_box=lambda: True, vim=True)
+
+    assert result == "typed"
+    assert fake.typed == [".", "\x7f", ENTER]
+    assert fake.submitted == ["/compact"]
+
+
+class CursorInside(FakeClaudeBox):
+    """The cursor sits a few characters before the text's end: the probe key and its Backspace act there."""
+
+    def __init__(self, boxes: dict[str, str], back: int, **kw: Any) -> None:
+        super().__init__(boxes, **kw)
+        self.back = back
+
+    def run(self, _: Config, args: list[str]) -> str | None:
+        key = args[-1]
+        if args[:2] == ["session", "type"] and key in (".", "\x7f"):
+            self.typed.append(key)
+            text, at = self.boxes["S"], len(self.boxes["S"]) - self.back
+            self.boxes["S"] = text[:at] + "." + text[at:] if key == "." else text[: at - 1] + text[at:]
+            return "ok"
+        return super().run(_, args)
+
+
+def test_its_own_text_with_the_cursor_left_inside_is_proven_typed_and_gets_its_enter(tmp_path: Path) -> None:
+    fake = CursorInside({"S": "/compact"}, back=3)
+
+    result = _type(tmp_path, fake, command="/compact", wait_s=10, may_probe_box=lambda: True, vim=True)
+
+    assert result == "typed"
+    assert fake.typed == [".", "\x7f", ENTER]
+    assert fake.submitted == ["/compact"]
+
+
+def test_a_proven_suggestion_is_not_typed_over_once_the_user_comes_to_the_tab(tmp_path: Path) -> None:
+    fake = GreySuggestion("/compact")
+    asked_after_the_probe: list[bool] = []
+
+    def may_probe_box() -> bool:
+        # The probe's own last check passes; the user comes right after it.
+        if "\x7f" in fake.typed:
+            asked_after_the_probe.append(True)
+        return len(asked_after_the_probe) <= 1
+
+    result = _type(tmp_path, fake, command="/compact", wait_s=6, may_probe_box=may_probe_box, vim=True)
+
+    assert result == "unproven"
+    assert fake.typed == [".", "\x7f"]
+    assert fake.submitted == []
+
+
+def test_no_probe_key_on_another_messages_text_once_the_user_comes_to_the_tab_during_its_claim(tmp_path: Path) -> None:
+    fake = FakeClaudeBox({"S": OTHER_TEXT})
+    selected = False
+    settled: list[bool] = []
+
+    def claim_left_unsent(box: str) -> Callable[[bool], None] | None:
+        nonlocal selected
+        selected = True
+        return settled.append
+
+    result = _type(
+        tmp_path,
+        fake,
+        OWN_TEXT,
+        wait_s=8,
+        may_probe_box=lambda: not selected,
+        own_pattern=OWN_PATTERN,
+        claim_left_unsent=claim_left_unsent,
+    )
+
+    assert result == "draft"
+    assert fake.typed == []
+    assert settled == [False]
+    assert fake.boxes["S"] == OTHER_TEXT

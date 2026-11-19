@@ -140,6 +140,9 @@ def type_when_idle(
     claim_left_unsent claims the message whose text bridge typed and never submitted, when the box holds it unedited,
     and returns how to settle that claim. Such text that stays the same for ORPHAN_STEADY_S gets Enter alone where a
     probe key would be allowed, never a clear or an edit.
+    Text bridge would press Enter on gets it only once this call typed it or a probe proved it typed: Claude Code shows
+    a recent command in an empty box as grey text that reads the same, and Enter does nothing on it. Text a probe
+    proves grey counts as an empty box, and the command is typed over it.
     may_type False holds this try back without a key or a screen read while something else may deliver the text;
     once text is claimed it is not asked.
     A draft a probe proved is judged: stray keys are cleared once and the wait goes on, someone's words are kept,
@@ -189,10 +192,11 @@ def type_when_idle(
     cleared = False
     retyped = False
     told_unsure = False
+    suggested: str | None = None
 
     def attempt() -> TypeResult:
         nonlocal claimed, pressed, pressed_was_last, idle_before, known_draft, box, orphan_since, entered, looked
-        nonlocal may_probe_box, cleared, retyped, told_unsure, vim, own_chip
+        nonlocal may_probe_box, cleared, retyped, told_unsure, vim, own_chip, suggested
         enter_rounds = 0
         busy = False
         while waiting.seconds() < wait_s or (entered is not None and entered.seconds() < ENTER_BUDGET_S):
@@ -201,7 +205,7 @@ def type_when_idle(
             if not still_wanted():
                 return "unwanted"
             if not claimed and may_type is not None and not may_type():
-                idle_before, known_draft, box, orphan_since, busy = False, None, None, None, False
+                idle_before, known_draft, box, orphan_since, busy, suggested = False, None, None, None, False, None
                 time.sleep(1)
                 continue
             screen = _read_screen(config, target)
@@ -212,12 +216,19 @@ def type_when_idle(
                 screen = _read_screen(config, target)
             if looked.slept():
                 # The Mac slept since the last look, or during this one: what showed is no proof of anything now.
-                idle_before, known_draft, box, orphan_since, busy = False, None, None, None, False
+                idle_before, known_draft, box, orphan_since, busy, suggested = False, None, None, None, False, None
                 looked = _Stopwatch()
                 continue
             looked = _Stopwatch()
-            idle = screen is not None and (map_screen_to_idle(screen) and not held(screen))
-            box = map_screen_to_draft(screen) if screen is not None and not idle else None
+            draft = map_screen_to_draft(screen) if screen is not None else None
+            if draft != suggested:
+                suggested = None
+            idle = (
+                screen is not None
+                and not held(screen)
+                and (map_screen_to_idle(screen) or (suggested is not None and not is_box_padded(screen)))
+            )
+            box = draft if not idle else None
             busy = screen is not None and held(screen)
             # Past the wait only our text's Enter is left to press, and only while the box shows it free to take one.
             overtime = waiting.seconds() >= wait_s
@@ -231,33 +242,47 @@ def type_when_idle(
                 time.sleep(2)
                 continue
             if left_by_earlier_try(box) and screen is not None and not busy:
+                proof = "typed"
                 with _pane_lock(pane):
                     again = _read_screen(config, target)
                     left = map_screen_to_draft(again) if again is not None else None
                     if again is not None and not held(again) and left_by_earlier_try(left):
-                        # This try or an earlier one left this very text unsent: only its Enter is missing.
-                        if not still_wanted() or (not claimed and claim is not None and not claim()):
-                            return "unwanted"
-                        claimed, pressed = True, _squash(left or "")
-                        pressed_was_last = _is_last_prompt(again, pressed)
-                        if entered is None:
-                            entered = _Stopwatch()
-                        if is_box_padded(again):
-                            # Read as our text alone, it holds an empty line too, and Enter may not run it: once, the
-                            # box starts over.
-                            if retyped:
-                                return "stuck"
-                            retyped, pressed = True, _squash(command)
-                            # Typed again, a long text folds into a chip with a new number.
-                            own_chip = None
-                            enter_rounds += 1
-                            result = _clear_and_type_again(
-                                config, target, again, command, just_typed_or_folded, still_wanted, held
-                            )
-                        else:
-                            submitted = _submit(config, target, left_by_earlier_try, still_wanted)
-                            enter_rounds += submitted != "untouched"
-                            result = "typed" if submitted == "sent" else "stuck"
+                        # Grey text shows only in an empty box: a padded one is typed, and the clear below proves it.
+                        if not claimed and not is_box_padded(again):
+                            proof = _prove_typed(config, target, left or "", may_probe_box)
+                        if proof == "suggestion":
+                            suggested = left
+                        elif proof == "typed":
+                            # This try or an earlier one left this very text unsent: only its Enter is missing.
+                            if not still_wanted() or (not claimed and claim is not None and not claim()):
+                                return "unwanted"
+                            claimed, pressed = True, _squash(left or "")
+                            pressed_was_last = _is_last_prompt(again, pressed)
+                            if entered is None:
+                                entered = _Stopwatch()
+                            if is_box_padded(again):
+                                # Read as our text alone, it holds an empty line too, and Enter may not run it: once,
+                                # the box starts over.
+                                if retyped:
+                                    return "stuck"
+                                retyped, pressed = True, _squash(command)
+                                # Typed again, a long text folds into a chip with a new number.
+                                own_chip = None
+                                enter_rounds += 1
+                                result = _clear_and_type_again(
+                                    config, target, again, command, just_typed_or_folded, still_wanted, held
+                                )
+                            else:
+                                submitted = _submit(config, target, left_by_earlier_try, still_wanted)
+                                enter_rounds += submitted != "untouched"
+                                result = "typed" if submitted == "sent" else "stuck"
+                if proof == "unknown":
+                    return "failed"
+                if proof != "typed":
+                    # Grey text is typed over on the next look; unproven text waits for a probe to be allowed.
+                    idle_before = proof == "suggestion"
+                    time.sleep(2)
+                    continue
                 if result is None or (result == "stuck" and enter_rounds < STUCK_ENTER_ROUNDS):
                     time.sleep(2)
                     continue
@@ -270,7 +295,7 @@ def type_when_idle(
                 continue
             # The prefix alone is a try cut short, whose stray start the judge clears.
             if box and box.startswith(BRIDGE_TEXT_PREFIX) and box != BRIDGE_TEXT_PREFIX:
-                # Another message's unsent text: a probe key would only add to it.
+                # Another message's unsent text: proven typed, it gets its Enter, never a clear.
                 known_draft = box
                 if orphan_since is None or orphan_since[0] != box:
                     # Steady while awake: sleep shows no one left it alone.
@@ -290,7 +315,16 @@ def type_when_idle(
                         if again is not None and map_screen_to_draft(again) == box and not held(again) and allowed():
                             # Left by a try that died or by older code: unchanged this long, nobody is typing it.
                             settle = claim_left_unsent(box)
-                            if settle is not None:
+                            # The claim can wait on the database while the user comes to the tab.
+                            proof = _prove_typed(config, target, box, allowed) if settle is not None else None
+                            if settle is not None and proof != "typed":
+                                # Grey text that reads as that message was never typed: the message goes out again.
+                                settle(False)
+                                if proof == "unknown":
+                                    return "failed"
+                                if proof == "suggestion":
+                                    suggested, idle_before = box, True
+                            elif settle is not None:
                                 # Its own message, not this one: this one going unwanted must not cut its Enter short.
                                 submitted = _submit(
                                     config,
@@ -340,6 +374,7 @@ def type_when_idle(
                 if verdict == "suggestion":
                     idle = True
                     idle_before = True
+                    suggested = box
                 elif verdict == "draft":
                     known_draft = box
                     if call != "keep" and tell_unsure is not None and not told_unsure:
@@ -352,16 +387,26 @@ def type_when_idle(
             if idle and idle_before:
                 with _pane_lock(pane):
                     again = _read_screen(config, target)
+                    # The user may have come to the tab since the probe and typed the same text for real.
+                    if suggested is not None and (may_probe_box is None or not may_probe_box()):
+                        suggested = None
                     # Idle, or still the suggestion the probe found.
                     if again is not None and (
                         (map_screen_to_idle(again) and not held(again))
-                        or (box and map_screen_to_draft(again) == box and not held(again) and not is_box_padded(again))
+                        or (
+                            suggested
+                            and map_screen_to_draft(again) == suggested
+                            and not held(again)
+                            and not is_box_padded(again)
+                        )
                     ):
                         # The tab can switch conversations during the screen read; the claim keeps a hook from also
                         # delivering.
                         if not still_wanted() or (claim is not None and not claim()):
                             return "unwanted"
                         claimed, pressed = True, _squash(command)
+                        # Typed over, the grey text is gone, even where ours reads the same.
+                        suggested = None
                         pressed_was_last = _is_last_prompt(again, pressed)
                         result = _type_and_submit(config, target, command, just_typed_or_folded, still_wanted)
                         entered = _Stopwatch()
@@ -446,7 +491,27 @@ def _read_screen(config: Config, target: list[str]) -> str | None:
     return None if reading.slept() else screen
 
 
-def _probe_box(config: Config, target: list[str], box: str, still_allowed: Callable[[], bool]) -> str:
+def _prove_typed(
+    config: Config, target: list[str], box: str, allowed: Callable[[], bool] | None
+) -> Literal["typed", "suggestion", "unknown", "unproven"]:
+    """Claude Code shows a recent command in an empty box as grey text that reads as typed, and Enter does nothing on
+    it: text bridge would press Enter on is "typed" only once a probe proves it."""
+    if allowed is None or not allowed():
+        return "unproven"
+    verdict = _probe_box(config, target, box, allowed)
+    return "typed" if verdict == "draft" else verdict
+
+
+def _adds_probe_key(before: str, now: str) -> bool:
+    """The key lands where the cursor is, which the user may have left inside the text."""
+    return len(now) == len(before) + 1 and any(
+        now[i] == PROBE_KEY and now[:i] + now[i + 1 :] == before for i in range(len(now))
+    )
+
+
+def _probe_box(
+    config: Config, target: list[str], box: str, still_allowed: Callable[[], bool]
+) -> Literal["suggestion", "draft", "unknown"]:
     """A key replaces a suggestion and adds to a draft; either way it is taken back before this returns.
 
     "suggestion" or "draft" only when the box is verified back as it was and the user has not come to the tab;
@@ -456,10 +521,14 @@ def _probe_box(config: Config, target: list[str], box: str, still_allowed: Calla
     before = _squash(box)
     # Spacing is not compared: the key can land on a line of its own after a newline in the box. A box that is the
     # key alone looks the same before a replacing key lands, so only the added key counts there.
-    with_key = {PROBE_KEY, before + PROBE_KEY} - {before}
     run_agterm(config, ["session", "type", *target, PROBE_KEY])
     # A frame showing neither is waited out, giving up on one left the key in the owner's draft, unless the owner came.
-    after = _await_box(config, target, lambda now: now in with_key, lambda now: still_allowed())
+    after = _await_box(
+        config,
+        target,
+        lambda now: now != before and (now == PROBE_KEY or _adds_probe_key(before, now)),
+        lambda now: still_allowed(),
+    )
     if after is None or not still_allowed():
         return "unknown"
     if run_agterm(config, ["session", "type", *target, BACKSPACE]) is None:
