@@ -17,6 +17,7 @@ from bridge.db import connect, transaction
 from bridge.drivers import scan_transcripts
 from bridge.guard import NOT_APPROVED, NOT_OWNER_REVIEWED, list_merge_waits, map_row_to_merge_facts
 from bridge.guildview import post_signals_to_leads
+from bridge.registry import AgtermTab, sync_tab_parents
 from bridge.review_github import (
     CI_BLOCKED_BY_BILLING,
     CI_BLOCKED_BY_GITHUB,
@@ -90,6 +91,7 @@ from bridge.reviews import (
     tell_review_waits,
 )
 from bridge.serve import list_lead_work_prs
+from bridge.watcher import find_tab_parent
 
 # An invented cutover for the agent prefix rule; times in these tests fall on both sides of it.
 PREFIX_FROM_MS = 1_790_000_000_000
@@ -754,6 +756,68 @@ def test_owner_is_the_parent_lead_after_the_worker_ended(tmp_path: Path) -> None
     tree: Any = {"workspaces": [{"sessions": [{"id": "tab-worker", "parent": "tab-lead"}]}]}
     with transaction(conn):
         record_tab_parents(conn, tree)
+    owner = find_owner(conn, CONFIG, REF, "Org/app", "dev/x")
+    assert owner is not None and (owner.handle, owner.lead, owner.via) == ("alex", "Alex", "lead")
+
+
+def worker_tree(parent: str | None) -> Any:
+    tab = {"id": "tab-worker"} | ({"parent": parent} if parent else {})
+    return {"workspaces": [{"sessions": [tab]}]}
+
+
+def tab_parent_rows(conn: Any) -> list[tuple[str, str]]:
+    return [tuple(r) for r in conn.execute("SELECT agterm_session, parent_session FROM tab_parents ORDER BY 1")]
+
+
+def test_a_closed_tabs_lead_link_survives_a_reconcile_and_a_tree_without_it(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "t.db")
+    with transaction(conn):
+        record_tab_parents(conn, worker_tree("tab-lead"))
+        sync_tab_parents(conn, {"s-lead": AgtermTab("Lead", "W", session_id="tab-lead")})
+    assert tab_parent_rows(conn) == [("tab-worker", "tab-lead")]
+    tree: Any = {"workspaces": [{"sessions": [{"id": "tab-lead"}]}]}
+    assert find_tab_parent(conn, tree, "tab-worker") == "tab-lead"
+    assert tab_parent_rows(conn) == [("tab-worker", "tab-lead")]
+
+
+def test_a_reconcile_replaces_a_live_tabs_link_and_drops_it_when_the_tab_has_no_parent(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "t.db")
+    with transaction(conn):
+        record_tab_parents(conn, worker_tree("tab-lead"))
+        sync_tab_parents(conn, {"s-w": AgtermTab("Task", "W", session_id="tab-worker", parent="tab-other")})
+    assert tab_parent_rows(conn) == [("tab-worker", "tab-other")]
+    with transaction(conn):
+        sync_tab_parents(conn, {"s-w": AgtermTab("Task", "W", session_id="tab-worker")})
+    assert tab_parent_rows(conn) == []
+
+
+def test_the_live_tree_replaces_a_tabs_link_and_drops_it_when_the_tab_has_no_parent(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "t.db")
+    with transaction(conn):
+        record_tab_parents(conn, worker_tree("tab-lead"))
+    assert find_tab_parent(conn, worker_tree("tab-other"), "tab-worker") == "tab-other"
+    assert tab_parent_rows(conn) == [("tab-worker", "tab-other")]
+    assert find_tab_parent(conn, worker_tree(None), "tab-worker") is None
+    assert tab_parent_rows(conn) == []
+
+
+def test_a_closed_workers_pr_stays_with_its_lead_after_its_tab_leaves_the_tree(tmp_path: Path) -> None:
+    conn = setup_pr(tmp_path)
+    with transaction(conn):
+        add_session(conn, "lead-c", "alex", session="tab-lead")
+        add_lead(conn, "Alex", "s-alex")
+        add_session(conn, "w-c", "worker", branch="dev/x", session="tab-worker")
+        sync_tab_parents(
+            conn,
+            {
+                "s-alex": AgtermTab("Alex", "W", session_id="tab-lead"),
+                "s-worker": AgtermTab("Task", "W", session_id="tab-worker", parent="tab-lead"),
+            },
+        )
+        conn.execute("UPDATE instances SET ended_at = 99 WHERE conversation_id = 'w-c'")
+        sync_tab_parents(conn, {"s-alex": AgtermTab("Alex", "W", session_id="tab-lead")})
+        add_session(conn, "asker-c", "charlie")
+        conn.execute("INSERT INTO refs VALUES ('asker-c', ?, 'prompt', 0, 9, 0, 1)", (REF,))
     owner = find_owner(conn, CONFIG, REF, "Org/app", "dev/x")
     assert owner is not None and (owner.handle, owner.lead, owner.via) == ("alex", "Alex", "lead")
 

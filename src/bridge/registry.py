@@ -391,7 +391,7 @@ def sync_tabs(conn: sqlite3.Connection, config: Config, at_ms: int) -> None:
                 "UPDATE surfaces SET tab_name = ?, workspace_name = ?, updated_at = ? WHERE surface = ?",
                 (tab.tab_name, tab.workspace_name, at_ms, surface),
             )
-        _sync_tab_parents(conn, tabs)
+        sync_tab_parents(conn, tabs)
         assign_handles(conn, at_ms)
 
 
@@ -526,11 +526,13 @@ class AgtermTab:
     parent: str = ""
 
 
-def _sync_tab_parents(conn: sqlite3.Connection, tabs: dict[str, AgtermTab]) -> None:
+def sync_tab_parents(conn: sqlite3.Connection, tabs: dict[str, AgtermTab]) -> None:
     # No tabs means agterm did not answer, which is the moment these links exist for.
     if not tabs:
         return
-    conn.execute("DELETE FROM tab_parents")
+    # A closed tab keeps its link: who owns its PR walks it after the tab is gone.
+    live = [(tab.session_id,) for tab in tabs.values() if tab.session_id]
+    conn.executemany("DELETE FROM tab_parents WHERE agterm_session = ?", live)
     for tab in tabs.values():
         if tab.parent and tab.session_id:
             record_tab_parent(conn, tab.session_id, tab.parent)

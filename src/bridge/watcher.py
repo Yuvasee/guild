@@ -47,21 +47,27 @@ def read_tree(config: Config) -> dict[str, object] | None:
         return None
 
 
-def map_tree_to_parent(tree: dict[str, object] | None, session_id: str) -> str | None:
+def find_tree_tab(tree: dict[str, object] | None, session_id: str) -> dict[str, object] | None:
     workspaces = tree.get("workspaces") if tree else None
     for workspace in cast(list[dict[str, object]], workspaces if isinstance(workspaces, list) else []):
         sessions = workspace.get("sessions")
         for tab in cast(list[dict[str, object]], sessions if isinstance(sessions, list) else []):
-            if tab.get("id") == session_id and isinstance(tab.get("parent"), str):
-                return str(tab["parent"])
+            if tab.get("id") == session_id:
+                return tab
     return None
 
 
+def map_tree_to_parent(tree: dict[str, object] | None, session_id: str) -> str | None:
+    tab = find_tree_tab(tree, session_id)
+    return str(tab["parent"]) if tab is not None and isinstance(tab.get("parent"), str) else None
+
+
 def find_tab_parent(conn: sqlite3.Connection, tree: dict[str, object] | None, session_id: str) -> str | None:
-    """The live tree wins and corrects the stored link, which stands in only when agterm did not answer."""
-    if tree is not None:
-        parent = map_tree_to_parent(tree, session_id)
-        if parent:
+    """The live tree wins and corrects the stored link, which stands in when agterm did not answer or the tab closed."""
+    tab = find_tree_tab(tree, session_id)
+    if tab is not None:
+        parent = tab.get("parent")
+        if isinstance(parent, str) and parent:
             record_tab_parent(conn, session_id, parent)
             return parent
         stray = conn.execute(
