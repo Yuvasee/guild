@@ -254,3 +254,46 @@ def test_hidden_and_unknown_tabs_are_not_read(bridge_env: BridgeEnv, spawn_proce
         tabs = list_context_tabs(conn, Config(), tree)
 
     assert [t.session for t in tabs] == ["TAB-A"]
+
+
+PERMISSION_SCREEN = "\n".join(
+    [
+        "╭" + RULE + "╮",
+        "│ Bash command                                   │",
+        "│   gh pr list -R Org/app --state open           │",
+        "│   List open PRs                                │",
+        "│ Do you want to proceed?                        │",
+        "│   1. Yes                                       │",
+        "│   2. No, and tell Claude what to do differently │",
+        "╰" + RULE + "╯",
+    ]
+)
+
+
+def test_a_tab_waiting_on_a_permission_dialog_five_minutes_is_named_to_the_assistant_once(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    _, tabs = _worker_team(bridge_env, spawn_process)
+    with bridge_env.connect() as conn:
+        lead = conn.execute(
+            "SELECT s.handle FROM instances i JOIN surfaces s ON s.surface = i.surface"
+            " WHERE i.conversation_id = 'conv-a'"
+        ).fetchone()[0]
+    config = Config(assistant_handle=lead)
+
+    def look(at: int, screen: str = PERMISSION_SCREEN) -> list[str]:
+        with bridge_env.connect() as conn, transaction(conn):
+            actions = record_context_screens(conn, config, tabs, {"conv-b": (screen, at)}, at)
+            return [
+                str(conn.execute("SELECT body FROM messages WHERE id = ?", (m,)).fetchone()[0])
+                for m, _ in actions.messages
+            ]
+
+    assert look(1_000_000) == [], "first sight starts the wait"
+    assert look(1_000_000 + 4 * 60_000) == []
+    (told,) = look(1_000_000 + 5 * 60_000)
+    assert "waited 5m on a permission dialog" in told and "gh pr list -R Org/app --state open" in told
+    assert "│" not in told and "Do you want to proceed" not in told
+    assert look(1_000_000 + 9 * 60_000) == [], "once per dialog"
+    assert look(1_000_000 + 10 * 60_000, _screen("  Opus 5.5 | 20% ctx | ~/x")) == [], "answered: the marks are cleared"
+    assert look(1_000_000 + 11 * 60_000) == [], "a new dialog waits its own five minutes"

@@ -1,10 +1,12 @@
 """Each tab's context as its status line shows it: the window it really has, and tabs that can take no turn."""
 
+import hashlib
 import re
 import sqlite3
 from dataclasses import dataclass
 from typing import cast
 
+from bridge.asks import send_from_bridge
 from bridge.board import (
     SYSTEM_CONVERSATION,
     AddressError,
@@ -51,6 +53,12 @@ AFTER_COMPACTION_MS = 2 * CONTEXT_EVERY_S * 1000
 RULE_CHAR = "\u2500"
 _PCT_RE = re.compile(r"^\s+(\S.*?) \| (\d+)% ctx\b")
 LIMIT_MARKER = "Context limit reached · /compact or /clear to continue"
+PERMISSION_MARKER = "Do you want to proceed?"
+PERMISSION_PATIENCE_MS = 5 * 60_000
+"""A tab waiting this long on a permission dialog is named to the assistant, who can answer it for a read-only
+command, instead of waiting out the compaction's hour."""
+PERMISSION_LINES = 12
+PERMISSION_QUOTE_CHARS = 700
 LOW_MARKER = "Context low ("
 _DEAD_WORDS = {
     DEAD_TOO_LONG: 'its context is over its window (every turn ends in "Prompt is too long")',
@@ -97,6 +105,49 @@ def map_screen_to_limit_reached(screen: str) -> bool:
         return False
     pct = map_screen_to_context_pct(screen)
     return (pct is not None and pct >= CONTEXT_FULL_PCT) or any(LOW_MARKER in line for line in _footer(screen))
+
+
+def map_screen_to_permission_ask(screen: str) -> str | None:
+    """The lines above Claude Code's 'Do you want to proceed?': the command or edit it asks about, without the box."""
+    lines = screen.splitlines()
+    at = next((i for i, line in enumerate(lines) if PERMISSION_MARKER in line), None)
+    if at is None:
+        return None
+    shown = (line.strip(" \u2502\u256d\u256e\u2570\u256f\u2500") for line in lines[max(0, at - PERMISSION_LINES) : at])
+    return "\n".join(line for line in shown if line)[-PERMISSION_QUOTE_CHARS:]
+
+
+def _watch_permission_ask(
+    conn: sqlite3.Connection, config: Config, tab: ContextTab, screen: str, at_ms: int, actions: ContextActions
+) -> None:
+    """Seen once, told once per dialog: its first sight starts the wait, a dialog gone clears both marks."""
+    prefix = f"permission:{tab.conversation_id}:"
+    ask = map_screen_to_permission_ask(screen)
+    if ask is None:
+        conn.execute("DELETE FROM signal_posts WHERE substr(key, 1, ?) = ?", (len(prefix), prefix))
+        return
+    digest = hashlib.sha256(ask.encode()).hexdigest()[:12]
+    seen_key, told_key = f"{prefix}{digest}:seen", f"{prefix}{digest}:told"
+    seen = conn.execute("SELECT posted_at FROM signal_posts WHERE key = ?", (seen_key,)).fetchone()
+    if seen is None:
+        conn.execute("INSERT INTO signal_posts (key, message_id, posted_at) VALUES (?, 0, ?)", (seen_key, at_ms))
+        return
+    waited = at_ms - int(seen[0])
+    if (
+        waited < PERMISSION_PATIENCE_MS
+        or conn.execute("SELECT 1 FROM signal_posts WHERE key = ?", (told_key,)).fetchone()
+    ):
+        return
+    text = (
+        f"{tab.name} has waited {format_age(waited)} on a permission dialog:\n{ask}\n"
+        "Answer it in the tab if the command is harmless (a read-only one the parser flagged), else ask its lead."
+    )
+    sent = send_from_bridge(conn, config, config.assistant_handle, text, at_ms)
+    if sent:
+        conn.execute(
+            "INSERT INTO signal_posts (key, message_id, posted_at) VALUES (?, ?, ?)", (told_key, sent[0][0], at_ms)
+        )
+        actions.messages.extend(sent)
 
 
 def _footer(screen: str) -> list[str]:
@@ -174,6 +225,7 @@ def _record_screen(
     if row is None or held is None:
         # The tab moved on (/clear, a restart) since it was listed: the screen is another conversation's.
         return
+    _watch_permission_ask(conn, config, tab, screen, at_ms, actions)
     compacted_at = row["compacted_at"]
     if compacted_at is not None and int(compacted_at) >= read_at - AFTER_COMPACTION_MS:
         # Read before, or too soon after, a compaction: it may show the full context that compaction just emptied.
