@@ -1,6 +1,6 @@
 import json
 import sqlite3
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, cast
 from unittest import mock
@@ -21,10 +21,11 @@ from bridge.attention import (
     map_streams_to_ranking,
 )
 from bridge.config import Config
-from bridge.db import connect
+from bridge.db import connect, transaction
 from bridge.feed import answer_post, deliver_typed, record_failed_delivery
 from bridge.leads import ROLE_TEMPLATE, Lead, convert_lead_to_role
 from bridge.notify import UrgentNotice, release_urgent_notice, show_notification, take_next_urgent_notice
+from bridge.review_post import record_published_elsewhere
 from bridge.reviews import (
     COMMENTS_OPEN,
     FIXED,
@@ -186,12 +187,44 @@ def test_a_parent_in_another_group_or_off_the_list_leaves_the_order_alone() -> N
     assert [item.mark for item in ranking] == [1, 2, 3]
 
 
-def test_a_cycle_of_parents_loses_no_pr() -> None:
-    prs = [queued("a", loc=1, depends_on="b"), queued("b", loc=2, depends_on="a"), queued("c", loc=3)]
+def test_a_cycle_of_parents_loses_no_pr_and_stays_where_its_first_pr_was() -> None:
+    prs = [
+        queued("first", group="published", state="published"),
+        queued("a", group="published", state="published", depends_on="b"),
+        queued("b", group="published", state="published", depends_on="a"),
+        queued("last", group="published", state="published"),
+        queued("draft", group="drafts", state="draft"),
+    ]
 
     page = map_page_to_ranked_page({"needs": []}, {"prs": [asdict(pr) for pr in prs]}, [])
 
-    assert sorted(pr["ref"] for pr in cast(Any, page["reviews"])["prs"]) == ["a", "b", "c"]
+    assert [pr["ref"] for pr in cast(Any, page["reviews"])["prs"]] == ["first", "a", "b", "last", "draft"]
+
+
+def test_review_list_shows_a_stack_parent_first_when_the_stack_s_base_is_published(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    def stacked(number: int, parent: int | None, updated: str) -> Any:
+        return make_pr(
+            ref=f"pr:Org/app#{number}", number=number, url=f"https://github.com/Org/app/pull/{number}",
+            stack_parent=f"pr:Org/app#{parent}" if parent else None, updated_at=updated,
+        )  # fmt: skip
+
+    base, a, b, c = (
+        stacked(1, None, "2026-11-02T10:00:00Z"),
+        stacked(2, 1, "2026-11-02T11:00:00Z"),
+        stacked(3, 2, "2026-11-02T12:00:00Z"),
+        stacked(4, 3, "2026-11-02T13:00:00Z"),
+    )
+    with bridge_env.connect() as conn, transaction(conn):
+        store_open_prs(conn, [c, b, a, base], 1)
+        record_published_elsewhere(conn, base.ref, "https://chat.example/p1", 2)
+
+    listed = json.loads(Team(bridge_env, spawn_process).guild("review", "list").stdout)["prs"]
+
+    assert [(pr["ref"], pr["group"]) for pr in listed] == [
+        (a.ref, "waiting"), (b.ref, "waiting"), (c.ref, "waiting"), (base.ref, "published"),
+    ]  # fmt: skip
 
 
 def test_the_page_puts_an_unranked_pr_right_after_its_parent_within_its_group() -> None:
@@ -325,6 +358,28 @@ def test_a_pr_belongs_to_a_project_by_title_or_its_owning_leads_chunk_that_names
     assert title_only == ["PROJ-7"]
     assert still_title_only == ["PROJ-7"]
     assert keys() == ["PROJ-3", "PROJ-7"]
+
+
+def test_a_pr_s_branch_names_its_issue_only_with_a_configured_team_s_key(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "b.db")
+    store_open_prs(
+        conn,
+        [
+            make_pr(head="dev/acme-12_values-per-namespace", title="Values per namespace"),
+            make_pr(
+                ref="pr:Org/app#8", number=8, url="https://github.com/Org/app/pull/8", head="sam-5/AB-3-cleanup",
+                title="Cleanup",
+            ),
+        ],
+        1,
+    )  # fmt: skip
+
+    def keys(config: Config) -> dict[str, list[str]]:
+        prs: Any = map_db_to_reviews(conn, config, 2)["prs"]
+        return {pr["ref"]: pr["issue_keys"] for pr in prs}
+
+    assert keys(replace(CONFIG, issue_prefixes=("ACME", "SAM"))) == {REF: ["ACME-12"], "pr:Org/app#8": ["SAM-5"]}
+    assert keys(CONFIG) == {REF: [], "pr:Org/app#8": []}, "no configured team: a branch word is not a key"
 
 
 def test_project_argument_needs_a_name_and_real_issue_keys() -> None:

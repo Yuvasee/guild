@@ -49,7 +49,7 @@ from bridge.guard import (
     sync_claims_flag,
 )
 from bridge.leads import find_lead_on_surface, is_conversation_locked, list_leads
-from bridge.refs import map_ref_to_label
+from bridge.refs import map_prefixes_to_key_re, map_ref_to_label
 from bridge.registry import record_tab_parent
 from bridge.review_deps import map_states_to_blockers
 from bridge.review_github import (
@@ -2300,7 +2300,7 @@ def map_row_to_review(conn: sqlite3.Connection, config: Config, row: sqlite3.Row
         "rounds": rounds,
         "fixed_at": max(heads) if state == FIXED else None,
         "first_seen_at": row["first_seen_at"],
-        "issue_keys": _load_issue_keys_of_pr(conn, ref, str(row["title"]), owner),
+        "issue_keys": _load_issue_keys_of_pr(conn, config, row, owner),
         "issue_missing": bool(row["issue_missing"]),
         "open_threads": int(row["open_threads"] or 0),
         "his_open_threads": int(row["his_open_threads"] or 0),
@@ -2397,9 +2397,16 @@ def map_worktree_to_url(path: Path) -> str:
     return f"vscode://file{urllib.parse.quote(str(workspace if workspace.exists() else path))}"
 
 
-def _load_issue_keys_of_pr(conn: sqlite3.Connection, ref: str, title: str, owner: Owner | None) -> list[str]:
-    """What its title names, and the issues of the owning lead's chunks of work that name this PR."""
-    keys = set(_ISSUE_KEY_RE.findall(title.upper()))
+def _load_issue_keys_of_pr(
+    conn: sqlite3.Connection, config: Config, row: sqlite3.Row, owner: Owner | None
+) -> list[str]:
+    """What its title names, its branch's keys of a configured team, and the issues of the owning lead's chunks of
+    work that name this PR. The body is not stored, so a key only there does not count."""
+    ref = str(row["ref"])
+    keys = set(_ISSUE_KEY_RE.findall(str(row["title"]).upper()))
+    if config.issue_prefixes:
+        branch_keys = map_prefixes_to_key_re(config.issue_prefixes, ignore_case=True).findall(str(row["head"]))
+        keys.update(key.upper() for key in branch_keys)
     if owner is not None and owner.lead:
         for chunk in conn.execute(
             "SELECT refs FROM lead_work WHERE lead = ? AND done_at IS NULL", (owner.lead.lower(),)

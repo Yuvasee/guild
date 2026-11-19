@@ -12,7 +12,13 @@ from pathlib import Path
 from typing import Any, cast
 
 from bridge.asks import AskError
-from bridge.attention import PriorityError, load_projects, map_arg_to_project, store_projects
+from bridge.attention import (
+    PriorityError,
+    load_projects,
+    map_arg_to_project,
+    map_page_to_ranked_page,
+    store_projects,
+)
 from bridge.board import (
     AddressError,
     MessageStateError,
@@ -1300,8 +1306,9 @@ def cmd_comment_list(args: argparse.Namespace, conn: sqlite3.Connection, config:
 
 
 def cmd_review_list(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
-    view = map_db_to_reviews(conn, config, now_ms())
-    print(json.dumps(view, indent=2, ensure_ascii=False))
+    # Questions only sit between PRs, so without them the PRs keep the page's order.
+    view = map_page_to_ranked_page({"needs": []}, map_db_to_reviews(conn, config, now_ms()), load_projects(conn))
+    print(json.dumps(view["reviews"], indent=2, ensure_ascii=False))
     return 0
 
 

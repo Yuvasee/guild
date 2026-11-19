@@ -156,8 +156,19 @@ def _find_rankable_prs(prs: list[QueuedPr], parents: dict[str, str]) -> set[str]
 
 def convert_items_to_parent_order[T](items: list[T], key: Callable[[T], str], parents: dict[str, str]) -> list[T]:
     """Each item right after its parent, in the order the children had; the rest keep their order. A cycle of
-    parents keeps the order of its first item."""
+    parents stays where its first item was."""
     keys = {key(item) for item in items}
+
+    def is_in_cycle(start: str) -> bool:
+        seen: set[str] = set()
+        current = parents.get(start)
+        while current in keys and current not in seen:
+            if current == start:
+                return True
+            seen.add(current)
+            current = parents.get(current)
+        return False
+
     children: dict[str, list[T]] = {}
     for item in items:
         parent = parents.get(key(item))
@@ -175,10 +186,8 @@ def convert_items_to_parent_order[T](items: list[T], key: Callable[[T], str], pa
             place(child)
 
     for item in items:
-        if parents.get(key(item)) not in keys:
+        if parents.get(key(item)) not in keys or is_in_cycle(key(item)):
             place(item)
-    for item in items:
-        place(item)
     return ordered
 
 
