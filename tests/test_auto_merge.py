@@ -5,7 +5,7 @@ from typing import Any
 from unittest import mock
 
 import pytest
-from test_reviews import CONFIG, REF, add_session, make_pr
+from test_reviews import CONFIG, REF, add_lead, add_session, make_pr
 
 from bridge.auto_merge import SANDBOX_BLOCK, map_db_to_dry_run, map_row_to_auto_merge_block, run_auto_merge
 from bridge.db import connect, transaction
@@ -316,3 +316,23 @@ def test_a_failed_stacked_merge_is_told_as_a_failure_with_githubs_reason(tmp_pat
     run(conn, gh=StackGh({"status": "failed", "details": {"message": "head moved"}}))
     assert row(conn)["auto_merge_error"] == "GitHub's stacked merge ended failed: head moved"
     assert conn.execute("SELECT COUNT(*) FROM user_items WHERE kind = 'done'").fetchone()[0] == 0
+
+
+def test_a_leads_claim_keeps_its_pr_from_merging_and_a_workers_claim_does_not(tmp_path: Path) -> None:
+    conn = setup(tmp_path)
+
+    def claim(handle: str, conversation: str) -> None:
+        with transaction(conn):
+            conn.execute("DELETE FROM claims")
+            conn.execute(
+                "INSERT INTO claims (resource, token, holder_conversation, holder_handle, reason, acquired_at,"
+                " renewed_at, expires_at) VALUES (?, 't', ?, ?, 'keep until the release', 0, 0, 10000000)",
+                (REF.lower(), conversation, handle),
+            )
+
+    with transaction(conn):
+        add_lead(conn, "Lead-X", "s-lead")
+    claim("lead-x", "c2")
+    assert run(conn).merges == [], "the lead keeps it"
+    claim("worker", "c1")
+    assert len(run(conn).merges) == 1, "a worker's claim is its work, not a hold"

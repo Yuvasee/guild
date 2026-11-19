@@ -197,6 +197,10 @@ def run_auto_merge(conn: sqlite3.Connection, config: Config, now: int) -> list[t
                 sent.extend(tell_sandbox(conn, config, row, now))
         if block is not None or (dry and (ref, head, "would merge") in _LOGGED):
             continue
+        held = find_lead_claim(conn, ref, now)
+        if held is not None:
+            log_once(ref, head, f"auto-merge: {ref} not merged: {held}")
+            continue
         live = find_live_block(conn, config, row)
         if live is not None:
             log_once(ref, head, f"auto-merge: {ref} not merged: {live}")
@@ -207,6 +211,23 @@ def run_auto_merge(conn: sqlite3.Connection, config: Config, now: int) -> list[t
             continue
         return [*sent, *merge_pr(conn, config, row, now)]
     return sent
+
+
+def find_lead_claim(conn: sqlite3.Connection, ref: str, now: int) -> str | None:
+    """A lead holding a live claim on the PR keeps it for now: a lead claims a PR to keep it until something outside
+    the PR is done. A worker's claim is its work in progress and holds nothing."""
+    row = conn.execute(
+        """
+        SELECT c.holder_handle, c.reason FROM claims c JOIN leads l ON l.name = c.holder_handle AND l.retired_at IS NULL
+        WHERE lower(c.resource) = lower(?) AND c.expires_at > ?
+          AND EXISTS (SELECT 1 FROM instances i WHERE i.conversation_id = c.holder_conversation AND i.ended_at IS NULL)
+        """,
+        (ref, now),
+    ).fetchone()
+    if row is None:
+        return None
+    why = f" ({row['reason']})" if row["reason"] else ""
+    return f"claimed by lead {row['holder_handle']}{why}; it merges once the claim is released"
 
 
 def log_once(ref: str, head: str, line: str) -> None:
