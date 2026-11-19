@@ -130,7 +130,8 @@ def type_when_idle(
     bridge's or that a probe proved real, which is cleared only as stray keys: it may be the user's. "unproven" is
     text no probe could check, such as Claude Code's grey suggestion in a selected tab: nobody hears of it, nothing is
     typed over it.
-    claim runs right before typing and must win for the text to go in; release undoes it when typing fails.
+    claim runs right before typing and must win for the text to go in; release undoes it when typing fails, or when
+    the screen read after the claim no longer shows the box free, which waits on as a busy box does.
     may_probe_box allows telling Claude Code's grey suggestion from a real draft by pressing one key: both read as
     plain text, and a draft is never disturbed.
     own_pattern matches this text, spacing removed, as an earlier try typed it: a request's time left changes.
@@ -194,6 +195,12 @@ def type_when_idle(
     told_unsure = False
     suggested: str | None = None
 
+    def unclaim() -> None:
+        nonlocal claimed
+        claimed = False
+        if release is not None:
+            release()
+
     def attempt() -> TypeResult:
         nonlocal claimed, pressed, pressed_was_last, idle_before, known_draft, box, orphan_since, entered, looked
         nonlocal may_probe_box, cleared, retyped, told_unsure, vim, own_chip, suggested
@@ -252,11 +259,20 @@ def type_when_idle(
                             proof = _prove_typed(config, target, left or "", may_probe_box)
                         if proof == "suggestion":
                             suggested = left
-                        elif proof == "typed":
-                            # This try or an earlier one left this very text unsent: only its Enter is missing.
-                            if not still_wanted() or (not claimed and claim is not None and not claim()):
+                        elif proof == "typed" and not claimed:
+                            if not still_wanted() or (claim is not None and not claim()):
                                 return "unwanted"
-                            claimed, pressed = True, _squash(left or "")
+                            claimed = True
+                            # The claim can wait on the database while the user comes to the tab and edits the box.
+                            again = _read_screen(config, target)
+                            left = map_screen_to_draft(again) if again is not None else None
+                            if again is None or held(again) or not left_by_earlier_try(left):
+                                unclaim()
+                        elif proof == "typed" and not still_wanted():
+                            return "unwanted"
+                        if proof == "typed" and claimed and again is not None:
+                            # This try or an earlier one left this very text unsent: only its Enter is missing.
+                            pressed = _squash(left or "")
                             pressed_was_last = _is_last_prompt(again, pressed)
                             if entered is None:
                                 entered = _Stopwatch()
@@ -410,12 +426,30 @@ def type_when_idle(
                         # delivering.
                         if not still_wanted() or (claim is not None and not claim()):
                             return "unwanted"
-                        claimed, pressed = True, _squash(command)
-                        # Typed over, the grey text is gone, even where ours reads the same.
-                        suggested = None
-                        pressed_was_last = _is_last_prompt(again, pressed)
-                        result = _type_and_submit(config, target, command, just_typed_or_folded, still_wanted)
-                        entered = _Stopwatch()
+                        claimed = True
+                        # The claim can wait on the database while the user comes to the tab and starts a draft.
+                        grey_text = suggested if grey == "suggestion" else None
+                        again = _read_screen(config, target)
+                        if (
+                            again is None
+                            or held(again)
+                            or not (
+                                map_screen_to_idle(again)
+                                or (
+                                    grey_text is not None
+                                    and map_screen_to_draft(again) == grey_text
+                                    and not is_box_padded(again)
+                                )
+                            )
+                        ):
+                            unclaim()
+                        else:
+                            pressed = _squash(command)
+                            # Typed over, the grey text is gone, even where ours reads the same.
+                            suggested = None
+                            pressed_was_last = _is_last_prompt(again, pressed)
+                            result = _type_and_submit(config, target, command, just_typed_or_folded, still_wanted)
+                            entered = _Stopwatch()
                 if result == "stuck":
                     # A dialog that opened, or an Enter that did not take: the loop above presses it again.
                     enter_rounds += 1

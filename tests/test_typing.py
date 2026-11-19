@@ -1667,3 +1667,54 @@ def test_no_probe_key_on_another_messages_text_replaced_by_a_draft_during_its_cl
     assert settled == [False]
     assert fake.boxes["S"] == "my private draft"
     assert result == "draft"
+
+
+def test_nothing_is_typed_into_a_box_that_gains_a_draft_during_the_claim(tmp_path: Path) -> None:
+    fake = FakeClaudeBox()
+    released: list[bool] = []
+
+    def claim() -> bool:
+        fake.boxes["S"] = "my private draft"
+        return True
+
+    result = _type(tmp_path, fake, wait_s=5, claim=claim, release=lambda: released.append(True))
+
+    assert result == "unproven"
+    assert fake.typed == []
+    assert fake.boxes["S"] == "my private draft"
+    assert released == [True]
+
+
+def test_a_claim_the_box_stays_empty_through_types_once(tmp_path: Path) -> None:
+    fake = FakeClaudeBox()
+    claims: list[bool] = []
+    released: list[bool] = []
+
+    def claim() -> bool:
+        claims.append(True)
+        return True
+
+    result = _type(tmp_path, fake, claim=claim, release=lambda: released.append(True))
+
+    assert result == "typed"
+    assert fake.typed == ["hello", ENTER]
+    assert claims == [True]
+    assert released == []
+
+
+def test_text_left_unsent_that_the_user_edits_during_the_claim_is_not_cleared(tmp_path: Path) -> None:
+    fake = FakeClaudeBox({"S": "\n/compact"})
+    released: list[bool] = []
+
+    def claim() -> bool:
+        fake.boxes["S"] = "\n/compact focus on the tests"
+        return True
+
+    result = _type(
+        tmp_path, fake, command="/compact", wait_s=3, vim=True, claim=claim, release=lambda: released.append(True)
+    )
+
+    assert result == "unproven"
+    assert fake.typed == []
+    assert fake.boxes["S"] == "\n/compact focus on the tests"
+    assert released == [True]
