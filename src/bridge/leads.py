@@ -205,7 +205,8 @@ def map_names_to_brief_rules(names: list[str], config: Config) -> str:
         "and who decides, what happens if it never is, the risk of using it wrong. Before writing, read the reference "
         "example house.md names, if any; before registering, pass the spec's first-reader check. A PR's description "
         "opens, for a colleague with no context, with the spec's three parts: context (what, where from, why now), a "
-        "user story in numbered steps with concrete actors, and how it is solved in principle; details folded after; "
+        "user story in numbered steps with concrete actors, and how it is solved in principle; an enabling PR's 'How "
+        "this will be used' comes right after them, not folded; other details folded after; "
         'a few key terms defined at first use as <ins title="definition">term</ins>.'
     )
     scope = (

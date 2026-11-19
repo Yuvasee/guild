@@ -37,7 +37,10 @@ attention:
    doesn't happen; then the same steps after this PR. No abstract nouns where an actor and an action fit.
 3. **How it is solved, in principle**: two to four sentences, no file or function names.
 
-Everything else (files, tests, measurements, reviews, rollout) comes after, folded in `<details>`. A key term specific
+A PR that only enables something (a flag off by default, an opt-in value, one step of a plan) keeps its **How this
+will be used** section right after these three parts, not folded: the merge check looks for it near the top; its long
+parts may fold inside it. Everything else (files, tests, measurements, reviews, rollout) comes after, folded in
+`<details>`. A key term specific
 to this PR or its area is defined at its first use, a few at most, never a glossary at the top: write
 `<ins title="one-line definition">term</ins>` (GitHub keeps this tag: the term shows underlined and the definition
 appears on hover; it strips `<abbr>` and `<dfn>`); a definition longer than a line goes in parentheses after the term.
