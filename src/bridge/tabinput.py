@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Literal
 
 from bridge.compaction import (
+    map_screen_to_box_lines,
     map_screen_to_busy,
     map_screen_to_draft,
     map_screen_to_idle,
@@ -27,10 +28,19 @@ SUBMIT_RETRIES = 3
 ENTER = "\r"
 PROBE_KEY = "."
 BACKSPACE = "\x7f"
-CLEAR_KEYS = "\x05\x15"
-"""Ctrl-E then Ctrl-U: empties a one-line box in Claude Code 2.1.328's default mode and vim INSERT and NORMAL, wherever
-the cursor is (Ctrl-U alone keeps what is under or after it); no Escape, which interrupts a turn, and no arrow,
-which recalls history or opens a panel."""
+KILL_TO_END = "\x0b"
+KILL_TO_START = "\x15"
+
+
+def map_lines_to_clear_keys(lines: int) -> str:
+    """Ctrl-K takes the rest of the line, or at its end the break after it; Ctrl-U the line up to the cursor, or at its
+    start the break before it. Twice per line each empties a box of that many lines in Claude Code 2.1.328's default
+    mode and vim INSERT and NORMAL, wherever the cursor is; no Escape, which interrupts a turn, and no arrow, which
+    recalls history or opens a panel."""
+    return KILL_TO_END * 2 * lines + KILL_TO_START * 2 * lines
+
+
+CLEAR_KEYS = map_lines_to_clear_keys(1)
 STRAY_MAX_CHARS = 3
 BOX_QUOTE_CHARS = 80
 TYPED_HEADS = ("/compact", "[bridge]")
@@ -177,11 +187,12 @@ def type_when_idle(
     pressed_was_last = False
     entered: _Stopwatch | None = None
     cleared = False
+    retyped = False
     told_unsure = False
 
     def attempt() -> TypeResult:
         nonlocal claimed, pressed, pressed_was_last, idle_before, known_draft, box, orphan_since, entered, looked
-        nonlocal may_probe_box, cleared, told_unsure, vim
+        nonlocal may_probe_box, cleared, retyped, told_unsure, vim, own_chip
         enter_rounds = 0
         busy = False
         while waiting.seconds() < wait_s or (entered is not None and entered.seconds() < ENTER_BUDGET_S):
@@ -231,9 +242,22 @@ def type_when_idle(
                         pressed_was_last = _is_last_prompt(again, pressed)
                         if entered is None:
                             entered = _Stopwatch()
-                        submitted = _submit(config, target, left_by_earlier_try, still_wanted)
-                        enter_rounds += submitted != "untouched"
-                        result = "typed" if submitted == "sent" else "stuck"
+                        if is_box_padded(again):
+                            # Read as our text alone, it holds an empty line too, and Enter may not run it: once, the
+                            # box starts over.
+                            if retyped:
+                                return "stuck"
+                            retyped, pressed = True, _squash(command)
+                            # Typed again, a long text folds into a chip with a new number.
+                            own_chip = None
+                            enter_rounds += 1
+                            result = _clear_and_type_again(
+                                config, target, again, command, just_typed_or_folded, still_wanted, held
+                            )
+                        else:
+                            submitted = _submit(config, target, left_by_earlier_try, still_wanted)
+                            enter_rounds += submitted != "untouched"
+                            result = "typed" if submitted == "sent" else "stuck"
                 if result is None or (result == "stuck" and enter_rounds < STUCK_ENTER_ROUNDS):
                     time.sleep(2)
                     continue
@@ -312,7 +336,7 @@ def type_when_idle(
                         ):
                             # Once: stray keys that come back are someone's doing.
                             cleared = True
-                            verdict = _clear_box(config, target, box, may_probe_box, held)
+                            verdict = _clear_box(config, target, again, box, may_probe_box, held)
                 if verdict == "suggestion":
                     idle = True
                     idle_before = True
@@ -331,7 +355,7 @@ def type_when_idle(
                     # Idle, or still the suggestion the probe found.
                     if again is not None and (
                         (map_screen_to_idle(again) and not held(again))
-                        or (box and map_screen_to_draft(again) == box and not held(again))
+                        or (box and map_screen_to_draft(again) == box and not held(again) and not is_box_padded(again))
                     ):
                         # The tab can switch conversations during the screen read; the claim keeps a hook from also
                         # delivering.
@@ -449,12 +473,18 @@ def _probe_box(config: Config, target: list[str], box: str, still_allowed: Calla
 
 
 def _clear_box(
-    config: Config, target: list[str], box: str, still_allowed: Callable[[], bool], held: Callable[[str], bool]
+    config: Config,
+    target: list[str],
+    screen: str,
+    box: str,
+    still_allowed: Callable[[], bool],
+    held: Callable[[str], bool],
 ) -> str:
     """Gives "cleared" once the box shows empty or a grey suggestion a probe proves; anything else is "unknown", and the
     caller must not touch the box again."""
     before = _squash(box)
-    if run_agterm(config, ["session", "type", *target, CLEAR_KEYS]) is None:
+    lines = map_screen_to_box_lines(screen)
+    if lines is None or run_agterm(config, ["session", "type", *target, map_lines_to_clear_keys(len(lines))]) is None:
         return "unknown"
     after = _await_box(config, target, lambda now: now != before, lambda now: still_allowed())
     if after is None or not still_allowed():
@@ -462,10 +492,48 @@ def _clear_box(
     if after == "":
         return "cleared"
     # The probe key is vim's repeat in NORMAL mode, which the owner may have entered meanwhile.
-    screen = _read_screen(config, target)
-    if screen is None or held(screen) or map_screen_to_draft(screen) is None:
+    now = _read_screen(config, target)
+    if now is None or held(now) or map_screen_to_draft(now) is None:
         return "unknown"
     return "cleared" if _probe_box(config, target, after, still_allowed) == "suggestion" else "unknown"
+
+
+def _clear_and_type_again(
+    config: Config,
+    target: list[str],
+    screen: str,
+    command: str,
+    ours: Callable[[str | None], bool],
+    still_wanted: Callable[[], bool],
+    held: Callable[[str], bool],
+) -> TypeResult:
+    lines = map_screen_to_box_lines(screen)
+    draft = map_screen_to_draft(screen)
+    if lines is None or draft is None:
+        return "failed"
+    left = _squash(draft)
+    if run_agterm(config, ["session", "type", *target, map_lines_to_clear_keys(len(lines))]) is None:
+        return "failed"
+    if _await_box(config, target, lambda now: now == "", lambda now: now == left) is None:
+        return "failed"
+    if not still_wanted():
+        return "unwanted"
+    # Vim may have gone to NORMAL, or a dialog opened, while the box emptied.
+    again = _read_screen(config, target)
+    if again is None or not map_screen_to_idle(again) or held(again):
+        return "failed"
+    return _type_and_submit(config, target, command, ours, still_wanted)
+
+
+def _holds_only_empty_lines(screen: str) -> bool:
+    lines = map_screen_to_box_lines(screen)
+    return lines is not None and len(lines) > 1 and not any(lines)
+
+
+def is_box_padded(screen: str) -> bool:
+    """The box holds an empty line beside other lines, which its draft does not show."""
+    lines = map_screen_to_box_lines(screen)
+    return lines is not None and len(lines) > 1 and "" in lines
 
 
 def _await_box(
@@ -473,12 +541,13 @@ def _await_box(
 ) -> str | None:
     """The box, spacing removed, once done holds. None once it shows anything neither done nor pending, or when
     PROBE_LANDS_S pass first: a loaded machine can show a key seconds after it went in. A slow read is waited out,
-    not cut short: giving up early is what leaves a key in the box."""
+    not cut short: giving up early is what leaves a key in the box. "" is a box of one empty line: one of several
+    empty lines is no answer yet."""
     started = _Stopwatch()
     while True:
         time.sleep(PROBE_SETTLE_S)
         screen = _read_screen(config, target)
-        draft = map_screen_to_draft(screen) if screen is not None else None
+        draft = map_screen_to_draft(screen) if screen is not None and not _holds_only_empty_lines(screen) else None
         now = _squash(draft) if draft is not None else None
         if now is not None and done(now):
             return now
@@ -549,8 +618,8 @@ def _submit(
             return "sent"
         if not still_wanted():
             return "sent" if presses else "untouched"
-        # A dialog would take an Enter as its answer.
-        if not ours(draft) or map_screen_to_busy(screen) or presses > SUBMIT_RETRIES:
+        # A dialog would take an Enter as its answer; an empty line beside our text may keep Enter from running it.
+        if not ours(draft) or is_box_padded(screen) or map_screen_to_busy(screen) or presses > SUBMIT_RETRIES:
             break
         if run_agterm(config, ["session", "type", *target, ENTER]) is None:
             break

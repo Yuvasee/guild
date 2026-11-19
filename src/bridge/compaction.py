@@ -347,6 +347,8 @@ def map_screen_to_idle(screen: str) -> bool:
     box = _find_input_box(tail)
     if box is None or box != (prompts[-1], prompts[-1] + 1) or not _EMPTY_PROMPT_RE.match(tail[box[0]]):
         return False
+    if map_screen_to_box_lines(screen) != [""]:
+        return False
     # The whole screen: a submitted prompt whose first line is above the tail still quotes, not shows, its markers.
     return not map_screen_to_busy(screen)
 
@@ -400,6 +402,24 @@ def map_screen_to_draft(screen: str) -> str | None:
         return None
     body = [_CLEAR_HINT_RE.sub("", line).strip() for line in lines[box[0] : box[1]]]
     return " ".join(body).lstrip("\u276f").replace("\u00a0", " ").strip()
+
+
+def map_screen_to_box_lines(screen: str) -> list[str] | None:
+    """The input box's lines as shown, empty ones kept, which the draft drops: a box holding an empty line over
+    "/compact" reads as the draft "/compact", and one holding two empty lines as an empty box. None without a box."""
+    raw = screen.splitlines()
+    kept = [i for i, line in enumerate(raw) if line.strip()]
+    lines = [raw[i] for i in kept]
+    box = _find_input_box(lines)
+    if box is None or box[1] < len(lines) - 14:
+        return None
+    start = kept[box[0]]
+    # Closed by a rule, every row up to it is the box's; a torn box's blank rows may be the frame's.
+    closed = box[1] < len(lines) and lines[box[1]].startswith("\u2500")
+    end = kept[box[1]] if closed else kept[box[1] - 1] + 1
+    body = [_CLEAR_HINT_RE.sub("", line).strip() for line in raw[start:end]]
+    body[0] = body[0].strip().lstrip("\u276f").strip()
+    return body
 
 
 _CLEAR_HINT_RE = re.compile(r"\s{2,}new task\? /clear to save \S+ tokens\b.*$")
