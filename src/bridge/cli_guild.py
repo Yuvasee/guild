@@ -701,6 +701,12 @@ def confirm_model_switch(config: Config, session: str, model: str = "") -> str |
     return None
 
 
+WORKER_NAME_MIN_CHARS = 3
+WORKER_BRIEF_MIN_CHARS = 10
+"""A launch with a one-letter name or prompt was a typo that took a laptop slot, more than once."""
+WORKER_NAMES_NOT_TASKS = frozenset({"list", "ls", "show", "status", "help", "close", "closed", "reopen", "test"})
+
+
 def cmd_worker(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
     me = current_party(conn)
     parent = os.environ.get("AGTERM_SESSION_ID")
@@ -709,9 +715,17 @@ def cmd_worker(args: argparse.Namespace, conn: sqlite3.Connection, config: Confi
     name = " ".join(str(args.name).split())
     if not name or not is_english_name(name):
         raise UsageError("a worker's tab name is in English")
+    if len(name) < WORKER_NAME_MIN_CHARS or name.casefold() in WORKER_NAMES_NOT_TASKS:
+        raise UsageError(
+            f"'{name}' is no task name: name the worker for what it does; `guild worker closed` lists closed workers "
+            "and `bridge sessions` the live ones"
+        )
     prompt = sys.stdin.read() if args.prompt == "-" else str(args.prompt)
-    if not prompt.strip():
-        raise UsageError("a worker needs a brief")
+    if len(prompt.strip()) < WORKER_BRIEF_MIN_CHARS:
+        raise UsageError(
+            f"a worker needs a brief, not {len(prompt.strip())} characters: write it to a file and pass it with "
+            "--prompt - < brief.md"
+        )
     # Without a tree agterm is down, and creating the tab fails on its own.
     tree = read_tree(config)
     live = list_live_workers(conn, tree, parent) if tree else []

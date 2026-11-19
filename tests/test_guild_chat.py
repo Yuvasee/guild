@@ -1298,7 +1298,7 @@ def test_guild_worker_stores_the_parent_link_before_any_reconcile(
     env = dict(bridge_env.env, CLAUDE_PID=str(team.a), AGTERM_SESSION_ID="TAB-A")
 
     done = subprocess.run(
-        [str(VENV_BIN / "guild"), "worker", "Task", "--prompt", "x"],
+        [str(VENV_BIN / "guild"), "worker", "Task", "--prompt", "Fix the export retry"],
         env=env, capture_output=True, text=True, timeout=30, check=False,
     )  # fmt: skip
 
@@ -1427,6 +1427,23 @@ def test_worker_refuses_a_non_english_name(bridge_env: BridgeEnv, spawn_process:
 
     assert done.returncode == 2
     assert "English" in done.stderr
+
+
+@pytest.mark.parametrize(
+    ("name", "prompt", "says"),
+    [("x", "Fix the export retry", "no task name"), ("list", "Fix the export retry", "no task name"),
+     ("Export retry", "x", "needs a brief")],
+)  # fmt: skip
+def test_worker_refuses_a_typo_name_or_prompt(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess, name: str, prompt: str, says: str
+) -> None:
+    team = Team(bridge_env, spawn_process)
+    env = dict(bridge_env.env, CLAUDE_PID=str(team.a), AGTERM_SESSION_ID="TAB-A")
+    done = subprocess.run(
+        [str(VENV_BIN / "guild"), "worker", name, "--prompt", prompt],
+        env=env, capture_output=True, text=True, timeout=30, check=False,
+    )  # fmt: skip
+    assert done.returncode == 2 and says in done.stderr
 
 
 def test_lead_row_shows_declared_work_with_state_and_names_whom_it_waits_on(
