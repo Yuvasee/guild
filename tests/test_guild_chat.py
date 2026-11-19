@@ -340,7 +340,8 @@ def test_suggestion_in_the_box_does_not_block_typing_and_a_draft_stays(tmp_path:
 
     assert suggestion == "typed"
     assert typed[:2] == [".", "\x7f"]
-    assert typed[2:] == ["hello", "\r"]
+    # Proven again under the lock that types over it.
+    assert typed[2:] == [".", "\x7f", "hello", "\r"]
     assert draft == "draft"
     assert draft_typed == [".", "\x7f"]
 
