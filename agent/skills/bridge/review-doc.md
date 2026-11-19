@@ -15,7 +15,8 @@ the headings and the one-line summaries, and open only what they want to check.
    clear. Match its plainness and length, not its subject.
 2. **First reader.** Before `guild review doc`, give a fresh subagent the install's reader profile (who the reader is
    and what they already know; `house.md` names the file), the doc's **In short**, **User story** and **What changes
-   and why**, and the PR's diff, and ask it to retell the user story in its own words, step by step, today and after;
+   and why**, the top of the PR's description (its three opening parts, see **The PR description** below), and the
+   PR's diff, and ask it to retell the user story in its own words, step by step, today and after;
    to explain back from the doc and the diff what changes, why and how; to list every term that reader would not
    understand; and to list the sentences that could be deleted without losing anything the reader needs to decide or
    review. A wrong retelling of the story, a wrong or vague explain-back, or a flagged term the doc neither explains
@@ -24,6 +25,23 @@ the headings and the one-line summaries, and open only what they want to check.
    is explained or gone. At most three readers: if the third still gets it wrong, the doc's structure is the problem,
    so rework the top rather than polish sentences. Say in **Verified and not verified** that the first reader passed,
    in which round, and any flagged point you kept with why (`guild review doc` refuses the doc without that line).
+
+## The PR description
+
+The PR's own description opens with a condensed version of the doc's opening, for a colleague with no context and little
+attention:
+
+1. **Context**: what this is, where it came from (the issue, incident or request), why it is needed now. Two or three
+   sentences.
+2. **User story**: numbered steps with concrete actors: who does what, what the system does, what goes wrong today or
+   doesn't happen; then the same steps after this PR. No abstract nouns where an actor and an action fit.
+3. **How it is solved, in principle**: two to four sentences, no file or function names.
+
+Everything else (files, tests, measurements, reviews, rollout) comes after, folded in `<details>`. A key term specific
+to this PR or its area is defined at its first use, a few at most, never a glossary at the top: write
+`<ins title="one-line definition">term</ins>` (GitHub keeps this tag: the term shows underlined and the definition
+appears on hover; it strips `<abbr>` and `<dfn>`); a definition longer than a line goes in parentheses after the term.
+No headers like What / Why / Measured filled with jargon: the three parts are plain sentences.
 
 ## Essence visible, details folded
 
