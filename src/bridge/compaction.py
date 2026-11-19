@@ -359,6 +359,16 @@ def map_screen_to_busy(screen: str) -> bool:
     )
 
 
+def map_screen_to_vim_insert(screen: str) -> bool:
+    """The footer under the input box says vim INSERT; Claude Code 2.1.328 marks no other vim mode."""
+    lines = [line for line in screen.splitlines() if line.strip()]
+    box = _find_input_box(lines)
+    return box is not None and any(_VIM_INSERT_RE.match(line) for line in lines[box[1] :])
+
+
+_VIM_INSERT_RE = re.compile(r"^\s+-- INSERT --")
+
+
 def map_screen_to_dialog(screen: str) -> bool:
     return any(marker in line for line in _find_live_tail(screen) for marker in _DIALOG_MARKERS)
 

@@ -1,15 +1,24 @@
 import fcntl
 import json
+import os
 import re
 import subprocess
 import threading
 import time
+import unicodedata
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from itertools import takewhile
+from pathlib import Path
 from typing import Literal
 
-from bridge.compaction import map_screen_to_busy, map_screen_to_draft, map_screen_to_idle, map_screen_to_transcript
+from bridge.compaction import (
+    map_screen_to_busy,
+    map_screen_to_draft,
+    map_screen_to_idle,
+    map_screen_to_transcript,
+    map_screen_to_vim_insert,
+)
 from bridge.config import Config, state_dir
 from bridge.errlog import log_error, log_slow
 
@@ -18,6 +27,17 @@ SUBMIT_RETRIES = 3
 ENTER = "\r"
 PROBE_KEY = "."
 BACKSPACE = "\x7f"
+CLEAR_KEYS = "\x05\x15"
+"""Ctrl-E then Ctrl-U: empties a one-line box in Claude Code 2.1.328's default mode and vim INSERT and NORMAL, wherever
+the cursor is (Ctrl-U alone keeps what is under or after it); no Escape, which interrupts a turn, and no arrow,
+which recalls history or opens a panel."""
+STRAY_MAX_CHARS = 3
+BOX_QUOTE_CHARS = 80
+TYPED_HEADS = ("/compact", "[bridge]")
+"""What bridge types first into a box: a box holding only a start of one is a try cut short."""
+_KEY_RESIDUE_RE = re.compile(r"(?:\^\[|\x1b)*\[[0-9;]*[A-DFH~]|(?:\^\[|\x1b)+(?:O[A-DFH])?")
+"""What an escape sequence leaves when the box takes it as text, such as "^[[A" or "[200~"."""
+_STRAY_CATEGORIES = frozenset({"Pc", "Pd", "Ps", "Pe", "Pi", "Pf", "Po", "Sm", "Sc", "Sk", "Cc", "Cf"})
 PROBE_SETTLE_S = 0.5
 PROBE_LANDS_S = 5.0
 TEXT_LANDS_S = 5.0
@@ -40,6 +60,39 @@ AGTERM_LOG_EVERY_S = 30.0
 
 TypeResult = Literal["typed", "stuck", "unwanted", "failed", "timeout", "draft", "unproven"]
 SubmitResult = Literal["sent", "pressed", "untouched"]
+BoxCall = Literal["clear", "keep", "ask"]
+
+
+def judge_box(box: str) -> BoxCall:
+    """Text in a tab's input box: stray keys bridge may clear, someone's words it keeps, or neither, which a person
+    decides. A word in any script is kept unless it only starts a command bridge types."""
+    text = "".join(box.split())
+    if len(text) >= 2 and any(head.startswith(text) for head in TYPED_HEADS):
+        return "clear"
+    if _KEY_RESIDUE_RE.fullmatch(text):
+        return "clear"
+    if any(ch.isalpha() for ch in text):
+        return "keep"
+    if len(text) <= STRAY_MAX_CHARS and all(unicodedata.category(ch) in _STRAY_CATEGORIES for ch in text):
+        return "clear"
+    return "ask"
+
+
+def map_box_to_quote(box: str) -> str:
+    return json.dumps(box if len(box) <= BOX_QUOTE_CHARS else box[:BOX_QUOTE_CHARS] + "…", ensure_ascii=False)
+
+
+def is_claude_vim() -> bool:
+    """Claude Code's editorMode: settings.json's when it sets one, else the global config's."""
+    home = os.environ.get("CLAUDE_CONFIG_DIR")
+    for path in (Path(home or Path.home() / ".claude") / "settings.json", Path(home or Path.home()) / ".claude.json"):
+        try:
+            mode = json.loads(path.read_text()).get("editorMode")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if mode is not None:
+            return mode == "vim"
+    return False
 
 
 def type_when_idle(
@@ -55,6 +108,7 @@ def type_when_idle(
     own_pattern: re.Pattern[str] | None = None,
     claim_left_unsent: Callable[[str], Callable[[bool], None] | None] | None = None,
     may_type: Callable[[], bool] | None = None,
+    tell_unsure: Callable[[str], None] | None = None,
 ) -> TypeResult:
     """Types one line plus Enter into a Claude Code tab once its input box is empty and idle.
 
@@ -63,8 +117,9 @@ def type_when_idle(
     box holds that text alone and no turn or dialog holds it. "stuck" means it stayed after all of them, or never
     showed there alone; a later call finding this same text in the box presses only Enter.
     "unwanted" means still_wanted turned False first; "draft" that the wait ran out with text in the box that is
-    bridge's or that a probe proved real, which is never cleared: it may be the user's. "unproven" is text no probe
-    could check, such as Claude Code's grey suggestion in a selected tab: nobody hears of it, nothing is typed over it.
+    bridge's or that a probe proved real, which is cleared only as stray keys: it may be the user's. "unproven" is
+    text no probe could check, such as Claude Code's grey suggestion in a selected tab: nobody hears of it, nothing is
+    typed over it.
     claim runs right before typing and must win for the text to go in; release undoes it when typing fails.
     may_probe_box allows telling Claude Code's grey suggestion from a real draft by pressing one key: both read as
     plain text, and a draft is never disturbed.
@@ -77,8 +132,16 @@ def type_when_idle(
     probe key would be allowed, never a clear or an edit.
     may_type False holds this try back without a key or a screen read while something else may deliver the text;
     once text is claimed it is not asked.
+    A draft a probe proved is judged: stray keys are cleared once and the wait goes on, someone's words are kept,
+    and text neither goes to tell_unsure once while the wait goes on. A clear the box does not show gives "failed".
+    With Claude Code in vim mode, no key goes in unless the footer shows INSERT.
     """
     command = map_text_to_typable(command)
+    vim = is_claude_vim()
+
+    def held(screen: str) -> bool:
+        # Vim NORMAL mode has no footer marker and takes keys as commands: "." repeats the last edit into the draft.
+        return map_screen_to_busy(screen) or (vim and not map_screen_to_vim_insert(screen))
 
     own_chip: str | None = None
 
@@ -113,13 +176,17 @@ def type_when_idle(
     pressed: str | None = None
     pressed_was_last = False
     entered: _Stopwatch | None = None
+    cleared = False
+    told_unsure = False
 
     def attempt() -> TypeResult:
         nonlocal claimed, pressed, pressed_was_last, idle_before, known_draft, box, orphan_since, entered, looked
-        nonlocal may_probe_box
+        nonlocal may_probe_box, cleared, told_unsure, vim
         enter_rounds = 0
         busy = False
         while waiting.seconds() < wait_s or (entered is not None and entered.seconds() < ENTER_BUDGET_S):
+            # The owner can switch vim on or off during an hour's wait.
+            vim = is_claude_vim()
             if not still_wanted():
                 return "unwanted"
             if not claimed and may_type is not None and not may_type():
@@ -138,9 +205,9 @@ def type_when_idle(
                 looked = _Stopwatch()
                 continue
             looked = _Stopwatch()
-            idle = screen is not None and map_screen_to_idle(screen)
+            idle = screen is not None and (map_screen_to_idle(screen) and not held(screen))
             box = map_screen_to_draft(screen) if screen is not None and not idle else None
-            busy = screen is not None and map_screen_to_busy(screen)
+            busy = screen is not None and held(screen)
             # Past the wait only our text's Enter is left to press, and only while the box shows it free to take one.
             overtime = waiting.seconds() >= wait_s
             result: TypeResult | None = None
@@ -156,7 +223,7 @@ def type_when_idle(
                 with _pane_lock(pane):
                     again = _read_screen(config, target)
                     left = map_screen_to_draft(again) if again is not None else None
-                    if again is not None and not map_screen_to_busy(again) and left_by_earlier_try(left):
+                    if again is not None and not held(again) and left_by_earlier_try(left):
                         # This try or an earlier one left this very text unsent: only its Enter is missing.
                         if not still_wanted() or (not claimed and claim is not None and not claim()):
                             return "unwanted"
@@ -177,7 +244,8 @@ def type_when_idle(
                 # Our text, held by a turn or a dialog: only its Enter may follow, once the screen allows it.
                 time.sleep(2)
                 continue
-            if box and box.startswith(BRIDGE_TEXT_PREFIX):
+            # The prefix alone is a try cut short, whose stray start the judge clears.
+            if box and box.startswith(BRIDGE_TEXT_PREFIX) and box != BRIDGE_TEXT_PREFIX:
                 # Another message's unsent text: a probe key would only add to it.
                 known_draft = box
                 if orphan_since is None or orphan_since[0] != box:
@@ -189,18 +257,13 @@ def type_when_idle(
                     and may_probe_box is not None
                     and claim_left_unsent is not None
                     and screen is not None
-                    and not map_screen_to_busy(screen)
+                    and not held(screen)
                     and may_probe_box()
                 ):
                     allowed = may_probe_box
                     with _pane_lock(pane):
                         again = _read_screen(config, target)
-                        if (
-                            again is not None
-                            and map_screen_to_draft(again) == box
-                            and not map_screen_to_busy(again)
-                            and allowed()
-                        ):
+                        if again is not None and map_screen_to_draft(again) == box and not held(again) and allowed():
                             # Left by a try that died or by older code: unchanged this long, nobody is typing it.
                             settle = claim_left_unsent(box)
                             if settle is not None:
@@ -223,7 +286,7 @@ def type_when_idle(
                 and box != known_draft
                 and may_probe_box is not None
                 and screen is not None
-                and not map_screen_to_busy(screen)
+                and not held(screen)
                 and may_probe_box()
             ):
                 with _pane_lock(pane):
@@ -233,15 +296,31 @@ def type_when_idle(
                         _probe_box(config, target, box, may_probe_box)
                         if again is not None
                         and map_screen_to_draft(again) == box
-                        and not map_screen_to_busy(again)
+                        and not held(again)
                         and may_probe_box()
                         else "moved"
                     )
+                    call = judge_box(box) if verdict == "draft" else None
+                    if call == "clear" and not cleared:
+                        # Read again: the owner may have typed since the probe proved the box.
+                        again = _read_screen(config, target)
+                        if (
+                            again is not None
+                            and map_screen_to_draft(again) == box
+                            and not held(again)
+                            and may_probe_box()
+                        ):
+                            # Once: stray keys that come back are someone's doing.
+                            cleared = True
+                            verdict = _clear_box(config, target, box, may_probe_box, held)
                 if verdict == "suggestion":
                     idle = True
                     idle_before = True
                 elif verdict == "draft":
                     known_draft = box
+                    if call != "keep" and tell_unsure is not None and not told_unsure:
+                        told_unsure = True
+                        tell_unsure(box)
                 elif verdict == "unknown":
                     # The box is not as we left it, so the user is there or a key may be stuck: no more keys.
                     return "failed"
@@ -251,8 +330,8 @@ def type_when_idle(
                     again = _read_screen(config, target)
                     # Idle, or still the suggestion the probe found.
                     if again is not None and (
-                        map_screen_to_idle(again)
-                        or (box and map_screen_to_draft(again) == box and not map_screen_to_busy(again))
+                        (map_screen_to_idle(again) and not held(again))
+                        or (box and map_screen_to_draft(again) == box and not held(again))
                     ):
                         # The tab can switch conversations during the screen read; the claim keeps a hook from also
                         # delivering.
@@ -367,6 +446,26 @@ def _probe_box(config: Config, target: list[str], box: str, still_allowed: Calla
     if restored is None or not still_allowed():
         return "unknown"
     return "suggestion" if after == PROBE_KEY else "draft"
+
+
+def _clear_box(
+    config: Config, target: list[str], box: str, still_allowed: Callable[[], bool], held: Callable[[str], bool]
+) -> str:
+    """Gives "cleared" once the box shows empty or a grey suggestion a probe proves; anything else is "unknown", and the
+    caller must not touch the box again."""
+    before = _squash(box)
+    if run_agterm(config, ["session", "type", *target, CLEAR_KEYS]) is None:
+        return "unknown"
+    after = _await_box(config, target, lambda now: now != before, lambda now: still_allowed())
+    if after is None or not still_allowed():
+        return "unknown"
+    if after == "":
+        return "cleared"
+    # The probe key is vim's repeat in NORMAL mode, which the owner may have entered meanwhile.
+    screen = _read_screen(config, target)
+    if screen is None or held(screen) or map_screen_to_draft(screen) is None:
+        return "unknown"
+    return "cleared" if _probe_box(config, target, after, still_allowed) == "suggestion" else "unknown"
 
 
 def _await_box(

@@ -22,6 +22,7 @@ from bridge.compaction import (
 from bridge.config import Config, state_dir
 from bridge.context_watch import list_context_tabs, record_context_screens
 from bridge.db import transaction
+from bridge.tabinput import CLEAR_KEYS
 
 DRAFT = "Give me a short summary of the week in HTML"
 
@@ -100,6 +101,44 @@ def test_the_owners_draft_holds_the_drive_tells_the_assistant_once_and_logs_no_e
     assert again is None, "the session is not asked to save its notes again until it compacts"
     assert "compact-drive" not in _log("errors.log")
     assert _log("slow.log").count("compact not typed for conv-a") == 1
+
+
+def test_a_stray_key_left_in_the_box_is_cleared_and_compact_typed_with_no_notice(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    team = Team(bridge_env, spawn_process)
+    team.enroll()
+    _start_cycle(bridge_env)
+    fake = FakeClaudeBox({"TAB-A": "."})
+
+    code, spawned = _drive(bridge_env, fake)
+
+    assert code == 0
+    assert fake.typed == [".", "\x7f", CLEAR_KEYS, "/compact", "\r"]
+    assert fake.submitted == ["/compact"]
+    assert spawned == []
+
+
+def test_text_bridge_cannot_judge_tells_the_assistant_once_at_the_start_and_not_again_at_the_end(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    team = Team(bridge_env, spawn_process)
+    team.enroll()
+    _start_cycle(bridge_env)
+    fake = FakeClaudeBox({"TAB-A": "42"})
+
+    code, spawned = _drive(bridge_env, fake)
+    with bridge_env.connect() as conn:
+        bodies = [r[0] for r in conn.execute("SELECT body FROM messages ORDER BY id")]
+        phase = read_phase(conn, "conv-a")
+
+    assert code == 0
+    assert fake.boxes["TAB-A"] == "42"
+    assert "/compact" not in fake.typed
+    assert [r.handle for _, r in spawned] == ["old-b"]
+    assert len(bodies) == 1
+    assert 'bridge is waiting to type /compact in tab "Old A" (TAB-A): its input box holds "42"' in bodies[0]
+    assert phase is None
 
 
 def test_a_probe_key_bridge_cannot_verify_is_one_error_and_one_notice_per_cycle(

@@ -45,6 +45,7 @@ from bridge.tabinput import (
     TYPE_WAIT_S,
     TypeResult,
     is_tab_selected,
+    map_box_to_quote,
     map_text_to_typable,
     type_when_idle,
 )
@@ -745,6 +746,15 @@ def deliver_typed(conn: sqlite3.Connection, config: Config, message_id: int, con
         # Unreadable once typed: an Enter may submit a cancelled message, and "unwanted" after one counts as sent.
         return retry_when_locked(f"#{message_id} to {conversation_id}: check it is still wanted", still_wanted)
 
+    def tell_unsure(box: str) -> None:
+        def tell() -> tuple[int, Recipient] | None:
+            with transaction(conn):
+                return tell_assistant_of_draft(conn, config, message_id, conversation_id, now_ms(), box)
+
+        told = unlocked("tell the assistant of the box", tell, None)
+        if told is not None:
+            spawn_typed_delivery(told[0], [told[1]])
+
     deferral = WaiterDeferral(int(row["pid"]), f"#{message_id} to {conversation_id}")
     try:
         result = type_when_idle(
@@ -762,6 +772,7 @@ def deliver_typed(conn: sqlite3.Connection, config: Config, message_id: int, con
                 "claim text left unsent", lambda: claim_unsent_message(conn, conversation_id, box), None
             ),
             may_type=deferral.may_type,
+            tell_unsure=tell_unsure,
         )
     except StillLockedError:
         # Typed, its Enter unproven: as a stuck one, the retry pass presses Enter only if it is still wanted.
@@ -960,10 +971,11 @@ def record_failed_delivery(
 
 
 def tell_assistant_of_draft(
-    conn: sqlite3.Connection, config: Config, message_id: int, conversation_id: str, at_ms: int
+    conn: sqlite3.Connection, config: Config, message_id: int, conversation_id: str, at_ms: int, box: str | None = None
 ) -> tuple[int, Recipient] | None:
-    """Text in a tab's input box holds a wake back, and bridge never clears it: it may be the owner's draft. The
-    assistant hears it once per message, and the assistant's own tab shows on the page; the retries go on."""
+    """Text in a tab's input box holds a wake back, and bridge clears only stray keys: it may be the owner's draft. The
+    assistant hears it once per message, and the assistant's own tab shows on the page; the retries go on. With box,
+    the text bridge could not judge as stray keys or someone's words, told while the typer still waits."""
     row = conn.execute(
         """
         SELECT r.handle, r.draft_told_at, r.stuck_told_at, s.agterm_session FROM message_recipients r
@@ -987,7 +999,12 @@ def tell_assistant_of_draft(
     except AddressError:
         return None
     tab = f"{row['handle']}'s tab" + (f" ({row['agterm_session']})" if row["agterm_session"] else "")
-    body = f"{tab} has unsent text in its input box; bridge cannot deliver #{message_id} until it is cleared."
+    body = (
+        f"{tab} has unsent text in its input box; bridge cannot deliver #{message_id} until it is cleared."
+        if box is None
+        else f"{tab} has {map_box_to_quote(box)} in its input box, which bridge cannot judge as stray keys or "
+        f"someone's words, so it leaves it; #{message_id} waits until the box is cleared: clear it if it is stray."
+    )
     result = send_message(conn, Party(SYSTEM_CONVERSATION, "bridge"), [assistant], "info", body, at_ms)
     conn.execute("UPDATE messages SET post_type = ? WHERE id = ?", (TO_ASSISTANT, result.message_id))
     return result.message_id, assistant
@@ -1278,7 +1295,7 @@ def _convert_screen_to_held_reason(tab: UndeliveredTab, screen: str | None, unre
         if not tab.draft_proven:
             return None
         preview = convert_text_to_preview(box, BOX_PREVIEW_CHARS)
-        return f"Its input box holds a draft ({preview!r}), which bridge never clears. Later messages wait behind it"
+        return f"Its input box holds a draft ({preview!r}), which bridge does not clear. Later messages wait behind it"
     if tab.compacting:
         return "It is compacting"
     if screen is None:

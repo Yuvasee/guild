@@ -25,7 +25,7 @@ from bridge.feed import (
     tell_of_undelivered_tab,
 )
 from bridge.guildview import _load_undelivered_to_needs  # pyright: ignore[reportPrivateUsage]
-from bridge.tabinput import ENTER_BUDGET_S, SUBMIT_RETRIES, type_when_idle
+from bridge.tabinput import CLEAR_KEYS, ENTER_BUDGET_S, SUBMIT_RETRIES, is_claude_vim, judge_box, type_when_idle
 
 ENTER = "\r"
 PROMPT = chr(0x276F)
@@ -93,6 +93,8 @@ class FakeClaudeBox:
             self.boxes[session] = ""
         elif key == "\x7f":
             self.boxes[session] = text[:-1]
+        elif key == CLEAR_KEYS:
+            self.boxes[session] = ""
         else:
             self.boxes[session] = text + key
         return "ok"
@@ -125,9 +127,14 @@ def _type(
     session: str = "S",
     wait_s: int = 5,
     still_wanted: Callable[[], bool] = lambda: True,
+    vim: bool = False,
     **kw: object,
 ) -> str:
-    with mock.patch("bridge.tabinput.run_agterm", fake.run), mock.patch("bridge.tabinput.state_dir", lambda: tmp_path):
+    with (
+        mock.patch("bridge.tabinput.run_agterm", fake.run),
+        mock.patch("bridge.tabinput.state_dir", lambda: tmp_path),
+        mock.patch("bridge.tabinput.is_claude_vim", lambda: vim),
+    ):
         return type_when_idle(Config(), session, "P", command, still_wanted, wait_s=wait_s, **kw)  # type: ignore[arg-type]
 
 
@@ -1166,3 +1173,259 @@ def test_a_draft_proven_in_the_assistants_own_tab_is_marked_without_a_message_to
 
     assert told is None
     assert marked == 2000
+
+
+def test_stray_keys_are_cleared_someones_words_kept_and_anything_else_asked() -> None:
+    cleared = [".", "..", ",;", " . ", "-", "\u2014", "+", "/", "/c", "/comp", "/compa", "/compact", "[bri", "[bridge]"]
+    cleared += ["^[", "^[[A", "[B", "[200~", "\x1b"]
+    kept = [
+        "x",
+        "ok",
+        "fix it.",
+        "\u0434\u0430",
+        "\u043f\u0440\u0438\u0432\u0435\u0442.",
+        "\u65e5\u672c",
+        "/compact now",
+    ]
+    kept += ["/comp ok", "/clear", "OK", "[A1]", "\u0434\u0430/comp", "./comp"]
+    asked = ["....", "?!?!", "1", "42", "3.", "#12", "\U0001f642", "+1"]
+
+    assert {box: judge_box(box) for box in cleared} == dict.fromkeys(cleared, "clear")
+    assert {box: judge_box(box) for box in kept} == dict.fromkeys(kept, "keep")
+    assert {box: judge_box(box) for box in asked} == dict.fromkeys(asked, "ask")
+
+
+def test_a_stray_key_in_the_box_is_cleared_and_the_text_typed(tmp_path: Path) -> None:
+    fake = FakeClaudeBox({"S": "."})
+    unsure: list[str] = []
+
+    result = _type(tmp_path, fake, wait_s=10, may_probe_box=lambda: True, tell_unsure=unsure.append)
+
+    assert result == "typed"
+    assert fake.typed == [".", "\x7f", CLEAR_KEYS, "hello", ENTER]
+    assert fake.submitted == ["hello"]
+    assert unsure == []
+
+
+def test_a_half_typed_compact_is_cleared_when_vim_shows_insert(tmp_path: Path) -> None:
+    fake = FakeClaudeBox({"S": "/comp"})
+
+    result = _type(tmp_path, fake, command="/compact", wait_s=10, may_probe_box=lambda: True, vim=True)
+
+    assert result == "typed"
+    assert fake.submitted == ["/compact"]
+
+
+def test_a_grey_suggestion_after_the_clear_is_probed_and_typed_over(tmp_path: Path) -> None:
+    class SuggestsAfterClearing(FakeClaudeBox):
+        def run(self, _: Config, args: list[str]) -> str | None:
+            result = super().run(_, args)
+            if args[-1] == CLEAR_KEYS:
+                self.boxes["S"] = 'Try "fix lint errors"'
+                self.suggestions.add("S")
+            return result
+
+    fake = SuggestsAfterClearing({"S": ",;"})
+
+    result = _type(tmp_path, fake, wait_s=10, may_probe_box=lambda: True)
+
+    assert result == "typed"
+    assert fake.typed == [".", "\x7f", CLEAR_KEYS, ".", "\x7f", "hello", ENTER]
+    assert fake.submitted == ["hello"]
+
+
+def test_someones_words_in_the_box_are_kept_and_nobody_is_asked(tmp_path: Path) -> None:
+    fake = FakeClaudeBox({"S": "\u043f\u043e\u0447\u0438\u043d\u0438 \u0442\u0435\u0441\u0442"})
+    unsure: list[str] = []
+
+    result = _type(tmp_path, fake, wait_s=4, may_probe_box=lambda: True, tell_unsure=unsure.append)
+
+    assert result == "draft"
+    assert fake.typed == [".", "\x7f"]
+    assert unsure == []
+
+
+def test_text_bridge_cannot_judge_is_left_and_told_once_while_the_wait_goes_on(tmp_path: Path) -> None:
+    fake = FakeClaudeBox({"S": "42"})
+    unsure: list[str] = []
+
+    result = _type(tmp_path, fake, wait_s=6, may_probe_box=lambda: True, tell_unsure=unsure.append)
+
+    assert result == "draft"
+    assert fake.typed == [".", "\x7f"]
+    assert fake.boxes["S"] == "42"
+    assert unsure == ["42"]
+
+
+def test_a_clear_the_box_does_not_show_gets_no_more_keys(tmp_path: Path) -> None:
+    class IgnoresTheClear(FakeClaudeBox):
+        def run(self, _: Config, args: list[str]) -> str | None:
+            if args[-1] == CLEAR_KEYS:
+                self.typed.append(CLEAR_KEYS)
+                return "ok"
+            return super().run(_, args)
+
+    fake = IgnoresTheClear({"S": "."})
+
+    result = _type(tmp_path, fake, wait_s=8, may_probe_box=lambda: True)
+
+    assert result == "failed"
+    assert fake.typed == [".", "\x7f", CLEAR_KEYS]
+    assert fake.boxes["S"] == "."
+
+
+def test_stray_keys_that_come_back_after_the_clear_are_asked_about_not_cleared_again(tmp_path: Path) -> None:
+    class TypesItAgain(FakeClaudeBox):
+        reads_since_clear: int | None = None
+
+        def run(self, _: Config, args: list[str]) -> str | None:
+            if args[-1] == CLEAR_KEYS:
+                self.reads_since_clear = 0
+            elif args[:2] == ["session", "text"] and self.reads_since_clear is not None:
+                self.reads_since_clear += 1
+                if self.reads_since_clear == 2:
+                    self.boxes["S"] = "."
+            return super().run(_, args)
+
+    fake = TypesItAgain({"S": "."})
+    unsure: list[str] = []
+
+    result = _type(tmp_path, fake, wait_s=8, may_probe_box=lambda: True, tell_unsure=unsure.append)
+
+    assert result == "draft"
+    assert fake.typed == [".", "\x7f", CLEAR_KEYS, ".", "\x7f"]
+    assert unsure == ["."]
+
+
+def test_a_clear_that_brings_up_other_text_gets_no_more_keys(tmp_path: Path) -> None:
+    class RecallsHistory(FakeClaudeBox):
+        def run(self, _: Config, args: list[str]) -> str | None:
+            result = super().run(_, args)
+            if args[-1] == CLEAR_KEYS:
+                self.boxes["S"] = "earlier prompt"
+            return result
+
+    fake = RecallsHistory({"S": "."})
+
+    result = _type(tmp_path, fake, wait_s=8, may_probe_box=lambda: True)
+
+    assert result == "failed"
+    assert fake.typed == [".", "\x7f", CLEAR_KEYS, ".", "\x7f"]
+    assert fake.submitted == []
+    assert fake.boxes["S"] == "earlier prompt"
+
+
+class VimNormal(FakeClaudeBox):
+    """Vim NORMAL mode: Claude Code's footer shows no mode, and "." repeats the last edit."""
+
+    def run(self, _: Config, args: list[str]) -> str | None:
+        screen = super().run(_, args)
+        if args[:2] == ["session", "text"] and screen is not None:
+            return screen.replace("  -- INSERT --", "  \u23f8 manual mode on")
+        return screen
+
+
+def test_with_vim_in_normal_mode_no_key_goes_in_neither_probe_nor_clear_nor_text(tmp_path: Path) -> None:
+    stray, empty = VimNormal({"S": "."}), VimNormal()
+
+    results = [
+        _type(tmp_path, stray, wait_s=4, may_probe_box=lambda: True, vim=True),
+        _type(tmp_path, empty, wait_s=4, may_probe_box=lambda: True, vim=True),
+    ]
+
+    assert results == ["timeout", "timeout"]
+    assert stray.typed == empty.typed == []
+
+
+def test_without_vim_the_same_footer_is_the_default_mode_and_gets_its_keys(tmp_path: Path) -> None:
+    fake = VimNormal({"S": "."})
+
+    result = _type(tmp_path, fake, wait_s=10, may_probe_box=lambda: True, vim=False)
+
+    assert result == "typed"
+    assert fake.submitted == ["hello"]
+
+
+def test_claude_codes_editor_mode_comes_from_settings_before_the_global_config(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    settings, config = tmp_path / "settings.json", tmp_path / ".claude.json"
+    seen = [is_claude_vim()]
+    config.write_text(json.dumps({"editorMode": "vim"}))
+    seen.append(is_claude_vim())
+    settings.write_text(json.dumps({"editorMode": "normal"}))
+    seen.append(is_claude_vim())
+    settings.write_text(json.dumps({"editorMode": "vim"}))
+    config.write_text("{not json")
+    seen.append(is_claude_vim())
+
+    assert seen == [False, True, False, True]
+
+
+def test_text_in_a_tabs_box_bridge_cannot_judge_reaches_the_assistant_quoted_once_per_message(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    team = Team(bridge_env, spawn_process)
+    message_id = _overdue_message_to(bridge_env, "old-a", team.b, typed=False)
+    config = Config(assistant_handle="old-b")
+    with bridge_env.connect() as conn:
+        first = tell_assistant_of_draft(conn, config, message_id, "conv-a", 2000, "42")
+        again = tell_assistant_of_draft(conn, config, message_id, "conv-a", 3000)
+        body = conn.execute("SELECT body FROM messages ORDER BY id DESC LIMIT 1").fetchone()[0]
+
+    assert first is not None and first[1].handle == "old-b"
+    assert again is None
+    assert 'has "42" in its input box' in body
+    assert f"#{message_id} waits until the box is cleared" in body
+
+
+def test_stray_keys_the_owner_types_onto_after_the_probe_are_not_cleared(tmp_path: Path) -> None:
+    class OwnerTypesAfterTheProbe(FakeClaudeBox):
+        reads_after_probe = 0
+
+        def run(self, _: Config, args: list[str]) -> str | None:
+            if args[:2] == ["session", "text"] and self.typed[-1:] == ["\x7f"] and self.boxes["S"] == ".":
+                self.reads_after_probe += 1
+                if self.reads_after_probe == 2:
+                    self.boxes["S"] = ". please keep this"
+            return super().run(_, args)
+
+    fake = OwnerTypesAfterTheProbe({"S": "."})
+
+    result = _type(tmp_path, fake, wait_s=4, may_probe_box=lambda: True)
+
+    assert CLEAR_KEYS not in fake.typed
+    assert fake.boxes["S"] == ". please keep this"
+    assert result == "draft"
+
+
+def test_a_try_cut_short_after_the_bridge_prefix_is_cleared_and_typed_over(tmp_path: Path) -> None:
+    fake = FakeClaudeBox({"S": "[bridge]"})
+
+    result = _type(tmp_path, fake, wait_s=10, may_probe_box=lambda: True)
+
+    assert result == "typed"
+    assert fake.typed == [".", "\x7f", CLEAR_KEYS, "hello", ENTER]
+
+
+def test_no_probe_after_the_clear_once_the_footer_leaves_insert(tmp_path: Path) -> None:
+    class LeavesInsertOnClear(FakeClaudeBox):
+        normal = False
+
+        def run(self, _: Config, args: list[str]) -> str | None:
+            if args[-1] == CLEAR_KEYS:
+                self.typed.append(CLEAR_KEYS)
+                self.boxes["S"], self.normal = "earlier prompt", True
+                return "ok"
+            screen = super().run(_, args)
+            if self.normal and args[:2] == ["session", "text"] and screen is not None:
+                return screen.replace("-- INSERT --", "")
+            return screen
+
+    fake = LeavesInsertOnClear({"S": "."})
+
+    result = _type(tmp_path, fake, wait_s=8, may_probe_box=lambda: True, vim=True)
+
+    assert result == "failed"
+    assert fake.typed == [".", "\x7f", CLEAR_KEYS]

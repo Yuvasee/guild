@@ -87,7 +87,7 @@ from bridge.serve import DEFAULT_PORT, serve
 from bridge.service import install_service, restart_service, uninstall_service
 from bridge.shadow_filter import map_rows_to_report
 from bridge.shadow_filter import read_rows as read_shadow_rows
-from bridge.tabinput import is_tab_selected, type_when_idle
+from bridge.tabinput import is_tab_selected, map_box_to_quote, type_when_idle
 from bridge.watcher import read_tree
 from bridge.worker_api import WORKER_API_PORT, convert_bridge_commands_to_gbridge
 
@@ -96,10 +96,10 @@ PIN_SESSION_FILE_RETRIES = 10
 COMPACT_WAIT_S = 3600
 """The owner's text in the box, a selected tab's grey suggestion or a long turn can hold a drive this long."""
 _DRIVE_HELD = {
-    "draft": "its input box holds text bridge never clears, which may be the owner's draft",
+    "draft": "its input box holds text that is not stray keys, which may be the owner's draft",
     "unproven": "its input box holds text, and the tab stayed selected, so bridge could not tell a draft from Claude "
     "Code's grey suggestion",
-    "timeout": "it stayed busy with a turn or a dialog, or the Mac slept",
+    "timeout": "it stayed busy with a turn or a dialog, its vim input stayed out of INSERT mode, or the Mac slept",
 }
 """Waits that ran out: nothing went wrong, so they are no error."""
 _DRIVE_FAILED = {
@@ -496,8 +496,27 @@ def cmd_compact_drive(args: argparse.Namespace, conn: sqlite3.Connection, config
         status = conn.execute("SELECT status FROM instances WHERE instance_id = ?", (instance_id,)).fetchone()
         return status is not None and status["status"] == "idle" and not is_tab_selected(config, session)
 
+    told_unsure = False
+
+    def tell_unsure(box: str) -> None:
+        nonlocal told_unsure
+        tree = read_tree(config) or {}
+        with transaction(conn):
+            if read_phase(conn, conversation_id) != expected:
+                return
+            told = tell_of_held_drive(conn, config, tree, conversation_id, instance_id, phase, "unsure", box)
+        told_unsure = True
+        _spawn_told(told)
+
     result = type_when_idle(
-        config, session, pane, command, still_wanted, wait_s=COMPACT_WAIT_S, may_probe_box=may_probe_box
+        config,
+        session,
+        pane,
+        command,
+        still_wanted,
+        wait_s=COMPACT_WAIT_S,
+        may_probe_box=may_probe_box,
+        tell_unsure=tell_unsure,
     )
     if result == "typed":
         if phase == "continue":
@@ -511,9 +530,10 @@ def cmd_compact_drive(args: argparse.Namespace, conn: sqlite3.Connection, config
             return 0
         end_driving(conn, conversation_id, now_ms())
         # "unwanted" with the phase still ours: its tab ended or moved to another conversation, so nothing is owed.
+        # Told of the box's text at the start, they already know the wait would end like this.
         told = (
             []
-            if result == "unwanted"
+            if result == "unwanted" or (result == "draft" and told_unsure)
             else tell_of_held_drive(conn, config, tree, conversation_id, instance_id, phase, result)
         )
     if result in _DRIVE_FAILED:
@@ -521,11 +541,15 @@ def cmd_compact_drive(args: argparse.Namespace, conn: sqlite3.Connection, config
         log_error("compact-drive", f"{phase} not typed for {conversation_id}: {result}")
     elif result in _DRIVE_HELD:
         log_slow("compact-drive", f"{phase} not typed for {conversation_id} in {COMPACT_WAIT_S // 60} min: {result}")
+    _spawn_told(told)
+    return 1 if result in _DRIVE_FAILED else 0
+
+
+def _spawn_told(told: list[tuple[int, Recipient]]) -> None:
     for message_id, recipient in told:
         if recipient.pid:
             write_hint(recipient.pid, HINT_SENT)
         spawn_typed_delivery(message_id, [recipient])
-    return 1 if result in _DRIVE_FAILED else 0
 
 
 def tell_of_held_drive(
@@ -536,8 +560,10 @@ def tell_of_held_drive(
     instance_id: str,
     phase: str,
     result: str,
+    box: str = "",
 ) -> list[tuple[int, Recipient]]:
-    """The assistant and a worker's lead hear it, as of a dead tab; with neither, the owner's page."""
+    """The assistant and a worker's lead hear it, as of a dead tab; with neither, the owner's page. "unsure" is told
+    while the wait goes on, with the box's text."""
     row = conn.execute(
         "SELECT s.handle, s.agterm_session, s.surface FROM instances i LEFT JOIN surfaces s ON s.surface = i.surface"
         " WHERE i.instance_id = ?",
@@ -552,17 +578,28 @@ def tell_of_held_drive(
     )  # fmt: skip
     recipients = find_alert_recipients(conn, config, tab)
     what = "/compact" if phase == "compact" else "continue"
+    then = "type /compact there" if phase == "compact" else "tell it to continue"
+    if result == "unsure":
+        body = (
+            f'bridge is waiting to type {what} in tab "{tab.name}" ({tab.session}): its input box holds '
+            f"{map_box_to_quote(box)}, which bridge cannot judge as stray keys or someone's words, so it leaves it. "
+            f"Clear it if it is stray; bridge waits up to {COMPACT_WAIT_S // 60} min, then {then} by hand."
+        )
+    else:
+        why = _DRIVE_HELD.get(result) or _DRIVE_FAILED[result]
+        body = (
+            f'bridge could not type {what} in tab "{tab.name}" ({tab.session}) within {COMPACT_WAIT_S // 60} min: '
+            f"{why}. It does not try again until the conversation compacts; once the box is clear, {then}. Claude "
+            "Code also compacts by itself near the end of its window."
+        )
     if not recipients:
-        text = f"{name}: bridge could not type {what} ({result}); do it by hand once the box is clear"
+        text = (
+            body
+            if result == "unsure"
+            else f"{name}: bridge could not type {what} ({result}); do it by hand once the box is clear"
+        )
         add_user_item(conn, Party(conversation_id, name), "action", text[:USER_ITEM_MAX_CHARS], now_ms())
         return []
-    why = _DRIVE_HELD.get(result) or _DRIVE_FAILED[result]
-    then = "type /compact there" if phase == "compact" else "tell it to continue"
-    body = (
-        f'bridge could not type {what} in tab "{tab.name}" ({tab.session}) within {COMPACT_WAIT_S // 60} min: {why}. '
-        f"It does not try again until the conversation compacts; once the box is clear, {then}. Claude Code also "
-        "compacts by itself near the end of its window."
-    )
     sent = send_message(conn, Party(SYSTEM_CONVERSATION, "bridge"), recipients, "info", body, now_ms())
     conn.execute("UPDATE messages SET post_type = ? WHERE id = ?", (BLOCKED_TAB, sent.message_id))
     return [(sent.message_id, r) for r in recipients]
