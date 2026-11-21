@@ -940,6 +940,24 @@ options:
   --handovers  show handovers from other tabs
 ```
 
+### guild assistant sync
+
+name Right Hand's tab '<Name> · Right Hand', tint it, move it to TEAM and pin its handle
+
+Right Hand is the tab whose handle is `assistant_handle`, or, failing that, a running tab named after it or after
+`<Name> · Right Hand`; run this once its Claude is listed in `bridge sessions`. It pins that handle first (taking it
+from a tab with no running Claude that still held it), so the new tab name does not change it, then names the tab, tints
+it yellow on icon and name, moves it to the `TEAM` workspace and sets its title-bar context, as `guild lead sync` does
+for a lead. Safe to run again. Exit 1 if agterm refused a step; exit 2 if no such tab runs, the tab is locked, or
+another running tab holds the handle.
+
+```text
+usage: guild assistant sync [-h]
+
+options:
+  -h, --help  show this help message and exit
+```
+
 ### guild handover
 
 hand your work to a lead, from stdin

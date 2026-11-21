@@ -329,7 +329,63 @@ macOS terminal built for coding agents, with a control CLI (`agtermctl`). Guild 
 
 Without agterm, sessions still register and appear on the dashboard, but nothing is typed into tabs: messages wait for
 each session's next tool call, and the crew features (team lead tabs, workers, automatic compaction) don't work.
-Tested with agterm 0.39.
+
+### agterm setup
+
+What has to be true; Troubleshooting below checks each line.
+
+- agterm 0.39 or later: nested tabs and tints arrived there.
+- bridge finds `agtermctl`. agterm tabs usually have it on `PATH`, and the Homebrew cask links it into
+  `/opt/homebrew/bin`; anywhere else, set `agtermctl = "/Applications/agterm.app/Contents/MacOS/agtermctl"` in
+  `~/.config/bridge/config.toml`.
+- The dashboard finds it too. `bridge install-service` freezes your `PATH` into the service, so run it from an agterm
+  tab, or use the full path above.
+- Every Claude starts straight in an agterm tab: not in tmux, ssh or an IDE terminal, and not from another agent's
+  shell. Its tab's ids reach bridge only that way.
+- Hooks first: a `claude` started before `bridge install-hooks` has none until you restart it.
+- Nothing in agterm's own settings, keymap or `hooks.conf`. Guild makes its `TEAM` workspace and names tabs itself.
+
+### The sidebar
+
+Guild lays out the left sidebar itself, the shape in the picture at the top:
+
+- A workspace named `TEAM`, made the first time it's needed.
+- Right Hand's tab in it, named `<Name> · Right Hand`, yellow, by `guild assistant sync`. Right Hand is whichever tab
+  has the handle `assistant_handle`; the sync pins that handle, so the new name doesn't change it.
+- Each team lead's tab in it, named `<Name> · <Label>`, by `guild lead add`: tinted with the next free colour of blue,
+  green, orange, purple, red and gray, with the lead's scope as the tab's title-bar context.
+- Each worker as a tab nested under its team lead's tab, named after its task (`guild worker`). Moving a lead's tab
+  carries its workers.
+- Any other tab with Claude in it gets renamed once, to the session's title, after its first prompt. A name you give it
+  by hand sticks. Right Hand's tab, and a team lead's tab while only the lead runs in it, are not renamed this way.
+
+Something moved, renamed or lost its colour? `guild lead sync <Name>` or `guild assistant sync` puts it back.
+
+## Troubleshooting
+
+Ask Claude in an agterm tab to run these; each line says what a good answer is and what fixes a bad one.
+
+| Check | Good | If not |
+| --- | --- | --- |
+| `agtermctl version` | agterm 0.39 or later | install or upgrade agterm; not found: set `agtermctl` to its full path (agterm setup) |
+| `grep -c bridge-hook ~/.claude/settings.json` | not 0 | `bridge install-hooks`, then restart `claude` in each tab |
+| the dashboard check below | `ok`: it read agterm's tabs in the last 45 s | `agterm not answering`: it can't run `agtermctl`; set its full path, `bridge restart-service` |
+| `bridge sessions` | every session in a tab has a handle, not `pid:<n>` | `pid:<n>`: see below |
+| `agtermctl tree --json \| grep -o '"name":"[^"]*· Right Hand"'` | Right Hand's tab, in `TEAM`, yellow in the sidebar | `guild assistant sync` |
+
+The dashboard check (the same 45 s the Guild page uses to say agterm is not answering):
+
+```sh
+curl -s 127.0.0.1:8765/api/guild | python3 -c 'import json,sys; d=json.load(sys.stdin); t=d.get("tabs_at"); print("ok" if t and d["now"]-t < 45000 else "agterm not answering")'
+```
+
+- **`bridge sessions` shows `pid:12345` instead of a tab name.** That session has no handle, so nobody can message it.
+  Either bridge never learned its tab (Claude started outside agterm), or it couldn't read agterm's tab list
+  (`agtermctl` not found, by the dashboard service in particular).
+- **The page says a team lead "has no live session".** No running Claude is registered on that lead's tab: it exited,
+  it runs in another tab, or it's one of the `pid:` sessions above.
+- **Messages aren't typed into tabs.** The dashboard types them with `agtermctl`: see the dashboard check above. It
+  also waits, on purpose, for a tab to be idle with an empty input box; a draft you left there holds the message.
 
 ## Limits
 
@@ -399,6 +455,8 @@ Full usage and flags: [docs/commands.md](docs/commands.md), or `<command> --help
 | **`bridge` · Outside services** | |
 | [`bridge issue-sync`](docs/commands.md#bridge-issue-sync) | move Linear issues forward to match their PRs and live work |
 | [`bridge auto-merge`](docs/commands.md#bridge-auto-merge) | what the auto-merger would do with each open queue PR: merge it, or what blocks it |
+| **`guild` · Setup** | |
+| [`guild assistant sync`](docs/commands.md#guild-assistant-sync) | name Right Hand's tab '<Name> · Right Hand', tint it, move it to TEAM and pin its handle |
 | **`guild` · Team leads** | |
 | [`guild leads`](docs/commands.md#guild-leads) | list team leads |
 | [`guild lead add`](docs/commands.md#guild-lead-add) | make a tab a team lead: name, tint, a place in the TEAM workspace |
@@ -500,6 +558,31 @@ The rest, including your team's own rules and the keys that keep people's names 
 Then in agterm: open a tab named after `assistant_handle` and start `claude` there: that is Right Hand. Open a tab in a
 project directory, start `claude`, and ask Right Hand to make it a team lead (`guild lead add`).
 </details>
+
+## Uninstall
+
+Before removing anything, give agterm its tabs back: `guild lead retire <Name>` for each team lead restores the tab's
+old name, workspace and context and clears its tint. Right Hand's tab keeps its name and colour; rename or close it by
+hand, and remove the `TEAM` workspace once it's empty. bridge also pins `claude --resume <id>` as each Claude tab's
+restore command in agterm; clear a tab's with `agtermctl session restore --clear --target <tab id>`, adding
+`--pane-id <pane id>` for the second pane of a split.
+
+Then:
+
+```sh
+bridge uninstall-service                  # the launchd service and its plist
+bridge uninstall-hooks                    # bridge's hooks out of ~/.claude/settings.json; others stay
+rm ~/.local/bin/bridge ~/.local/bin/bridge-hook ~/.local/bin/guild   # after a deploy.sh upgrade
+uv tool uninstall bridge                  # if it was installed with uv tool install
+rm -rf ~/.local/share/bridge              # releases made by deploy.sh
+rm -rf ~/.local/share/guild               # the checkout SETUP.md cloned
+rm -rf ~/.claude/skills/bridge            # the agents' skill
+rm -rf ~/.config/bridge                   # config
+rm -rf ~/.local/state/bridge              # the database, logs, backups, the rewake script
+```
+
+Plus your `overlay_dir`, if you set one. What stays: agterm itself, Claude Code with its transcripts
+(`~/.claude/projects`) and your other settings, and your repos.
 
 ## License
 

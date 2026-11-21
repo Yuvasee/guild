@@ -15,7 +15,7 @@ value in every command.
 
 ```sh
 sw_vers -productName                      # must be macOS
-echo "$AGTERM_SESSION_ID"; agtermctl version   # must be inside agterm; agterm 0.39 or later
+echo "$AGTERM_PANE_ID"; agtermctl version  # must be inside agterm; agterm 0.39 or later; note its "client:" path
 uv --version                              # needed; Python 3.12+ comes through uv
 claude --version
 gh auth status                            # optional: only the PR features need it
@@ -25,6 +25,11 @@ ls ~/.claude/skills/bridge 2>/dev/null    # an existing skill of that name would
 ```
 
 - Not macOS, or not inside agterm: stop. Guild needs both; point the user to https://github.com/umputun/agterm.
+- `$AGTERM_PANE_ID` is empty although the user runs agterm: this Claude runs inside tmux, ssh or another wrapper,
+  which hides the tab from bridge. Stop and ask the user to start Claude straight in an agterm tab and ask again.
+- `agtermctl` not found, but `/Applications/agterm.app/Contents/MacOS/agtermctl version` works (agterm installed from
+  the DMG, not the Homebrew cask, which links it): fine, step 3 puts that full path in the config. Use that full path
+  wherever this guide says `agtermctl`.
 - No `uv`: ask before installing it (`brew install uv`, or the installer at https://docs.astral.sh/uv/).
 - `bridge`, `guild` or `bridge-hook` already exist and are not from this repo, port 8765 is taken, or
   `~/.claude/skills/bridge` exists: tell the user what you found and ask how to proceed before going on.
@@ -65,7 +70,11 @@ owner_name = "<their name>"
 user_alias = "<their name>"
 assistant_handle = "<right hand name, lowercase>"
 compact_at_tokens = 150000
+agtermctl = "<the client: path agtermctl version printed in step 1, else what command -v agtermctl prints>"
 ```
+
+`agtermctl` as a full path: the dashboard service gets a copy of this shell's `PATH` when it is installed and never
+again, so a bare name it cannot find there would leave it unable to read or type into tabs.
 
 `compact_at_tokens` turns on compaction with keep notes; tell the user they can set it to 0 to turn it off. Other
 keys are in the README and `docs/adapters.md`; leave them at their defaults.
@@ -100,10 +109,37 @@ A fresh Claude Code tab usually shows dialogs before its prompt: "trust this fol
 fullscreen renderer?" (answer "Not now"), and a login if the user is not signed in. Ask the user to answer them in
 that tab, and say which answers to pick.
 
-Check: within a minute, `bridge sessions` lists a session with that handle. Right Hand's role arrives with its
-session start; its first prompt from the user will show it.
+Check: within a minute, `bridge sessions` lists a session with that handle. Then lay out its tab:
 
-## 6. Start the first team lead
+```sh
+guild assistant sync   # names the tab "<Name> · Right Hand", tints it, moves it to TEAM and pins its handle
+```
+
+Right Hand's role arrives with its session start; its first prompt from the user will show it.
+
+## 6. Verify the wiring
+
+Right Hand's tab is the test: a tab opened in agterm, with `claude` started in it after the hooks. Run each check and
+tell the user one line per check.
+
+```sh
+agtermctl version                                      # agterm 0.39 or later
+grep -c bridge-hook ~/.claude/settings.json            # not 0
+curl -s http://127.0.0.1:PORT/api/guild | python3 -c 'import json,sys; d=json.load(sys.stdin); t=d.get("tabs_at"); print("ok" if t and d["now"]-t < 45000 else "agterm not answering")'   # ok: it read agterm's tabs in the last 45 s
+bridge sessions                                        # Right Hand's row shows its handle, not pid:<n>
+agtermctl tree --json | grep -o '"name":"[^"]*· Right Hand"'             # Right Hand's tab name
+```
+
+Do not start a team lead before Right Hand has its handle: a team lead is made from a tab's handle. If a check fails:
+
+- `agterm not answering`: the dashboard cannot run `agtermctl`. Check the `agtermctl` key from step 3, then
+  `bridge restart-service`, and check again after ten seconds.
+- `pid:<n>` for Right Hand: its Claude started outside agterm, or before the hooks, or agterm's tab list has no such
+  pane. Close Right Hand's Claude, start `claude` again in its tab, and check again.
+- No Right Hand tab name: run `guild assistant sync` again; it is safe to repeat.
+- This setup tab itself may show as `pid:<n>`: this Claude started before the hooks. That blocks nothing.
+
+## 7. Start the first team lead
 
 ```sh
 agtermctl session new --name "<label, lowercase>" --cwd "<project directory>" --no-select --json   # note .result.id
@@ -133,7 +169,7 @@ agtermctl session type --target <id> $'\r'
 
 Check: `guild leads` lists the team lead; the dashboard shows it under **Team Leads**.
 
-## 7. Open the dashboard and hand over
+## 8. Open the dashboard and hand over
 
 ```sh
 open http://127.0.0.1:PORT/
@@ -146,8 +182,6 @@ Tell the user, in a few lines:
 - that questions for them appear on the page under **Needs you**;
 - that team leads use the connectors of their Claude account: if it is connected to a tracker or chat, the first team
   lead may start by reading it to learn its scope;
-- how to undo everything: `bridge uninstall-service`, `bridge uninstall-hooks`, `uv tool uninstall bridge`,
-  and removing `~/.local/bin/{bridge,bridge-hook,guild}`, `~/.claude/skills/bridge`, `~/.config/bridge`,
-  `~/.local/share/bridge` (releases made by upgrades) and `~/.local/state/bridge`.
+- how to undo everything: the README's Uninstall section.
 
 Finish with one summary line of what was installed and where.
