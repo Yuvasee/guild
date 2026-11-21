@@ -118,12 +118,21 @@ from bridge.leads import (
     set_lead_domains,
     set_lead_label,
     set_lead_work,
+    sync_assistant_terminal,
     sync_lead_terminal,
     write_notes,
 )
 from bridge.linear_cli import add_linear_commands
 from bridge.refs import map_text_to_ref
-from bridge.registry import is_english_name, list_sessions, reconcile
+from bridge.registry import (
+    HandleTakenError,
+    find_assistant_surface,
+    is_english_name,
+    list_sessions,
+    map_config_to_assistant_title,
+    reconcile,
+    set_handle,
+)
 from bridge.review_post import (
     ReviewError,
     map_arg_to_ref,
@@ -434,10 +443,39 @@ def build_parser(config: Config) -> argparse.ArgumentParser:
     p.add_argument("--days", type=int, default=14)
     p.set_defaults(func=cmd_urgent)
 
+    assistant = sub.add_parser("assistant", help="Right Hand's tab")
+    assistant_sub = assistant.add_subparsers(dest="assistant_command", required=True)
+    p = assistant_sub.add_parser(
+        "sync", help="name Right Hand's tab '<Name> · Right Hand', tint it, move it to TEAM and pin its handle"
+    )
+    p.set_defaults(func=cmd_assistant_sync)
+
     p = sub.add_parser("handover", help="hand your work to a lead, from stdin")
     p.add_argument("lead")
     p.set_defaults(func=cmd_handover)
     return parser
+
+
+def cmd_assistant_sync(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
+    reconcile(conn, config, now_ms())
+    handle = config.assistant_handle
+    row = find_assistant_surface(conn, config)
+    if row is None or not row["agterm_session"]:
+        raise UsageError(
+            f"no running Claude in an agterm tab has the handle {handle}: open a tab named {handle}, start claude "
+            "there, and run this once `bridge sessions` lists it"
+        )
+    if is_surface_locked(conn, config, str(row["surface"])):
+        raise UsageError(f"{handle}'s tab is locked, and Guild ignores locked tabs")
+    try:
+        with transaction(conn):
+            set_handle(conn, str(row["surface"]), handle, now_ms(), take_from_ended=True)
+    except HandleTakenError as exc:
+        raise UsageError(str(exc)) from exc
+    if _report_sync_problems(sync_assistant_terminal(config, str(row["agterm_session"])), "guild assistant sync"):
+        return 1
+    print(f"Right Hand: tab {map_config_to_assistant_title(config)!r} in TEAM, handle {handle} pinned")
+    return 0
 
 
 def cmd_leads(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
@@ -1656,9 +1694,13 @@ def _active_lead(conn: sqlite3.Connection, config: Config, name: str) -> Lead:
 
 def _sync_terminal(conn: sqlite3.Connection, config: Config, lead: Lead) -> int:
     problems = sync_lead_terminal(config, lead, _agterm_session_of(conn, lead))
+    return _report_sync_problems(problems, f"guild lead sync {lead.name}")
+
+
+def _report_sync_problems(problems: list[str], retry: str) -> int:
     for problem in problems:
         print(f"warning: {problem}", file=sys.stderr)
     if problems:
-        print(f"run `guild lead sync {lead.name}` to try again", file=sys.stderr)
+        print(f"run `{retry}` to try again", file=sys.stderr)
         return 1
     return 0

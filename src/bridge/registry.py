@@ -554,6 +554,35 @@ def read_agterm_tabs(agtermctl: str) -> dict[str, AgtermTab]:
     return map_agterm_tree_to_tabs(raw)
 
 
+def map_config_to_assistant_title(config: Config) -> str:
+    return f"{config.assistant_handle.capitalize()} · Right Hand"
+
+
+def list_assistant_tab_handles(config: Config) -> set[str]:
+    """Tab names, as handles, that mark a tab as Right Hand's: its handle, or the title its sync gives it."""
+    return {config.assistant_handle, convert_tab_name_to_handle(map_config_to_assistant_title(config))}
+
+
+def find_assistant_surface(conn: sqlite3.Connection, config: Config) -> sqlite3.Row | None:
+    """The live surface that is Right Hand: the one holding its handle, else one whose tab is named after it (a new
+    tab opened after the old one closed gets a suffixed handle while the closed one keeps the pin)."""
+    rows = conn.execute(
+        "SELECT * FROM surfaces s WHERE EXISTS "
+        "(SELECT 1 FROM instances i WHERE i.surface = s.surface AND i.ended_at IS NULL) "
+        "ORDER BY s.handle IS NOT ?, s.surface",
+        (config.assistant_handle,),
+    ).fetchall()
+    names = list_assistant_tab_handles(config)
+    return next(
+        (
+            r
+            for r in rows
+            if r["handle"] == config.assistant_handle or convert_tab_name_to_handle(r["tab_name"] or "") in names
+        ),
+        None,
+    )
+
+
 def name_tabs_after_sessions(
     conn: sqlite3.Connection, config: Config, tabs: dict[str, AgtermTab]
 ) -> dict[str, AgtermTab]:
@@ -571,10 +600,16 @@ def name_tabs_after_sessions(
         """
     ).fetchall()
     renamed = dict(tabs)
+    # Right Hand is found by its handle, which follows its tab's name unless pinned; a split pane renames the tab too.
+    assistant = find_assistant_surface(conn, config)
+    assistant_tab = str(assistant["agterm_session"]) if assistant and assistant["agterm_session"] else None
+    assistant_names = list_assistant_tab_handles(config)
     for row in rows:
         surface = str(row["surface"])
         tab = renamed.get(surface)
         if tab is None or not tab.session_id or config.hides(tab.tab_name, tab.workspace_name):
+            continue
+        if tab.session_id == assistant_tab or convert_tab_name_to_handle(tab.tab_name) in assistant_names:
             continue
         # A worker's tab is named after its task, and its session's title is only about the brief file.
         if (
@@ -737,7 +772,8 @@ def protected_lead_handles(conn: sqlite3.Connection) -> set[str]:
     return {str(r[0]) for r in rows}
 
 
-def set_handle(conn: sqlite3.Connection, surface: str, handle: str, at_ms: int) -> None:
+def set_handle(conn: sqlite3.Connection, surface: str, handle: str, at_ms: int, take_from_ended: bool = False) -> None:
+    """take_from_ended: a handle pinned on a surface with no live session moves here too, as Right Hand's sync needs."""
     if handle in protected_lead_handles(conn):
         raise HandleTakenError(f"handle {handle!r} belongs to a team lead")
     lead = conn.execute("SELECT display_name FROM leads WHERE surface = ?", (surface,)).fetchone()
@@ -751,10 +787,12 @@ def set_handle(conn: sqlite3.Connection, surface: str, handle: str, at_ms: int) 
         """,
         (handle, surface),
     ).fetchone()
-    if owner is not None and (owner["live"] or owner["handle_explicit"]):
+    if owner is not None and (owner["live"] or (owner["handle_explicit"] and not take_from_ended)):
         raise HandleTakenError(f"handle {handle!r} belongs to tab {owner['tab_name'] or owner['surface']!r}")
     current = conn.execute("SELECT handle FROM surfaces WHERE surface = ?", (surface,)).fetchone()
-    conn.execute("UPDATE surfaces SET handle = NULL WHERE handle = ? AND surface != ?", (handle, surface))
+    conn.execute(
+        "UPDATE surfaces SET handle = NULL, handle_explicit = 0 WHERE handle = ? AND surface != ?", (handle, surface)
+    )
     rename_handle(conn, surface, current["handle"] if current else None, handle, at_ms)
     conn.execute("UPDATE surfaces SET handle_explicit = 1 WHERE surface = ?", (surface,))
     sync_claim_handles(conn)

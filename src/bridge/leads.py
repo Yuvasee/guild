@@ -9,13 +9,20 @@ from typing import cast
 from bridge.agent_prefix import CLAUDE_PREFIX
 from bridge.config import Config, read_overlay, state_dir
 from bridge.inject import cut_to_last_chars, measure_chars
-from bridge.registry import HandleTakenError, is_english_name, protected_lead_handles, set_handle
+from bridge.registry import (
+    HandleTakenError,
+    is_english_name,
+    map_config_to_assistant_title,
+    protected_lead_handles,
+    set_handle,
+)
 from bridge.tabinput import run_agterm
 
 NAME_RE = re.compile(r"[A-Z][a-z]{1,31}")
 ALIAS_RE = re.compile(r"[^\W\d_]{2,32}")
 TEAM_WORKSPACE = "TEAM"
 TINTS = ("blue", "green", "orange", "purple", "red", "yellow", "gray")
+ASSISTANT_TINT = "yellow"
 NOTES_INJECT_MAX_CHARS = 4000
 CONTEXT_MAX_BYTES = 256
 SCOPE_MAX_CHARS = 500
@@ -411,10 +418,10 @@ def enroll_lead(
         raise LeadError(f"tab {tab_handle!r} already is {held.display_name}")
     if alias is not None and _is_handle_unavailable(conn, alias, surface):
         raise LeadError(f"alias {alias!r} already names another tab or lead")
-    used = {str(r[0]) for r in conn.execute("SELECT tint FROM leads WHERE retired_at IS NULL")}
+    used = {str(r[0]) for r in conn.execute("SELECT tint FROM leads WHERE retired_at IS NULL")} | {ASSISTANT_TINT}
     chosen = tint or next((t for t in TINTS if t not in used), TINTS[0])
-    if chosen not in TINTS:
-        raise LeadError(f"tint must be one of {', '.join(TINTS)}")
+    if chosen not in TINTS or chosen == ASSISTANT_TINT:
+        raise LeadError(f"tint must be one of {', '.join(t for t in TINTS if t != ASSISTANT_TINT)}")
     try:
         set_handle(conn, surface, name, at_ms)
     except HandleTakenError as exc:
@@ -620,15 +627,24 @@ def append_handover(name: str, from_handle: str, stamp: str, text: str) -> None:
 
 
 def sync_lead_terminal(config: Config, lead: Lead, agterm_session: str) -> list[str]:
+    return sync_team_tab(config, agterm_session, lead.tab_title, lead.tint, lead.scope)
+
+
+def sync_assistant_terminal(config: Config, agterm_session: str) -> list[str]:
+    context = "Right Hand: routes the team leads' work"
+    return sync_team_tab(config, agterm_session, map_config_to_assistant_title(config), ASSISTANT_TINT, context)
+
+
+def sync_team_tab(config: Config, agterm_session: str, title: str, tint: str, context: str) -> list[str]:
     """Idempotent, so a failure halfway is fixed by running it again. Moving a tab carries its nested workers."""
     state_dir().mkdir(parents=True, exist_ok=True)
     # Two syncs at once would each find no TEAM and create one.
     with (state_dir() / "team-workspace.lock").open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        return _sync_lead_terminal(config, lead, agterm_session)
+        return _sync_team_tab(config, agterm_session, title, tint, context)
 
 
-def _sync_lead_terminal(config: Config, lead: Lead, agterm_session: str) -> list[str]:
+def _sync_team_tab(config: Config, agterm_session: str, title: str, tint: str, context: str) -> list[str]:
     workspaces = _read_workspaces(config)
     if workspaces is None:
         return ["agterm is not reachable"]
@@ -641,11 +657,11 @@ def _sync_lead_terminal(config: Config, lead: Lead, agterm_session: str) -> list
     in_place = agterm_session in workspace.sessions
     if not in_place and run_agterm(config, ["session", "move", workspace.id, "--target", agterm_session]) is None:
         problems.append(f"could not move the tab to workspace {TEAM_WORKSPACE}")
-    if run_agterm(config, ["session", "rename", lead.tab_title, "--target", agterm_session]) is None:
+    if run_agterm(config, ["session", "rename", title, "--target", agterm_session]) is None:
         problems.append("could not rename the tab")
-    if run_agterm(config, ["session", "tint", lead.tint, "--on", "icon,name", "--target", agterm_session]) is None:
+    if run_agterm(config, ["session", "tint", tint, "--on", "icon,name", "--target", agterm_session]) is None:
         problems.append("could not tint the tab")
-    context = lead.scope.encode()[:CONTEXT_MAX_BYTES].decode(errors="ignore")
+    context = context.encode()[:CONTEXT_MAX_BYTES].decode(errors="ignore")
     if run_agterm(config, ["session", "context", " ".join(context.split()), "--target", agterm_session]) is None:
         problems.append("could not set the tab's context")
     return problems

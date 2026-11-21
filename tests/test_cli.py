@@ -225,6 +225,23 @@ def _write_tabs(bridge_env: BridgeEnv, tabs: list[tuple[str, str, str]]) -> None
     )
 
 
+def test_right_hand_tab_keeps_its_name_and_handle_after_its_session_is_titled(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    pid = spawn_process(env={"AGTERM_PANE_ID": "PANE-A"})
+    bridge_env.write_session_file(pid, "conv-a")
+    projects = bridge_env.root / "projects" / "-tmp"
+    projects.mkdir(parents=True)
+    _write_tabs(bridge_env, [("S-A", "aide", "PANE-A")])
+    bridge_env.cli("sessions")
+    (projects / "conv-a.jsonl").write_text(json.dumps({"type": "ai-title", "aiTitle": "Morning plan"}) + "\n")
+
+    listed = json.loads(bridge_env.cli("sessions", "--json").stdout)
+
+    assert [s["handle"] for s in listed] == ["aide"]
+    assert not bridge_env.stub_log.exists()
+
+
 def test_locked_tab_is_not_listed_and_not_renamed(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:
     pid = spawn_process(env={"AGTERM_PANE_ID": "PANE-A"})
     bridge_env.write_session_file(pid, "conv-a")
