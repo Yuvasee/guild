@@ -50,7 +50,7 @@
   <text x="52" y="93" font-size="13" font-weight="600" class="ink">Xavi · Right Hand</text>
   <text x="52" y="109" font-size="11.5" class="muted">routes your words; streams the group back</text>
 
-  <text x="38" y="142" font-size="11" font-weight="600" letter-spacing=".08em" class="faint">TEAM</text>
+  <text x="38" y="142" font-size="11" font-weight="600" letter-spacing=".08em" class="faint">TEAM LEADS</text>
 
   <rect class="box" x="38" y="150" width="280" height="32" rx="7"/>
   <rect x="38" y="150" width="5" height="32" rx="2" class="blue"/>

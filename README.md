@@ -324,7 +324,7 @@ macOS terminal built for coding agents, with a control CLI (`agtermctl`). Guild 
 
 - know which agent runs in which tab, and whether a tab is busy, idle or waiting on a dialog;
 - type a message, an answer or `/compact` into an idle tab without clobbering what you were typing there;
-- give each team lead a named, tinted tab in a `TEAM` workspace, and open workers as tabs nested under their team lead;
+- give each team lead a named, tinted tab in a `👁 GUILD` workspace, and open workers as tabs nested under their team lead;
 - jump to the tab behind any row on the page.
 
 Without agterm, sessions still register and appear on the dashboard, but nothing is typed into tabs: messages wait for
@@ -334,7 +334,7 @@ each session's next tool call, and the crew features (team lead tabs, workers, a
 
 What has to be true; Troubleshooting below checks each line.
 
-- agterm 0.39 or later: nested tabs and tints arrived there.
+- agterm 0.41 or later: nested tabs arrived in 0.39, colours given as hex in 0.41.
 - bridge finds `agtermctl`. agterm tabs usually have it on `PATH`, and the Homebrew cask links it into
   `/opt/homebrew/bin`; anywhere else, set `agtermctl = "/Applications/agterm.app/Contents/MacOS/agtermctl"` in
   `~/.config/bridge/config.toml`.
@@ -343,13 +343,14 @@ What has to be true; Troubleshooting below checks each line.
 - Every Claude starts straight in an agterm tab: not in tmux, ssh or an IDE terminal, and not from another agent's
   shell. Its tab's ids reach bridge only that way.
 - Hooks first: a `claude` started before `bridge install-hooks` has none until you restart it.
-- Nothing in agterm's own settings, keymap or `hooks.conf`. Guild makes its `TEAM` workspace and names tabs itself.
+- Nothing in agterm's own settings, keymap or `hooks.conf`. Guild makes its `👁 GUILD` workspace and names tabs itself.
 
 ### The sidebar
 
 Guild lays out the left sidebar itself, the shape in the picture at the top:
 
-- A workspace named `TEAM`, made the first time it's needed.
+- A workspace named `👁 GUILD`, in the orange of Guild's eye, made the first time it's needed. A `GUILD` or `TEAM`
+  workspace from an earlier version is renamed to it.
 - Right Hand's tab in it, named `<Name> · Right Hand`, yellow, by `guild assistant sync`. Right Hand is whichever tab
   has the handle `assistant_handle`; the sync pins that handle, so the new name doesn't change it.
 - Each team lead's tab in it, named `<Name> · <Label>`, by `guild lead add`: tinted with the next free colour of blue,
@@ -367,11 +368,11 @@ Ask Claude in an agterm tab to run these; each line says what a good answer is a
 
 | Check | Good | If not |
 | --- | --- | --- |
-| `agtermctl version` | agterm 0.39 or later | install or upgrade agterm; not found: set `agtermctl` to its full path (agterm setup) |
+| `agtermctl version` | agterm 0.41 or later | install or upgrade agterm; not found: set `agtermctl` to its full path (agterm setup) |
 | `grep -c bridge-hook ~/.claude/settings.json` | not 0 | `bridge install-hooks`, then restart `claude` in each tab |
 | the dashboard check below | `ok`: it read agterm's tabs in the last 45 s | `agterm not answering`: it can't run `agtermctl`; set its full path, `bridge restart-service` |
 | `bridge sessions` | every session in a tab has a handle, not `pid:<n>` | `pid:<n>`: see below |
-| `agtermctl tree --json \| grep -o '"name":"[^"]*· Right Hand"'` | Right Hand's tab, in `TEAM`, yellow in the sidebar | `guild assistant sync` |
+| `agtermctl tree --json \| grep -o '"name":"[^"]*· Right Hand"'` | Right Hand's tab, in `👁 GUILD`, yellow in the sidebar | `guild assistant sync` |
 
 The dashboard check (the same 45 s the Guild page uses to say agterm is not answering):
 
@@ -456,12 +457,12 @@ Full usage and flags: [docs/commands.md](docs/commands.md), or `<command> --help
 | [`bridge issue-sync`](docs/commands.md#bridge-issue-sync) | move Linear issues forward to match their PRs and live work |
 | [`bridge auto-merge`](docs/commands.md#bridge-auto-merge) | what the auto-merger would do with each open queue PR: merge it, or what blocks it |
 | **`guild` · Setup** | |
-| [`guild assistant sync`](docs/commands.md#guild-assistant-sync) | name Right Hand's tab '<Name> · Right Hand', tint it, move it to TEAM and pin its handle |
+| [`guild assistant sync`](docs/commands.md#guild-assistant-sync) | name Right Hand's tab '<Name> · Right Hand', tint it, move it to 👁 GUILD and pin its handle |
 | **`guild` · Team leads** | |
 | [`guild leads`](docs/commands.md#guild-leads) | list team leads |
-| [`guild lead add`](docs/commands.md#guild-lead-add) | make a tab a team lead: name, tint, a place in the TEAM workspace |
+| [`guild lead add`](docs/commands.md#guild-lead-add) | make a tab a team lead: name, tint, a place in the 👁 GUILD workspace |
 | [`guild lead label`](docs/commands.md#guild-lead-label) | change a lead's project label and rename its tab |
-| [`guild lead sync`](docs/commands.md#guild-lead-sync) | apply a lead's tab name, tint and place in TEAM again |
+| [`guild lead sync`](docs/commands.md#guild-lead-sync) | apply a lead's tab name, tint and place in 👁 GUILD again |
 | [`guild lead retire`](docs/commands.md#guild-lead-retire) | undo enrollment; the tab goes back, the name is never reused |
 | [`guild lead domains`](docs/commands.md#guild-lead-domains) | the projects a lead takes new work from: priority project names or Linear project refs |
 | [`guild lead park`](docs/commands.md#guild-lead-park) | no 'has room' notices for a lead left idle on purpose, until a date |
@@ -563,7 +564,7 @@ project directory, start `claude`, and ask Right Hand to make it a team lead (`g
 
 Before removing anything, give agterm its tabs back: `guild lead retire <Name>` for each team lead restores the tab's
 old name, workspace and context and clears its tint. Right Hand's tab keeps its name and colour; rename or close it by
-hand, and remove the `TEAM` workspace once it's empty. bridge also pins `claude --resume <id>` as each Claude tab's
+hand, and remove the `👁 GUILD` workspace once it's empty. bridge also pins `claude --resume <id>` as each Claude tab's
 restore command in agterm; clear a tab's with `agtermctl session restore --clear --target <tab id>`, adding
 `--pane-id <pane id>` for the second pane of a split.
 

@@ -35,7 +35,7 @@ class Team:
         spaces.setdefault(workspace_a, []).append(session(tab_a, "TAB-A", "PANE-A"))
         spaces.setdefault(workspace_b, []).append(session("Old B", "TAB-B", "PANE-B"))
         workspaces = [
-            {"id": "WS-NEW" if name == "TEAM" else f"WS-{name}", "name": name, "sessions": ss}
+            {"id": "WS-NEW" if name == "\U0001f441 GUILD" else f"WS-{name}", "name": name, "sessions": ss}
             for name, ss in spaces.items()
         ]
         self.env.stub_tree.write_text(json.dumps({"ok": True, "result": {"tree": {"workspaces": workspaces}}}))
@@ -92,8 +92,8 @@ def test_enroll_names_and_tints_the_tab_and_moves_it_to_the_team_workspace(
 
     assert done.returncode == 0, done.stderr
     log = team.log()
-    assert "workspace new TEAM --json" in log
-    assert "workspace tint" not in log
+    assert "workspace new \U0001f441 GUILD --json" in log
+    assert "workspace tint #e8590c --on icon,name --target WS-NEW" in log
     assert "session move WS-NEW --target TAB-A" in log
     assert "session rename Alex · Data --target TAB-A" in log
     assert "session tint blue --on icon,name --target TAB-A" in log
@@ -104,13 +104,34 @@ def test_enroll_names_and_tints_the_tab_and_moves_it_to_the_team_workspace(
     assert [(r["name"], r["status"], r["linear_refs"]) for r in listed] == [("alex", "idle", ["P-PROJ-41"])]
 
 
+@pytest.mark.parametrize(
+    ("existing", "renamed"),
+    [("TEAM", True), ("GUILD", True), ("\U0001f441 GUILD", False), ("\U0001f441\ufe0f GUILD", False)],
+)
+def test_an_earlier_or_current_guild_workspace_is_reused_never_doubled(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess, existing: str, renamed: bool
+) -> None:
+    team = Team(bridge_env, spawn_process)
+    team.write_tree(workspace_b=existing)
+
+    done = team.enroll()
+
+    assert done.returncode == 0, done.stderr
+    log = team.log()
+    workspace = "WS-NEW" if existing == "\U0001f441 GUILD" else f"WS-{existing}"
+    assert (f"workspace rename \U0001f441 GUILD --target {workspace}" in log) == renamed
+    assert "workspace new" not in log
+    assert f"session move {workspace} --target TAB-A" in log
+    assert f"workspace tint #e8590c --on icon,name --target {workspace}" in log
+
+
 def test_sync_is_idempotent_once_the_tab_is_in_the_team_workspace(
     bridge_env: BridgeEnv, spawn_process: SpawnProcess
 ) -> None:
     team = Team(bridge_env, spawn_process)
     team.enroll()
     team.enroll("Boris", "old-b")
-    team.write_tree(workspace_a="TEAM", tab_a="Alex · Data", workspace_b="TEAM")
+    team.write_tree(workspace_a="\U0001f441 GUILD", tab_a="Alex · Data", workspace_b="\U0001f441 GUILD")
     bridge_env.stub_log.write_text("")
 
     done = team.guild("lead", "sync", "alex")
@@ -160,7 +181,7 @@ def test_locked_tab_cannot_be_enrolled_and_a_tab_locked_later_is_ignored(
 def test_retired_name_is_never_reused_and_the_tab_goes_back(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:
     team = Team(bridge_env, spawn_process)
     team.enroll()
-    team.write_tree(workspace_a="TEAM", tab_a="Alex · Data")
+    team.write_tree(workspace_a="\U0001f441 GUILD", tab_a="Alex · Data")
 
     retired = team.guild("lead", "retire", "alex")
     again = team.enroll("Alex", "old-b")
@@ -202,7 +223,7 @@ def test_lead_names_and_aliases_cannot_be_taken(bridge_env: BridgeEnv, spawn_pro
 def test_retirement_does_not_take_a_handle_that_moved_on(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:
     team = Team(bridge_env, spawn_process)
     team.enroll()
-    team.write_tree(workspace_a="TEAM", tab_a="Alex · Data")
+    team.write_tree(workspace_a="\U0001f441 GUILD", tab_a="Alex · Data")
     assert bridge_env.cli("handle", "old-a", pid=team.b).returncode == 0
     assert bridge_env.cli("handle", "other", pid=team.b).returncode == 0
 
@@ -216,7 +237,7 @@ def test_retirement_does_not_take_a_handle_that_moved_on(bridge_env: BridgeEnv, 
 def test_failed_restore_keeps_the_lead_and_retrying_works(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:
     team = Team(bridge_env, spawn_process)
     team.enroll()
-    team.write_tree(workspace_a="TEAM", tab_a="Alex · Data", workspace_b="Other")
+    team.write_tree(workspace_a="\U0001f441 GUILD", tab_a="Alex · Data", workspace_b="Other")
 
     gone = team.guild("lead", "retire", "alex")
     still = json.loads(team.guild("leads", "--json").stdout)
@@ -387,7 +408,7 @@ def test_lead_tab_keeps_its_name_while_other_tabs_follow_their_session(
 ) -> None:
     team = Team(bridge_env, spawn_process)
     team.enroll()
-    team.write_tree(workspace_a="TEAM", tab_a="Alex · Data")
+    team.write_tree(workspace_a="\U0001f441 GUILD", tab_a="Alex · Data")
     projects = Path(bridge_env.env["BRIDGE_CLAUDE_PROJECTS_DIR"]) / "p"
     projects.mkdir(parents=True)
     title = json.dumps({"type": "custom-title", "customTitle": "Something else"}) + "\n"
@@ -408,7 +429,7 @@ def test_lead_tab_keeps_its_name_while_other_tabs_follow_their_session(
 def test_label_names_the_tab_and_can_change(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:
     team = Team(bridge_env, spawn_process)
     team.enroll()
-    team.write_tree(workspace_a="TEAM", tab_a="Alex · Data")
+    team.write_tree(workspace_a="\U0001f441 GUILD", tab_a="Alex · Data")
     bridge_env.stub_log.write_text("")
 
     changed = team.guild("lead", "label", "alex", "Scale & Load")

@@ -39,7 +39,7 @@ def test_sync_names_tints_moves_and_pins_right_hands_tab(bridge_env: BridgeEnv, 
     assert synced.returncode == 0, synced.stderr
     log = bridge_env.stub_log.read_text().splitlines()
     assert {
-        "workspace new TEAM --json",
+        "workspace new \U0001f441 GUILD --json",
         "session move WS-NEW --target TAB-R",
         "session rename Aide · Right Hand --target TAB-R",
         "session tint yellow --on icon,name --target TAB-R",

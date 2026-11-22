@@ -15,7 +15,7 @@ value in every command.
 
 ```sh
 sw_vers -productName                      # must be macOS
-echo "$AGTERM_PANE_ID"; agtermctl version  # must be inside agterm; agterm 0.39 or later; note its "client:" path
+echo "$AGTERM_PANE_ID"; agtermctl version  # must be inside agterm; agterm 0.41 or later; note its "client:" path
 uv --version                              # needed; Python 3.12+ comes through uv
 claude --version
 gh auth status                            # optional: only the PR features need it
@@ -112,7 +112,7 @@ that tab, and say which answers to pick.
 Check: within a minute, `bridge sessions` lists a session with that handle. Then lay out its tab:
 
 ```sh
-guild assistant sync   # names the tab "<Name> · Right Hand", tints it, moves it to TEAM and pins its handle
+guild assistant sync   # names the tab "<Name> · Right Hand", tints it, moves it to 👁 GUILD and pins its handle
 ```
 
 Right Hand's role arrives with its session start; its first prompt from the user will show it.
@@ -123,7 +123,7 @@ Right Hand's tab is the test: a tab opened in agterm, with `claude` started in i
 tell the user one line per check.
 
 ```sh
-agtermctl version                                      # agterm 0.39 or later
+agtermctl version                                      # agterm 0.41 or later
 grep -c bridge-hook ~/.claude/settings.json            # not 0
 curl -s http://127.0.0.1:PORT/api/guild | python3 -c 'import json,sys; d=json.load(sys.stdin); t=d.get("tabs_at"); print("ok" if t and d["now"]-t < 45000 else "agterm not answering")'   # ok: it read agterm's tabs in the last 45 s
 bridge sessions                                        # Right Hand's row shows its handle, not pid:<n>
@@ -157,7 +157,7 @@ guild lead add <Name> --tab <handle> --scope "<one sentence>" --label <Label>
 guild lead wake <Name>
 ```
 
-`guild lead add` renames the tab to `<Name> · <Label>`, tints it and moves it to a `TEAM` workspace.
+`guild lead add` renames the tab to `<Name> · <Label>`, tints it and moves it to a `👁 GUILD` workspace.
 
 If `guild lead wake` prints `<Name>: unproven` and exits 1, nothing was typed: the empty prompt's grey hint can look
 like a draft to it. Type the first prompt yourself:

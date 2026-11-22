@@ -638,9 +638,9 @@ usage: guild lead [-h] {add,label,sync,retire,domains,park,wake,model} ...
 
 positional arguments:
   {add,label,sync,retire,domains,park,wake,model}
-    add                 make a tab a team lead: name, tint, a place in the TEAM workspace
+    add                 make a tab a team lead: name, tint, a place in the 👁 GUILD workspace
     label               change a lead's project label and rename its tab
-    sync                apply a lead's tab name, tint and place in TEAM again
+    sync                apply a lead's tab name, tint and place in 👁 GUILD again
     retire              undo enrollment; the tab goes back, the name is never reused
     domains             the projects a lead takes new work from: priority project names or Linear
                         project refs
@@ -655,7 +655,7 @@ options:
 
 ### guild lead add
 
-make a tab a team lead: name, tint, a place in the TEAM workspace
+make a tab a team lead: name, tint, a place in the 👁 GUILD workspace
 
 ```text
 usage: guild lead add [-h] --tab TAB --scope SCOPE [--ref REF] --label LABEL [--alias ALIAS]
@@ -692,7 +692,7 @@ options:
 
 ### guild lead sync
 
-apply a lead's tab name, tint and place in TEAM again
+apply a lead's tab name, tint and place in 👁 GUILD again
 
 ```text
 usage: guild lead sync [-h] name
@@ -942,12 +942,12 @@ options:
 
 ### guild assistant sync
 
-name Right Hand's tab '<Name> · Right Hand', tint it, move it to TEAM and pin its handle
+name Right Hand's tab '<Name> · Right Hand', tint it, move it to 👁 GUILD and pin its handle
 
 Right Hand is the tab whose handle is `assistant_handle`, or, failing that, a running tab named after it or after
 `<Name> · Right Hand`; run this once its Claude is listed in `bridge sessions`. It pins that handle first (taking it
 from a tab with no running Claude that still held it), so the new tab name does not change it, then names the tab, tints
-it yellow on icon and name, moves it to the `TEAM` workspace and sets its title-bar context, as `guild lead sync` does
+it yellow on icon and name, moves it to the `👁 GUILD` workspace and sets its title-bar context, as `guild lead sync` does
 for a lead. Safe to run again. Exit 1 if agterm refused a step; exit 2 if no such tab runs, the tab is locked, or
 another running tab holds the handle.
 

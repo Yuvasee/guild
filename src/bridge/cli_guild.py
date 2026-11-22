@@ -91,6 +91,7 @@ from bridge.identity import current_party, ensure_current_instance
 from bridge.inject import measure_chars
 from bridge.install import list_guard_globs
 from bridge.leads import (
+    GUILD_WORKSPACE,
     NOTES_INJECT_MAX_CHARS,
     REVIEW_DOC_SPEC,
     Lead,
@@ -257,7 +258,7 @@ def build_parser(config: Config) -> argparse.ArgumentParser:
 
     lead = sub.add_parser("lead", help="enroll, sync or retire a team lead")
     lead_sub = lead.add_subparsers(dest="lead_command", required=True)
-    p = lead_sub.add_parser("add", help="make a tab a team lead: name, tint, a place in the TEAM workspace")
+    p = lead_sub.add_parser("add", help="make a tab a team lead: name, tint, a place in the 👁 GUILD workspace")
     p.add_argument("name", help="one capitalised word, e.g. Ada")
     p.add_argument("--tab", required=True, help="handle of the tab that becomes the lead")
     p.add_argument("--scope", required=True)
@@ -270,7 +271,7 @@ def build_parser(config: Config) -> argparse.ArgumentParser:
     p.add_argument("name")
     p.add_argument("label")
     p.set_defaults(func=cmd_lead_label)
-    p = lead_sub.add_parser("sync", help="apply a lead's tab name, tint and place in TEAM again")
+    p = lead_sub.add_parser("sync", help="apply a lead's tab name, tint and place in 👁 GUILD again")
     p.add_argument("name")
     p.set_defaults(func=cmd_lead_sync)
     p = lead_sub.add_parser("retire", help="undo enrollment; the tab goes back, the name is never reused")
@@ -446,7 +447,7 @@ def build_parser(config: Config) -> argparse.ArgumentParser:
     assistant = sub.add_parser("assistant", help="Right Hand's tab")
     assistant_sub = assistant.add_subparsers(dest="assistant_command", required=True)
     p = assistant_sub.add_parser(
-        "sync", help="name Right Hand's tab '<Name> · Right Hand', tint it, move it to TEAM and pin its handle"
+        "sync", help="name Right Hand's tab '<Name> · Right Hand', tint it, move it to 👁 GUILD and pin its handle"
     )
     p.set_defaults(func=cmd_assistant_sync)
 
@@ -474,7 +475,7 @@ def cmd_assistant_sync(args: argparse.Namespace, conn: sqlite3.Connection, confi
         raise UsageError(str(exc)) from exc
     if _report_sync_problems(sync_assistant_terminal(config, str(row["agterm_session"])), "guild assistant sync"):
         return 1
-    print(f"Right Hand: tab {map_config_to_assistant_title(config)!r} in TEAM, handle {handle} pinned")
+    print(f"Right Hand: tab {map_config_to_assistant_title(config)!r} in {GUILD_WORKSPACE}, handle {handle} pinned")
     return 0
 
 

@@ -113,7 +113,7 @@ bridge post decision "Ship the export worker behind a flag, or wait for the load
 
 A tab enrolled with `guild lead add` is a named team lead. Its role, scope and notes arrive as
 "[guild]" context at every session start, and the name outlives the conversation. Its tab sits in the
-TEAM workspace, named "<Name> · <label>" and tinted in its color; its workers nest under it.
+👁 GUILD workspace, named "<Name> · <label>" and tinted in its color; its workers nest under it.
 
 - `guild leads` lists the leads. `guild notes` shows your notes; `guild notes --write` replaces
   them from stdin. Keep them short: what you own, what is in flight, what you decided.

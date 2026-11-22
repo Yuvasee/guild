@@ -2,7 +2,7 @@ import fcntl
 import json
 import re
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import cast
 
@@ -20,7 +20,11 @@ from bridge.tabinput import run_agterm
 
 NAME_RE = re.compile(r"[A-Z][a-z]{1,31}")
 ALIAS_RE = re.compile(r"[^\W\d_]{2,32}")
-TEAM_WORKSPACE = "TEAM"
+GUILD_WORKSPACE = "\U0001f441 GUILD"
+# Earlier names, renamed in place so an install never gets a second workspace.
+OLD_GUILD_WORKSPACES = ("GUILD", "TEAM")
+# The orange of Guild's eye (docs/images/eye.svg); a hex tint needs agterm 0.41.0.
+GUILD_WORKSPACE_TINT = "#e8590c"
 TINTS = ("blue", "green", "orange", "purple", "red", "yellow", "gray")
 ASSISTANT_TINT = "yellow"
 NOTES_INJECT_MAX_CHARS = 4000
@@ -638,7 +642,7 @@ def sync_assistant_terminal(config: Config, agterm_session: str) -> list[str]:
 def sync_team_tab(config: Config, agterm_session: str, title: str, tint: str, context: str) -> list[str]:
     """Idempotent, so a failure halfway is fixed by running it again. Moving a tab carries its nested workers."""
     state_dir().mkdir(parents=True, exist_ok=True)
-    # Two syncs at once would each find no TEAM and create one.
+    # Two syncs at once would each find no GUILD and create one.
     with (state_dir() / "team-workspace.lock").open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         return _sync_team_tab(config, agterm_session, title, tint, context)
@@ -648,15 +652,18 @@ def _sync_team_tab(config: Config, agterm_session: str, title: str, tint: str, c
     workspaces = _read_workspaces(config)
     if workspaces is None:
         return ["agterm is not reachable"]
-    workspace = next((w for w in workspaces if w.name == TEAM_WORKSPACE), None)
+    workspace = next((w for w in workspaces if _is_named_guild(w.name)), None)
     if workspace is None:
-        workspace = _create_team_workspace(config)
+        workspace = _rename_old_guild_workspace(config, workspaces) or _create_guild_workspace(config)
         if workspace is None:
-            return [f"could not create workspace {TEAM_WORKSPACE}"]
+            return [f"could not create workspace {GUILD_WORKSPACE}"]
     problems: list[str] = []
+    tinted = ["workspace", "tint", GUILD_WORKSPACE_TINT, "--on", "icon,name", "--target", workspace.id]
+    if run_agterm(config, tinted) is None:
+        problems.append(f"could not tint workspace {GUILD_WORKSPACE}")
     in_place = agterm_session in workspace.sessions
     if not in_place and run_agterm(config, ["session", "move", workspace.id, "--target", agterm_session]) is None:
-        problems.append(f"could not move the tab to workspace {TEAM_WORKSPACE}")
+        problems.append(f"could not move the tab to workspace {GUILD_WORKSPACE}")
     if run_agterm(config, ["session", "rename", title, "--target", agterm_session]) is None:
         problems.append("could not rename the tab")
     if run_agterm(config, ["session", "tint", tint, "--on", "icon,name", "--target", agterm_session]) is None:
@@ -707,12 +714,24 @@ class _Workspace:
     contexts: dict[str, str]
 
 
-def _create_team_workspace(config: Config) -> _Workspace | None:
-    output = run_agterm(config, ["workspace", "new", TEAM_WORKSPACE, "--json"])
+def _is_named_guild(name: str) -> bool:
+    # The eye may come back with an emoji variation selector after it.
+    return name.replace("\ufe0f", "") == GUILD_WORKSPACE
+
+
+def _rename_old_guild_workspace(config: Config, workspaces: list[_Workspace]) -> _Workspace | None:
+    old = next((w for w in workspaces if w.name in OLD_GUILD_WORKSPACES), None)
+    if old is None or run_agterm(config, ["workspace", "rename", GUILD_WORKSPACE, "--target", old.id]) is None:
+        return None
+    return replace(old, name=GUILD_WORKSPACE)
+
+
+def _create_guild_workspace(config: Config) -> _Workspace | None:
+    output = run_agterm(config, ["workspace", "new", GUILD_WORKSPACE, "--json"])
     if output is None:
         return None
     try:
-        return _Workspace(str(json.loads(output)["result"]["id"]), TEAM_WORKSPACE, (), {})
+        return _Workspace(str(json.loads(output)["result"]["id"]), GUILD_WORKSPACE, (), {})
     except (ValueError, KeyError, TypeError):
         return None
 
