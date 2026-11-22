@@ -861,6 +861,11 @@ MIGRATIONS: tuple[str, ...] = (
     """
     ALTER TABLE review_prs ADD COLUMN issue_missing INTEGER NOT NULL DEFAULT 0;
     """,
+    # A chunk's name is its short title, the lead's tab label; the long text is its about.
+    """
+    ALTER TABLE lead_work ADD COLUMN about TEXT;
+    ALTER TABLE leads ADD COLUMN tab_renamed_at INTEGER;
+    """,
 )
 
 HOOK_BUSY_TIMEOUT_MS = 200

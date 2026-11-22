@@ -118,12 +118,14 @@ A tab enrolled with `guild lead add` is a named team lead. Its role, scope and n
 - `guild leads` lists the leads. `guild notes` shows your notes; `guild notes --write` replaces
   them from stdin. Keep them short: what you own, what is in flight, what you decided.
 - The owner's page shows a lead's main chunks of work with their Linear issues and PRs, and nothing else about what it does.
-  Keep them true: a few plain lines a person would name, not tasks or workers. Refs are `PROJ-12`, `owner/repo#12`, `#12`
-  in your repo, or a URL; state and titles come from enrichment. `guild work list` shows yours.
+  Keep them true: a few plain lines a person would name, not tasks or workers. A chunk's title is a short project name,
+  at most 3 words and 24 characters; the longer text goes in `--about`. Your newest chunk set in the last 3 days names
+  your tab: `<Name> · <title>`. Refs are `PROJ-12`, `owner/repo#12`, `#12` in your repo, or a URL; state and titles
+  come from enrichment. `guild work list` shows yours.
 
   ```bash
-  guild work set "Nightly export worker" PROJ-34 Acme-Org/monorepo#45   # add, or update by name; refs replace
-  guild work done "Nightly export worker"                              # it leaves the page
+  guild work set "Nightly export" PROJ-34 Acme-Org/monorepo#45 --about "CSV export moves to a worker"  # refs replace
+  guild work done "Nightly export"                                                                       # leaves the page
   ```
 - Other tabs hand work over with `guild handover <lead>` (stdin); read yours with
   `guild notes --handovers` and fold what matters into your notes.
@@ -197,8 +199,8 @@ A tab enrolled with `guild lead add` is a named team lead. Its role, scope and n
   `guild priority set onboarding=PROJ-39,PROJ-44 export=PROJ-34`, first project first; `guild priority show`
   prints it. A PR belongs to a project by an issue key in its title or in the owning lead's chunk that names the PR,
   so keep `guild work set` true.
-- `guild lead label <name> "<label>"` changes a lead's project label and renames its tab. Tab and workspace names
-  are in English.
+- `guild lead label <name> "<label>"` changes a lead's standing label, its tab's label while it has no chunk set in
+  the last 3 days. Tab and workspace names are in English.
 - Capacity: `guild lead domains <lead> [<project>…]` (priority project names or Linear project refs; the assistant or the lead sets them). While the owner is on, bridge tells the assistant every 5 minutes about a lead under 4 workers that is idle 20+ minutes or whose open chunks all wait on others, with up to 3 unclaimed open issues of its domains; `guild capacity` is the dry run.
 
 ## The owner's asks (`guild ask`)

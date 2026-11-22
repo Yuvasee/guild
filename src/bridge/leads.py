@@ -10,7 +10,10 @@ from bridge.agent_prefix import CLAUDE_PREFIX
 from bridge.config import Config, read_overlay, state_dir
 from bridge.inject import cut_to_last_chars, measure_chars
 from bridge.registry import (
+    LEAD_LABEL_MAX_CHARS,
+    LEAD_LABEL_MAX_WORDS,
     HandleTakenError,
+    find_lead_tab_title,
     is_english_name,
     map_config_to_assistant_title,
     protected_lead_handles,
@@ -33,7 +36,7 @@ SCOPE_MAX_CHARS = 500
 REFS_MAX = 10
 REF_MAX_CHARS = 64
 LABEL_MAX_CHARS = 40
-WORK_NAME_MAX_CHARS = 80
+WORK_ABOUT_MAX_CHARS = 200
 DOMAIN_MAX_CHARS = 64
 
 INTERNAL_WORDS = ("worker", "lead", "Guild", "bridge")
@@ -67,7 +70,8 @@ ROLE_TEMPLATE = "\n".join(
         "{owner}'s screen is shared.",
         "- `{assistant}, relaying {user}'s answer` (`guild answer`) is {owner}'s OK for that question only, prod "
         "writes too.",
-        '- Main chunks on the page: `guild work set "<chunk>" <refs>` at start, `guild work done` at end.',
+        '- Main chunks on the page: `guild work set "<title>" <refs> --about "<what and why>"` at start, '
+        "`guild work done` at end. The title is a short project name (at most 3 words) and becomes your tab's label.",
         "- Typing in your tab is {owner}: answer there; send {assistant} one line per decision.",
         "- {owner}'s asks (typed here or relayed): `guild ask add` at once, verbatim; to verified with evidence of "
         "what {owner} sees.",
@@ -149,10 +153,6 @@ class Lead:
     retired_at: int | None
     label: str | None
     domains: tuple[str, ...] = ()
-
-    @property
-    def tab_title(self) -> str:
-        return f"{self.display_name} · {self.label}" if self.label else self.display_name
 
 
 def map_row_to_lead(row: sqlite3.Row) -> Lead:
@@ -244,21 +244,34 @@ def get_lead(conn: sqlite3.Connection, name: str) -> Lead:
 class LeadWork:
     name: str
     refs: tuple[str, ...]
+    about: str | None = None
 
 
-def set_lead_work(conn: sqlite3.Connection, lead: str, name: str, refs: list[str] | None, at_ms: int) -> None:
-    """Refs replace the chunk's when given; a chunk finished earlier comes back when set again."""
+def set_lead_work(
+    conn: sqlite3.Connection, lead: str, name: str, refs: list[str] | None, at_ms: int, about: str | None = None
+) -> None:
+    """Refs and about replace the chunk's when given; a chunk finished earlier comes back when set again."""
     clean = " ".join(name.split())
-    if not clean or len(clean) > WORK_NAME_MAX_CHARS:
-        raise LeadError(f"a chunk's name is one line of 1 to {WORK_NAME_MAX_CHARS} characters")
+    if not clean or len(clean.split()) > LEAD_LABEL_MAX_WORDS or len(clean) > LEAD_LABEL_MAX_CHARS:
+        raise LeadError(
+            f"a chunk's title is a short project name, at most {LEAD_LABEL_MAX_WORDS} words and "
+            f"{LEAD_LABEL_MAX_CHARS} characters, e.g. 'Nightly export'; it becomes your tab's label. "
+            'Put the longer text in --about "..."'
+        )
+    if not is_english_name(clean):
+        raise LeadError("a chunk's title is in English, since it names a tab")
+    about = " ".join((about or "").split()) or None
+    if about is not None and len(about) > WORK_ABOUT_MAX_CHARS:
+        raise LeadError(f"--about is one line of at most {WORK_ABOUT_MAX_CHARS} characters")
     conn.execute(
         """
-        INSERT INTO lead_work (lead, name, refs, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)
+        INSERT INTO lead_work (lead, name, refs, created_at, updated_at, about) VALUES (?1, ?2, ?3, ?4, ?4, ?6)
         ON CONFLICT (lead, name) DO UPDATE SET
             name = excluded.name, updated_at = excluded.updated_at, done_at = NULL,
-            refs = CASE WHEN ?5 THEN excluded.refs ELSE refs END
+            refs = CASE WHEN ?5 THEN excluded.refs ELSE refs END,
+            about = coalesce(excluded.about, about)
         """,
-        (lead, clean, json.dumps(refs or []), at_ms, refs is not None),
+        (lead, clean, json.dumps(refs or []), at_ms, refs is not None, about),
     )
 
 
@@ -273,9 +286,10 @@ def finish_lead_work(conn: sqlite3.Connection, lead: str, name: str, at_ms: int)
 
 def list_lead_work(conn: sqlite3.Connection, lead: str) -> list[LeadWork]:
     return [
-        LeadWork(str(r["name"]), tuple(cast(list[str], json.loads(str(r["refs"])))))
+        LeadWork(str(r["name"]), tuple(cast(list[str], json.loads(str(r["refs"])))), r["about"])
         for r in conn.execute(
-            "SELECT name, refs FROM lead_work WHERE lead = ? AND done_at IS NULL ORDER BY created_at, name", (lead,)
+            "SELECT name, refs, about FROM lead_work WHERE lead = ? AND done_at IS NULL ORDER BY created_at, name",
+            (lead,),
         )
     ]
 
@@ -630,8 +644,11 @@ def append_handover(name: str, from_handle: str, stamp: str, text: str) -> None:
         handovers.write(f"## From {from_handle}, {stamp}\n\n{text.strip()}\n\n")
 
 
-def sync_lead_terminal(config: Config, lead: Lead, agterm_session: str) -> list[str]:
-    return sync_team_tab(config, agterm_session, lead.tab_title, lead.tint, lead.scope)
+def sync_lead_terminal(
+    conn: sqlite3.Connection, config: Config, lead: Lead, agterm_session: str, at_ms: int
+) -> list[str]:
+    title = find_lead_tab_title(conn, lead.name, at_ms)
+    return sync_team_tab(config, agterm_session, title, lead.tint, lead.scope)
 
 
 def sync_assistant_terminal(config: Config, agterm_session: str) -> list[str]:

@@ -354,7 +354,10 @@ Guild lays out the left sidebar itself, the shape in the picture at the top:
 - Right Hand's tab in it, named `<Name> · Right Hand`, yellow, by `guild assistant sync`. Right Hand is whichever tab
   has the handle `assistant_handle`; the sync pins that handle, so the new name doesn't change it.
 - Each team lead's tab in it, named `<Name> · <Label>`, by `guild lead add`: tinted with the next free colour of blue,
-  green, orange, purple, red and gray, with the lead's scope as the tab's title-bar context.
+  green, orange, purple, red and gray, with the lead's scope as the tab's title-bar context. The label follows the
+  lead's work: the title of its newest open chunk set in the last 3 days (`guild work set "<title>"`, at most 3 words),
+  else its standing label (`guild lead label`). The tab is renamed at most once per 10 minutes, and the Guild page
+  shows the same name.
 - Each worker as a tab nested under its team lead's tab, named after its task (`guild worker`). Moving a lead's tab
   carries its workers.
 - Any other tab with Claude in it gets renamed once, to the session's title, after its first prompt. A name you give it
@@ -461,7 +464,7 @@ Full usage and flags: [docs/commands.md](docs/commands.md), or `<command> --help
 | **`guild` · Team leads** | |
 | [`guild leads`](docs/commands.md#guild-leads) | list team leads |
 | [`guild lead add`](docs/commands.md#guild-lead-add) | make a tab a team lead: name, tint, a place in the 👁 GUILD workspace |
-| [`guild lead label`](docs/commands.md#guild-lead-label) | change a lead's project label and rename its tab |
+| [`guild lead label`](docs/commands.md#guild-lead-label) | change a lead's standing label, its tab's label while it has no chunk set in the last 3 days |
 | [`guild lead sync`](docs/commands.md#guild-lead-sync) | apply a lead's tab name, tint and place in 👁 GUILD again |
 | [`guild lead retire`](docs/commands.md#guild-lead-retire) | undo enrollment; the tab goes back, the name is never reused |
 | [`guild lead domains`](docs/commands.md#guild-lead-domains) | the projects a lead takes new work from: priority project names or Linear project refs |
@@ -474,7 +477,7 @@ Full usage and flags: [docs/commands.md](docs/commands.md), or `<command> --help
 | [`guild worker reopen`](docs/commands.md#guild-worker-reopen) | resume a closed worker in a tab nested under yours (its lead or the assistant) |
 | [`guild worker attach`](docs/commands.md#guild-worker-attach) | a host worker whose tab was closed: open it again under yours |
 | **`guild` · What team leads show and keep** | |
-| [`guild work set`](docs/commands.md#guild-work-set) | add a chunk, or update it by name; given refs replace its refs |
+| [`guild work set`](docs/commands.md#guild-work-set) | add a chunk, or update it by title; given refs replace its refs |
 | [`guild work done`](docs/commands.md#guild-work-done) | a chunk ended; it leaves the page |
 | [`guild work list`](docs/commands.md#guild-work-list) | the open chunks |
 | [`guild notes`](docs/commands.md#guild-notes) | a lead's or the assistant's notes that outlive conversations |

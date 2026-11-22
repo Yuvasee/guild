@@ -27,7 +27,7 @@ from bridge.feed import DELIVERY_MARKS, OPEN_KINDS, PICK_LABEL, RELAYED_ANSWER, 
 from bridge.host_workers import HOST_KIND_PREFIX
 from bridge.leads import TINTS, Lead, find_lead_on_surface, is_conversation_locked, list_lead_work, list_leads
 from bridge.refs import map_ref_to_label
-from bridge.registry import list_sessions
+from bridge.registry import find_lead_tab_title, list_sessions
 from bridge.remote import REMOTE_STALE_AFTER_MS
 from bridge.reviews import find_lead_of
 from bridge.signals import CI_STOPPED, STALL, map_enrichment_to_status
@@ -164,13 +164,12 @@ def map_db_to_guild(
                     "text": f"{lead.display_name} has no live session",
                 }
             )
-        tab_name, tint = _find_tab_of_lead(conn, lead, tree, tab_id)
         leads.append(
             {
                 "name": lead.name,
                 "display_name": lead.display_name,
-                "tab_name": tab_name,
-                "tint": tint,
+                "tab_name": find_lead_tab_title(conn, lead.name, now),
+                "tint": _find_tint_of_lead(lead, tree, tab_id),
                 "surface": lead.surface,
                 **map_states_to_rollup(own, workers),
                 "workers": workers,
@@ -178,7 +177,12 @@ def map_db_to_guild(
                 "worker_cap": WORKER_CAP,
                 "asks_you": _has_open_post(conn, conversation, now),
                 "work": [
-                    {"name": c.name, "links": [_map_ref_to_link(r, enrichment, url_of) for r in c.refs]} for c in chunks
+                    {
+                        "name": c.name,
+                        "about": c.about,
+                        "links": [_map_ref_to_link(r, enrichment, url_of) for r in c.refs],
+                    }
+                    for c in chunks
                 ],
             }
         )
@@ -601,18 +605,16 @@ def _tab_names(conn: sqlite3.Connection, surface: str) -> tuple[str | None, str 
     return (row["tab_name"], row["workspace_name"]) if row else (None, None)
 
 
-def _find_tab_of_lead(
-    conn: sqlite3.Connection, lead: Lead, tree: dict[str, object] | None, tab_id: str | None
-) -> tuple[str, str | None]:
-    """(name, tint) as agterm shows them now; without its tree, what bridge last saw and the tint it asked for."""
+def _find_tint_of_lead(lead: Lead, tree: dict[str, object] | None, tab_id: str | None) -> str | None:
+    """As agterm shows it now; without its tree, the tint bridge asked for."""
     workspaces = tree.get("workspaces") if tree else None
     for workspace in cast(list[dict[str, object]], workspaces if isinstance(workspaces, list) else []):
         sessions = workspace.get("sessions")
         for tab in cast(list[dict[str, object]], sessions if isinstance(sessions, list) else []):
             if tab_id and tab.get("id") == tab_id:
                 tint = tab.get("tint")
-                return str(tab.get("name") or lead.tab_title), str(tint) if tint in TINTS else None
-    return _tab_names(conn, lead.surface or "")[0] or lead.tab_title, lead.tint
+                return str(tint) if tint in TINTS else None
+    return lead.tint
 
 
 def map_body_to_sections(body: str, options: list[str]) -> list[dict[str, object]]:

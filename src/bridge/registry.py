@@ -385,6 +385,7 @@ def reconcile(conn: sqlite3.Connection, config: Config, at_ms: int) -> None:
 
 def sync_tabs(conn: sqlite3.Connection, config: Config, at_ms: int) -> None:
     tabs = name_tabs_after_sessions(conn, config, read_agterm_tabs(config.agtermctl))
+    tabs = name_lead_tabs_after_work(conn, config, tabs, at_ms)
     with transaction(conn):
         for surface, tab in tabs.items():
             conn.execute(
@@ -644,6 +645,60 @@ def name_tabs_after_sessions(
                     renamed[pane] = replace(other, tab_name=name)
         with transaction(conn):
             conn.execute("UPDATE surfaces SET named_for = ? WHERE surface = ?", (row["conversation_id"], surface))
+    return renamed
+
+
+LEAD_LABEL_MAX_WORDS = 3
+LEAD_LABEL_MAX_CHARS = 24
+LEAD_LABEL_FRESH_MS = 3 * 24 * 60 * 60 * 1000
+LEAD_TAB_RENAME_EVERY_MS = 10 * 60 * 1000
+
+
+def convert_work_name_to_label(name: str) -> str:
+    """Whole words that fit; a chunk named before titles were short gives its first ones."""
+    words = name.split()[:LEAD_LABEL_MAX_WORDS]
+    while len(words) > 1 and len(" ".join(words)) > LEAD_LABEL_MAX_CHARS:
+        words.pop()
+    return re.sub(r"[^\w)]+$", "", " ".join(words)[:LEAD_LABEL_MAX_CHARS])
+
+
+def find_lead_tab_title(conn: sqlite3.Connection, lead: str, at_ms: int) -> str:
+    """The one name of a lead's tab, for agterm and the Guild page: the newest open chunk touched in the last 3 days,
+    else the standing label."""
+    row = conn.execute("SELECT display_name, label FROM leads WHERE name = ?", (lead,)).fetchone()
+    work = conn.execute(
+        """
+        SELECT name FROM lead_work WHERE lead = ? AND done_at IS NULL AND updated_at >= ?
+        ORDER BY updated_at DESC, created_at DESC LIMIT 1
+        """,
+        (lead, at_ms - LEAD_LABEL_FRESH_MS),
+    ).fetchone()
+    label = convert_work_name_to_label(str(work["name"])) if work else row["label"]
+    return f"{row['display_name']} · {label}" if label else str(row["display_name"])
+
+
+def name_lead_tabs_after_work(
+    conn: sqlite3.Connection, config: Config, tabs: dict[str, AgtermTab], at_ms: int
+) -> dict[str, AgtermTab]:
+    """At most once per 10 minutes per lead, so a lead switching chunks does not flicker its tab."""
+    rows = conn.execute(
+        "SELECT name, surface, tab_renamed_at FROM leads WHERE retired_at IS NULL AND surface IS NOT NULL"
+    ).fetchall()
+    renamed = dict(tabs)
+    for row in rows:
+        tab = renamed.get(str(row["surface"]))
+        if tab is None or not tab.session_id or config.hides(tab.tab_name, tab.workspace_name):
+            continue
+        if row["tab_renamed_at"] is not None and at_ms - int(row["tab_renamed_at"]) < LEAD_TAB_RENAME_EVERY_MS:
+            continue
+        name = find_lead_tab_title(conn, str(row["name"]), at_ms)
+        if name == tab.tab_name or not rename_agterm_tab(config.agtermctl, tab.session_id, name):
+            continue
+        for pane, other in renamed.items():
+            if other.session_id == tab.session_id:
+                renamed[pane] = replace(other, tab_name=name)
+        with transaction(conn):
+            conn.execute("UPDATE leads SET tab_renamed_at = ? WHERE name = ?", (at_ms, row["name"]))
     return renamed
 
 

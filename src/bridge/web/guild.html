@@ -288,6 +288,7 @@ table.pipeline { width: 100%; min-width: 1120px; table-layout: fixed; border-col
 .chunk { align-items: start; padding-top: 6px; padding-bottom: 6px; border-radius: 9px; }
 .chunk:nth-child(odd of .chunk) { background: var(--row); }
 .chunk .what { min-width: 0; overflow-wrap: anywhere; }
+.chunk .about { color: var(--soft); }
 .chunk .refs { min-width: 0; display: flex; flex-wrap: wrap; gap: 0 12px; font-size: 12px; line-height: 21px; color: var(--soft); overflow-wrap: anywhere; }
 .chunk .ref a { font-weight: 500; }
 .chunk .state { color: var(--faint); margin-left: 4px; }
@@ -894,7 +895,9 @@ function renderRefs(links) {
 
 function renderChunk(chunk) {
   const line = el("div", "chunk");
-  line.append(el("span", "what", chunk.name));
+  const what = el("span", "what", chunk.name);
+  if (chunk.about) what.append(el("span", "about", " · " + chunk.about));
+  line.append(what);
   line.append(renderRefs(chunk.links.filter((link) => link.kind !== "pr")));
   line.append(renderRefs(chunk.links.filter((link) => link.kind === "pr")));
   return line;

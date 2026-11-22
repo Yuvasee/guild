@@ -520,7 +520,9 @@ def test_a_body_without_labels_renders_as_it_is(body: str) -> None:
     assert sections(body) == [(None, body)]
 
 
-def test_a_lead_shows_agterm_tab_name_and_tint(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:
+def test_a_lead_shows_its_computed_tab_name_and_agterms_tint(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
     team = Team(bridge_env, spawn_process)
     team.enroll()
     conn = bridge_env.connect()
@@ -535,11 +537,9 @@ def test_a_lead_shows_agterm_tab_name_and_tint(bridge_env: BridgeEnv, spawn_proc
     def team_with(**fields: object) -> dict[str, object]:
         return {"workspaces": [{"name": "Other"}, {"name": "TEAM", "tint": "red", "sessions": [{**fields, "id": tab}]}]}
 
-    assert shown(team_with(name="Alex · Moved", tint="purple")) == ("Alex · Moved", "purple")
-    assert shown(team_with(name="Alex · Moved")) == ("Alex · Moved", None)
-    assert shown(team_with(name="Alex · Moved", tint="javascript:x")) == ("Alex · Moved", None)
-    conn.execute("UPDATE surfaces SET tab_name = 'Cached name' WHERE agterm_session = ?", (tab,))
-    assert shown(None) == ("Cached name", lead_row["tint"])
-    conn.execute("UPDATE surfaces SET tab_name = NULL WHERE agterm_session = ?", (tab,))
+    # The page and the tab share one computed name, so a tab renamed by hand does not change the page.
+    assert shown(team_with(name="Alex · Moved", tint="purple")) == ("Alex · Data", "purple")
+    assert shown(team_with(name="Alex · Moved")) == ("Alex · Data", None)
+    assert shown(team_with(name="Alex · Moved", tint="javascript:x")) == ("Alex · Data", None)
     conn.execute("UPDATE leads SET label = 'Label' WHERE name = 'alex'")
     assert shown(None) == ("Alex · Label", lead_row["tint"])
