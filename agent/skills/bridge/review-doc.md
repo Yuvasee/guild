@@ -96,8 +96,8 @@ sharp but has never seen this code.
   ready until that heading is there; a PR that only sounds like one says so in a line `Not an enabling PR: <reason>`.
 - **A PR that changes the same files as another open PR says how they relate.** When bridge reports two open PRs
   changing the same files, one is stacked on the other, or each description gets a line
-  `Related: #N — stacked | independent because …` naming the other; until then neither is ready for the owner. A
-  Related line that says independent does not make the PR wait for the other's merge.
+  `Related: #N — stacked | independent because …` naming the other, one PR per line; until then neither is ready
+  for the owner. A line saying `independent because <reason>` does not make the PR wait for the other's merge.
 
 ## The order
 

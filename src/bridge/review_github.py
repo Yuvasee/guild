@@ -260,8 +260,8 @@ def add_label(repo: str, number: int, label: str) -> None:
     run_gh(add)
 
 
-KnownHeads = dict[tuple[str, str], tuple[int, tuple[str, ...]]]
-"""(ref, head oid) to the line count and changed paths already read for that head."""
+KnownHeads = dict[tuple[str, str, str], tuple[int, tuple[str, ...]]]
+"""(ref, head oid, base) to the line count and changed paths already read for that head on that base."""
 
 
 def fetch_open_prs(config: Config, known: KnownHeads | None = None) -> list[OpenPr]:
@@ -291,12 +291,15 @@ def map_node_to_open_pr(node: Any, config: Config, known: KnownHeads | None = No
     ref = f"pr:{repo}#{number}"
     head_oid = str(node["headRefOid"])
     files: Any = node["files"]
-    # Listing a large PR's files costs REST calls, and one head has one line count and one list of files.
-    counted = (known or {}).get((ref, head_oid)) if files["pageInfo"]["hasNextPage"] else None
-    if counted is None:
+    # Listing a large PR's files costs REST calls, and one head on one base has one line count and one list of files.
+    head_key = (ref, head_oid, str(node["baseRefName"]))
+    known_head = (known or {}).get(head_key) if files["pageInfo"]["hasNextPage"] else None
+    if known_head is None:
         rows = fetch_all_files(repo, number) if files["pageInfo"]["hasNextPage"] else list(files["nodes"])
         loc = map_files_to_loc(int(node["additions"]), int(node["deletions"]), rows, list_loc_excluded(config))
-        counted = loc, tuple(str(row["path"]) for row in rows)
+        paths = tuple(str(row["path"]) for row in rows)
+    else:
+        loc, paths = known_head
     commits = [n["commit"] for n in node["commits"]["nodes"]]
     last: Any = commits[-1] if commits else {}
     base_ref: Any = node.get("baseRef") or {}
@@ -319,8 +322,8 @@ def map_node_to_open_pr(node: Any, config: Config, known: KnownHeads | None = No
         head_oid=head_oid,
         base=str(node["baseRefName"]),
         stack_parent=f"pr:{repo}#{parents[0]['number']}" if parents else None,
-        loc=counted[0],
-        files=counted[1],
+        loc=loc,
+        files=paths,
         checks=rollup.get("state"),
         requested=count_real_review_requests(node["reviewRequests"]["nodes"], config),
         approved_by=map_reviews_to_approvers(node["reviews"]["nodes"], config),

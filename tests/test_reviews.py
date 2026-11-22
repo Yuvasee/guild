@@ -86,8 +86,8 @@ from bridge.reviews import (
     store_review_threads,
     take_comment_wakes,
     tell_bot_round_cap,
-    tell_overlaps,
     tell_bot_waits,
+    tell_overlaps,
     tell_ready_to_merge,
     tell_review_waits,
 )
@@ -1727,12 +1727,14 @@ def test_a_many_file_pr_lists_its_files_only_for_a_new_head() -> None:
     }  # fmt: skip
     rows = [{"path": "app/new.py", "additions": 5, "deletions": 1}]
     with mock.patch("bridge.review_github.fetch_all_files", return_value=rows) as listed:
-        known = map_node_to_open_pr(node, CONFIG, {(REF, "b2"): (42, ("app/old.py",))})
+        known = map_node_to_open_pr(node, CONFIG, {(REF, "b2", "main"): (42, ("app/old.py",))})
         assert (known.loc, known.files) == (42, ("app/old.py",))
         listed.assert_not_called()
-        new = map_node_to_open_pr(node, CONFIG, {(REF, "a1"): (42, ("app/old.py",))})
+        new = map_node_to_open_pr(node, CONFIG, {(REF, "a1", "main"): (42, ("app/old.py",))})
         assert (new.loc, new.files) == (6, ("app/new.py",))
-        listed.assert_called_once()
+        retargeted = map_node_to_open_pr(node, CONFIG, {(REF, "b2", "dev/old-base"): (42, ("app/old.py",))})
+        assert retargeted.files == ("app/new.py",)
+        assert listed.call_count == 2
 
 
 def test_rows_sort_waiting_then_published_then_drafts(tmp_path: Path) -> None:
@@ -2061,7 +2063,7 @@ def test_docs_and_images_are_not_lines_of_code_so_a_docs_only_pr_gets_no_documen
 
 def test_a_line_count_made_under_an_older_rule_is_made_again_for_the_same_head(tmp_path: Path) -> None:
     conn = setup_pr(tmp_path, loc=1010)
-    assert load_known_heads(conn) == {(REF, "a1"): (1010, ())}
+    assert load_known_heads(conn) == {(REF, "a1", "main"): (1010, ())}
     with transaction(conn):
         conn.execute("UPDATE review_prs SET loc_rule = NULL")
     assert load_known_heads(conn) == {}
@@ -3049,6 +3051,7 @@ def test_two_prs_changing_one_file_tell_each_owner_once(tmp_path: Path) -> None:
     bodies = {r[0] for r in conn.execute("SELECT body FROM messages")}
     assert unowned == [] and second == []
     assert sorted(recipient.handle for _, recipient in first) == ["ana", "ben"]
+    assert len(conn.execute("SELECT 1 FROM signal_posts").fetchall()) == 2
     assert bodies == {
         "https://github.com/Org/app/pull/7 (T) and https://x/8 (U) change the same files (app/a.py, app/b.py, "
         "app/c.py, +2 more): stack one on the other, or say why they are independent; each body needs a line "
@@ -3114,3 +3117,24 @@ def test_an_overlapping_pr_is_ready_only_once_its_body_names_the_other_on_a_rela
         conn.execute("UPDATE review_prs SET draft = 1 WHERE number = 8")
     drafted = {p["number"]: p for p in cast(list[dict[str, Any]], map_db_to_reviews(conn, CONFIG, 1000)["prs"])}
     assert drafted[8]["reviews_gap"] is None
+
+
+def test_an_owner_found_after_the_other_was_told_is_told_too(tmp_path: Path) -> None:
+    conn = setup_overlap(tmp_path, {"files": ("app/a.py",)}, {"files": ("app/a.py",)})
+    with transaction(conn):
+        add_session(conn, "c1", "ana", branch="dev/a")
+        first = tell_overlaps(conn, CONFIG, 1000)
+        add_session(conn, "c2", "ben", branch="dev/b")
+        later = tell_overlaps(conn, CONFIG, 2000)
+        after = tell_overlaps(conn, CONFIG, 3000)
+    assert [r.handle for _, r in first] == ["ana"] and [r.handle for _, r in later] == ["ben"] and after == []
+
+
+def test_long_paths_and_titles_keep_the_overlap_notice_under_the_message_limit(tmp_path: Path) -> None:
+    files = tuple(f"{'d' * 490}/{n}.py" for n in range(3))
+    conn = setup_overlap(tmp_path, {"files": files, "title": "t" * 250}, {"files": files, "title": "u" * 250})
+    with transaction(conn):
+        add_session(conn, "c1", "ana", branch="dev/a")
+        told = tell_overlaps(conn, CONFIG, 1000)
+    body = conn.execute("SELECT body FROM messages").fetchone()[0]
+    assert len(told) == 1 and len(body) <= BODY_MAX_CHARS and "d/0.py, …d" in body and "(tt" in body

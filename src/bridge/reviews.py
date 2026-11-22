@@ -121,9 +121,11 @@ BOT_WAIT_ASSISTANT_MS = 2 * 60 * 60 * 1000
 BOT_WAIT_OWNER_GRACE_MS = 60 * 60 * 1000
 """The owner's time to answer before the assistant hears of it, so a long wait found at once is not both at once."""
 BOT_WAIT_LINKS_MAX = 5
+BOT_ROUND_CAP = 3
 OVERLAP_KEY = "overlap:"
 OVERLAP_PATHS_SHOWN = 3
-BOT_ROUND_CAP = 3
+OVERLAP_NAME_MAX_CHARS = 120
+"""A path or title in the overlap notice is cut to this, so the notice stays under the board's message limit."""
 BACKPORT_RECHECK_MS = 15 * 60_000
 """A refused check runs again this often on the same head: a named PR may merge meanwhile."""
 LOC_RULE = 1
@@ -1345,9 +1347,10 @@ def load_known_heads(conn: sqlite3.Connection) -> KnownHeads:
     """Counts made under an older rule are made again, even for the same head, and so are heads whose files were
     never read."""
     return {
-        (str(r["ref"]), str(r["head_oid"])): (int(r["loc"]), tuple(json.loads(str(r["files"]))))
+        (str(r["ref"]), str(r["head_oid"]), str(r["base"])): (int(r["loc"]), tuple(json.loads(str(r["files"]))))
         for r in conn.execute(
-            "SELECT ref, head_oid, loc, files FROM review_prs WHERE loc_rule = ? AND files IS NOT NULL", (LOC_RULE,)
+            "SELECT ref, head_oid, base, loc, files FROM review_prs WHERE loc_rule = ? AND files IS NOT NULL",
+            (LOC_RULE,),
         )
     }
 
@@ -1855,7 +1858,10 @@ def map_rows_to_overlaps(rows: Sequence[sqlite3.Row], config: Config) -> dict[tu
     other. Files the line count leaves out (lock, generated, docs, images) do not count, nor does a backport: it
     changes its default-branch PR's files by design."""
     excluded = list_loc_excluded(config)
-    parents = {str(r["ref"]): r["stack_parent"] for r in rows}
+    children: dict[str, list[str]] = {}
+    for r in rows:
+        if r["stack_parent"]:
+            children.setdefault(str(r["stack_parent"]).casefold(), []).append(str(r["ref"]).casefold())
     repos = {str(r["ref"]): str(r["repo"]).casefold() for r in rows}
     paths = {
         str(r["ref"]): {p for p in json.loads(str(r["files"])) if not is_loc_excluded(p, excluded)}
@@ -1865,29 +1871,23 @@ def map_rows_to_overlaps(rows: Sequence[sqlite3.Row], config: Config) -> dict[tu
     found: dict[tuple[str, str], tuple[str, ...]] = {}
     for a, b in itertools.combinations(sorted(paths), 2):
         shared = paths[a] & paths[b]
-        if shared and repos[a] == repos[b] and not is_stacked_on(parents, a, b) and not is_stacked_on(parents, b, a):
-            found[(a, b)] = tuple(sorted(shared))
+        if not shared or repos[a] != repos[b]:
+            continue
+        if _map_ref_to_key(b) in list_stacked_on(children, a.casefold()) or _map_ref_to_key(a) in list_stacked_on(
+            children, b.casefold()
+        ):
+            continue
+        found[(a, b)] = tuple(sorted(shared))
     return found
-
-
-def is_stacked_on(parents: Mapping[str, str | None], ref: str, ancestor: str) -> bool:
-    seen: set[str] = set()
-    parent = parents.get(ref)
-    while parent is not None and parent not in seen:
-        if parent.casefold() == ancestor.casefold():
-            return True
-        seen.add(parent)
-        parent = parents.get(parent)
-    return False
 
 
 def tell_overlaps(conn: sqlite3.Connection, config: Config, now: int) -> list[tuple[int, Recipient]]:
     """Two open PRs changing the same files: the owner of each is told once per pair, in one message when one owns
-    both. With no owner for either it waits for one; a pair that no longer overlaps is forgotten."""
+    both. A PR with no owner yet waits for one; a pair that no longer overlaps is forgotten."""
     rows = conn.execute("SELECT * FROM review_prs WHERE closed_at IS NULL").fetchall()
     by_ref = {str(r["ref"]): r for r in rows}
     overlaps = map_rows_to_overlaps(rows, config)
-    keys = {f"{OVERLAP_KEY}{a}|{b}": (a, b) for a, b in overlaps}
+    keys = {f"{OVERLAP_KEY}{a}|{b}|{ref}": ((a, b), ref) for a, b in overlaps for ref in (a, b)}
     told = {
         str(r[0])
         for r in conn.execute(
@@ -1895,34 +1895,42 @@ def tell_overlaps(conn: sqlite3.Connection, config: Config, now: int) -> list[tu
         )
     }
     conn.executemany("DELETE FROM signal_posts WHERE key = ?", [(key,) for key in told - keys.keys()])
-    sent: list[tuple[int, Recipient]] = []
-    for key, pair in keys.items():
+    due: dict[tuple[tuple[str, str], str, str], tuple[Owner, list[str]]] = {}
+    for key, (pair, ref) in keys.items():
         if key in told:
             continue
-        owners: dict[tuple[str, str], Owner] = {}
-        for ref in pair:
-            row = by_ref[ref]
-            owner = find_owner(conn, config, ref, str(row["repo"]), str(row["head"]))
-            if owner is not None:
-                owners.setdefault((owner.handle, owner.conversation_id), owner)
-        if not owners:
-            continue
-        text = map_overlap_to_text(by_ref[pair[0]], by_ref[pair[1]], overlaps[pair])
-        for owner in owners.values():
-            message_id, recipient = tell_owner(conn, owner, text, now)
-            sent.append((message_id, recipient))
-        record_signal_post(conn, key, sent[-1][0], now)
+        row = by_ref[ref]
+        owner = find_owner(conn, config, ref, str(row["repo"]), str(row["head"]))
+        if owner is not None:
+            due.setdefault((pair, owner.handle, owner.conversation_id), (owner, []))[1].append(key)
+    sent: list[tuple[int, Recipient]] = []
+    for (pair, _, _), (owner, pair_keys) in due.items():
+        message_id, recipient = tell_owner(
+            conn, owner, map_overlap_to_text(by_ref[pair[0]], by_ref[pair[1]], overlaps[pair]), now
+        )
+        sent.append((message_id, recipient))
+        for key in pair_keys:
+            record_signal_post(conn, key, message_id, now)
     return sent
 
 
 def map_overlap_to_text(a: sqlite3.Row, b: sqlite3.Row, paths: tuple[str, ...]) -> str:
-    shown = ", ".join(paths[:OVERLAP_PATHS_SHOWN])
+    shown = ", ".join(_cut_path(path) for path in paths[:OVERLAP_PATHS_SHOWN])
     more = f", +{len(paths) - OVERLAP_PATHS_SHOWN} more" if len(paths) > OVERLAP_PATHS_SHOWN else ""
     return (
-        f"{a['url']} ({a['title']}) and {b['url']} ({b['title']}) change the same files ({shown}{more}): stack one on "
+        f"{a['url']} ({_cut_title(str(a['title']))}) and {b['url']} "
+        f"({_cut_title(str(b['title']))}) change the same files ({shown}{more}): stack one on "
         "the other, or say why they are independent; each body needs a line "
         "'Related: #N — stacked | independent because …'."
     )
+
+
+def _cut_path(path: str) -> str:
+    return path if len(path) <= OVERLAP_NAME_MAX_CHARS else "…" + path[1 - OVERLAP_NAME_MAX_CHARS :]
+
+
+def _cut_title(title: str) -> str:
+    return title if len(title) <= OVERLAP_NAME_MAX_CHARS else title[: OVERLAP_NAME_MAX_CHARS - 1] + "…"
 
 
 def tell_bot_round_cap(
@@ -2145,6 +2153,7 @@ def map_db_to_reviews(conn: sqlite3.Connection, config: Config, now: int) -> dic
     """The queue as the page shows it, read only from the database: a page poll makes no GitHub call."""
     poll = conn.execute("SELECT ok_at, error, error_at FROM review_poll WHERE id = 1").fetchone()
     rows = conn.execute("SELECT * FROM review_prs WHERE closed_at IS NULL ORDER BY updated_at DESC").fetchall()
+    overlaps = map_rows_to_overlaps(rows, config)
     return {
         "enabled": bool(config.review_org),
         "ok_at": poll["ok_at"] if poll else None,
@@ -2205,7 +2214,9 @@ def map_db_to_reviews(conn: sqlite3.Connection, config: Config, now: int) -> dic
             "'Related: #N — stacked | independent because …' naming the other; drafts are not checked. A Related "
             "line saying independent does not make it wait for that PR's merge.",
         ],
-        "prs": sorted((map_row_to_review(conn, config, row, now) for row in rows), key=map_review_to_sort_key),
+        "prs": sorted(
+            (map_row_to_review(conn, config, row, now, overlaps) for row in rows), key=map_review_to_sort_key
+        ),
     }
 
 
@@ -2267,17 +2278,16 @@ def map_row_to_usage_gap(row: sqlite3.Row) -> str | None:
     return None if row["draft"] or not row["usage_missing"] else USAGE_GAP
 
 
-def map_row_to_related_gap(conn: sqlite3.Connection, config: Config, row: sqlite3.Row) -> str | None:
+def map_row_to_related_gap(row: sqlite3.Row, overlaps: Mapping[tuple[str, str], object]) -> str | None:
     """Why a PR changing the same files as another open PR is not ready for the owner: its body has no Related line
     naming that PR. A draft is not checked yet."""
     if row["draft"]:
         return None
     ref = str(row["ref"])
-    rows = conn.execute("SELECT * FROM review_prs WHERE closed_at IS NULL AND repo = ?", (row["repo"],)).fetchall()
     related = {r.casefold() for r in json.loads(str(row["related_prs"]))}
     missing = [
         b if a == ref else a
-        for a, b in map_rows_to_overlaps(rows, config)
+        for a, b in overlaps
         if ref in (a, b) and _map_ref_to_key(b if a == ref else a) not in related
     ]
     return f"no Related line for {', '.join('#' + m.rpartition('#')[2] for m in missing)}" if missing else None
@@ -2364,7 +2374,13 @@ def map_row_to_bot_threads(row: sqlite3.Row) -> list[dict[str, Any]]:
     return json.loads(str(row["bot_threads"] or "[]"))
 
 
-def map_row_to_review(conn: sqlite3.Connection, config: Config, row: sqlite3.Row, now: int) -> dict[str, object]:
+def map_row_to_review(
+    conn: sqlite3.Connection,
+    config: Config,
+    row: sqlite3.Row,
+    now: int,
+    overlaps: Mapping[tuple[str, str], object] | None = None,
+) -> dict[str, object]:
     ref = str(row["ref"])
     his = [
         int(r[0])
@@ -2458,7 +2474,7 @@ def map_row_to_review(conn: sqlite3.Connection, config: Config, row: sqlite3.Row
             for g in (
                 map_row_to_reviews_gap(row, config),
                 map_row_to_usage_gap(row),
-                map_row_to_related_gap(conn, config, row),
+                map_row_to_related_gap(row, overlaps or {}),
             )
             if g
         )

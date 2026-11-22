@@ -225,3 +225,22 @@ def test_a_pr_a_related_line_calls_independent_is_named_but_not_waited_for() -> 
     body = "Related: #8 — independent because it changes another branch of the parser\nRelated: #9 — stacked\n"
     assert map_markdown_to_named_prs(body, "Org/app", 7) == ("Org/app#9",)
     assert map_markdown_to_related_prs(body, "Org/app", 7) == ("Org/app#8", "Org/app#9")
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Related: #8 — not independent because both change the runtime contract",
+        "Related: #8 — stacked | independent because …",
+        "Related: #8 — stacked; #9 — independent because they touch other paths",
+        "Related: #8 — independent",
+    ],
+    ids=["negated", "template-pasted", "mixed-line", "no-reason"],
+)
+def test_a_related_line_that_does_not_settle_independence_keeps_the_wait(body: str) -> None:
+    assert "Org/app#8" in map_markdown_to_named_prs(body, "Org/app", 7)
+
+
+def test_an_independent_pr_is_not_waited_for_though_the_body_names_it_elsewhere() -> None:
+    body = "Related: #8 — independent because it changes another parser branch.\n\nUnlike #8, this keeps the cache."
+    assert map_markdown_to_named_prs(body, "Org/app", 7) == ()
