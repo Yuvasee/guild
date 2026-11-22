@@ -672,18 +672,24 @@ def convert_work_name_to_label(name: str) -> str:
     return re.sub(r"[^\w)]+$", "", " ".join(words)[:LEAD_LABEL_MAX_CHARS])
 
 
-def find_lead_tab_title(conn: sqlite3.Connection, lead: str, at_ms: int) -> str:
-    """The one name of a lead's tab, for agterm and the Guild page: the newest open chunk touched in the last 3 days,
-    else the standing label."""
-    row = conn.execute("SELECT display_name, label FROM leads WHERE name = ?", (lead,)).fetchone()
-    work = conn.execute(
+def find_title_chunk(conn: sqlite3.Connection, lead: str, at_ms: int) -> str | None:
+    """The chunk whose name becomes the tab's label: the open one updated last, within the last 3 days."""
+    row = conn.execute(
         """
         SELECT name FROM lead_work WHERE lead = ? AND done_at IS NULL AND updated_at >= ?
         ORDER BY updated_at DESC, created_at DESC LIMIT 1
         """,
         (lead, at_ms - LEAD_LABEL_FRESH_MS),
     ).fetchone()
-    label = convert_work_name_to_label(str(work["name"])) if work else row["label"]
+    return str(row["name"]) if row else None
+
+
+def find_lead_tab_title(conn: sqlite3.Connection, lead: str, at_ms: int) -> str:
+    """The one name of a lead's tab, for agterm and the Guild page: the newest open chunk touched in the last 3 days,
+    else the standing label."""
+    row = conn.execute("SELECT display_name, label FROM leads WHERE name = ?", (lead,)).fetchone()
+    work = find_title_chunk(conn, lead, at_ms)
+    label = convert_work_name_to_label(work) if work else row["label"]
     return f"{row['display_name']} · {label}" if label else str(row["display_name"])
 
 

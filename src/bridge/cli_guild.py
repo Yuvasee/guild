@@ -129,6 +129,7 @@ from bridge.registry import (
     HandleTakenError,
     find_assistant_surface,
     find_lead_tab_title,
+    find_title_chunk,
     is_english_name,
     list_sessions,
     map_config_to_assistant_title,
@@ -1588,9 +1589,13 @@ def _repo_of_lead(conn: sqlite3.Connection, lead: Lead) -> str | None:
 def _print_work(conn: sqlite3.Connection, lead: Lead) -> int:
     chunks = list_lead_work(conn, lead.name)
     print(f"{lead.display_name}: {len(chunks)} open" if chunks else f"{lead.display_name}: no work declared")
+    title = find_title_chunk(conn, lead.name, now_ms())
     for chunk in chunks:
         about = f" — {chunk.about}" if chunk.about else ""
-        print(f"  {chunk.name}{about}" + (f"  [{' '.join(chunk.refs)}]" if chunk.refs else ""))
+        mark = "  ← title" if chunk.name == title else ""
+        print(f"  {chunk.name}{about}" + (f"  [{' '.join(chunk.refs)}]" if chunk.refs else "") + mark)
+    if title is None:
+        print(f"  (no chunk updated in 3 days: the tab shows the standing label {lead.label!r})")
     return 0
 
 

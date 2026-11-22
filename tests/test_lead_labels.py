@@ -125,6 +125,9 @@ def test_the_tab_follows_the_work_at_most_once_per_ten_minutes_and_the_page_show
     assert within == [], "a second change within 10 minutes waits"
     assert after == ["session rename Alex · Release train --target TAB-A"]
     assert lead["tab_name"] == "Alex · Release train"
+    listed = team.guild("work", "list", pid=team.a).stdout
+    assert "Release train  ← title" in listed, listed
+    assert "Nightly export" in listed and "Nightly export — Move the CSV export to a worker  ← title" not in listed
     assert {"name": "Nightly export", "about": "Move the CSV export to a worker"}.items() <= lead["work"][0].items()
 
 
