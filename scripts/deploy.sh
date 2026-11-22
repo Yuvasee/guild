@@ -90,11 +90,12 @@ else
 fi
 [ -f "$was/pyvenv.cfg" ] && [ -x "$was/bin/bridge" ] || fail 1 "$was is not a bridge venv"
 
-step="board heads-up"
-bridge board "Deploying bridge $sha: hooks and the dashboard restart within a minute." --topic bridge
-
 step="deploy-check before"
 bridge "$check" >"$logs/$sha-check-before.txt" 2>&1 || fail $? "see $logs/$sha-check-before.txt"
+
+# After the check: an attempt it stops changes nothing, so the board hears only of a deploy that goes ahead.
+step="board heads-up"
+bridge board "Deploying bridge $sha: hooks and the dashboard restart within a minute." --topic bridge
 
 step="back up bridge.db"
 sqlite3 "$state/bridge.db" ".backup '$state/backups/bridge-pre-$sha.db'"

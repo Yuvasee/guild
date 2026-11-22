@@ -201,13 +201,17 @@ def test_an_entry_point_that_is_no_venvs_is_not_taken_as_the_release_to_roll_bac
     assert not list((deploy.root / "releases").iterdir())
 
 
-def test_a_failing_step_stops_the_deploy_and_names_it_before_anything_is_installed(deploy: Deploy) -> None:
+def test_a_failing_step_stops_the_deploy_and_names_it_before_anything_is_installed(
+    deploy: Deploy, bridge_env: BridgeEnv
+) -> None:
     result = deploy.run(check="no-such-command")
 
     assert result.returncode == 1
     assert "stopped at 'deploy-check before'" in result.stderr
     assert not (deploy.root / "current").exists()
     assert not list((deploy.root / "releases").iterdir())
+    with bridge_env.connect() as conn:
+        assert conn.execute("SELECT count(*) FROM messages WHERE board = 1").fetchone()[0] == 0
 
 
 def test_a_dirty_checkout_is_not_deployed(deploy: Deploy) -> None:
