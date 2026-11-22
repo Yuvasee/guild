@@ -155,10 +155,12 @@ background:linear-gradient(120deg,var(--ds-band-a),var(--ds-band-b))}
 :where(.ds-band,.band) :where(p){font-family:var(--ds-serif);font-size:1.08em;opacity:.95;max-width:46em}
 :where(.ds-band,.band) :where(.ds-kicker,.kicker,a){color:inherit}
 :where(.ds-band,.band) :where(.ds-kicker,.kicker){opacity:.85}
-:where(.ds-band,.band) :where(code){background:var(--ds-band-tint);color:inherit}
 :where(.ds-chips,.chips){display:flex;flex-wrap:wrap;gap:6px;margin-top:14px}
 :where(.ds-chips,.chips)>:where(span,a){border-radius:999px;padding:3px 10px;font-size:.78em;background:var(--ds-band-tint)}
-.ds-band .ds-chip,.band .ds-chip{color:var(--ds-band-chip-fg);background:var(--ds-band-chip)}
+/* Inside a band, code and evidence chips keep the band's look over the roles the script gives them and over a page's
+   own chip rules (a doubled class outranks ".band .chips span"). */
+:is(.ds-band,.band) code,:is(.ds-band,.band) code.ds-path,:is(.ds-band,.band) code.ds-ident{background:var(--ds-band-tint);color:var(--ds-on-band)}
+:is(.ds-band,.band) .ds-chip.ds-chip{color:var(--ds-band-chip-fg);background:var(--ds-band-chip)}
 :where(.ds-sec,.sec){display:flex;align-items:center;gap:14px;margin:2.4em 0 .5em}
 :where(.ds-sec,.sec) :where(h2){margin:2px 0 0}
 :where(.ds-sec,.sec) :where(.ds-num,.num){flex:0 0 46px;height:46px;border-radius:14px;display:flex;align-items:center;
