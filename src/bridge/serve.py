@@ -496,7 +496,9 @@ class DashboardState:
         with self._connection() as conn, transaction(conn):
             actions = record_context_screens(conn, self.config, tabs, screens, now_ms())
         for instance_id, conversation_id, generic_keep in actions.drives:
-            if not spawn_compact_drive("compact", instance_id, conversation_id, "none", generic_keep=generic_keep):
+            if not spawn_compact_drive(
+                "compact", instance_id, conversation_id, "none", generic_keep=generic_keep, by_screen=True
+            ):
                 with self._connection() as conn, transaction(conn):
                     give_up_driving(conn, conversation_id)
         for message_id, recipient in actions.messages:

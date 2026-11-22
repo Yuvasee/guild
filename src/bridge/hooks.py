@@ -783,10 +783,11 @@ def spawn_compact_drive(
     claim: bool = False,
     reopened: bool = False,
     generic_keep: bool = False,
+    by_screen: bool = False,
 ) -> bool:
     # Detached: it waits for the tab to be idle, which happens only after this hook returns.
     argv = [sys.executable, "-m", "bridge", "_compact-drive", phase, instance_id, conversation_id, "--keep", keep]
-    flags = [("--claim", claim), ("--reopened", reopened), ("--generic-keep", generic_keep)]
+    flags = [("--claim", claim), ("--reopened", reopened), ("--generic-keep", generic_keep), ("--by-screen", by_screen)]
     try:
         subprocess.Popen(
             [*argv, *(flag for flag, on in flags if on)],

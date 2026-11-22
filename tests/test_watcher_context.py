@@ -108,7 +108,7 @@ def test_a_dead_worker_is_compacted_and_its_lead_and_the_assistant_told_once(
         body = conn.execute("SELECT body FROM messages ORDER BY id DESC LIMIT 1").fetchone()[0]
         full = read_context_full(conn, "conv-b")
     drive = bridge_env.cli(
-        "_compact-drive", "compact", worker.instance_id, "conv-b", "--keep", "none", "--generic-keep"
+        "_compact-drive", "compact", worker.instance_id, "conv-b", "--keep", "none", "--generic-keep", "--by-screen"
     )
 
     assert [(d[1], d[2]) for d in first.drives] == [("conv-b", True)]

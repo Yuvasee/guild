@@ -34,6 +34,7 @@ def _drive(
     phase: str = "compact",
     config: Config | None = None,
     tree: str | None = "",
+    by_screen: bool = False,
 ) -> tuple[int, list[tuple[int, Recipient]]]:
     """Drives conv-a (lead alex in TAB-A) with old-b as the assistant, its tab unselected."""
     spawned: list[tuple[int, Recipient]] = []
@@ -42,7 +43,7 @@ def _drive(
         instance = conn.execute("SELECT instance_id FROM instances WHERE conversation_id = 'conv-a'").fetchone()[0]
         args = argparse.Namespace(
             phase=phase, instance_id=instance, conversation_id="conv-a", keep="shown", reopened=False,
-            generic_keep=False, claim=False,
+            generic_keep=False, claim=False, by_screen=by_screen,
         )  # fmt: skip
         with (
             mock.patch("bridge.tabinput.run_agterm", fake.run),
@@ -154,6 +155,26 @@ def test_a_held_continue_leaves_the_next_held_compact_its_notice(
 
     assert [r.handle for _, r in after_compaction] == ["old-b"]
     assert [r.handle for _, r in next_cycle] == ["old-b"]
+
+
+def test_a_safety_net_drive_types_over_the_grey_suggestion_of_a_tab_whose_refused_prompt_left_it_active(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    team = Team(bridge_env, spawn_process)
+    team.enroll()
+    with bridge_env.connect() as conn, transaction(conn):
+        conn.execute("UPDATE instances SET status = 'active' WHERE conversation_id = 'conv-a'")
+    hook_drive = FakeClaudeBox({"TAB-A": "continue"}, suggestions={"TAB-A"})
+    net_drive = FakeClaudeBox({"TAB-A": "continue"}, suggestions={"TAB-A"})
+
+    _start_cycle(bridge_env)
+    _drive(bridge_env, hook_drive)
+    _start_cycle(bridge_env)
+    code, _ = _drive(bridge_env, net_drive, by_screen=True)
+
+    assert hook_drive.typed == [], "a drive by status waits for the hook that never comes"
+    assert code == 0
+    assert net_drive.submitted == ["/compact"]
 
 
 def test_a_stray_key_left_in_the_box_is_cleared_and_compact_typed_with_no_notice(

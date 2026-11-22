@@ -215,6 +215,7 @@ def build_parser(config: Config) -> argparse.ArgumentParser:
     p.add_argument("--claim", action="store_true")
     p.add_argument("--reopened", action="store_true", help="messages from while the context was full are given again")
     p.add_argument("--generic-keep", action="store_true", help="/compact says what to keep: no notes were saved")
+    p.add_argument("--by-screen", action="store_true", help="probe whenever the screen shows the tab waiting")
     p.add_argument("instance_id")
     p.add_argument("conversation_id")
     p.set_defaults(func=cmd_compact_drive)
@@ -495,8 +496,11 @@ def cmd_compact_drive(args: argparse.Namespace, conn: sqlite3.Connection, config
 
     def may_probe_box() -> bool:
         # Claude Code's grey suggestion after a turn reads as a draft; without a probe /compact would never go in.
+        # A prompt refused at the context limit leaves the status "active": a safety-net drive goes by the screen,
+        # which type_when_idle reads as not held right before every probe.
         status = conn.execute("SELECT status FROM instances WHERE instance_id = ?", (instance_id,)).fetchone()
-        return status is not None and status["status"] == "idle" and not is_tab_selected(config, session)
+        idle = args.by_screen or (status is not None and status["status"] == "idle")
+        return idle and not is_tab_selected(config, session)
 
     told_unsure = False
 
