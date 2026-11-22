@@ -24,6 +24,11 @@ from bridge.tabinput import AGTERM_SLOW_S, ENTER, is_tab_selected, run_agterm, t
 
 CHECK_TAB_NAME = "bridge deploy check"
 LANDS_WITHIN_S = 10.0
+CAT_STARTS_WITHIN_S = 30.0
+CAT_READY = "bridge-check-ready"
+# agterm runs a tab's command through an interactive login shell, whose rc files can take over 10 s under load; typing
+# starts once cat has said it runs, so the check times the typing, not the shell.
+CAT_COMMAND = f"printf '%s\\n' {CAT_READY}; exec /bin/cat"
 REWAKE_TAB_NAME = "bridge rewake check"
 LONG_TAB_NAME = "bridge long message check"
 LONG_MESSAGE_CHARS = 3_000
@@ -60,7 +65,7 @@ def check_typing(config: Config) -> CheckResult:
     # A unique name finds the tab again when agterm made it but its reply was lost.
     name = f"{CHECK_TAB_NAME} {secrets.token_hex(3)}"
     created = run_agterm(
-        config, ["session", "new", *where, "--no-select", "--name", name, "--command", "/bin/cat", "--json"]
+        config, ["session", "new", *where, "--no-select", "--name", name, "--command", CAT_COMMAND, "--json"]
     )
     session = _map_created_to_id(created) or _find_session_named(config, name)
     if session is None:
@@ -297,20 +302,32 @@ def _tail(screen: str) -> str:
 
 
 def _type_and_see(config: Config, session: str) -> CheckResult:
+    started = time.monotonic()
+    if not _await_screen(config, session, lambda screen: CAT_READY in screen, CAT_STARTS_WITHIN_S):
+        return CheckResult(False, f"the check tab did not start cat within {CAT_STARTS_WITHIN_S:.0f} s")
+    cat_s = time.monotonic() - started
     token = f"bridge-check-{secrets.token_hex(4)}"
     started = time.monotonic()
     if run_agterm(config, ["session", "type", "--target", session, token]) is None:
         return CheckResult(False, "agterm refused the typed text")
     if run_agterm(config, ["session", "type", "--target", session, ENTER]) is None:
         return CheckResult(False, "agterm refused the Enter")
-    while time.monotonic() - started < LANDS_WITHIN_S:
-        screen = run_agterm(config, ["session", "text", "--target", session]) or ""
-        if screen.count(token) >= 2:
-            return CheckResult(True, f"typed and submitted in {time.monotonic() - started:.1f} s")
-        time.sleep(0.3)
+    if _await_screen(config, session, lambda screen: screen.count(token) >= 2, LANDS_WITHIN_S):
+        return CheckResult(
+            True, f"typed and submitted in {time.monotonic() - started:.1f} s (cat started in {cat_s:.1f} s)"
+        )
     screen = run_agterm(config, ["session", "text", "--target", session]) or ""
     seen = "the text but not its Enter" if token in screen else "nothing"
     return CheckResult(False, f"after {LANDS_WITHIN_S:.0f} s the check tab shows {seen}")
+
+
+def _await_screen(config: Config, session: str, shows: Callable[[str], bool], within_s: float) -> bool:
+    started = time.monotonic()
+    while time.monotonic() - started < within_s:
+        if shows(run_agterm(config, ["session", "text", "--target", session]) or ""):
+            return True
+        time.sleep(0.3)
+    return False
 
 
 def _map_created_to_id(output: str | None) -> str | None:

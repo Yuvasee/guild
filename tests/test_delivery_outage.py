@@ -7,7 +7,7 @@ import pytest
 
 from bridge import tabinput
 from bridge.config import Config
-from bridge.deploycheck import _shows_answer, check_typing
+from bridge.deploycheck import CAT_READY, _shows_answer, check_typing
 from bridge.errlog import log_slow
 from bridge.outage import AGTERM_SILENT_NOTICE_AFTER_MS, OutageNotices
 from bridge.wake import WakeWatch
@@ -112,15 +112,28 @@ def test_a_slow_agterm_answer_goes_to_the_slow_log_not_the_error_log(
 
 
 class FakeAgterm:
-    """A tab running cat: what is typed echoes, and an Enter makes cat print the line again."""
+    """A tab whose command announces cat and runs it once its shell has started: what is typed echoes at once, and an
+    Enter makes cat print the line again, when cat runs."""
 
-    def __init__(self, enter_takes: bool = True, reply_lost: bool = False, close_fails: bool = False) -> None:
+    def __init__(
+        self,
+        enter_takes: bool = True,
+        reply_lost: bool = False,
+        close_fails: bool = False,
+        cat_starts_on_read: int = 1,
+    ) -> None:
         self.enter_takes = enter_takes
         self.reply_lost = reply_lost
         self.close_fails = close_fails
+        self.cat_starts_on_read = cat_starts_on_read
+        self.announces = False
+        self.cat_runs = False
+        self.reads = 0
         self.name = ""
         self.screen = ""
         self.line = ""
+        self.unread: list[str] = []
+        self.typed: list[str] = []
         self.closed: list[str] = []
 
     def __call__(self, config: Config, args: list[str]) -> str | None:
@@ -129,17 +142,26 @@ class FakeAgterm:
             return json.dumps({"result": {"tree": {"workspaces": [{"sessions": sessions}]}}})
         if args[:2] == ["session", "new"]:
             self.name = args[args.index("--name") + 1]
+            self.announces = CAT_READY in args[args.index("--command") + 1]
             return None if self.reply_lost else json.dumps({"result": {"id": "CHECK"}})
         if args[:2] == ["session", "type"]:
             text = args[-1]
+            self.typed.append(text)
             if text == tabinput.ENTER:
                 if self.enter_takes:
-                    self.screen += f"{self.line}\n{self.line}\n"
+                    self.screen += f"{self.line}\n"
+                    self.unread.append(self.line)
                     self.line = ""
             else:
                 self.line += text
+            self._let_cat_read()
             return ""
         if args[:2] == ["session", "text"]:
+            self.reads += 1
+            if not self.cat_runs and self.reads >= self.cat_starts_on_read:
+                self.cat_runs = True
+                self.screen += f"{CAT_READY}\n" if self.announces else ""
+            self._let_cat_read()
             return self.screen + self.line
         if args[:2] == ["session", "close"]:
             if self.close_fails:
@@ -147,6 +169,11 @@ class FakeAgterm:
             self.closed.append(args[-1])
             return ""
         return None
+
+    def _let_cat_read(self) -> None:
+        if self.cat_runs:
+            self.screen += "".join(f"{line}\n" for line in self.unread)
+            self.unread = []
 
 
 def test_the_deploy_check_passes_when_text_and_enter_take(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -168,6 +195,32 @@ def test_the_deploy_check_fails_when_the_enter_does_not_take(monkeypatch: pytest
 
     assert not result.ok
     assert "the text but not its Enter" in result.detail
+    assert fake.closed == ["CHECK"]
+
+
+def test_the_deploy_check_times_the_typing_from_when_cat_runs_not_from_when_its_tab_opens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeAgterm(cat_starts_on_read=3)
+    monkeypatch.setattr("bridge.deploycheck.run_agterm", fake)
+    monkeypatch.setattr("bridge.deploycheck.LANDS_WITHIN_S", 0.2)
+
+    result = check_typing(Config())
+
+    assert result.ok, result.detail
+    assert "cat started in" in result.detail
+
+
+def test_the_deploy_check_types_nothing_into_a_tab_whose_cat_never_starts(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeAgterm(cat_starts_on_read=10**9)
+    monkeypatch.setattr("bridge.deploycheck.run_agterm", fake)
+    monkeypatch.setattr("bridge.deploycheck.CAT_STARTS_WITHIN_S", 0.2)
+
+    result = check_typing(Config())
+
+    assert not result.ok
+    assert "did not start cat" in result.detail
+    assert fake.typed == []
     assert fake.closed == ["CHECK"]
 
 
