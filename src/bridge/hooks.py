@@ -531,6 +531,11 @@ def handle_hook(
                 and take_phase(conn, conversation_id, PHASE_REQUESTED, PHASE_COMPACTING)
             ):
                 drive = "compact"
+                # The drive starts now, however long ago the request went out: serve's watcher dates its end by this.
+                conn.execute(
+                    "UPDATE conversations SET compact_requested_at = ? WHERE conversation_id = ?",
+                    (at_ms, conversation_id),
+                )
             if conversation_id and text:
                 record_reply(conn, conversation_id, text, at_ms)
                 add_refs(conn, conversation_id, refs, "reply", at_ms)

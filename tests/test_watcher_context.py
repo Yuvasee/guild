@@ -11,6 +11,7 @@ from bridge.compaction import (
     FULL_CONTEXT_SQL,
     PHASE_COMPACTING,
     PHASE_REQUESTED,
+    end_driving,
     is_request_delivered,
     read_context_full,
     record_death,
@@ -42,6 +43,11 @@ LIMIT_SCREEN = _screen(
 )
 
 
+def _mid_turn(screen: str) -> str:
+    rule_at = screen.index(RULE)
+    return screen[:rule_at] + "\u00b7 Thinking\u2026 (12s \u00b7 esc to interrupt)\n" + screen[rule_at:]
+
+
 def test_the_percent_comes_from_the_footer_only() -> None:
     assert map_screen_to_context_pct(_screen("  Opus 5.5 | 13% ctx | \\~/projects/bridge")) == 13
     # As a host worker showed it before its first request after a start.
@@ -64,8 +70,9 @@ def test_context_limit_counts_only_with_the_footer_saying_so() -> None:
         "  Fable 5.2 | 17% ctx | ~/projects/bridge",
     ]  # fmt: skip
     assert not map_screen_to_limit_reached("\n".join(lines) + "\n")
-    busy = LIMIT_SCREEN.replace("\u276f\u00a0", "\u276f half typed")
-    assert not map_screen_to_limit_reached(busy)
+    suggested = LIMIT_SCREEN.replace("\u276f\u00a0", "\u276f\u00a0continue")
+    assert map_screen_to_limit_reached(suggested), "Claude Code's grey suggestion reads as text in the box"
+    assert not map_screen_to_limit_reached(_mid_turn(suggested))
 
 
 def _worker_team(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> tuple[Team, list[ContextTab]]:
@@ -183,6 +190,114 @@ def test_a_full_idle_tab_that_ignored_the_request_is_compacted_anyway(
 
     assert early.drives == []
     assert [(d[1], d[2]) for d in late.drives] == [("conv-b", True)]
+
+
+DAY_MS = 86_400_000
+"""A request that went out three days ago, whose drive ended without a compaction: the mark stayed."""
+
+
+def _stuck_cycle(bridge_env: BridgeEnv, phase: str | None = None, requested_at: int = 1_000_000) -> None:
+    with bridge_env.connect() as conn, transaction(conn):
+        conn.execute(
+            "UPDATE conversations SET compact_phase = ?, compact_warned_at = 650000, compact_requested_at = ?,"
+            " context_tokens = 650000"
+            " WHERE conversation_id = 'conv-b'",
+            (phase, requested_at),
+        )
+
+
+def _look(bridge_env: BridgeEnv, tabs: list[ContextTab], screen: str, at: int) -> tuple[list[str], list[str]]:
+    """(conversations driven, bodies told) for one look at conv-b, with alex as the assistant."""
+    config = Config(compact_at_tokens=600_000, assistant_handle="alex")
+    with bridge_env.connect() as conn, transaction(conn):
+        actions = record_context_screens(conn, config, tabs, {"conv-b": (screen, at)}, at)
+        bodies = [
+            str(conn.execute("SELECT body FROM messages WHERE id = ?", (m,)).fetchone()[0]) for m, _ in actions.messages
+        ]
+    return [d[1] for d in actions.drives], bodies
+
+
+def test_a_tab_stuck_at_the_limit_over_a_grey_suggestion_is_compacted_and_told_once_then_retried_quietly(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    _, tabs = _worker_team(bridge_env, spawn_process)
+    _stuck_cycle(bridge_env)
+    screen = LIMIT_SCREEN.replace("\u276f\u00a0", "\u276f\u00a0continue")
+    at = 3 * DAY_MS
+
+    first = _look(bridge_env, tabs, screen, at)
+    second = _look(bridge_env, tabs, screen, at + 90_000)
+    with bridge_env.connect() as conn, transaction(conn):
+        end_driving(conn, "conv-b", at + 60 * 60_000)
+    paused = _look(bridge_env, tabs, screen, at + 61 * 60_000)
+    retried = _look(bridge_env, tabs, screen, at + 90 * 60_000)
+
+    drives, bodies = first
+    assert drives == ["conv-b"]
+    assert len(bodies) == 1 and "cannot take a turn" in bodies[0] and "never over someone's words" in bodies[0]
+    assert second == ([], []), "its drive is under way"
+    assert paused == ([], []), "a drive that waited in vain is retried after a pause"
+    assert retried == (["conv-b"], []), "retried without telling again"
+
+
+def test_a_tab_past_85_percent_over_a_grey_suggestion_is_compacted_whatever_its_marks_say(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    _, tabs = _worker_team(bridge_env, spawn_process)
+    _stuck_cycle(bridge_env)
+    at = 3 * DAY_MS
+
+    below = _look(bridge_env, tabs, _screen("  Opus 5.5 | 84% ctx | ~/x").replace("\u00a0", "\u00a0go on"), at)
+    drives, bodies = _look(bridge_env, tabs, _screen("  Opus 5.5 | 86% ctx | ~/x").replace("\u00a0", "\u00a0go on"), at)
+    with bridge_env.connect() as conn, transaction(conn):
+        end_driving(conn, "conv-b", at)
+    again = _look(bridge_env, tabs, _screen("  Opus 5.5 | 88% ctx | ~/x"), at + 31 * 60_000)
+
+    assert below == ([], [])
+    assert drives == ["conv-b"]
+    assert len(bodies) == 1 and 'Tab "Old B" (TAB-B) is at 86% of its window' in bodies[0]
+    assert again == (["conv-b"], []), "the assistant hears of it once per cycle"
+
+
+def test_a_host_tab_whose_drive_waited_in_vain_is_asked_again_after_the_pause(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    _, tabs = _worker_team(bridge_env, spawn_process)
+    _stuck_cycle(bridge_env)
+    with bridge_env.connect() as conn, transaction(conn):
+        conn.execute("UPDATE conversations SET context_tokens = NULL WHERE conversation_id = 'conv-b'")
+        end_driving(conn, "conv-b", DAY_MS)
+    screen = _screen("  Opus 5.5 | 80% ctx | ~/.local/state/gbridge/worktrees/g-x")
+
+    paused = _look(bridge_env, tabs, screen, DAY_MS + 29 * 60_000)
+    drives, bodies = _look(bridge_env, tabs, screen, DAY_MS + 31 * 60_000)
+
+    assert paused == ([], [])
+    assert drives == [] and len(bodies) == 1 and "Context reached 80% of its window" in bodies[0]
+
+
+def test_a_full_tab_mid_turn_is_left_alone(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:
+    _, tabs = _worker_team(bridge_env, spawn_process)
+    _stuck_cycle(bridge_env)
+
+    limit = _look(bridge_env, tabs, _mid_turn(LIMIT_SCREEN), 3 * DAY_MS)
+    full = _look(bridge_env, tabs, _mid_turn(_screen("  Opus 5.5 | 97% ctx | ~/x")), 3 * DAY_MS)
+
+    assert limit == ([], []) and full == ([], [])
+
+
+def test_a_compacting_phase_that_outlived_its_drive_is_taken_over(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    _, tabs = _worker_team(bridge_env, spawn_process)
+    screen = _screen("  Opus 5.5 | 92% ctx | ~/x")
+    _stuck_cycle(bridge_env, PHASE_COMPACTING, requested_at=DAY_MS)
+
+    live = _look(bridge_env, tabs, screen, DAY_MS + 60 * 60_000)
+    stale = _look(bridge_env, tabs, screen, DAY_MS + 3 * 60 * 60_000)
+
+    assert live == ([], [])
+    assert stale[0] == ["conv-b"]
 
 
 def test_the_window_is_estimated_from_tokens_and_the_footer(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:

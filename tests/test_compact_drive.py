@@ -15,6 +15,7 @@ from bridge.compaction import (
     COMPACT_AT_WINDOW_SHARE,
     PHASE_COMPACTING,
     PHASE_CONTINUE,
+    RETRY_AFTER_MS,
     ContextReading,
     read_phase,
     record_context,
@@ -68,11 +69,11 @@ def _log(name: str) -> str:
     return path.read_text() if path.exists() else ""
 
 
-def _asked_again(conn: sqlite3.Connection) -> str | None:
+def _asked_again(conn: sqlite3.Connection, at_ms: int = 1) -> str | None:
     """What the next hook past the threshold would give the session."""
     reading = ContextReading(700_000, int(time.time() * 1000))
     return record_context(
-        conn, "conv-a", reading, 0, 600_000, COMPACT_AT_WINDOW_SHARE, can_deliver=True, driven=True, at_ms=1
+        conn, "conv-a", reading, 0, 600_000, COMPACT_AT_WINDOW_SHARE, can_deliver=True, driven=True, at_ms=at_ms
     )
 
 
@@ -98,9 +99,45 @@ def test_the_owners_draft_holds_the_drive_tells_the_assistant_once_and_logs_no_e
     assert [r.handle for _, r in spawned] == ["old-b"]
     assert 'could not type /compact in tab "Old A" (TAB-A) within 0 min: its input box holds text' in body
     assert items == 0
-    assert again is None, "the session is not asked to save its notes again until it compacts"
+    assert again is None, "the session is not asked to save its notes again within the retry pause"
     assert "compact-drive" not in _log("errors.log")
     assert _log("slow.log").count("compact not typed for conv-a") == 1
+
+
+def test_after_the_retry_pause_the_session_is_asked_for_its_notes_again(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    team = Team(bridge_env, spawn_process)
+    team.enroll()
+    _start_cycle(bridge_env)
+    _drive(bridge_env, FakeClaudeBox({"TAB-A": DRAFT}))
+    ended_at = int(time.time() * 1000)
+    with bridge_env.connect() as conn, transaction(conn):
+        early = _asked_again(conn, ended_at + RETRY_AFTER_MS - 60_000)
+        late = _asked_again(conn, ended_at + RETRY_AFTER_MS + 60_000)
+        repeated = _asked_again(conn, ended_at + RETRY_AFTER_MS + 120_000)
+
+    assert early is None
+    assert late is not None and "save what must survive" in late
+    assert repeated is None, "asked once per retry"
+
+
+def test_a_retried_drive_held_by_the_same_draft_types_only_the_probe_and_tells_no_one_again(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    team = Team(bridge_env, spawn_process)
+    team.enroll()
+    fake = FakeClaudeBox({"TAB-A": DRAFT})
+
+    _start_cycle(bridge_env)
+    _, first = _drive(bridge_env, fake)
+    _start_cycle(bridge_env)
+    _, second = _drive(bridge_env, fake)
+
+    assert fake.boxes["TAB-A"] == DRAFT
+    assert set(fake.typed) <= {".", "\x7f"}, "nothing but the probe key and its Backspace"
+    assert [r.handle for _, r in first] == ["old-b"]
+    assert second == []
 
 
 def test_a_stray_key_left_in_the_box_is_cleared_and_compact_typed_with_no_notice(

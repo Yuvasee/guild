@@ -17,7 +17,11 @@ NEAR_MARGIN_SHARE = 4
 """Within a quarter of the threshold (150k of 600k), tool hooks check every call instead of every 30 s."""
 FAILED_TURNS_DEAD = 3
 CONTEXT_FULL_PCT = 90
-"""Past this share of its window a tab is full: offered no work, and compacted even if it did not end its turn."""
+"""Past this share of its window a tab is full: offered no work."""
+RETRY_AFTER_MS = 30 * 60_000
+"""A drive that waited in vain is tried again after this, by the watcher or by asking for notes again."""
+COMPACT_WAIT_S = 3600
+"""The owner's text in the box, a selected tab's grey suggestion or a long turn can hold a drive this long."""
 TOO_LONG_TEXT = "Prompt is too long"
 DEAD_TOO_LONG = "too-long"
 DEAD_REFUSED = "refused"
@@ -259,7 +263,8 @@ def record_context(
     When bridge can drive the tab (agterm), the session is asked to end its turn so compaction follows at once.
     """
     row = conn.execute(
-        "SELECT compact_warned_at, compacted_at, context_window FROM conversations WHERE conversation_id = ?",
+        "SELECT compact_warned_at, compacted_at, context_window, compact_phase, compact_requested_at"
+        " FROM conversations WHERE conversation_id = ?",
         (conversation_id,),
     ).fetchone()
     if row is None:
@@ -271,7 +276,10 @@ def record_context(
     tokens = reading.tokens + pending_tokens
     conn.execute("UPDATE conversations SET context_tokens = ? WHERE conversation_id = ?", (tokens, conversation_id))
     compact_at = map_window_to_compact_at(compact_at_tokens, window_share, row["context_window"])
-    if row["compact_warned_at"] is not None or not can_deliver or not compact_at or tokens < compact_at:
+    requested = row["compact_requested_at"]
+    # A drive that ended without a compaction left the mark; once its retry pause passed the request goes out again.
+    retry = driven and row["compact_phase"] is None and requested is not None and at_ms - requested >= RETRY_AFTER_MS
+    if (row["compact_warned_at"] is not None and not retry) or not can_deliver or not compact_at or tokens < compact_at:
         return None
     conn.execute(
         "UPDATE conversations SET compact_warned_at = ?, compact_phase = ?, compact_requested_at = ?"
@@ -351,6 +359,12 @@ def map_screen_to_idle(screen: str) -> bool:
         return False
     # The whole screen: a submitted prompt whose first line is above the tail still quotes, not shows, its markers.
     return not map_screen_to_busy(screen)
+
+
+def map_screen_to_waiting(screen: str) -> bool:
+    """Claude Code waits for input with its box empty or not: its grey suggestion reads as typed text, which only the
+    drive's probe tells from a draft before anything is typed over it."""
+    return map_screen_to_box_lines(screen) is not None and not map_screen_to_busy(screen)
 
 
 def map_screen_to_busy(screen: str) -> bool:
@@ -494,9 +508,8 @@ def give_up_driving(conn: sqlite3.Connection, conversation_id: str) -> None:
 
 
 def end_driving(conn: sqlite3.Connection, conversation_id: str, at_ms: int) -> None:
-    """A drive that waited in vain ends the cycle without a new request: what held it most likely holds the next one,
-    and every turn would be asked to save its notes again. The next request follows a compaction; serve's watcher
-    near the window may drive an idle, empty box again, dated from now so it waits its retry pause first."""
+    """A drive that waited in vain ends the cycle without a new request at once: what held it most likely still holds
+    it. Dated from now, the request and serve's watcher both try again once RETRY_AFTER_MS has passed."""
     conn.execute(
         "UPDATE conversations SET compact_phase = NULL, compact_requested_at = ? WHERE conversation_id = ?",
         (at_ms, conversation_id),
@@ -516,7 +529,28 @@ def reset_after_compaction(conn: sqlite3.Connection, conversation_id: str, at_ms
         """,
         (at_ms, conversation_id),
     )
+    conn.execute(
+        "DELETE FROM signal_posts WHERE key IN (?, ?)",
+        (_told_key(TOLD_FORCED, conversation_id), _told_key(TOLD_HELD, conversation_id)),
+    )
     return reopened
+
+
+TOLD_FORCED = "compact-forced"
+TOLD_HELD = "compact-held"
+
+
+def _told_key(kind: str, conversation_id: str) -> str:
+    return f"{kind}:{conversation_id}"
+
+
+def take_told_once(conn: sqlite3.Connection, kind: str, conversation_id: str, at_ms: int) -> bool:
+    """True the first time per compaction cycle: retried drives would otherwise repeat the same notice."""
+    cursor = conn.execute(
+        "INSERT OR IGNORE INTO signal_posts (key, message_id, posted_at) VALUES (?, 0, ?)",
+        (_told_key(kind, conversation_id), at_ms),
+    )
+    return cursor.rowcount == 1
 
 
 def record_failed_turns(conn: sqlite3.Connection, conversation_id: str, tail: TranscriptTail) -> None:

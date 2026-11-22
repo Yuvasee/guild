@@ -26,11 +26,14 @@ from bridge.cli_claims import add_claim_commands
 from bridge.cli_pages import add_page_commands
 from bridge.cli_pins import add_pin_commands
 from bridge.compaction import (
+    COMPACT_WAIT_S,
     CONTINUE_PROMPTS,
     GENERIC_KEEP,
     KEEP_MAX_CHARS,
     PHASE_COMPACTING,
     PHASE_CONTINUE,
+    RETRY_AFTER_MS,
+    TOLD_HELD,
     UNREAD_NOTE,
     end_driving,
     list_dropped_lines,
@@ -38,6 +41,7 @@ from bridge.compaction import (
     read_phase,
     save_keep,
     take_phase,
+    take_told_once,
 )
 from bridge.config import Config, db_path, load_config, state_dir
 from bridge.context_watch import ContextTab, find_alert_recipients, list_context_tabs
@@ -93,8 +97,6 @@ from bridge.worker_api import WORKER_API_PORT, convert_bridge_commands_to_gbridg
 
 DEFAULT_SETTINGS = Path.home() / ".claude/settings.json"
 PIN_SESSION_FILE_RETRIES = 10
-COMPACT_WAIT_S = 3600
-"""The owner's text in the box, a selected tab's grey suggestion or a long turn can hold a drive this long."""
 _DRIVE_HELD = {
     "draft": "its input box holds text that is not stray keys, which may be the owner's draft",
     "unproven": "its input box holds text, and the tab stayed selected, so bridge could not tell a draft from Claude "
@@ -504,6 +506,9 @@ def cmd_compact_drive(args: argparse.Namespace, conn: sqlite3.Connection, config
         with transaction(conn):
             if read_phase(conn, conversation_id) != expected:
                 return
+            if not take_told_once(conn, TOLD_HELD, conversation_id, now_ms()):
+                told_unsure = True
+                return
             told = tell_of_held_drive(conn, config, tree, conversation_id, instance_id, phase, "unsure", box)
         told_unsure = True
         _spawn_told(told)
@@ -530,14 +535,16 @@ def cmd_compact_drive(args: argparse.Namespace, conn: sqlite3.Connection, config
             return 0
         end_driving(conn, conversation_id, now_ms())
         # "unwanted" with the phase still ours: its tab ended or moved to another conversation, so nothing is owed.
-        # Told of the box's text at the start, they already know the wait would end like this.
+        # Told of the box's text at the start, they already know the wait would end like this. A retried drive held
+        # again is told once per cycle.
         told = (
             []
-            if result == "unwanted" or (result == "draft" and told_unsure)
+            if result == "unwanted"
+            or (result == "draft" and told_unsure)
+            or not take_told_once(conn, TOLD_HELD, conversation_id, now_ms())
             else tell_of_held_drive(conn, config, tree, conversation_id, instance_id, phase, result)
         )
     if result in _DRIVE_FAILED:
-        # Once per cycle: no new request follows until the conversation compacts.
         log_error("compact-drive", f"{phase} not typed for {conversation_id}: {result}")
     elif result in _DRIVE_HELD:
         log_slow("compact-drive", f"{phase} not typed for {conversation_id} in {COMPACT_WAIT_S // 60} min: {result}")
@@ -587,10 +594,14 @@ def tell_of_held_drive(
         )
     else:
         why = _DRIVE_HELD.get(result) or _DRIVE_FAILED[result]
+        again = (
+            f"bridge tries again after {RETRY_AFTER_MS // 60_000} min and does not tell of it again; "
+            if phase == "compact"
+            else ""
+        )
         body = (
             f'bridge could not type {what} in tab "{tab.name}" ({tab.session}) within {COMPACT_WAIT_S // 60} min: '
-            f"{why}. It does not try again until the conversation compacts; once the box is clear, {then}. Claude "
-            "Code also compacts by itself near the end of its window."
+            f"{why}. {again}once the box is clear, {then}."
         )
     if not recipients:
         text = (

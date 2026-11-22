@@ -18,6 +18,7 @@ from bridge.board import (
 )
 from bridge.compaction import (
     COMPACT_AT_WINDOW_SHARE,
+    COMPACT_WAIT_S,
     CONTEXT_FULL_PCT,
     DEAD_COMPACTABLE,
     DEAD_FAILING,
@@ -26,12 +27,16 @@ from bridge.compaction import (
     DEAD_TOO_LONG,
     PHASE_COMPACTING,
     PHASE_REQUESTED,
+    RETRY_AFTER_MS,
+    TOLD_FORCED,
     clear_death,
     convert_tokens_to_request,
     estimate_window,
     map_screen_to_idle,
+    map_screen_to_waiting,
     record_death,
     reopen_unread_messages,
+    take_told_once,
 )
 from bridge.config import Config
 from bridge.feed import BLOCKED_TAB
@@ -47,7 +52,10 @@ SCREEN_LINES = 20
 WINDOW_MIN_PCT = 10
 """Below this the status line's whole percent is too coarse to tell the window from."""
 REQUEST_PATIENCE_MS = 5 * 60_000
-RETRY_AFTER_MS = 30 * 60_000
+COMPACT_NOW_PCT = 85
+"""Past this share of its window a tab that waits for input is compacted, whatever the cycle's marks say."""
+STALE_DRIVE_MS = 2 * COMPACT_WAIT_S * 1000
+"""A drive ends within its wait; a phase still "compacting" this long after it started outlived its drive."""
 AFTER_COMPACTION_MS = 2 * CONTEXT_EVERY_S * 1000
 """The status line can show the old size until the first request after compaction."""
 RULE_CHAR = "\u2500"
@@ -98,10 +106,10 @@ def map_screen_to_model_pct(screen: str) -> tuple[str, int] | None:
 
 
 def map_screen_to_limit_reached(screen: str) -> bool:
-    """Claude Code refuses every prompt until /compact or /clear, and waits with an empty box. Its footer must say
-    so too: the notice alone may be quoted in a healthy tab's transcript."""
+    """Claude Code refuses every prompt until /compact or /clear, and waits for input, its box often showing a grey
+    suggestion. Its footer must say so too: the notice alone may be quoted in a healthy tab's transcript."""
     tail = [line for line in screen.splitlines() if line.strip()][-SCREEN_LINES:]
-    if not any(LIMIT_MARKER in line for line in tail) or not map_screen_to_idle(screen):
+    if not any(LIMIT_MARKER in line for line in tail) or not map_screen_to_waiting(screen):
         return False
     pct = map_screen_to_context_pct(screen)
     return (pct is not None and pct >= CONTEXT_FULL_PCT) or any(LOW_MARKER in line for line in _footer(screen))
@@ -255,7 +263,8 @@ def _record_screen(
         # The host's transcript is out of reach: whatever reached the tab since the last look may never have been read.
         record_death(conn, tab.conversation_id, DEAD_LIMIT_SCREEN, at_ms, at_ms - 2 * CONTEXT_EVERY_S * 1000)
     row = conn.execute("SELECT * FROM conversations WHERE conversation_id = ?", (tab.conversation_id,)).fetchone()
-    if row["context_dead_why"] is not None:
+    dead = row["context_dead_why"]
+    if dead is not None and (row["context_dead_alerted_at"] is None or dead not in DEAD_COMPACTABLE):
         if row["context_dead_alerted_at"] is None:
             _handle_death(conn, config, tab, row, at_ms, actions)
         return
@@ -268,12 +277,20 @@ def _record_screen(
     if phase is None and since_request is not None and since_request < RETRY_AFTER_MS:
         # A cycle started lately and given up; its give-up told the user, and a retry every tick would only repeat it.
         return
-    if pct is not None and pct >= share_pct and row["context_tokens"] is None and row["compact_warned_at"] is None:
+    asked = row["compact_warned_at"] is not None and phase is not None
+    if dead is None and pct is not None and pct >= share_pct and row["context_tokens"] is None and not asked:
         _request_compaction(conn, tab, pct, at_ms, actions)
         return
     waited = phase == PHASE_REQUESTED and since_request is not None and since_request >= REQUEST_PATIENCE_MS
-    if pct is not None and pct >= CONTEXT_FULL_PCT and (phase is None or waited) and map_screen_to_idle(screen):
-        _start_compaction(conn, tab, row["context_tokens"], at_ms, actions)
+    stale = phase == PHASE_COMPACTING and since_request is not None and since_request >= STALE_DRIVE_MS
+    full = dead is not None or (pct is not None and pct >= COMPACT_NOW_PCT)
+    if not full or not (phase is None or waited or stale) or not map_screen_to_waiting(screen):
+        return
+    if stale:
+        conn.execute("UPDATE conversations SET compact_phase = NULL WHERE conversation_id = ?", (tab.conversation_id,))
+    # A dead tab's alert already said bridge compacts it.
+    if _start_compaction(conn, tab, row["context_tokens"], at_ms, actions) and dead is None:
+        _tell_forced(conn, config, tab, cast(int, pct), at_ms, actions)
 
 
 def _request_compaction(
@@ -301,9 +318,10 @@ def _request_compaction(
 def _start_compaction(
     conn: sqlite3.Connection, tab: ContextTab, tokens: int | None, at_ms: int, actions: ContextActions
 ) -> bool:
+    # Dated now, not by an old request: a phase that stays this long after the drive's wait outlived it.
     cursor = conn.execute(
         "UPDATE conversations SET compact_phase = ?, compact_warned_at = coalesce(compact_warned_at, ?),"
-        " compact_requested_at = coalesce(compact_requested_at, ?)"
+        " compact_requested_at = ?"
         " WHERE conversation_id = ? AND (compact_phase IS NULL OR compact_phase = ?)",
         (PHASE_COMPACTING, tokens or 0, at_ms, tab.conversation_id, PHASE_REQUESTED),
     )
@@ -311,6 +329,25 @@ def _start_compaction(
         return False
     actions.drives.append((tab.instance_id, tab.conversation_id, True))
     return True
+
+
+def _tell_forced(
+    conn: sqlite3.Connection, config: Config, tab: ContextTab, pct: int, at_ms: int, actions: ContextActions
+) -> None:
+    if not take_told_once(conn, TOLD_FORCED, tab.conversation_id, at_ms):
+        return
+    recipients = find_alert_recipients(conn, config, tab)
+    if not recipients:
+        return
+    body = (
+        f'Tab "{tab.name}" ({tab.session}) is at {pct}% of its window and has not compacted, so bridge is typing '
+        "/compact into it. Someone's words in its box are left alone, and so is any text while the tab is selected; "
+        f"then bridge says so once and tries again {RETRY_AFTER_MS // 60_000} min after each wait, or you compact it "
+        "by hand."
+    )
+    result = send_message(conn, Party(SYSTEM_CONVERSATION, "bridge"), recipients, "info", body, at_ms)
+    conn.execute("UPDATE messages SET post_type = ? WHERE id = ?", (BLOCKED_TAB, result.message_id))
+    actions.messages.extend((result.message_id, r) for r in recipients)
 
 
 def _handle_death(
@@ -336,8 +373,9 @@ def _handle_death(
         )
     elif started:
         did = (
-            "bridge is typing /compact into it once it is idle; after compaction it gets its saved notes, the "
-            "messages it missed, and a prompt to continue. If it is still stuck in 15 min, compact it by hand"
+            "bridge is typing /compact into it once it waits for input, never over someone's words in its box; "
+            "after compaction it gets its saved notes, the messages it missed, and a prompt to continue. If it is "
+            "still stuck in 15 min, compact it by hand"
         )
     elif row["compact_phase"] is not None:
         did = f"a compaction is already under way ({row['compact_phase']}); if it does not finish, compact it by hand"
