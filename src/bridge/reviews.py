@@ -1,3 +1,4 @@
+import itertools
 import json
 import random
 import re
@@ -58,6 +59,7 @@ from bridge.review_github import (
     DocDiff,
     FetchedComment,
     GitHubError,
+    KnownHeads,
     OpenPr,
     ReviewThreads,
     Said,
@@ -68,6 +70,7 @@ from bridge.review_github import (
     fetch_open_prs,
     fetch_pr_states,
     fetch_review_threads,
+    is_loc_excluded,
     list_loc_excluded,
     list_unanswered_colleague_comments,
 )
@@ -118,6 +121,8 @@ BOT_WAIT_ASSISTANT_MS = 2 * 60 * 60 * 1000
 BOT_WAIT_OWNER_GRACE_MS = 60 * 60 * 1000
 """The owner's time to answer before the assistant hears of it, so a long wait found at once is not both at once."""
 BOT_WAIT_LINKS_MAX = 5
+OVERLAP_KEY = "overlap:"
+OVERLAP_PATHS_SHOWN = 3
 BOT_ROUND_CAP = 3
 BACKPORT_RECHECK_MS = 15 * 60_000
 """A refused check runs again this often on the same head: a named PR may merge meanwhile."""
@@ -194,8 +199,10 @@ def store_open_prs(conn: sqlite3.Connection, prs: list[OpenPr], now: int) -> Non
                                     checks, requested, approved_by, bot_approved, others_reviewed, merge_state,
                                     in_merge_queue, commit_oids, updated_at, first_seen_at,
                                     fetched_at, threads_key, loc_rule, body_reviews, depends_on, usage_missing,
-                                    bot_cleared, named_prs, must_merge, persist_sandbox, issue_missing)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    bot_cleared, named_prs, must_merge, persist_sandbox, issue_missing, files,
+                                    related_prs)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?)
             ON CONFLICT (ref) DO UPDATE SET
                 title = excluded.title, url = excluded.url, draft = excluded.draft, head = excluded.head,
                 head_oid = excluded.head_oid, base = excluded.base, stack_parent = excluded.stack_parent,
@@ -203,7 +210,7 @@ def store_open_prs(conn: sqlite3.Connection, prs: list[OpenPr], now: int) -> Non
                 requested = excluded.requested, body_reviews = excluded.body_reviews, depends_on = excluded.depends_on,
                 usage_missing = excluded.usage_missing, named_prs = excluded.named_prs,
                 must_merge = excluded.must_merge, persist_sandbox = excluded.persist_sandbox,
-                issue_missing = excluded.issue_missing,
+                issue_missing = excluded.issue_missing, files = excluded.files, related_prs = excluded.related_prs,
                 approved_by = excluded.approved_by, bot_approved = excluded.bot_approved,
                 bot_cleared = excluded.bot_cleared,
                 ci_blocked_by = CASE WHEN excluded.checks = 'FAILURE' THEN ci_blocked_by END,
@@ -224,7 +231,7 @@ def store_open_prs(conn: sqlite3.Connection, prs: list[OpenPr], now: int) -> Non
                 pr.merge_state, int(pr.in_merge_queue), json.dumps(pr.commit_oids), pr.updated_at, now, now,
                 map_pr_to_threads_key(pr), LOC_RULE, convert_reviews_to_text(pr.body_reviews), pr.depends_on,
                 pr.usage_missing, int(pr.bot_cleared), json.dumps(pr.named_prs), json.dumps(pr.must_merge),
-                int(pr.persist_sandbox), int(pr.issue_missing),
+                int(pr.persist_sandbox), int(pr.issue_missing), json.dumps(pr.files), json.dumps(pr.related_prs),
             ),
         )  # fmt: skip
         if not pr.open_threads:
@@ -1334,11 +1341,14 @@ def map_events_to_rounds(comment_times: list[int], head_times: list[int]) -> tup
     return rounds, open_comments
 
 
-def load_known_loc(conn: sqlite3.Connection) -> dict[tuple[str, str], int]:
-    """Counts made under an older rule are made again, even for the same head."""
+def load_known_heads(conn: sqlite3.Connection) -> KnownHeads:
+    """Counts made under an older rule are made again, even for the same head, and so are heads whose files were
+    never read."""
     return {
-        (str(r["ref"]), str(r["head_oid"])): int(r["loc"])
-        for r in conn.execute("SELECT ref, head_oid, loc FROM review_prs WHERE loc_rule = ?", (LOC_RULE,))
+        (str(r["ref"]), str(r["head_oid"])): (int(r["loc"]), tuple(json.loads(str(r["files"]))))
+        for r in conn.execute(
+            "SELECT ref, head_oid, loc, files FROM review_prs WHERE loc_rule = ? AND files IS NOT NULL", (LOC_RULE,)
+        )
     }
 
 
@@ -1347,7 +1357,7 @@ def poll_review_queue(
 ) -> list[tuple[int, Recipient]]:
     """One round of the background job. GitHub is read with no transaction open; returns the wakes to deliver."""
     try:
-        prs = fetch_open_prs(config, load_known_loc(conn))
+        prs = fetch_open_prs(config, load_known_heads(conn))
     except GitHubError as exc:
         with transaction(conn):
             record_poll_error(conn, str(exc), now)
@@ -1426,6 +1436,7 @@ def poll_review_queue(
             *tell_review_waits(conn, config, now),
             *tell_bot_waits(conn, config, now),
             *tell_issue_missing(conn, config, now),
+            *tell_overlaps(conn, config, now),
             *tell_bot_round_cap(conn, config, bot_rounds, now),
         ]
 
@@ -1839,6 +1850,81 @@ def tell_issue_missing(conn: sqlite3.Connection, config: Config, now: int) -> li
     return sent
 
 
+def map_rows_to_overlaps(rows: Sequence[sqlite3.Row], config: Config) -> dict[tuple[str, str], tuple[str, ...]]:
+    """(ref, ref), in order, to the paths both change, for two open PRs of one repo neither of which is stacked on the
+    other. Files the line count leaves out (lock, generated, docs, images) do not count, nor does a backport: it
+    changes its default-branch PR's files by design."""
+    excluded = list_loc_excluded(config)
+    parents = {str(r["ref"]): r["stack_parent"] for r in rows}
+    repos = {str(r["ref"]): str(r["repo"]).casefold() for r in rows}
+    paths = {
+        str(r["ref"]): {p for p in json.loads(str(r["files"])) if not is_loc_excluded(p, excluded)}
+        for r in rows
+        if r["files"] is not None and not is_backport_base(config.backport_bases, str(r["base"]))
+    }
+    found: dict[tuple[str, str], tuple[str, ...]] = {}
+    for a, b in itertools.combinations(sorted(paths), 2):
+        shared = paths[a] & paths[b]
+        if shared and repos[a] == repos[b] and not is_stacked_on(parents, a, b) and not is_stacked_on(parents, b, a):
+            found[(a, b)] = tuple(sorted(shared))
+    return found
+
+
+def is_stacked_on(parents: Mapping[str, str | None], ref: str, ancestor: str) -> bool:
+    seen: set[str] = set()
+    parent = parents.get(ref)
+    while parent is not None and parent not in seen:
+        if parent.casefold() == ancestor.casefold():
+            return True
+        seen.add(parent)
+        parent = parents.get(parent)
+    return False
+
+
+def tell_overlaps(conn: sqlite3.Connection, config: Config, now: int) -> list[tuple[int, Recipient]]:
+    """Two open PRs changing the same files: the owner of each is told once per pair, in one message when one owns
+    both. With no owner for either it waits for one; a pair that no longer overlaps is forgotten."""
+    rows = conn.execute("SELECT * FROM review_prs WHERE closed_at IS NULL").fetchall()
+    by_ref = {str(r["ref"]): r for r in rows}
+    overlaps = map_rows_to_overlaps(rows, config)
+    keys = {f"{OVERLAP_KEY}{a}|{b}": (a, b) for a, b in overlaps}
+    told = {
+        str(r[0])
+        for r in conn.execute(
+            "SELECT key FROM signal_posts WHERE substr(key, 1, ?) = ?", (len(OVERLAP_KEY), OVERLAP_KEY)
+        )
+    }
+    conn.executemany("DELETE FROM signal_posts WHERE key = ?", [(key,) for key in told - keys.keys()])
+    sent: list[tuple[int, Recipient]] = []
+    for key, pair in keys.items():
+        if key in told:
+            continue
+        owners: dict[tuple[str, str], Owner] = {}
+        for ref in pair:
+            row = by_ref[ref]
+            owner = find_owner(conn, config, ref, str(row["repo"]), str(row["head"]))
+            if owner is not None:
+                owners.setdefault((owner.handle, owner.conversation_id), owner)
+        if not owners:
+            continue
+        text = map_overlap_to_text(by_ref[pair[0]], by_ref[pair[1]], overlaps[pair])
+        for owner in owners.values():
+            message_id, recipient = tell_owner(conn, owner, text, now)
+            sent.append((message_id, recipient))
+        record_signal_post(conn, key, sent[-1][0], now)
+    return sent
+
+
+def map_overlap_to_text(a: sqlite3.Row, b: sqlite3.Row, paths: tuple[str, ...]) -> str:
+    shown = ", ".join(paths[:OVERLAP_PATHS_SHOWN])
+    more = f", +{len(paths) - OVERLAP_PATHS_SHOWN} more" if len(paths) > OVERLAP_PATHS_SHOWN else ""
+    return (
+        f"{a['url']} ({a['title']}) and {b['url']} ({b['title']}) change the same files ({shown}{more}): stack one on "
+        "the other, or say why they are independent; each body needs a line "
+        "'Related: #N — stacked | independent because …'."
+    )
+
+
 def tell_bot_round_cap(
     conn: sqlite3.Connection, config: Config, bot_rounds: dict[str, int], now: int
 ) -> list[tuple[int, Recipient]]:
@@ -2114,6 +2200,10 @@ def map_db_to_reviews(conn: sqlite3.Connection, config: Config, now: int) -> dic
             "flag, step N of M, …) is ready for you once its description has a section headed How this will be used; "
             "its owner is told once. A line 'Not an enabling PR: <reason>' turns the check off; drafts are not "
             "checked.",
+            "Two open PRs of one repo that change the same file (not lock, generated or docs files), neither stacked "
+            "on the other: each owner is told once, and each is ready for you once its description has a line "
+            "'Related: #N — stacked | independent because …' naming the other; drafts are not checked. A Related "
+            "line saying independent does not make it wait for that PR's merge.",
         ],
         "prs": sorted((map_row_to_review(conn, config, row, now) for row in rows), key=map_review_to_sort_key),
     }
@@ -2175,6 +2265,22 @@ def map_row_to_reviews_gap(row: sqlite3.Row, config: Config) -> str | None:
 def map_row_to_usage_gap(row: sqlite3.Row) -> str | None:
     """Why a PR that says it only enables something is not ready for the owner; a draft is not checked yet."""
     return None if row["draft"] or not row["usage_missing"] else USAGE_GAP
+
+
+def map_row_to_related_gap(conn: sqlite3.Connection, config: Config, row: sqlite3.Row) -> str | None:
+    """Why a PR changing the same files as another open PR is not ready for the owner: its body has no Related line
+    naming that PR. A draft is not checked yet."""
+    if row["draft"]:
+        return None
+    ref = str(row["ref"])
+    rows = conn.execute("SELECT * FROM review_prs WHERE closed_at IS NULL AND repo = ?", (row["repo"],)).fetchall()
+    related = {r.casefold() for r in json.loads(str(row["related_prs"]))}
+    missing = [
+        b if a == ref else a
+        for a, b in map_rows_to_overlaps(rows, config)
+        if ref in (a, b) and _map_ref_to_key(b if a == ref else a) not in related
+    ]
+    return f"no Related line for {', '.join('#' + m.rpartition('#')[2] for m in missing)}" if missing else None
 
 
 @dataclass(frozen=True)
@@ -2347,7 +2453,16 @@ def map_row_to_review(conn: sqlite3.Connection, config: Config, row: sqlite3.Row
         "review_wait": wait.reason if (wait := find_review_wait(conn, config, row)) else None,
         "reviews_gap": None
         if group == BACKPORTS
-        else "; ".join(g for g in (map_row_to_reviews_gap(row, config), map_row_to_usage_gap(row)) if g) or None,
+        else "; ".join(
+            g
+            for g in (
+                map_row_to_reviews_gap(row, config),
+                map_row_to_usage_gap(row),
+                map_row_to_related_gap(conn, config, row),
+            )
+            if g
+        )
+        or None,
         "reviewed_at": row["reviewed_at"],
         "reviewed_by": row["reviewed_by"],
         "reviewed_oid": row["reviewed_oid"],

@@ -866,6 +866,12 @@ MIGRATIONS: tuple[str, ...] = (
     ALTER TABLE lead_work ADD COLUMN about TEXT;
     ALTER TABLE leads ADD COLUMN tab_renamed_at INTEGER;
     """,
+    # The paths a PR changes (NULL until read) and the PRs its body's Related lines name: two open PRs changing the
+    # same file must say how they relate.
+    """
+    ALTER TABLE review_prs ADD COLUMN files TEXT;
+    ALTER TABLE review_prs ADD COLUMN related_prs TEXT NOT NULL DEFAULT '[]';
+    """,
 )
 
 HOOK_BUSY_TIMEOUT_MS = 200

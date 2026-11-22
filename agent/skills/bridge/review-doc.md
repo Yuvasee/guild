@@ -94,6 +94,10 @@ sharp but has never seen this code.
   doc's opening story tells the same five points, so the plan never has to be explained in chat. Bridge reads the
   title and description for such words (off by default, an opt-in flag or value, behind a flag, step N of M, …) and keeps the PR not
   ready until that heading is there; a PR that only sounds like one says so in a line `Not an enabling PR: <reason>`.
+- **A PR that changes the same files as another open PR says how they relate.** When bridge reports two open PRs
+  changing the same files, one is stacked on the other, or each description gets a line
+  `Related: #N — stacked | independent because …` naming the other; until then neither is ready for the owner. A
+  Related line that says independent does not make the PR wait for the other's merge.
 
 ## The order
 

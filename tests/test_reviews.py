@@ -63,7 +63,7 @@ from bridge.reviews import (
     find_issue_lead,
     find_owner,
     find_owner_of_ref,
-    load_known_loc,
+    load_known_heads,
     load_marks,
     map_command_to_branch_writes,
     map_command_to_comment_targets,
@@ -86,6 +86,7 @@ from bridge.reviews import (
     store_review_threads,
     take_comment_wakes,
     tell_bot_round_cap,
+    tell_overlaps,
     tell_bot_waits,
     tell_ready_to_merge,
     tell_review_waits,
@@ -1724,10 +1725,13 @@ def test_a_many_file_pr_lists_its_files_only_for_a_new_head() -> None:
         "files": {"pageInfo": {"hasNextPage": True}, "nodes": []},
         "reviewRequests": {"nodes": []}, "reviews": {"nodes": []}, "latestReviews": {"nodes": []},
     }  # fmt: skip
-    with mock.patch("bridge.review_github.fetch_all_files", return_value=[]) as listed:
-        assert map_node_to_open_pr(node, CONFIG, {(REF, "b2"): 42}).loc == 42
+    rows = [{"path": "app/new.py", "additions": 5, "deletions": 1}]
+    with mock.patch("bridge.review_github.fetch_all_files", return_value=rows) as listed:
+        known = map_node_to_open_pr(node, CONFIG, {(REF, "b2"): (42, ("app/old.py",))})
+        assert (known.loc, known.files) == (42, ("app/old.py",))
         listed.assert_not_called()
-        assert map_node_to_open_pr(node, CONFIG, {(REF, "a1"): 42}).loc == 6
+        new = map_node_to_open_pr(node, CONFIG, {(REF, "a1"): (42, ("app/old.py",))})
+        assert (new.loc, new.files) == (6, ("app/new.py",))
         listed.assert_called_once()
 
 
@@ -2057,10 +2061,10 @@ def test_docs_and_images_are_not_lines_of_code_so_a_docs_only_pr_gets_no_documen
 
 def test_a_line_count_made_under_an_older_rule_is_made_again_for_the_same_head(tmp_path: Path) -> None:
     conn = setup_pr(tmp_path, loc=1010)
-    assert load_known_loc(conn) == {(REF, "a1"): 1010}
+    assert load_known_heads(conn) == {(REF, "a1"): (1010, ())}
     with transaction(conn):
         conn.execute("UPDATE review_prs SET loc_rule = NULL")
-    assert load_known_loc(conn) == {}
+    assert load_known_heads(conn) == {}
 
 
 def merge_ok_view(conn: Any) -> dict[str, Any]:
@@ -3014,3 +3018,99 @@ def test_a_cleared_head_or_a_draft_stops_the_bot_wait_and_a_draft_forgets_what_w
     assert cleared == [], "the bot's approval of the head is not kept as a comment; its clearance stands"
     assert len(told) == 1 and as_draft == []
     assert len(ready_again) == 1, "a draft resets the telling"
+
+
+OTHER = "pr:Org/app#8"
+
+
+def setup_overlap(tmp_path: Path, a: dict[str, Any], b: dict[str, Any]) -> Any:
+    conn = connect(tmp_path / "t.db")
+    with transaction(conn):
+        store_open_prs(
+            conn,
+            [
+                make_pr(**{"head": "dev/a", **a}),
+                make_pr(**{"ref": OTHER, "number": 8, "title": "U", "url": "https://x/8", "head": "dev/b", **b}),
+            ],
+            500,
+        )
+    return conn
+
+
+def test_two_prs_changing_one_file_tell_each_owner_once(tmp_path: Path) -> None:
+    files = ("app/a.py", "app/b.py", "app/c.py", "app/d.py", "app/e.py")
+    conn = setup_overlap(tmp_path, {"files": files}, {"files": (*files, "app/f.py")})
+    with transaction(conn):
+        unowned = tell_overlaps(conn, CONFIG, 900)
+        add_session(conn, "c1", "ana", branch="dev/a")
+        add_session(conn, "c2", "ben", branch="dev/b")
+        first = tell_overlaps(conn, CONFIG, 1000)
+        second = tell_overlaps(conn, CONFIG, 2000)
+    bodies = {r[0] for r in conn.execute("SELECT body FROM messages")}
+    assert unowned == [] and second == []
+    assert sorted(recipient.handle for _, recipient in first) == ["ana", "ben"]
+    assert bodies == {
+        "https://github.com/Org/app/pull/7 (T) and https://x/8 (U) change the same files (app/a.py, app/b.py, "
+        "app/c.py, +2 more): stack one on the other, or say why they are independent; each body needs a line "
+        "'Related: #N — stacked | independent because …'."
+    }
+
+
+def test_one_owner_of_both_overlapping_prs_gets_one_message(tmp_path: Path) -> None:
+    conn = setup_overlap(tmp_path, {"files": ("app/a.py",), "head": "dev/x"}, {"files": ("app/a.py",)})
+    with transaction(conn):
+        add_session(conn, "c1", "ana", branch="dev/x")
+        conn.execute("INSERT INTO review_branch_writes (conversation_id, branch, at) VALUES ('c1', 'dev/b', 1)")
+        owners = [find_owner(conn, CONFIG, ref, "Org/app", head) for ref, head in ((REF, "dev/x"), (OTHER, "dev/b"))]
+        told = tell_overlaps(conn, CONFIG, 1000)
+    assert [owner.handle if owner else None for owner in owners] == ["ana", "ana"]
+    assert [recipient.handle for _, recipient in told] == ["ana"]
+
+
+def test_a_pair_that_stops_overlapping_is_forgotten_and_told_again_if_it_overlaps_again(tmp_path: Path) -> None:
+    conn = setup_overlap(tmp_path, {"files": ("app/a.py",)}, {"files": ("app/a.py",)})
+    with transaction(conn):
+        add_session(conn, "c1", "ana", branch="dev/a")
+        first = tell_overlaps(conn, CONFIG, 1000)
+        conn.execute("UPDATE review_prs SET files = '[\"app/z.py\"]' WHERE ref = ?", (OTHER,))
+        apart = tell_overlaps(conn, CONFIG, 2000)
+        conn.execute("UPDATE review_prs SET files = '[\"app/a.py\"]' WHERE ref = ?", (OTHER,))
+        again = tell_overlaps(conn, CONFIG, 3000)
+    assert len(first) == 1 and apart == [] and len(again) == 1
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        ({"files": ("app/a.py",)}, {"files": ("app/a.py",), "stack_parent": REF}),
+        ({"files": ("app/a.py",), "stack_parent": OTHER}, {"files": ("app/a.py",)}),
+        ({"files": ("uv.lock", "README.md", "app/a.py")}, {"files": ("uv.lock", "README.md", "app/b.py")}),
+        ({"files": ("app/a.py",)}, {"files": ("app/a.py",), "repo": "Org/lib", "ref": "pr:Org/lib#8"}),
+        ({"files": ("app/a.py",)}, {"files": ("app/a.py",), "base": "release-1"}),
+    ],
+    ids=["child", "parent", "only-excluded-files", "other-repo", "backport"],
+)
+def test_no_overlap_for_a_stack_excluded_files_another_repo_or_a_backport(
+    tmp_path: Path, a: dict[str, Any], b: dict[str, Any]
+) -> None:
+    config = replace(CONFIG, backport_bases=("release-*",))
+    conn = setup_overlap(tmp_path, a, b)
+    with transaction(conn):
+        add_session(conn, "c1", "ana", branch="dev/a")
+        assert tell_overlaps(conn, config, 1000) == []
+    assert all(p["reviews_gap"] is None for p in map_db_to_reviews(conn, config, 1000)["prs"])  # type: ignore[union-attr]
+
+
+def test_an_overlapping_pr_is_ready_only_once_its_body_names_the_other_on_a_related_line(tmp_path: Path) -> None:
+    conn = setup_overlap(
+        tmp_path,
+        {"files": ("app/a.py",), "related_prs": ("Org/app#8",)},
+        {"files": ("app/a.py",)},
+    )
+    view = {p["number"]: p for p in cast(list[dict[str, Any]], map_db_to_reviews(conn, CONFIG, 1000)["prs"])}
+    assert view[7]["reviews_gap"] is None
+    assert view[8]["reviews_gap"] == "no Related line for #7"
+    with transaction(conn):
+        conn.execute("UPDATE review_prs SET draft = 1 WHERE number = 8")
+    drafted = {p["number"]: p for p in cast(list[dict[str, Any]], map_db_to_reviews(conn, CONFIG, 1000)["prs"])}
+    assert drafted[8]["reviews_gap"] is None

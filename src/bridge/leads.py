@@ -76,6 +76,8 @@ ROLE_TEMPLATE = "\n".join(
         "what {owner} sees.",
         "- No PR review request as a decision: the page lists open PRs. For {owner}: essence "
         f"visible, details folded. A PR doc follows {REVIEW_DOC_SPEC}; reasons OBSERVED, REPRODUCED or FROM CODE.",
+        "- Bridge says two open PRs change the same files: stack one on the other, or give each body a line "
+        "'Related: #N — stacked | independent because …'.",
         "{reviews}",
         "- Merge your own PR yourself: approved on GitHub ({bot} counts), CI green, no "
         "conflicts, none of {owner}'s comments open (settle them), each colleague's comment answered or its thread "

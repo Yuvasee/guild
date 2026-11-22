@@ -4,6 +4,7 @@ from bridge.review_deps import (
     map_markdown_to_dependency,
     map_markdown_to_named_prs,
     map_markdown_to_preconditions,
+    map_markdown_to_related_prs,
     map_states_to_blockers,
 )
 
@@ -207,3 +208,20 @@ def test_merge_after_a_pr_stays_a_dependency_that_its_merge_clears() -> None:
     assert named == (f"{APP}#12",) and map_markdown_to_dependency(body, APP, 7) == f"{APP}#12"
     assert map_states_to_blockers(named, named, set(), {f"{APP}#12": "OPEN"}) == (f"waits for {APP}#12 to merge",)
     assert map_states_to_blockers(named, named, set(), {f"{APP}#12": "MERGED"}) == ()
+
+
+def test_related_lines_name_prs_by_number_by_repo_and_by_url() -> None:
+    body = (
+        "Fixes the retry.\n\n"
+        "Related: #8 — stacked\n"
+        "- **Related:** Org/lib#4, https://github.com/Org/app/pull/9 — independent because they touch other paths\n"
+        "Not related: #10\n"
+        "See #11.\n"
+    )
+    assert map_markdown_to_related_prs(body, "Org/app", 7) == ("Org/app#8", "Org/app#9", "Org/lib#4")
+
+
+def test_a_pr_a_related_line_calls_independent_is_named_but_not_waited_for() -> None:
+    body = "Related: #8 — independent because it changes another branch of the parser\nRelated: #9 — stacked\n"
+    assert map_markdown_to_named_prs(body, "Org/app", 7) == ("Org/app#9",)
+    assert map_markdown_to_related_prs(body, "Org/app", 7) == ("Org/app#8", "Org/app#9")

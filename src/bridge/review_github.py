@@ -11,7 +11,12 @@ from typing import Any, cast
 from bridge.agent_prefix import strip_agent_prefix
 from bridge.config import Config
 from bridge.refs import names_issue, needs_issue
-from bridge.review_deps import map_markdown_to_dependency, map_markdown_to_named_prs, map_markdown_to_preconditions
+from bridge.review_deps import (
+    map_markdown_to_dependency,
+    map_markdown_to_named_prs,
+    map_markdown_to_preconditions,
+    map_markdown_to_related_prs,
+)
 from bridge.review_marks import find_missing_usage_section, map_markdown_to_reviews
 
 _PAGES_MAX = 20
@@ -189,6 +194,10 @@ class OpenPr:
     persist_sandbox: bool = False
     """Its body asks to keep its sandbox (PERSIST_SANDBOX): it never merges by itself."""
     labels: tuple[str, ...] = ()
+    files: tuple[str, ...] = ()
+    """The paths it changes."""
+    related_prs: tuple[str, ...] = ()
+    """owner/repo#N of the PRs its body's Related lines name."""
 
     @property
     def commit_oids(self) -> tuple[str, ...]:
@@ -251,7 +260,11 @@ def add_label(repo: str, number: int, label: str) -> None:
     run_gh(add)
 
 
-def fetch_open_prs(config: Config, known_loc: dict[tuple[str, str], int] | None = None) -> list[OpenPr]:
+KnownHeads = dict[tuple[str, str], tuple[int, tuple[str, ...]]]
+"""(ref, head oid) to the line count and changed paths already read for that head."""
+
+
+def fetch_open_prs(config: Config, known: KnownHeads | None = None) -> list[OpenPr]:
     """Raises rather than returning part of the list: a PR missing from it would look closed."""
     query = f"is:pr is:open archived:false author:{config.review_author} org:{config.review_org}"
     prs: list[OpenPr] = []
@@ -263,7 +276,7 @@ def fetch_open_prs(config: Config, known_loc: dict[tuple[str, str], int] | None 
         try:
             raw: Any = json.loads(run_gh(args))
             search: Any = raw["data"]["search"]
-            prs.extend(map_node_to_open_pr(node, config, known_loc) for node in search["nodes"] if node)
+            prs.extend(map_node_to_open_pr(node, config, known) for node in search["nodes"] if node)
         except (ValueError, KeyError, TypeError) as exc:
             raise GitHubError(f"unexpected answer from GitHub: {type(exc).__name__}") from exc
         if not search["pageInfo"]["hasNextPage"]:
@@ -272,17 +285,18 @@ def fetch_open_prs(config: Config, known_loc: dict[tuple[str, str], int] | None 
     raise GitHubError(f"more than {_PAGES_MAX} pages of open PRs")
 
 
-def map_node_to_open_pr(node: Any, config: Config, known_loc: dict[tuple[str, str], int] | None = None) -> OpenPr:
+def map_node_to_open_pr(node: Any, config: Config, known: KnownHeads | None = None) -> OpenPr:
     repo = str(node["repository"]["nameWithOwner"])
     number = int(node["number"])
     ref = f"pr:{repo}#{number}"
     head_oid = str(node["headRefOid"])
     files: Any = node["files"]
-    # Listing a large PR's files costs REST calls, and one head has one line count.
-    loc = (known_loc or {}).get((ref, head_oid)) if files["pageInfo"]["hasNextPage"] else None
-    if loc is None:
+    # Listing a large PR's files costs REST calls, and one head has one line count and one list of files.
+    counted = (known or {}).get((ref, head_oid)) if files["pageInfo"]["hasNextPage"] else None
+    if counted is None:
         rows = fetch_all_files(repo, number) if files["pageInfo"]["hasNextPage"] else list(files["nodes"])
         loc = map_files_to_loc(int(node["additions"]), int(node["deletions"]), rows, list_loc_excluded(config))
+        counted = loc, tuple(str(row["path"]) for row in rows)
     commits = [n["commit"] for n in node["commits"]["nodes"]]
     last: Any = commits[-1] if commits else {}
     base_ref: Any = node.get("baseRef") or {}
@@ -305,7 +319,8 @@ def map_node_to_open_pr(node: Any, config: Config, known_loc: dict[tuple[str, st
         head_oid=head_oid,
         base=str(node["baseRefName"]),
         stack_parent=f"pr:{repo}#{parents[0]['number']}" if parents else None,
-        loc=loc,
+        loc=counted[0],
+        files=counted[1],
         checks=rollup.get("state"),
         requested=count_real_review_requests(node["reviewRequests"]["nodes"], config),
         approved_by=map_reviews_to_approvers(node["reviews"]["nodes"], config),
@@ -316,6 +331,7 @@ def map_node_to_open_pr(node: Any, config: Config, known_loc: dict[tuple[str, st
         usage_missing=find_missing_usage_section(strip_agent_prefix(str(node["title"])), str(node.get("body") or "")),
         depends_on=depends_on,
         named_prs=map_markdown_to_named_prs(body, repo, number),
+        related_prs=map_markdown_to_related_prs(body, repo, number),
         must_merge=map_pr_to_must_merge(config, repo, number, node, depends_on),
         preconditions=map_markdown_to_preconditions(body, repo, number),
         persist_sandbox=PERSIST_SANDBOX in body,
@@ -692,10 +708,14 @@ def map_files_to_loc(additions: int, deletions: int, files: list[Any], excluded:
     no document or review worktree."""
     loc = additions + deletions
     for row in files:
-        name = PurePosixPath(str(row["path"])).name.lower()
-        if any(fnmatch.fnmatch(name, pattern.lower()) for pattern in (*excluded, *DOCS_AND_ASSETS)):
+        if is_loc_excluded(str(row["path"]), excluded):
             loc -= int(row["additions"]) + int(row["deletions"])
     return max(loc, 0)
+
+
+def is_loc_excluded(path: str, excluded: tuple[str, ...]) -> bool:
+    name = PurePosixPath(path).name.lower()
+    return any(fnmatch.fnmatch(name, pattern.lower()) for pattern in (*excluded, *DOCS_AND_ASSETS))
 
 
 COMPARE_FILES_MAX = 300

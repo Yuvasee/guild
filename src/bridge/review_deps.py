@@ -25,6 +25,8 @@ _MD_LINK_RE = re.compile(r"\[[^\]\n]*\]\((https?://github\.com/[^)\s]+)\)")
 _BACK_REF_RE = re.compile(r"\b(?:that|the\s+code|the\s+above)\s+PR\b|\bthe\s+PR\s+above\b", re.I)
 _SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+|\n")
 _PARAGRAPH_END_RE = re.compile(r"\n\s*\n")
+_RELATED_LINE_RE = re.compile(r"^[\s>*+-]*(?:\*\*|__)?related(?:\*\*|__)?\s*:(?P<rest>.*)$", re.I | re.M)
+_INDEPENDENT_RE = re.compile(r"\bindependent\b", re.I)
 
 
 def map_markdown_to_dependency(body: str, repo: str, number: int) -> str | None:
@@ -126,9 +128,20 @@ def _map_text_to_blocks(text: str) -> list[str]:
 
 def map_markdown_to_named_prs(body: str, repo: str, number: int) -> tuple[str, ...]:
     """Every PR its body names, as owner/repo#N, whatever the words around it; never itself. A bare #N is the PR of
-    that number the body names in full elsewhere, else this repo's #N. Some may be issues: only GitHub can tell."""
+    that number the body names in full elsewhere, else this repo's #N. Some may be issues: only GitHub can tell.
+    A Related line that calls them independent names PRs it need not wait for."""
     text = _MD_LINK_RE.sub(r"\1", MD_HIDDEN_RE.sub("", body))
-    return tuple(sorted(_find_prs(text, repo, number, _map_text_to_full_refs(text, repo))))
+    full = _map_text_to_full_refs(text, repo)
+    waited = _RELATED_LINE_RE.sub(lambda m: "" if _INDEPENDENT_RE.search(m["rest"]) else m[0], text)
+    return tuple(sorted(_find_prs(waited, repo, number, full)))
+
+
+def map_markdown_to_related_prs(body: str, repo: str, number: int) -> tuple[str, ...]:
+    """The PRs its body's 'Related:' lines name, as owner/repo#N: the ones it says how it relates to."""
+    text = _MD_LINK_RE.sub(r"\1", MD_HIDDEN_RE.sub("", body))
+    full = _map_text_to_full_refs(text, repo)
+    lines = "\n".join(m["rest"] for m in _RELATED_LINE_RE.finditer(text))
+    return tuple(sorted(_find_prs(lines, repo, number, full)))
 
 
 def _map_text_to_full_refs(text: str, repo: str) -> dict[str, set[str]]:
