@@ -134,13 +134,14 @@ def map_markdown_to_named_prs(body: str, repo: str, number: int) -> tuple[str, .
     A Related line that calls them independent names PRs it need not wait for."""
     text = _MD_LINK_RE.sub(r"\1", MD_HIDDEN_RE.sub("", body))
     full = _map_text_to_full_refs(text, repo)
-    independent = {
-        pr
-        for m in _RELATED_LINE_RE.finditer(text)
-        if _INDEPENDENT_RE.search(m["rest"]) and not _UNDECIDED_RE.search(m["rest"])
-        for pr in _find_prs(m["rest"], repo, number, full)
-    }
-    return tuple(sorted(_find_prs(text, repo, number, full) - independent))
+    independent: set[str] = set()
+    undecided: set[str] = set()
+    for m in _RELATED_LINE_RE.finditer(text):
+        words = _EMPHASIS_RE.sub("", m["rest"])
+        settled = _INDEPENDENT_RE.search(words) and not _UNDECIDED_RE.search(words)
+        (independent if settled else undecided).update(pr.casefold() for pr in _find_prs(words, repo, number, full))
+    freed = independent - undecided
+    return tuple(sorted(pr for pr in _find_prs(text, repo, number, full) if pr.casefold() not in freed))
 
 
 def map_markdown_to_related_prs(body: str, repo: str, number: int) -> tuple[str, ...]:
