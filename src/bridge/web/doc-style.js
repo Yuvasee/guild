@@ -14,8 +14,15 @@
   function theme() {
     var bg = getComputedStyle(document.body).backgroundColor;
     if (clear(bg)) bg = getComputedStyle(root).backgroundColor;
-    if (clear(bg)) { root.classList.remove("ds-dark", "ds-light"); return; }
-    var m = bg.match(/[\d.]+/g), dark = 0.2126 * m[0] + 0.7152 * m[1] + 0.0722 * m[2] < 128;
+    var dark;
+    if (clear(bg)) {
+      // No background of its own: the canvas is white unless the page opted into a dark colour scheme.
+      var scheme = getComputedStyle(root).colorScheme || "";
+      dark = /dark/.test(scheme) && (!/light/.test(scheme) || !!(window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches));
+    } else {
+      var m = bg.match(/[\d.]+/g);
+      dark = 0.2126 * m[0] + 0.7152 * m[1] + 0.0722 * m[2] < 128;
+    }
     root.classList.toggle("ds-dark", dark);
     root.classList.toggle("ds-light", !dark);
   }
@@ -36,7 +43,7 @@
   var IDENT = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*(?:\(\.{0,3}\))?$/;
   function inlineCode() {
     [].forEach.call(document.querySelectorAll("code"), function (c) {
-      if (c.closest("pre,svg") || c.children.length || c.classList.contains("ds-path") || c.classList.contains("ds-ident")) return;
+      if (c.closest("pre,svg,.ds-band,.band") || c.children.length || c.classList.contains("ds-path") || c.classList.contains("ds-ident")) return;
       var t = c.textContent.trim();
       if ((PATH.test(t) && !/^\//.test(t)) || /^(~|\/(home|Users|tmp|var|etc|opt|private))\/\S+$/.test(t) || (/^\/\S+\.\w{1,5}$/.test(t) && PATH.test(t.slice(1))))
         c.classList.add("ds-path");
@@ -89,9 +96,9 @@
   var CALLOUT_KIND = { risk: "risk", warning: "risk", caution: "risk", danger: "risk", decision: "decision",
     decided: "decision", recommendation: "decision", "my pick": "decision", fixed: "ok", done: "ok" };
   function callouts() {
-    [].forEach.call(document.querySelectorAll(".callout"), function (el) {
+    [].forEach.call(document.querySelectorAll(".callout,.box"), function (el) {
       el.classList.add("ds-callout");
-      ["risk", "decision", "ok"].forEach(function (k) { if (el.classList.contains(k)) el.classList.add("ds-" + k); });
+      ["risk", "decision", "ok", "warn", "info"].forEach(function (k) { if (el.classList.contains(k)) el.classList.add("ds-" + k); });
     });
     [].forEach.call(document.querySelectorAll("p,blockquote>p:first-child"), function (p) {
       if (p.closest("li,td,th,summary,svg,.ds-callout,#bridge-doc-nav")) return;
@@ -190,6 +197,14 @@
     keep.forEach(function (el) { el.classList.add("ds-keep"); });
   }
 
+  // A doc that numbers its own h2s keeps its numbers, without a badge counting beside them.
+  function ownNumbers() {
+    var own = [].some.call(document.querySelectorAll("h2"), function (h) {
+      return /^\s*(\d{1,3}|[IVX]{1,5})[.):]\s/.test(h.textContent) || !!h.querySelector(".ds-num,.num");
+    });
+    root.classList.toggle("ds-own-num", own);
+  }
+
   function stickyTop() {
     var nav = document.getElementById("bridge-doc-nav");
     // The side bar is fixed too, but full height: only a bar across the top covers table headers.
@@ -200,7 +215,7 @@
   function start() {
     if (root.hasAttribute("data-ds-done")) return;
     root.setAttribute("data-ds-done", "");
-    theme(); borders(); links(); inlineCode(); chips(); callouts(); blocks(); stickyTop();
+    theme(); borders(); ownNumbers(); links(); inlineCode(); chips(); callouts(); blocks(); stickyTop();
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start); else start();
   window.addEventListener("load", function () { theme(); stickyTop(); });

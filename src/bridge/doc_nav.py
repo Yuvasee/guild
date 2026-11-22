@@ -12,6 +12,9 @@ TERMS_FLAG = "data-viewer-terms"
 MIN_HEADINGS = 2
 NAV_MAX_BYTES = 2_000_000
 _HEAD_END_RE = re.compile(r"</head\s*>", re.I)
+_WRITTEN_DOC_STYLE_RE = re.compile(
+    rf'<style id="{DOC_STYLE_ID}">(?:(?!</style>).)*</style><script>(?:(?!</script>).)*</script>', re.S
+)
 _INERT_TAGS = ("template", "textarea")
 _RAW_TAGS = ("script", "style")
 
@@ -316,8 +319,12 @@ def convert_doc_to_viewable(doc: bytes) -> bytes:
 
 
 def convert_page_to_styled(text: str) -> str | None:
-    """The page with the shared doc style right after its <body> tag; None when it already has it or cannot be read
-    as HTML."""
+    """The page with the current shared doc style: in place of the older copy an earlier registration wrote, or right
+    after its <body> tag; None when it already has the current one or cannot be read as HTML."""
+    current = build_doc_style()
+    written = _WRITTEN_DOC_STYLE_RE.search(text)
+    if written is not None:
+        return None if written.group() == current else text[: written.start()] + current + text[written.end() :]
     scanner = _DocScanner(text)
     try:
         scanner.feed(text)
@@ -327,7 +334,20 @@ def convert_page_to_styled(text: str) -> str | None:
     if DOC_STYLE_ID in scanner.ids:
         return None
     at = next((at for at in (scanner.after_body, scanner.after_head, scanner.after_doctype) if at is not None), 0)
-    return text[:at] + build_doc_style() + text[at:]
+    return text[:at] + current + text[at:]
+
+
+def convert_served_page_to_styled(page: bytes) -> bytes:
+    """A page as /p/ serves it: with the current shared doc style, so a style change reaches pages registered before
+    it; as is when it is too large to scan or not UTF-8."""
+    if len(page) > NAV_MAX_BYTES:
+        return page
+    try:
+        text = page.decode("utf-8")
+    except UnicodeDecodeError:
+        return page
+    styled = convert_page_to_styled(text)
+    return page if styled is None else styled.encode("utf-8")
 
 
 @cache

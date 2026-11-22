@@ -1,6 +1,6 @@
-/* Shared doc style, injected into every review doc and page. No borders or lines anywhere: rows and blocks are told
-   apart by background, every corner is rounded. Base rules sit in :where() so a doc's own colours and sizes win;
-   only the no-line rule is forced. */
+/* Shared doc style, injected into every review doc and page: a magazine look. No borders or lines anywhere: rows and
+   blocks are told apart by background. Base rules sit in :where() so a doc's own colours and sizes win; only the
+   no-line rule and square table cells are forced. Opt-in classes are listed in agent/skills/bridge/page-style.md. */
 :root{
 --ds-fg:#1f2328;--ds-muted:#59636e;--ds-zebra:rgba(110,118,129,.075);--ds-hover:rgba(11,90,216,.08);
 --ds-th:rgba(110,118,129,.15);--ds-tint:rgba(110,118,129,.085);
@@ -9,7 +9,12 @@
 --ds-red:#c4271c;--ds-green:#1a7f37;--ds-blue:#0b5ad8;--ds-violet:#8250df;--ds-amber:#9a6700;--ds-grey:#6e7781;
 --ds-k:#cf222e;--ds-s:#0a3069;--ds-c:#6e7781;--ds-n:#0550ae;--ds-f:#8250df;--ds-b:#953800;--ds-m:#6e7781;
 --ds-add:#116329;--ds-add-bg:#dafbe1;--ds-del:#82071e;--ds-del-bg:#ffebe9;--ds-hunk:#0550ae;--ds-hunk-bg:#ddf4ff;
---ds-sticky-top:0px}
+--ds-on-accent:#ffffff;--ds-th-solid:#e8edf4;--ds-table:rgba(110,118,129,.035);
+--ds-s1:#3b4cca;--ds-s2:#0b7c8a;--ds-s3:#8a35b0;--ds-s4:#c2255c;--ds-s5:#a85a00;
+--ds-h1-a:#e4eafb;--ds-h1-b:#dcf1f3;--ds-band-a:#1f2a6b;--ds-band-b:#0b6b78;--ds-on-band:#ffffff;
+--ds-band-tint:rgba(255,255,255,.18);--ds-band-chip:rgba(255,255,255,.92);--ds-band-chip-fg:#1b1d21;
+--ds-serif:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,ui-serif,serif;
+--ds-sans:system-ui,-apple-system,"Segoe UI",sans-serif;--ds-sticky-top:0px}
 @media (prefers-color-scheme:dark){:root:not(.ds-light):not(.bdv-light):not([data-theme="light"]){
 --ds-fg:#e6edf3;--ds-muted:#9198a1;--ds-zebra:rgba(110,118,129,.13);--ds-hover:rgba(110,168,254,.12);
 --ds-th:rgba(110,118,129,.26);--ds-tint:rgba(110,118,129,.15);
@@ -17,6 +22,10 @@
 --ds-path:#56d4dd;--ds-ident:#d2a8ff;--ds-focus:#6ea8fe;
 --ds-red:#ff7b72;--ds-green:#3fb950;--ds-blue:#58a6ff;--ds-violet:#bc8cff;--ds-amber:#d29922;--ds-grey:#9198a1;
 --ds-k:#ff7b72;--ds-s:#a5d6ff;--ds-c:#8b949e;--ds-n:#79c0ff;--ds-f:#d2a8ff;--ds-b:#ffa657;--ds-m:#8b949e;
+--ds-on-accent:#0d1117;--ds-th-solid:#262d38;--ds-table:rgba(110,118,129,.06);
+--ds-s1:#8b97ff;--ds-s2:#4fd1de;--ds-s3:#d58cf3;--ds-s4:#ff7aa6;--ds-s5:#f0a64a;
+--ds-h1-a:#1d2550;--ds-h1-b:#0f363c;--ds-band-a:#1a2155;--ds-band-b:#0a4f59;--ds-on-band:#ffffff;
+--ds-band-tint:rgba(255,255,255,.16);--ds-band-chip:rgba(255,255,255,.9);--ds-band-chip-fg:#1b1d21;
 --ds-add:#aff5b4;--ds-add-bg:#033a16;--ds-del:#ffdcd7;--ds-del-bg:#67060c;--ds-hunk:#79c0ff;--ds-hunk-bg:#0c2d6b}}
 :root.ds-dark,:root.bdv-dark:not(.ds-light),:root[data-theme="dark"]:not(.ds-light){
 --ds-fg:#e6edf3;--ds-muted:#9198a1;--ds-zebra:rgba(110,118,129,.13);--ds-hover:rgba(110,168,254,.12);
@@ -25,6 +34,10 @@
 --ds-path:#56d4dd;--ds-ident:#d2a8ff;--ds-focus:#6ea8fe;
 --ds-red:#ff7b72;--ds-green:#3fb950;--ds-blue:#58a6ff;--ds-violet:#bc8cff;--ds-amber:#d29922;--ds-grey:#9198a1;
 --ds-k:#ff7b72;--ds-s:#a5d6ff;--ds-c:#8b949e;--ds-n:#79c0ff;--ds-f:#d2a8ff;--ds-b:#ffa657;--ds-m:#8b949e;
+--ds-on-accent:#0d1117;--ds-th-solid:#262d38;--ds-table:rgba(110,118,129,.06);
+--ds-s1:#8b97ff;--ds-s2:#4fd1de;--ds-s3:#d58cf3;--ds-s4:#ff7aa6;--ds-s5:#f0a64a;
+--ds-h1-a:#1d2550;--ds-h1-b:#0f363c;--ds-band-a:#1a2155;--ds-band-b:#0a4f59;--ds-on-band:#ffffff;
+--ds-band-tint:rgba(255,255,255,.16);--ds-band-chip:rgba(255,255,255,.9);--ds-band-chip-fg:#1b1d21;
 --ds-add:#aff5b4;--ds-add-bg:#033a16;--ds-del:#ffdcd7;--ds-del-bg:#67060c;--ds-hunk:#79c0ff;--ds-hunk-bg:#0c2d6b}
 
 /* No lines. The script lifts .ds-measure for a moment to see which boxes had a border and tints them instead. */
@@ -40,11 +53,23 @@ outline-style:none!important}
 :where(img,iframe,video,canvas,figure,picture,embed,object){border-radius:10px}
 :where(input,select,textarea){background:var(--ds-tint);border-radius:8px;padding:.3em .6em}
 
-/* Headings: a clear ladder. */
-:where(h1){font-size:1.8em;line-height:1.2;font-weight:700;letter-spacing:-.015em;margin:.4em 0 .5em}
-:where(h2){font-weight:650;letter-spacing:-.01em}
-:where(h3){font-weight:600}
+/* Headings: h1 a tinted band, h2 numbered with a coloured badge (unless the doc numbers them itself), the paragraph
+   right after h1 a lead. Headings inside an opt-in band or section header are left to it. */
+:where(h1,h2,h3){font-family:var(--ds-serif)}
+:where(h1:not(.ds-band *,.band *)){font-size:1.9em;line-height:1.2;font-weight:700;letter-spacing:-.01em;
+margin:.4em 0 .6em;padding:.55em .8em;border-radius:16px;background:linear-gradient(120deg,var(--ds-h1-a),var(--ds-h1-b))}
+:where(h1:not(.ds-band *,.band *)+p,.ds-lead,.lead){font-family:var(--ds-serif);font-size:1.17em;line-height:1.55}
+:where(h2){font-size:1.5em;line-height:1.25;font-weight:700;letter-spacing:-.01em;margin:2em 0 .6em}
+:where(h3){font-size:1.18em;line-height:1.3;font-weight:650;margin:1.5em 0 .45em}
 :where(h4){font-size:1em;font-weight:600;color:var(--ds-muted);text-transform:uppercase;letter-spacing:.04em}
+:where(body){counter-reset:ds-h2}
+:where(:root:not(.ds-own-num) h2:not(.ds-sec h2,.sec h2,.ds-band h2,.band h2,header h2,nav h2,aside h2,details h2,
+table h2,li h2,dialog h2,.ds-cards h2,[data-ds-skip] h2,#bridge-doc-nav h2))::before{counter-increment:ds-h2;
+content:counter(ds-h2);display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;
+min-width:1.55em;height:1.55em;padding:0 .35em;margin-right:.5em;border-radius:.45em;vertical-align:.12em;
+font:700 max(.7em,11px)/1 var(--ds-sans);color:var(--ds-on-accent);background:var(--ds-h2c,var(--ds-s1))}
+:where(h2:nth-of-type(5n+2)){--ds-h2c:var(--ds-s2)}:where(h2:nth-of-type(5n+3)){--ds-h2c:var(--ds-s3)}
+:where(h2:nth-of-type(5n+4)){--ds-h2c:var(--ds-s4)}:where(h2:nth-of-type(5n+5)){--ds-h2c:var(--ds-s5)}
 
 /* Links: coloured, underlined, external ones marked. */
 :where(a[href]){color:var(--ds-link);text-decoration:underline;text-decoration-thickness:1px;text-underline-offset:.18em;
@@ -103,13 +128,54 @@ white-space:nowrap;vertical-align:.12em;letter-spacing:.03em;text-transform:uppe
 padding:10px 14px;margin:12px 0}
 .ds-callout>b:first-child,.ds-callout>strong:first-child{color:var(--c)}
 .ds-callout.ds-risk{--c:var(--ds-red)}
+.ds-callout.ds-warn{--c:var(--ds-amber)}
+.ds-callout.ds-info{--c:var(--ds-blue)}
 .ds-callout.ds-decision{--c:var(--ds-violet)}
 .ds-callout.ds-ok{--c:var(--ds-green)}
+.ds-callout .label,.ds-callout .ds-label,.ds-label{display:block;margin-bottom:.35em;color:var(--c,var(--ds-s1));
+font:700 .72rem/1.2 var(--ds-sans);letter-spacing:.14em;text-transform:uppercase}
 :where(blockquote){margin:12px 0;padding:8px 14px;background:var(--ds-tint);border-radius:12px;color:var(--ds-muted)}
 
-/* Tables: header band, zebra rows, hover; each row a rounded strip; the header stays in view. */
-:where(th){background:var(--ds-th);font-weight:600;text-align:left;position:sticky;top:var(--ds-sticky-top);z-index:1}
+/* Tables: one rounded block (clipped, so the header still sticks), rows told apart by alternating background, a
+   tinted header row that stays in view, hover. Cells are never rounded, whatever the doc's own CSS says. */
+:where(table){border-radius:12px;overflow:clip;background:var(--ds-table)}
+:where(th,td){padding:.5em .75em;vertical-align:top}
+:where(th){background:var(--ds-th-solid);font-weight:600;text-align:left;position:sticky;top:var(--ds-sticky-top);
+z-index:1}
 :where(tr:nth-child(even)>td){background:var(--ds-zebra)}
 :where(tbody tr:hover>td){background:var(--ds-hover)}
-:where(th:first-child,td:first-child){border-top-left-radius:8px;border-bottom-left-radius:8px}
-:where(th:last-child,td:last-child){border-top-right-radius:8px;border-bottom-right-radius:8px}
+:root:not(.ds-measure) :is(td,th):not([data-ds-skip] *){border-radius:0!important}
+
+/* Opt-in magazine parts. Each takes the ds- name and, where the reference pages used one, the short name too. */
+:where(.ds-kicker,.kicker){display:block;font:700 .72rem/1.2 var(--ds-sans);letter-spacing:.14em;
+text-transform:uppercase;color:var(--ds-sc,var(--ds-s1))}
+:where(.ds-band,.band){display:block;margin:0 0 24px;padding:30px 28px 24px;border-radius:20px;color:var(--ds-on-band);
+background:linear-gradient(120deg,var(--ds-band-a),var(--ds-band-b))}
+:where(.ds-band,.band) :where(h1){font:700 clamp(28px,5vw,42px)/1.12 var(--ds-serif);margin:10px 0;color:inherit}
+:where(.ds-band,.band) :where(p){font-family:var(--ds-serif);font-size:1.08em;opacity:.95;max-width:46em}
+:where(.ds-band,.band) :where(.ds-kicker,.kicker,a){color:inherit}
+:where(.ds-band,.band) :where(.ds-kicker,.kicker){opacity:.85}
+:where(.ds-band,.band) :where(code){background:var(--ds-band-tint);color:inherit}
+:where(.ds-chips,.chips){display:flex;flex-wrap:wrap;gap:6px;margin-top:14px}
+:where(.ds-chips,.chips)>:where(span,a){border-radius:999px;padding:3px 10px;font-size:.78em;background:var(--ds-band-tint)}
+.ds-band .ds-chip,.band .ds-chip{color:var(--ds-band-chip-fg);background:var(--ds-band-chip)}
+:where(.ds-sec,.sec){display:flex;align-items:center;gap:14px;margin:2.4em 0 .5em}
+:where(.ds-sec,.sec) :where(h2){margin:2px 0 0}
+:where(.ds-sec,.sec) :where(.ds-num,.num){flex:0 0 46px;height:46px;border-radius:14px;display:flex;align-items:center;
+justify-content:center;font:700 22px/1 var(--ds-serif);color:var(--ds-on-accent);background:var(--ds-sc,var(--ds-s1))}
+:where(.ds-pull,.pull){font:600 1.3em/1.45 var(--ds-serif);margin:1.2em 0;padding:.35em 0 .35em 1em;border-radius:12px;
+background:linear-gradient(90deg,color-mix(in srgb,var(--ds-sc,var(--ds-s1)) 14%,transparent),transparent 65%)}
+.ds-badge{--c:var(--ds-grey);display:inline-block;font:700 .75em/1.35 var(--ds-sans);padding:.12em .65em;
+border-radius:999px;white-space:nowrap;color:var(--c);background:color-mix(in srgb,var(--c) 15%,transparent)}
+.ds-badge.keep{--c:var(--ds-green)}.ds-badge.change{--c:var(--ds-amber)}.ds-badge.measure{--c:var(--ds-blue)}
+.ds-badge.risk{--c:var(--ds-red)}.ds-badge.dropped{text-decoration:line-through}
+.ds-stage-1{--ds-sc:var(--ds-s1)}.ds-stage-2{--ds-sc:var(--ds-s2)}.ds-stage-3{--ds-sc:var(--ds-s3)}
+.ds-stage-4{--ds-sc:var(--ds-s4)}.ds-stage-5{--ds-sc:var(--ds-s5)}
+:where(.ds-stage){border-radius:16px;padding:14px 16px;background:color-mix(in srgb,var(--ds-sc,var(--ds-s1)) 11%,transparent)}
+:where(.ds-cards){display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin:14px 0}
+:where(.ds-cards>*){margin:0;border-radius:14px;padding:12px 14px;background:var(--ds-tint)}
+:where(.ds-cards>.ds-stage){background:color-mix(in srgb,var(--ds-sc,var(--ds-s1)) 11%,transparent)}
+:where(.ds-figure){margin:18px 0;padding:14px;border-radius:16px;background:var(--ds-tint);overflow-x:auto}
+:where(.ds-figure svg){display:block;width:100%;height:auto}
+:where(.ds-figure figcaption){font-size:.85em;color:var(--ds-muted);margin-top:8px}
+:where(svg.ds-wide){min-width:760px}

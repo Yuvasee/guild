@@ -243,8 +243,10 @@ guild ask list [--owner X] [--all] [--json]; guild ask show N    # show has the 
 A page published as a claude.ai artifact lives on one Anthropic account; its source and its bridge link outlive it.
 Keep the source in `<pages folder>/<slug>/`, the folder your role names (never /tmp), register it with
 `bridge page add <slug> --title "…" --source <pages folder>/<slug> [--url <claude.ai artifact url>]`, and after
-each publish run `bridge page set-url <slug> <url>`. `page add` writes the shared doc style (code highlighting,
-link, path and evidence roles, no borders) into the page's HTML file once; publish the file after it, or republish. In pins (`bridge pin --link`), notes, feed posts and reports
+each publish run `bridge page set-url <slug> <url>`. `page add` writes the shared doc style (a magazine look:
+h1 band, numbered h2s, zebra tables, code highlighting, link, path and evidence roles, no borders) into the page's HTML
+file, and /p/<slug> serves the page with the current one; publish the file after it, or republish. Its opt-in classes
+(header band, section headers, callouts, badges, cards, diagrams) are in [page-style.md](page-style.md). In pins (`bridge pin --link`), notes, feed posts and reports
 refer to it as `http://127.0.0.1:8765/p/<slug>`, which redirects to the current artifact. Colleagues get the
 claude.ai link itself; then mark the page `bridge page share <slug>`. `bridge pages` lists them,
 `bridge page archive <slug>` retires one.

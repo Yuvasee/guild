@@ -9,7 +9,14 @@ from conftest import BridgeEnv, SpawnProcess, http_request
 from test_leads import Team
 from test_status_watchers import STUBS
 
-from bridge.doc_nav import DOC_STYLE_ID, VIEW_ID, build_doc_style, convert_doc_to_viewable
+from bridge.doc_nav import (
+    DOC_STYLE_ID,
+    NAV_MAX_BYTES,
+    VIEW_ID,
+    build_doc_style,
+    convert_doc_to_viewable,
+    convert_served_page_to_styled,
+)
 from bridge.guildview import map_body_to_sections, map_sections_to_card
 from bridge.pages import add_doc_style_to_page
 
@@ -97,6 +104,75 @@ def test_registering_a_page_inlines_the_style_once(tmp_path: Path) -> None:
     assert styled.startswith("<!doctype html><html><head><title>t</title></head><body class='x'><style id=")
     assert add_doc_style_to_page(str(tmp_path)) is None
     assert page.read_text() == styled and styled.count(f'id="{DOC_STYLE_ID}"') == 1
+
+
+OLD_STYLE = '<style id="bridge-doc-style">td{border-radius:8px}</style><script>var a = 1 < 2;</script>'
+
+
+def test_a_served_page_gets_the_current_style_in_place_of_an_older_copy_or_added() -> None:
+    old = f"<!doctype html><head><style>p{{}}</style></head><body>{OLD_STYLE}<p>hi</p><script>x()</script></body>"
+    served = convert_served_page_to_styled(old.encode()).decode()
+    assert served == old.replace(OLD_STYLE, build_doc_style())
+    assert convert_served_page_to_styled(served.encode()).decode() == served
+    bare = convert_served_page_to_styled(b"<!doctype html><body><p>hi</p></body>").decode()
+    assert bare == f"<!doctype html><body>{build_doc_style()}<p>hi</p></body>"
+    for as_is in ("\u043f".encode("cp1251"), b"<body>" + b"x" * NAV_MAX_BYTES):
+        assert convert_served_page_to_styled(as_is) == as_is
+
+
+def test_registering_a_page_again_replaces_an_older_copy_of_the_style(tmp_path: Path) -> None:
+    page = tmp_path / "index.html"
+    page.write_text(f"<!doctype html><body>{OLD_STYLE}<p>hi</p></body>")
+    assert add_doc_style_to_page(str(tmp_path)) == f"updated the shared doc style in {page}"
+    assert page.read_text() == f"<!doctype html><body>{build_doc_style()}<p>hi</p></body>"
+
+
+def test_tables_round_only_as_a_whole_and_every_colour_has_a_dark_value() -> None:
+    css = (WEB / "doc-style.css").read_text()
+    assert ":root:not(.ds-measure) :is(td,th):not([data-ds-skip] *){border-radius:0!important}" in css
+    assert ":where(table){border-radius:12px;overflow:clip;" in css, "clip, not hidden: hidden stops the sticky header"
+    rules = re.findall(r"([^{}]*)\{([^{}]*)\}", re.sub(r"/\*.*?\*/", "", css, flags=re.S))
+    rounded = [s for s, body in rules if re.search(r"\b(td|th)\b", s) and re.search(r"radius:(?!0)", body)]
+    assert not rounded, "no cell is rounded"
+    light, *darks = re.findall(r"\{(\s*--ds-fg:[^}]*)\}", css)
+    names = lambda block: set(re.findall(r"(--ds-[\w-]+):", block))  # noqa: E731
+    assert len(darks) == 2
+    colours = {n for n in names(light) if n not in ("--ds-serif", "--ds-sans", "--ds-sticky-top")}
+    assert all(colours <= names(dark) for dark in darks), colours - names(darks[0])
+
+
+OWN = """
+const toggled = {};
+const h2 = (text) => ({ textContent: text, querySelector: () => null });
+let heads = [];
+globalThis.window = globalThis;
+globalThis.addEventListener = () => {};
+globalThis.location = { href: "http://127.0.0.1/", host: "127.0.0.1" };
+globalThis.NodeFilter = { SHOW_TEXT: 4, FILTER_REJECT: 2, FILTER_ACCEPT: 1 };
+globalThis.getComputedStyle = () => ({ backgroundColor: "rgb(255, 255, 255)", colorScheme: "normal" });
+function run() {
+  globalThis.document = {
+    readyState: "complete",
+    documentElement: { hasAttribute: () => false, setAttribute: () => {}, style: { setProperty: () => {} },
+      classList: { add: () => {}, remove: () => {}, toggle: (name, on) => { toggled[name] = on; } } },
+    body: { getElementsByTagName: () => [] },
+    querySelectorAll: (selector) => selector === "h2" ? heads : [],
+    createTreeWalker: () => ({ nextNode: () => false }),
+    getElementById: () => null,
+  };
+  eval(SCRIPT);
+}
+heads = [h2("In short"), h2("2026 plan")];
+run();
+if (toggled["ds-own-num"] !== false) throw new Error("plain headings lost their badges");
+heads = [h2("1. In short"), h2("2. Plan")];
+run();
+if (toggled["ds-own-num"] !== true) throw new Error("self-numbered headings got badges too");
+"""
+
+
+def test_headings_the_doc_numbers_itself_get_no_badge(tmp_path: Path) -> None:
+    run_node(tmp_path, f"const SCRIPT = {json.dumps((WEB / 'doc-style.js').read_text())};\n{OWN}")
 
 
 def test_a_page_not_in_utf8_is_registered_unstyled(tmp_path: Path) -> None:

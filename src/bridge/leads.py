@@ -83,7 +83,8 @@ ROLE_TEMPLATE = "\n".join(
         "conflicts, none of {owner}'s comments open (settle them), each colleague's comment answered or its thread "
         "resolved (nits too), you judge it safe. Deploys need {owner}.",
         CLAUDE_RULE,
-        "- Pages: source in {pages_dir}/<slug>/, `bridge page add`; cite /p/<slug> (`bridge` skill).",
+        "- Pages: source in {pages_dir}/<slug>/, `bridge page add`; cite /p/<slug> (`bridge` skill). Pages get the "
+        "magazine style; its classes are in the skill's page-style.md.",
         "- Propose rules and memory changes to {assistant}; only {assistant} writes shared memory and shared rules.",
         "- Notes outlive this chat: `guild notes` (`--write`). Close idle workers with no next job: "
         "`guild worker close <tab>`; back only via `guild worker reopen <id>`.",

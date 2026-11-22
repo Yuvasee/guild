@@ -9,7 +9,7 @@ from datetime import datetime
 from importlib.resources import files
 from pathlib import Path
 
-from bridge.doc_nav import convert_page_to_styled
+from bridge.doc_nav import DOC_STYLE_ID, convert_page_to_styled
 from bridge.errors import UsageError
 
 SLUG_MAX_CHARS = 60
@@ -144,8 +144,8 @@ def add_page(
 
 
 def add_doc_style_to_page(source: str) -> str | None:
-    """Writes the shared doc style into the page's HTML file, so the published artifact carries it; what it did, or
-    None when the page already had the style."""
+    """Writes the current shared doc style into the page's HTML file, so the published artifact carries it; what it
+    did, or None when the page already had it."""
     html_file = find_html_file(Path(source))
     if html_file is None:
         raise PageError(f"{source} holds neither index.html nor a single .html file")
@@ -159,6 +159,7 @@ def add_doc_style_to_page(source: str) -> str | None:
     styled = convert_page_to_styled(text)
     if styled is None:
         return None
+    did = "updated the shared doc style in" if DOC_STYLE_ID in text else "added the shared doc style to"
     tmp = html_file.with_name(f".{html_file.name}.{os.getpid()}.tmp")
     try:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
@@ -169,7 +170,7 @@ def add_doc_style_to_page(source: str) -> str | None:
     except OSError as error:
         tmp.unlink(missing_ok=True)
         raise PageError(f"cannot write {html_file}: {error}") from error
-    return f"added the shared doc style to {html_file}"
+    return f"{did} {html_file}"
 
 
 def set_page_url(conn: sqlite3.Connection, slug: str, artifact_url: str, now: int) -> Page:

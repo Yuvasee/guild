@@ -10,6 +10,7 @@ from conftest import BridgeEnv, SpawnProcess, http_request
 from test_leads import Team
 
 from bridge.db import MIGRATIONS, connect
+from bridge.doc_nav import build_doc_style
 from bridge.pages import (
     PageError,
     add_page,
@@ -301,7 +302,9 @@ def test_routes_serve_the_local_page_and_its_folder_never_a_hosted_copy(
     (empty / "index.html").unlink()
 
     assert request_without_redirect(dashboard + "/p/live") == (302, "/p/live/", "")
-    assert request_without_redirect(dashboard + "/p/live/") == (200, None, "<!doctype html><title>x</title>")
+    served_page = "<!doctype html>" + build_doc_style() + "<title>x</title>"
+    assert request_without_redirect(dashboard + "/p/live/") == (200, None, served_page)
+    assert (source / "index.html").read_text() == "<!doctype html><title>x</title>", "the style is added as served"
     assert request_without_redirect(dashboard + "/p/live/img/a.svg") == (200, None, "<svg/>")
     for outside in ("/p/live/../secret.txt", "/p/live/%2e%2e/secret.txt", "/p/live/nope.png"):
         status, location, body = request_without_redirect(dashboard + outside)

@@ -68,6 +68,7 @@ from bridge.config import Config, db_path
 from bridge.context_watch import CONTEXT_EVERY_S, list_context_tabs, read_pane_screen, record_context_screens
 from bridge.db import connect, now_ms, transaction
 from bridge.disk import DISK_EVERY_S, DiskReading, map_reading_to_dict, measure_disk, read_disk, send_disk_notice
+from bridge.doc_nav import convert_served_page_to_styled
 from bridge.dream import ALL, map_dreamers_to_page, resolve_dreamers
 from bridge.drivers import Link, load_drivers, scan_transcripts
 from bridge.enrich import collect_watched_refs, enrich_due, load_enrichment, provider_freshness
@@ -324,7 +325,7 @@ class DashboardState:
         if html_file is None:
             self._tell_owner_of_sourceless_page(page)
             return 404, None, _HTML, map_sourceless_page_to_html(page).encode()
-        return 200, None, _HTML, html_file.read_bytes()
+        return 200, None, _HTML, convert_served_page_to_styled(html_file.read_bytes())
 
     def _tell_owner_of_sourceless_page(self, page: Page) -> None:
         """Whoever opened it saw nothing, so its owner hears so, once per page per half hour."""
