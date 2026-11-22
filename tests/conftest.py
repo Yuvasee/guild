@@ -282,10 +282,13 @@ def dashboard(bridge_env: BridgeEnv) -> Generator[str]:
     port = free_port()
     server = subprocess.Popen([str(VENV_BIN / "bridge"), "serve", "--port", str(port)], env=bridge_env.env)
     base = f"http://127.0.0.1:{port}"
-    wait_up(base)
-    yield base
-    server.terminate()
-    server.wait()
+    # A server slow to come up fails the setup, and without this it outlives the run.
+    try:
+        wait_up(base)
+        yield base
+    finally:
+        server.terminate()
+        server.wait()
 
 
 def http_request(
