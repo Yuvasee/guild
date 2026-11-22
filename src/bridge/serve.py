@@ -279,6 +279,7 @@ class DashboardState:
         self._wake = WakeWatch()
         self._outages = OutageNotices()
         self._unpublished_told: dict[str, int] = {}
+        self._weekly_failure: str | None = None
         self._github: Callable[[list[str]], str] = run_gh
 
     def snapshot(self) -> dict[str, object]:
@@ -426,18 +427,23 @@ class DashboardState:
                 # Any failure, not just the expected ones: an escaped exception would end signal posts until restart.
                 print(f"signal posts failed: {exc}", flush=True)
                 log_error("signal posts", traceback.format_exc())
-            try:
-                self.send_weekly_task_once(now_ms())
-            except Exception as exc:
-                # Apart from signal posts: a missing task file must not stop them.
-                print(f"weekly task failed: {exc}", flush=True)
-                log_error("weekly task", traceback.format_exc())
+            self.send_weekly_task_once(now_ms())
             time.sleep(SIGNALS_EVERY_S)
 
     def send_weekly_task_once(self, now: int) -> None:
-        """On its day with nobody running `guild day`; signal_posts keeps it to one send per week."""
-        with self._connection() as conn, transaction(conn):
-            weekly = send_weekly_task(conn, self.config, now)
+        """On its day with nobody running `guild day`; signal_posts keeps it to one send per week. A failure is told
+        once per reason, not every minute it repeats."""
+        try:
+            with self._connection() as conn, transaction(conn):
+                weekly = send_weekly_task(conn, self.config, now)
+        except Exception as exc:
+            # Apart from signal posts: a missing or refused task file must not stop them.
+            if str(exc) != self._weekly_failure:
+                print(f"weekly task failed: {exc}", flush=True)
+                log_error("weekly task", traceback.format_exc())
+            self._weekly_failure = str(exc)
+            return
+        self._weekly_failure = None
         if weekly is None:
             return
         line, sent = weekly

@@ -140,7 +140,7 @@ from bridge.stats import convert_week_to_lines
 from bridge.status_watchers import read_watcher
 from bridge.tabinput import is_tab_selected, run_agterm, type_when_idle
 from bridge.watcher import find_conversation_tab, map_tree_to_parent, read_screen_tail, read_tree
-from bridge.weekly_task import send_weekly_task
+from bridge.weekly_task import WeeklyTaskRefused, send_weekly_task
 from bridge.workers import (
     WORKER_CAP,
     ChildTab,
@@ -589,7 +589,12 @@ def cmd_stats_week(args: argparse.Namespace, conn: sqlite3.Connection, config: C
 def cmd_day(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
     with transaction(conn):
         record_owner_on(conn, "guild day", now_ms())
-        weekly = send_weekly_task(conn, config, now_ms())
+    try:
+        with transaction(conn):
+            weekly = send_weekly_task(conn, config, now_ms())
+    except WeeklyTaskRefused as exc:
+        print(exc)
+        weekly = None
     if weekly:
         print(weekly[0])
     loads = assess_leads(conn, config, now_ms(), read_tree(config))

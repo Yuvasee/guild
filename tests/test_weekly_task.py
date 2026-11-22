@@ -1,3 +1,4 @@
+import argparse
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -7,6 +8,7 @@ from unittest import mock
 import pytest
 from test_reviews import CONFIG, add_session
 
+from bridge.cli_guild import cmd_day
 from bridge.config import map_toml_to_config
 from bridge.db import connect, transaction
 from bridge.serve import DashboardState
@@ -101,3 +103,43 @@ def test_the_weekday_must_be_0_to_6() -> None:
     for bad in (7, -1, True, "sunday"):
         with pytest.raises(ValueError, match="weekly_task_day"):
             map_toml_to_config({"weekly_task_day": bad})
+
+
+def test_bridge_serve_says_once_why_a_refused_weekly_task_was_not_sent(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    conn, config = setup(tmp_path)
+    (tmp_path / "task.md").write_text("Write the dreams analysis for {week} on /p/dreams-{week}.\n")
+    conn.close()
+    state = DashboardState(config)
+    logged: list[str] = []
+
+    def log_error(context: str, detail: str) -> None:
+        logged.append(detail)
+
+    with (
+        mock.patch("bridge.serve.db_path", return_value=tmp_path / "t.db"),
+        mock.patch("bridge.serve.spawn_typed_delivery"),
+        mock.patch("bridge.serve.log_error", log_error),
+    ):
+        for minute in range(3):
+            state.send_weekly_task_once(SUNDAY_9 + minute * 60_000)
+    lines = [line for line in capsys.readouterr().out.splitlines() if "weekly task" in line]
+    assert len(lines) == 1, lines
+    assert "/p/dreams-2026-w47 opens nothing" in lines[0] and str(tmp_path / "task.md") in lines[0]
+    assert len(logged) == 1
+    assert bodies(connect(tmp_path / "t.db")) == []
+
+
+def test_guild_day_prints_why_the_weekly_task_was_not_sent(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    conn, config = setup(tmp_path)
+    (tmp_path / "task.md").write_text("Write the dreams analysis on /p/dreams-w47.\n")
+    with (
+        mock.patch("bridge.cli_guild.now_ms", return_value=SUNDAY_9),
+        mock.patch("bridge.cli_guild.read_tree", return_value=None),
+        mock.patch("bridge.cli_guild.assess_leads", return_value=[]),
+    ):
+        assert cmd_day(argparse.Namespace(), conn, config) == 0
+    assert "/p/dreams-w47 opens nothing" in capsys.readouterr().out
+    assert bodies(conn) == []
+    assert conn.execute("SELECT 1 FROM signal_posts").fetchone() is None

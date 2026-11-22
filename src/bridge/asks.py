@@ -655,18 +655,23 @@ def send_from_bridge(
 
 
 def send_bodies_from_bridge(
-    conn: sqlite3.Connection, config: Config, to: str, text: str, now: int
+    conn: sqlite3.Connection, config: Config, to: str, text: str, now: int, refused_raises: bool = False
 ) -> list[tuple[str, int, Recipient]]:
-    """Split to fit a message; a message to the assistant is marked so that it is typed into its tab."""
+    """Split to fit a message; a message to the assistant is marked so that it is typed into its tab. An unknown
+    recipient or a refused body is skipped, or with refused_raises raised."""
     try:
         recipient = resolve_handle(conn, to)
     except AddressError:
+        if refused_raises:
+            raise
         return []
     sent: list[tuple[str, int, Recipient]] = []
     for body in split_text_to_bodies(text, BODY_MAX_CHARS):
         try:
             result = send_message(conn, Party(SYSTEM_CONVERSATION, "bridge"), [recipient], "info", body, now)
         except MessageStateError:
+            if refused_raises:
+                raise
             continue
         if to == config.assistant_handle:
             conn.execute("UPDATE messages SET post_type = ? WHERE id = ?", (TO_ASSISTANT, result.message_id))
