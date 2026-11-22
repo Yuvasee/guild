@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 from typing import cast
 
-from bridge.agent_prefix import CLAUDE_PREFIX, TITLE_RULE, is_prefixed
+from bridge.agent_prefix import CLAUDE_PREFIX, TITLE_RULE, is_prefixed, strip_agent_prefix
 from bridge.config import Config
 from bridge.enrich import read_linear_key
 from bridge.issue_sync import LinearApi, LinearError, LinearIssue, find_team_state
@@ -24,7 +24,7 @@ query($id: String!) {
   }
 }
 """
-_ISSUE_ID = "query($id: String!) { issue(id: $id) { id identifier } }"
+_ISSUE_ID = "query($id: String!) { issue(id: $id) { id identifier comments(first: 1) { nodes { id } } } }"
 _TEAM = "query($key: String!) { teams(filter: { key: { eq: $key } }) { nodes { id } } }"
 _PROJECT = """
 query($name: String!, $team: String!) {
@@ -146,7 +146,8 @@ def create_issue(api: LinearApi, args: argparse.Namespace, config: Config) -> li
             raise LinearCliError(f"{team}'s projects named '{args.project}': {found}; give its exact name")
         issue_input["projectId"] = projects[0].get("id")
     if args.description is not None:
-        issue_input["description"] = _with_prefix(_read_text(args.description))
+        # The owner's rule: a tracker description carries no agent prefix (GitHub bodies keep theirs).
+        issue_input["description"] = strip_agent_prefix(_read_text(args.description).strip())
     created = _get(api.query(_CREATE, {"input": issue_input}), "issueCreate")
     if _get(created, "success") is not True:
         raise LinearCliError("Linear did not confirm the new issue")
@@ -159,8 +160,10 @@ def comment_issue(api: LinearApi, args: argparse.Namespace, config: Config) -> l
     body = _read_text(args.body)
     if not body.strip():
         raise LinearCliError("the comment is empty")
-    issue_id = _find_issue_id(api, _read_key(args.key))
-    created = _get(api.query(_COMMENT, {"issueId": issue_id, "body": _with_prefix(body)}), "commentCreate")
+    issue_id, has_comments = _find_issue(api, _read_key(args.key))
+    # An issue's first comment reads like part of its description, so it carries no prefix either; replies do.
+    text = _with_prefix(body) if has_comments else strip_agent_prefix(body.strip())
+    created = _get(api.query(_COMMENT, {"issueId": issue_id, "body": text}), "commentCreate")
     if _get(created, "success") is not True:
         raise LinearCliError("Linear did not confirm the comment")
     return [f"commented: {_get(created, 'comment', 'url')}"]
@@ -182,12 +185,13 @@ def move_issue(api: LinearApi, args: argparse.Namespace, config: Config) -> list
     return [f"{key}: {found.state.name} -> {api.move(found.id, target.id)}"]
 
 
-def _find_issue_id(api: LinearApi, key: str) -> str:
+def _find_issue(api: LinearApi, key: str) -> tuple[str, bool]:
+    """The issue's id, and whether it has a comment yet."""
     issue = _get(api.query(_ISSUE_ID, {"id": key}), "issue")
     issue_id = _get(issue, "id")
     if not isinstance(issue_id, str):
         raise LinearCliError(f"{key}: not found or no access")
-    return issue_id
+    return issue_id, bool(_nodes(_get(issue, "comments")))
 
 
 def _read_key(raw: object) -> str:

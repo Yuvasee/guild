@@ -3,8 +3,8 @@ import re
 ROBOT = "🤖"
 CLAUDE_PREFIX = f"{ROBOT} Claude:"
 TITLE_RULE = (
-    f"'{CLAUDE_PREFIX}' goes only at the start of comment and description bodies on GitHub and Linear, never at the "
-    "start of a PR, issue or commit title"
+    f"'{CLAUDE_PREFIX}' goes only at the start of comment and description bodies on GitHub and of replies on Linear "
+    "(not a Linear description or an issue's first comment), never at the start of a PR, issue or commit title"
 )
 LINEAR_ISSUE_TOOLS = ("mcp__claude_ai_Linear__save_issue",)
 _LEADING_PREFIX_RE = re.compile(rf"^\s*{ROBOT}(?:\s*Claude\s*:)?\s*")

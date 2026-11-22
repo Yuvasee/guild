@@ -1308,7 +1308,7 @@ def test_guild_worker_stores_the_parent_link_before_any_reconcile(
         rows = conn.execute("SELECT agterm_session, parent_session FROM tab_parents").fetchall()
     assert [tuple(r) for r in rows] == [("TAB-W", "TAB-A")]
     brief = next((bridge_env.state_dir / "worker-briefs").iterdir()).read_text()
-    assert "you write to colleagues starts with '🤖 Claude:'; a PR, issue or commit title never" in brief
+    assert "you write to colleagues starts with '🤖 Claude:'; on Linear only a reply does" in brief
     assert "not Boris, Aide, worker, lead, Guild, bridge." in brief
     assert "through Aide" in brief and "never a sub-issue" in brief
     assert "No browser use" in brief

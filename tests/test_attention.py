@@ -449,7 +449,8 @@ def test_lead_role_says_the_urgent_criteria_and_stays_short() -> None:
 
 def test_lead_role_says_the_claude_prefix_and_the_issue_rule() -> None:
     role = render_role()
-    assert "On GitHub and Linear, comments and descriptions start with '🤖 Claude:', never titles (nor Slack)" in role
+    assert "On GitHub, comments and descriptions start with '🤖 Claude:'; on Linear only replies do" in role
+    assert "never titles (nor Slack)" in role
     assert "name nothing of ours (no lead's or aide's name" in role
     assert "search finds no duplicate; never a sub-issue" in role and "only after Sam confirms through aide" in role
     assert "approves the answers" not in role

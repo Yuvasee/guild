@@ -164,8 +164,8 @@ A tab enrolled with `guild lead add` is a named team lead. Its role, scope and n
   review org must name an issue in its branch, title or body: the shell guard refuses a `gh pr create` that names none.
 - Move an issue as you act on it: In Progress at start; In Review only at the PR that closes it, Done when that PR
   merges. A key in a branch or title means In Progress.
-- On GitHub and Linear, each comment and description body you write to colleagues starts with '🤖 Claude:'; a PR, issue
-  or commit title never does (the shell guard refuses one), and on Slack nothing does. On all three it names nothing of
+- On GitHub, each comment and description body you write to colleagues starts with '🤖 Claude:'; on Linear only a
+  reply does, not a description or an issue's first comment; a PR, issue or commit title never does (the shell guard refuses one), and on Slack nothing does. On all three it names nothing of
   ours: no lead's or the assistant's name, and not worker, lead, Guild or bridge.
 - Don't keep idle workers who have no plans for a new job or whose job is clearly done. `guild worker close <tab>` (name
   or id) closes your own nested tab and prints its id; `guild worker closed` lists closed workers. It

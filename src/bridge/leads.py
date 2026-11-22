@@ -40,7 +40,8 @@ DOMAIN_MAX_CHARS = 64
 
 INTERNAL_WORDS = ("worker", "lead", "Guild", "bridge")
 CLAUDE_RULE = (
-    f"- On GitHub and Linear, comments and descriptions start with '{CLAUDE_PREFIX}', never titles (nor Slack); "
+    f"- On GitHub, comments and descriptions start with '{CLAUDE_PREFIX}'; on Linear only replies do (not a "
+    f"description or an issue's first comment); never titles (nor Slack); "
     f"name nothing of ours (no lead's or {{assistant}}'s name, nor {', '.join(INTERNAL_WORDS)})."
 )
 LINEAR_CREATE_RULE = (
@@ -201,8 +202,9 @@ def map_names_to_brief_rules(names: list[str], config: Config) -> str:
     """The rules every worker starts with, its own names spelled out."""
     assistant, owner = config.assistant_handle.capitalize(), config.owner_name
     claude = (
-        f"On GitHub and Linear, each comment and description body you write to colleagues starts with "
-        f"'{CLAUDE_PREFIX}'; a PR, issue or commit title never does, nor anything on Slack. "
+        f"On GitHub, each comment and description body you write to colleagues starts with '{CLAUDE_PREFIX}'; on "
+        f"Linear only a reply does, not a description or an issue's first comment; a PR, issue or commit title never "
+        f"does, nor anything on Slack. "
         f"On all three it names nothing of ours: not {', '.join(names)}."
     )
     grooming = read_overlay(config, "grooming", owner=owner, assistant=assistant)

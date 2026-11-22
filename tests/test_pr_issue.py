@@ -279,7 +279,7 @@ def test_search_prints_one_line_per_issue_and_filters_by_team() -> None:
     assert "filter" not in empty.calls[0][1]
 
 
-def test_create_finds_team_and_project_and_prefixes_the_description(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_create_finds_team_and_project_and_keeps_the_description_unprefixed(monkeypatch: pytest.MonkeyPatch) -> None:
     api = FakeLinear(
         {
             "teams(": {"teams": {"nodes": [{"id": "team-1"}]}},
@@ -300,7 +300,7 @@ def test_create_finds_team_and_project_and_prefixes_the_description(monkeypatch:
     sent = api.calls[-1][1]["input"]
     assert sent == {
         "teamId": "team-1", "title": "Export fails", "projectId": "proj-1",
-        "description": "🤖 Claude: Export fails on empty rows.",
+        "description": "Export fails on empty rows.",
     }  # fmt: skip
     with pytest.raises(LinearCliError, match="never at the start of a PR, issue or commit title"):
         create_issue(api, args(team="ACME", title="🤖 Claude: x", project=None, description=None), CONFIG)  # type: ignore[arg-type]
@@ -309,17 +309,19 @@ def test_create_finds_team_and_project_and_prefixes_the_description(monkeypatch:
         create_issue(none, args(team="nope", title="x", project=None, description=None), CONFIG)  # type: ignore[arg-type]
 
 
-def test_comment_resolves_the_issue_and_keeps_an_existing_prefix() -> None:
-    api = FakeLinear(
-        {
-            "issue(id": {"issue": {"id": "id-1", "identifier": "ACME-12"}},
-            "commentCreate": {"commentCreate": {"success": True, "comment": {"url": "https://t/c1"}}},
-        }
-    )
-    lines = comment_issue(api, args(key="acme-12", body="🤖 Claude: Done."), CONFIG)  # type: ignore[arg-type]
+def test_an_issues_first_comment_has_no_prefix_and_a_reply_gets_one() -> None:
+    created = {"commentCreate": {"commentCreate": {"success": True, "comment": {"url": "https://t/c1"}}}}
+    issue = {"id": "id-1", "identifier": "ACME-12"}
+    first = FakeLinear({"issue(id": {"issue": {**issue, "comments": {"nodes": []}}}, **created})
+    body = "🤖 Claude: Scope is the export only."
+    lines = comment_issue(first, args(key="acme-12", body=body), CONFIG)  # type: ignore[arg-type]
     assert lines == ["commented: https://t/c1"]
-    assert api.calls[0][1] == {"id": "ACME-12"}
-    assert api.calls[1][1] == {"issueId": "id-1", "body": "🤖 Claude: Done."}
+    assert first.calls[0][1] == {"id": "ACME-12"}
+    assert first.calls[1][1] == {"issueId": "id-1", "body": "Scope is the export only."}
+    replied = FakeLinear({"issue(id": {"issue": {**issue, "comments": {"nodes": [{"id": "c0"}]}}}, **created})
+    comment_issue(replied, args(key="acme-12", body="Done."), CONFIG)  # type: ignore[arg-type]
+    assert replied.calls[1][1] == {"issueId": "id-1", "body": "🤖 Claude: Done."}
+    api = first
     with pytest.raises(LinearCliError, match="is not an issue key"):
         comment_issue(api, args(key="12", body="x"), CONFIG)  # type: ignore[arg-type]
 

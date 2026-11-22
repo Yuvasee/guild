@@ -139,7 +139,7 @@ bridge skill:
 |---|---|---|
 | Large PRs name their reviews before the owner's queue | a review doc at 100+ lines with a Reviews section; no review is required by name | `required_reviews` and `review_bot_name` in config, the `brief-reviews` and `lead-reviews` texts (below), `REVIEW_LARGE_LOC` in `src/bridge/review_worktree.py` |
 | How a large PR's review doc looks | sections, folds, provenance marks | `agent/skills/bridge/review-doc.md` |
-| What agents write on GitHub and the tracker starts with a prefix, and names no internal session | `🤖 Claude:`; leads' names and the words worker, lead, Guild, bridge | `CLAUDE_PREFIX` in `src/bridge/agent_prefix.py`, `INTERNAL_WORDS` in `src/bridge/leads.py` |
+| What agents write on GitHub, and their replies on the tracker, start with a prefix (a tracker description or an issue's first comment does not); none names an internal session | `🤖 Claude:`; leads' names and the words worker, lead, Guild, bridge | `CLAUDE_PREFIX` in `src/bridge/agent_prefix.py`, `INTERNAL_WORDS` in `src/bridge/leads.py` |
 | Tab, workspace and worker names are in English | non-ASCII letters are refused | `is_english_name` in `src/bridge/registry.py` |
 
 Bridge tells agents' comments from the owner's on a shared GitHub account by that prefix, so keep one if agents post
