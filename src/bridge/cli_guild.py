@@ -591,7 +591,7 @@ def cmd_day(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) 
         record_owner_on(conn, "guild day", now_ms())
         weekly = send_weekly_task(conn, config, now_ms())
     if weekly:
-        print(weekly)
+        print(weekly[0])
     loads = assess_leads(conn, config, now_ms(), read_tree(config))
     print(convert_loads_to_team_line(loads))
     for load in loads:

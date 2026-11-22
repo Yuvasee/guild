@@ -131,8 +131,8 @@ class Config:
     work_days: tuple[int, ...] = (0, 1, 2, 3, 4)
     """Working days as datetime.weekday() counts them: Monday is 0."""
     weekly_task_day: int | None = None
-    """The weekday (Monday is 0) whose `guild day` sends the weekly task, or the next day's when that one did not
-    run; None sends nothing."""
+    """The weekday (Monday is 0) the weekly task is sent on, from 09:00, by bridge serve or `guild day`, or the next
+    day when that one sent none; None sends nothing."""
     weekly_task_to: str = ""
     """The lead or the assistant the weekly task goes to."""
     weekly_task_file: str = ""

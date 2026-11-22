@@ -2,12 +2,14 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import pytest
 from test_reviews import CONFIG, add_session
 
 from bridge.config import map_toml_to_config
 from bridge.db import connect, transaction
+from bridge.serve import DashboardState
 from bridge.weekly_task import send_weekly_task
 
 SUNDAY_9 = int(datetime.fromisoformat("2026-11-22T09:00:00+00:00").timestamp() * 1000)
@@ -25,7 +27,8 @@ def setup(tmp_path: Path) -> tuple[Any, Any]:
 
 def sent(conn: Any, config: Any, now: int) -> str | None:
     with transaction(conn):
-        return send_weekly_task(conn, config, now)
+        weekly = send_weekly_task(conn, config, now)
+    return weekly[0] if weekly else None
 
 
 def bodies(conn: Any) -> list[str]:
@@ -48,6 +51,43 @@ def test_a_sunday_with_no_morning_report_sends_it_the_next_day_and_never_later(t
     (tmp_path / "b").mkdir()
     other, config = setup(tmp_path / "b")
     assert sent(other, config, SUNDAY_9 + 2 * DAY) is None
+
+
+def test_before_nine_in_the_work_timezone_it_waits_for_the_morning(tmp_path: Path) -> None:
+    conn, config = setup(tmp_path)
+    assert sent(conn, config, SUNDAY_9 - 60_000) is None, "08:59 on its day"
+    assert sent(conn, replace(config, work_timezone="Asia/Tokyo"), SUNDAY_9 - 9 * 3_600_000) == (
+        "weekly task for 2026-w47 sent to lead-x"
+    ), "09:00 in Tokyo is 00:00 UTC"
+    assert bodies(conn) == ["Write the dreams analysis for 2026-w47."]
+
+
+def test_a_monday_catch_up_also_waits_for_nine(tmp_path: Path) -> None:
+    conn, config = setup(tmp_path)
+    assert sent(conn, config, SUNDAY_9 + DAY - 3_600_000) is None, "Monday 08:00"
+    assert sent(conn, config, SUNDAY_9 + DAY) == "weekly task for 2026-w47 sent to lead-x"
+
+
+def test_bridge_serve_sends_it_on_its_day_with_no_guild_day(tmp_path: Path) -> None:
+    conn, config = setup(tmp_path)
+    conn.close()
+    state = DashboardState(config)
+    typed: list[int] = []
+
+    def type_into_tab(message_id: int, recipients: object) -> None:
+        typed.append(message_id)
+
+    with (
+        mock.patch("bridge.serve.db_path", return_value=tmp_path / "t.db"),
+        mock.patch("bridge.serve.spawn_typed_delivery", type_into_tab),
+    ):
+        state.send_weekly_task_once(SUNDAY_9 - 60_000)
+        assert typed == []
+        state.send_weekly_task_once(SUNDAY_9)
+        state.send_weekly_task_once(SUNDAY_9 + 60_000)
+    conn = connect(tmp_path / "t.db")
+    assert bodies(conn) == ["Write the dreams analysis for 2026-w47."]
+    assert typed == [r[0] for r in conn.execute("SELECT id FROM messages")]
 
 
 def test_with_no_weekday_configured_nothing_is_sent(tmp_path: Path) -> None:
