@@ -10,8 +10,6 @@ from bridge.agent_prefix import CLAUDE_PREFIX
 from bridge.config import Config, read_overlay, state_dir
 from bridge.inject import cut_to_last_chars, measure_chars
 from bridge.registry import (
-    LEAD_LABEL_MAX_CHARS,
-    LEAD_LABEL_MAX_WORDS,
     HandleTakenError,
     find_lead_tab_title,
     is_english_name,
@@ -36,6 +34,7 @@ SCOPE_MAX_CHARS = 500
 REFS_MAX = 10
 REF_MAX_CHARS = 64
 LABEL_MAX_CHARS = 40
+WORK_NAME_MAX_CHARS = 80
 WORK_ABOUT_MAX_CHARS = 200
 DOMAIN_MAX_CHARS = 64
 
@@ -70,8 +69,8 @@ ROLE_TEMPLATE = "\n".join(
         "{owner}'s screen is shared.",
         "- `{assistant}, relaying {user}'s answer` (`guild answer`) is {owner}'s OK for that question only, prod "
         "writes too.",
-        '- Main chunks on the page: `guild work set "<title>" <refs> --about "<what and why>"` at start, '
-        "`guild work done` at end. The title is a short project name (at most 3 words) and becomes your tab's label.",
+        '- Main chunks on the page: `guild work set "<chunk>" <refs> --about "<what and why>"` at start, '
+        "`guild work done` at end.",
         "- Typing in your tab is {owner}: answer there; send {assistant} one line per decision.",
         "- {owner}'s asks (typed here or relayed): `guild ask add` at once, verbatim; to verified with evidence of "
         "what {owner} sees.",
@@ -252,16 +251,8 @@ def set_lead_work(
 ) -> None:
     """Refs and about replace the chunk's when given; a chunk finished earlier comes back when set again."""
     clean = " ".join(name.split())
-    # A chunk named before titles were short can still be updated or reopened.
-    known = conn.execute("SELECT 1 FROM lead_work WHERE lead = ? AND name = ?", (lead, clean)).fetchone()
-    if not known and (not clean or len(clean.split()) > LEAD_LABEL_MAX_WORDS or len(clean) > LEAD_LABEL_MAX_CHARS):
-        raise LeadError(
-            f"a chunk's title is a short project name, at most {LEAD_LABEL_MAX_WORDS} words and "
-            f"{LEAD_LABEL_MAX_CHARS} characters, e.g. 'Nightly export'; it becomes your tab's label. "
-            'Put the longer text in --about "..."'
-        )
-    if not known and not is_english_name(clean):
-        raise LeadError("a chunk's title is in English, since it names a tab")
+    if not clean or len(clean) > WORK_NAME_MAX_CHARS:
+        raise LeadError(f"a chunk's name is one line of 1 to {WORK_NAME_MAX_CHARS} characters")
     about = " ".join((about or "").split()) or None
     if about is not None and len(about) > WORK_ABOUT_MAX_CHARS:
         raise LeadError(f"--about is one line of at most {WORK_ABOUT_MAX_CHARS} characters")
@@ -646,11 +637,8 @@ def append_handover(name: str, from_handle: str, stamp: str, text: str) -> None:
         handovers.write(f"## From {from_handle}, {stamp}\n\n{text.strip()}\n\n")
 
 
-def sync_lead_terminal(
-    conn: sqlite3.Connection, config: Config, lead: Lead, agterm_session: str, at_ms: int
-) -> list[str]:
-    title = find_lead_tab_title(conn, lead.name, at_ms)
-    return sync_team_tab(config, agterm_session, title, lead.tint, lead.scope)
+def sync_lead_terminal(conn: sqlite3.Connection, config: Config, lead: Lead, agterm_session: str) -> list[str]:
+    return sync_team_tab(config, agterm_session, find_lead_tab_title(conn, lead.name), lead.tint, lead.scope)
 
 
 def sync_assistant_terminal(config: Config, agterm_session: str) -> list[str]:

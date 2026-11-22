@@ -385,7 +385,7 @@ def reconcile(conn: sqlite3.Connection, config: Config, at_ms: int) -> None:
 
 def sync_tabs(conn: sqlite3.Connection, config: Config, at_ms: int) -> None:
     tabs = name_tabs_after_sessions(conn, config, read_agterm_tabs(config.agtermctl))
-    tabs = name_lead_tabs_after_work(conn, config, tabs, at_ms)
+    tabs = name_lead_tabs_after_labels(conn, config, tabs, at_ms)
     with transaction(conn):
         for surface, tab in tabs.items():
             conn.execute(
@@ -601,7 +601,7 @@ def name_tabs_after_sessions(
         """
     ).fetchall()
     renamed = dict(tabs)
-    # A lead's tab is named after its work (name_lead_tabs_after_work), whoever else runs in a pane of it.
+    # A lead's tab is named after its label (name_lead_tabs_after_labels), whoever else runs in a pane of it.
     lead_tabs = {
         tabs[str(r[0])].session_id
         for r in conn.execute("SELECT surface FROM leads WHERE retired_at IS NULL AND surface IS NOT NULL")
@@ -656,47 +656,20 @@ def name_tabs_after_sessions(
     return renamed
 
 
-LEAD_LABEL_MAX_WORDS = 3
-LEAD_LABEL_MAX_CHARS = 24
-LEAD_LABEL_FRESH_MS = 3 * 24 * 60 * 60 * 1000
 LEAD_TAB_RENAME_EVERY_MS = 10 * 60 * 1000
 
 
-def convert_work_name_to_label(name: str) -> str:
-    """Whole words that fit; a chunk named before titles were short gives its first ones."""
-    if len(name.split()) <= LEAD_LABEL_MAX_WORDS and len(name) <= LEAD_LABEL_MAX_CHARS:
-        return name
-    words = name.split()[:LEAD_LABEL_MAX_WORDS]
-    while len(words) > 1 and len(" ".join(words)) > LEAD_LABEL_MAX_CHARS:
-        words.pop()
-    return re.sub(r"[^\w)]+$", "", " ".join(words)[:LEAD_LABEL_MAX_CHARS])
-
-
-def find_title_chunk(conn: sqlite3.Connection, lead: str, at_ms: int) -> str | None:
-    """The chunk whose name becomes the tab's label: the open one updated last, within the last 3 days."""
-    row = conn.execute(
-        """
-        SELECT name FROM lead_work WHERE lead = ? AND done_at IS NULL AND updated_at >= ?
-        ORDER BY updated_at DESC, created_at DESC LIMIT 1
-        """,
-        (lead, at_ms - LEAD_LABEL_FRESH_MS),
-    ).fetchone()
-    return str(row["name"]) if row else None
-
-
-def find_lead_tab_title(conn: sqlite3.Connection, lead: str, at_ms: int) -> str:
-    """The one name of a lead's tab, for agterm and the Guild page: the newest open chunk touched in the last 3 days,
-    else the standing label."""
+def find_lead_tab_title(conn: sqlite3.Connection, lead: str) -> str:
+    """The one name of a lead's tab, for agterm and the Guild page."""
     row = conn.execute("SELECT display_name, label FROM leads WHERE name = ?", (lead,)).fetchone()
-    work = find_title_chunk(conn, lead, at_ms)
-    label = convert_work_name_to_label(work) if work else row["label"]
-    return f"{row['display_name']} · {label}" if label else str(row["display_name"])
+    return f"{row['display_name']} · {row['label']}" if row["label"] else str(row["display_name"])
 
 
-def name_lead_tabs_after_work(
+def name_lead_tabs_after_labels(
     conn: sqlite3.Connection, config: Config, tabs: dict[str, AgtermTab], at_ms: int
 ) -> dict[str, AgtermTab]:
-    """At most once per 10 minutes per lead, so a lead switching chunks does not flicker its tab."""
+    """Puts a lead's tab renamed by hand back, at most once per 10 minutes per lead: hooks sync too, and a name agterm
+    will not take must not cost every hook an agtermctl call."""
     rows = conn.execute(
         "SELECT name, surface, tab_renamed_at FROM leads WHERE retired_at IS NULL AND surface IS NOT NULL"
     ).fetchall()
@@ -705,7 +678,7 @@ def name_lead_tabs_after_work(
         tab = renamed.get(str(row["surface"]))
         if tab is None or not tab.session_id or config.hides(tab.tab_name, tab.workspace_name):
             continue
-        name = find_lead_tab_title(conn, str(row["name"]), at_ms)
+        name = find_lead_tab_title(conn, str(row["name"]))
         if name == tab.tab_name:
             continue
         # The serve loop and hook processes sync at once; the one that takes the slot renames.

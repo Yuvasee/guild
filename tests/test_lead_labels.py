@@ -11,11 +11,11 @@ from test_leads import Team
 
 from bridge import registry
 from bridge.config import Config
-from bridge.db import connect, transaction
+from bridge.db import connect
 from bridge.dream import convert_work_to_lines
 from bridge.guildview import map_db_to_guild
-from bridge.leads import LeadError, finish_lead_work, list_lead_work, set_lead_work
-from bridge.registry import LEAD_LABEL_FRESH_MS, LEAD_TAB_RENAME_EVERY_MS, AgtermTab, find_lead_tab_title
+from bridge.leads import list_lead_work, set_lead_work
+from bridge.registry import LEAD_TAB_RENAME_EVERY_MS, AgtermTab, find_lead_tab_title
 
 DAY_MS = 24 * 60 * 60 * 1000
 NOW = 100 * DAY_MS
@@ -32,53 +32,18 @@ def conn(tmp_path: Path) -> Generator[sqlite3.Connection]:
     db.close()
 
 
-def test_the_label_is_the_newest_fresh_open_chunk_else_the_standing_label(conn: sqlite3.Connection) -> None:
-    assert find_lead_tab_title(conn, "alex", NOW) == "Alex · Data"
-    set_lead_work(conn, "alex", "Nightly export", None, NOW - 2 * DAY_MS)
-    set_lead_work(conn, "alex", "Release train", None, NOW - DAY_MS)
-    assert find_lead_tab_title(conn, "alex", NOW) == "Alex · Release train"
-
-    set_lead_work(conn, "alex", "Nightly export", None, NOW)
-    assert find_lead_tab_title(conn, "alex", NOW) == "Alex · Nightly export", "setting a chunk again makes it newest"
-
-    finish_lead_work(conn, "alex", "Nightly export", NOW)
-    assert find_lead_tab_title(conn, "alex", NOW) == "Alex · Release train"
-    finish_lead_work(conn, "alex", "Release train", NOW)
-    assert find_lead_tab_title(conn, "alex", NOW) == "Alex · Data"
-
-
-def test_a_chunk_older_than_three_days_gives_the_standing_label(conn: sqlite3.Connection) -> None:
-    set_lead_work(conn, "alex", "Nightly export", None, NOW - LEAD_LABEL_FRESH_MS - 1)
-    assert find_lead_tab_title(conn, "alex", NOW) == "Alex · Data"
+def test_the_label_is_the_standing_label_whatever_the_chunks(conn: sqlite3.Connection) -> None:
+    set_lead_work(conn, "alex", "Nightly export", None, NOW - DAY_MS)
+    set_lead_work(conn, "alex", "Release train", None, NOW)
+    assert find_lead_tab_title(conn, "alex") == "Alex · Data"
     conn.execute("UPDATE leads SET label = NULL")
-    assert find_lead_tab_title(conn, "alex", NOW) == "Alex"
+    assert find_lead_tab_title(conn, "alex") == "Alex"
 
 
-@pytest.mark.parametrize(
-    ("name", "label"),
-    [
-        ("ABC-12 post-upgrade follow-ups (plan)", "ABC-12 post-upgrade"),
-        ("URGENT: tenant mix-up for one user", "URGENT: tenant mix-up"),
-        ("Export: release and docs", "Export: release and"),
-        ("Unbreakablesupercomputing all day", "Unbreakablesupercomputin"),
-    ],
-)
-def test_a_long_name_from_before_titles_were_short_gives_its_first_whole_words(
-    conn: sqlite3.Connection, name: str, label: str
-) -> None:
-    conn.execute(
-        "INSERT INTO lead_work (lead, name, refs, created_at, updated_at) VALUES ('alex', ?, '[]', ?, ?)",
-        (name, NOW, NOW),
-    )
-    assert find_lead_tab_title(conn, "alex", NOW) == f"Alex · {label}"
-
-
-@pytest.mark.parametrize("title", ["Four words is too many", "Unbreakablesupercomputing", "Ночной экспорт", "  "])
-def test_a_title_over_the_limit_is_refused_with_the_way_out(conn: sqlite3.Connection, title: str) -> None:
-    with pytest.raises(LeadError) as refused:
-        set_lead_work(conn, "alex", title, None, NOW)
-    assert conn.execute("SELECT count(*) FROM lead_work").fetchone()[0] == 0
-    assert "English" in str(refused.value) or "--about" in str(refused.value)
+def test_a_long_chunk_name_is_accepted(conn: sqlite3.Connection) -> None:
+    name = "Move the nightly CSV export off the web box into its own worker"
+    set_lead_work(conn, "alex", name, None, NOW)
+    assert [c.name for c in list_lead_work(conn, "alex")] == [name]
 
 
 def test_about_is_stored_kept_when_not_given_and_replaced_when_given(conn: sqlite3.Connection) -> None:
@@ -95,49 +60,66 @@ def _renames(team: Team) -> list[str]:
     return [line for line in team.log().splitlines() if "session rename" in line and "TAB-A" in line]
 
 
-def test_the_tab_follows_the_work_at_most_once_per_ten_minutes_and_the_page_shows_the_same(
+def _page_tab_name(bridge_env: BridgeEnv) -> str:
+    with bridge_env.connect() as conn:
+        leads = cast(list[dict[str, Any]], map_db_to_guild(conn, Config(), int(time.time() * 1000), str)["leads"])
+    return str(leads[0]["tab_name"])
+
+
+def test_lead_label_renames_the_tab_and_the_page_at_once_and_work_does_not(
     bridge_env: BridgeEnv, spawn_process: SpawnProcess
 ) -> None:
     team = Team(bridge_env, spawn_process)
     team.enroll()
     team.write_tree(workspace_a="\U0001f441 GUILD", tab_a="Alex · Data")
+    long_name = "Move the nightly CSV export off the web box into its own worker"
+    bridge_env.stub_log.write_text("")
+
+    work = team.guild("work", "set", long_name, "--about", "one line", pid=team.a)
+    bridge_env.cli("sessions")
+    after_work = _renames(team)
+    label = team.guild("lead", "label", "alex", "Billing")
+
+    assert work.returncode == 0, work.stderr
+    assert after_work == []
+    assert label.returncode == 0, label.stderr
+    assert _renames(team) == ["session rename Alex · Billing --target TAB-A"]
+    assert _page_tab_name(bridge_env) == "Alex · Billing"
+    listed = team.guild("work", "list", pid=team.a).stdout
+    assert f"  {long_name} — one line" in listed and "title" not in listed, listed
+
+
+def test_a_lead_tab_renamed_by_hand_is_put_back_at_most_once_per_ten_minutes(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    team = Team(bridge_env, spawn_process)
+    team.enroll()
+    team.write_tree(workspace_a="\U0001f441 GUILD", tab_a="My own name")
     with bridge_env.connect() as conn:
         conn.execute("UPDATE leads SET tab_renamed_at = NULL")
     bridge_env.stub_log.write_text("")
 
-    set_first = team.guild("work", "set", "Nightly export", "--about", "Move the CSV export to a worker", pid=team.a)
     bridge_env.cli("sessions")
     first = _renames(team)
-    team.write_tree(workspace_a="\U0001f441 GUILD", tab_a="Alex · Nightly export")
-    team.guild("work", "set", "Release train", pid=team.a)
     bridge_env.stub_log.write_text("")
     bridge_env.cli("sessions")
     within = _renames(team)
     with bridge_env.connect() as conn:
         conn.execute("UPDATE leads SET tab_renamed_at = tab_renamed_at - ?", (LEAD_TAB_RENAME_EVERY_MS,))
     bridge_env.cli("sessions")
-    after = _renames(team)
-    with bridge_env.connect() as conn:
-        lead = cast(list[dict[str, Any]], map_db_to_guild(conn, Config(), int(time.time() * 1000), str)["leads"])[0]
 
-    assert set_first.returncode == 0, set_first.stderr
-    assert first == ["session rename Alex · Nightly export --target TAB-A"]
-    assert within == [], "a second change within 10 minutes waits"
-    assert after == ["session rename Alex · Release train --target TAB-A"]
-    assert lead["tab_name"] == "Alex · Release train"
-    listed = team.guild("work", "list", pid=team.a).stdout
-    assert "Release train  ← title" in listed, listed
-    assert "Nightly export" in listed and "Nightly export — Move the CSV export to a worker  ← title" not in listed
-    assert {"name": "Nightly export", "about": "Move the CSV export to a worker"}.items() <= lead["work"][0].items()
+    assert first == ["session rename Alex · Data --target TAB-A"]
+    assert within == [], "agterm still shows the hand-given name; asked again only after 10 minutes"
+    assert _renames(team) == ["session rename Alex · Data --target TAB-A"]
+    assert _page_tab_name(bridge_env) == "Alex · Data"
 
 
 def test_a_locked_lead_tab_is_never_renamed(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:
     team = Team(bridge_env, spawn_process)
     team.enroll()
-    team.write_tree(workspace_a="\U0001f441 GUILD", tab_a="Alex · Data \U0001f512")
-    with bridge_env.connect() as conn, transaction(conn):
+    team.write_tree(workspace_a="\U0001f441 GUILD", tab_a="My own name \U0001f512")
+    with bridge_env.connect() as conn:
         conn.execute("UPDATE leads SET tab_renamed_at = NULL")
-        set_lead_work(conn, "alex", "Nightly export", None, int(time.time() * 1000))
     bridge_env.stub_log.write_text("")
 
     bridge_env.cli("sessions")
@@ -145,28 +127,11 @@ def test_a_locked_lead_tab_is_never_renamed(bridge_env: BridgeEnv, spawn_process
     assert _renames(team) == []
 
 
-def test_a_short_title_is_the_label_as_written(conn: sqlite3.Connection) -> None:
-    set_lead_work(conn, "alex", "C++ SDK", None, NOW)
-    assert find_lead_tab_title(conn, "alex", NOW) == "Alex · C++ SDK"
-
-
-def test_a_chunk_named_before_titles_were_short_can_still_be_updated(conn: sqlite3.Connection) -> None:
-    old = "A long chunk name from before the limit"
-    conn.execute(
-        "INSERT INTO lead_work (lead, name, refs, created_at, updated_at) VALUES ('alex', ?, '[]', 0, 0)", (old,)
-    )
-    set_lead_work(conn, "alex", old, ["issue:ABC-1"], NOW, "now with an about")
-    assert [(c.name, c.refs, c.about) for c in list_lead_work(conn, "alex")] == [
-        (old, ("issue:ABC-1",), "now with an about")
-    ]
-
-
 def test_a_rename_failed_or_done_takes_the_ten_minute_slot(
     conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     conn.execute("UPDATE leads SET surface = 'PANE'")
-    set_lead_work(conn, "alex", "Nightly export", None, NOW)
-    tabs = {"PANE": AgtermTab("Alex · Data", "W", "TAB")}
+    tabs = {"PANE": AgtermTab("My own name", "W", "TAB")}
     calls: list[str] = []
 
     def rename(agtermctl: str, session_id: str, name: str) -> bool:
@@ -174,14 +139,14 @@ def test_a_rename_failed_or_done_takes_the_ten_minute_slot(
         return len(calls) > 1
 
     monkeypatch.setattr(registry, "rename_agterm_tab", rename)
-    failed = registry.name_lead_tabs_after_work(conn, Config(), tabs, NOW)
-    registry.name_lead_tabs_after_work(conn, Config(), tabs, NOW + LEAD_TAB_RENAME_EVERY_MS - 1)
-    renamed = registry.name_lead_tabs_after_work(conn, Config(), tabs, NOW + LEAD_TAB_RENAME_EVERY_MS)
-    registry.name_lead_tabs_after_work(conn, Config(), tabs, NOW + LEAD_TAB_RENAME_EVERY_MS + 1)
+    failed = registry.name_lead_tabs_after_labels(conn, Config(), tabs, NOW)
+    registry.name_lead_tabs_after_labels(conn, Config(), tabs, NOW + LEAD_TAB_RENAME_EVERY_MS - 1)
+    renamed = registry.name_lead_tabs_after_labels(conn, Config(), tabs, NOW + LEAD_TAB_RENAME_EVERY_MS)
+    registry.name_lead_tabs_after_labels(conn, Config(), tabs, NOW + LEAD_TAB_RENAME_EVERY_MS + 1)
 
-    assert calls == ["Alex · Nightly export"] * 2
-    assert failed["PANE"].tab_name == "Alex · Data"
-    assert renamed["PANE"].tab_name == "Alex · Nightly export"
+    assert calls == ["Alex · Data"] * 2
+    assert failed["PANE"].tab_name == "My own name"
+    assert renamed["PANE"].tab_name == "Alex · Data"
 
 
 def test_another_session_in_a_pane_of_the_lead_tab_does_not_rename_it(

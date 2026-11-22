@@ -639,8 +639,7 @@ usage: guild lead [-h] {add,label,sync,retire,domains,park,wake,model} ...
 positional arguments:
   {add,label,sync,retire,domains,park,wake,model}
     add                 make a tab a team lead: name, tint, a place in the 👁 GUILD workspace
-    label               change a lead's standing label, its tab's label while it has no chunk set
-                        in the last 3 days
+    label               change a lead's specialization label and rename its tab
     sync                apply a lead's tab name, tint and place in 👁 GUILD again
     retire              undo enrollment; the tab goes back, the name is never reused
     domains             the projects a lead takes new work from: priority project names or Linear
@@ -671,14 +670,14 @@ options:
   --tab TAB      handle of the tab that becomes the lead
   --scope SCOPE
   --ref REF      Linear project or issue; repeat
-  --label LABEL  standing label; the tab is '<Name> · <label>' while no chunk is fresh
+  --label LABEL  the lead's specialization; the tab is named '<Name> · <label>'
   --alias ALIAS  spelling for dictation, e.g. Sami
   --tint TINT
 ```
 
 ### guild lead label
 
-change a lead's standing label, its tab's label while it has no chunk set in the last 3 days
+change a lead's specialization label and rename its tab
 
 ```text
 usage: guild lead label [-h] name label
@@ -874,7 +873,7 @@ usage: guild work [-h] {set,done,list} ...
 
 positional arguments:
   {set,done,list}
-    set            add a chunk, or update it by title; given refs replace its refs
+    set            add a chunk, or update it by name; given refs replace its refs
     done           a chunk ended; it leaves the page
     list           the open chunks
 
@@ -884,18 +883,18 @@ options:
 
 ### guild work set
 
-add a chunk, or update it by title; given refs replace its refs
+add a chunk, or update it by name; given refs replace its refs
 
 ```text
 usage: guild work set [-h] [--about ABOUT] [--lead LEAD] name [refs ...]
 
 positional arguments:
-  name           a short project name, at most 3 words, e.g. 'Nightly export'; your tab's label
+  name           a few plain words, e.g. 'Nightly export worker'
   refs           PROJ-34, Acme-Org/monorepo#45, #45 (your repo), or a URL
 
 options:
   -h, --help     show this help message and exit
-  --about ABOUT  what the chunk is and why, one line; the page shows it beside the title
+  --about ABOUT  what the chunk is and why, one line; the page shows it beside the name
   --lead LEAD    default: your own
 ```
 

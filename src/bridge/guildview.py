@@ -168,7 +168,7 @@ def map_db_to_guild(
             {
                 "name": lead.name,
                 "display_name": lead.display_name,
-                "tab_name": find_lead_tab_title(conn, lead.name, now),
+                "tab_name": find_lead_tab_title(conn, lead.name),
                 "tint": _find_tint_of_lead(lead, tree, tab_id),
                 "surface": lead.surface,
                 **map_states_to_rollup(own, workers),

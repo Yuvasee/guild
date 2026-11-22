@@ -129,7 +129,6 @@ from bridge.registry import (
     HandleTakenError,
     find_assistant_surface,
     find_lead_tab_title,
-    find_title_chunk,
     is_english_name,
     list_sessions,
     map_config_to_assistant_title,
@@ -265,15 +264,11 @@ def build_parser(config: Config) -> argparse.ArgumentParser:
     p.add_argument("--tab", required=True, help="handle of the tab that becomes the lead")
     p.add_argument("--scope", required=True)
     p.add_argument("--ref", action="append", default=[], help="Linear project or issue; repeat")
-    p.add_argument(
-        "--label", required=True, help="standing label; the tab is '<Name> · <label>' while no chunk is fresh"
-    )
+    p.add_argument("--label", required=True, help="the lead's specialization; the tab is named '<Name> · <label>'")
     p.add_argument("--alias", help="spelling for dictation, e.g. Sami")
     p.add_argument("--tint")
     p.set_defaults(func=cmd_lead_add)
-    p = lead_sub.add_parser(
-        "label", help="change a lead's standing label, its tab's label while it has no chunk set in the last 3 days"
-    )
+    p = lead_sub.add_parser("label", help="change a lead's specialization label and rename its tab")
     p.add_argument("name")
     p.add_argument("label")
     p.set_defaults(func=cmd_lead_label)
@@ -420,10 +415,10 @@ def build_parser(config: Config) -> argparse.ArgumentParser:
 
     work = sub.add_parser("work", help="the main chunks of work a lead declares; the page shows these")
     work_sub = work.add_subparsers(dest="work_command", required=True)
-    p = work_sub.add_parser("set", help="add a chunk, or update it by title; given refs replace its refs")
-    p.add_argument("name", help="a short project name, at most 3 words, e.g. 'Nightly export'; your tab's label")
+    p = work_sub.add_parser("set", help="add a chunk, or update it by name; given refs replace its refs")
+    p.add_argument("name", help="a few plain words, e.g. 'Nightly export worker'")
     p.add_argument("refs", nargs="*", help="PROJ-34, Acme-Org/monorepo#45, #45 (your repo), or a URL")
-    p.add_argument("--about", help="what the chunk is and why, one line; the page shows it beside the title")
+    p.add_argument("--about", help="what the chunk is and why, one line; the page shows it beside the name")
     p.add_argument("--lead", help="default: your own")
     p.set_defaults(func=cmd_work_set)
     p = work_sub.add_parser("done", help="a chunk ended; it leaves the page")
@@ -553,7 +548,7 @@ def cmd_lead_label(args: argparse.Namespace, conn: sqlite3.Connection, config: C
     lead = _active_lead(conn, config, str(args.name))
     with transaction(conn):
         lead = set_lead_label(conn, lead.name, str(args.label))
-    print(f"tab: {find_lead_tab_title(conn, lead.name, now_ms())}")
+    print(f"tab: {find_lead_tab_title(conn, lead.name)}")
     return _sync_terminal(conn, config, lead)
 
 
@@ -1589,13 +1584,9 @@ def _repo_of_lead(conn: sqlite3.Connection, lead: Lead) -> str | None:
 def _print_work(conn: sqlite3.Connection, lead: Lead) -> int:
     chunks = list_lead_work(conn, lead.name)
     print(f"{lead.display_name}: {len(chunks)} open" if chunks else f"{lead.display_name}: no work declared")
-    title = find_title_chunk(conn, lead.name, now_ms())
     for chunk in chunks:
         about = f" — {chunk.about}" if chunk.about else ""
-        mark = "  ← title" if chunk.name == title else ""
-        print(f"  {chunk.name}{about}" + (f"  [{' '.join(chunk.refs)}]" if chunk.refs else "") + mark)
-    if title is None:
-        print(f"  (no chunk updated in 3 days: the tab shows the standing label {lead.label!r})")
+        print(f"  {chunk.name}{about}" + (f"  [{' '.join(chunk.refs)}]" if chunk.refs else ""))
     return 0
 
 
@@ -1708,7 +1699,7 @@ def _active_lead(conn: sqlite3.Connection, config: Config, name: str) -> Lead:
 
 
 def _sync_terminal(conn: sqlite3.Connection, config: Config, lead: Lead) -> int:
-    problems = sync_lead_terminal(conn, config, lead, _agterm_session_of(conn, lead), now_ms())
+    problems = sync_lead_terminal(conn, config, lead, _agterm_session_of(conn, lead))
     return _report_sync_problems(problems, f"guild lead sync {lead.name}")
 
 
