@@ -252,13 +252,15 @@ def set_lead_work(
 ) -> None:
     """Refs and about replace the chunk's when given; a chunk finished earlier comes back when set again."""
     clean = " ".join(name.split())
-    if not clean or len(clean.split()) > LEAD_LABEL_MAX_WORDS or len(clean) > LEAD_LABEL_MAX_CHARS:
+    # A chunk named before titles were short can still be updated or reopened.
+    known = conn.execute("SELECT 1 FROM lead_work WHERE lead = ? AND name = ?", (lead, clean)).fetchone()
+    if not known and (not clean or len(clean.split()) > LEAD_LABEL_MAX_WORDS or len(clean) > LEAD_LABEL_MAX_CHARS):
         raise LeadError(
             f"a chunk's title is a short project name, at most {LEAD_LABEL_MAX_WORDS} words and "
             f"{LEAD_LABEL_MAX_CHARS} characters, e.g. 'Nightly export'; it becomes your tab's label. "
             'Put the longer text in --about "..."'
         )
-    if not is_english_name(clean):
+    if not known and not is_english_name(clean):
         raise LeadError("a chunk's title is in English, since it names a tab")
     about = " ".join((about or "").split()) or None
     if about is not None and len(about) > WORK_ABOUT_MAX_CHARS:

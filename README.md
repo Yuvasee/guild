@@ -356,12 +356,12 @@ Guild lays out the left sidebar itself, the shape in the picture at the top:
 - Each team lead's tab in it, named `<Name> · <Label>`, by `guild lead add`: tinted with the next free colour of blue,
   green, orange, purple, red and gray, with the lead's scope as the tab's title-bar context. The label follows the
   lead's work: the title of its newest open chunk set in the last 3 days (`guild work set "<title>"`, at most 3 words),
-  else its standing label (`guild lead label`). The tab is renamed at most once per 10 minutes, and the Guild page
-  shows the same name.
+  else its standing label (`guild lead label`). The Guild page shows that name at once; the tab is renamed to it at
+  most once per 10 minutes.
 - Each worker as a tab nested under its team lead's tab, named after its task (`guild worker`). Moving a lead's tab
   carries its workers.
 - Any other tab with Claude in it gets renamed once, to the session's title, after its first prompt. A name you give it
-  by hand sticks. Right Hand's tab, and a team lead's tab while only the lead runs in it, are not renamed this way.
+  by hand sticks. Right Hand's tab and a team lead's tab are not renamed this way.
 
 Something moved, renamed or lost its colour? `guild lead sync <Name>` or `guild assistant sync` puts it back.
 

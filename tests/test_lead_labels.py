@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import time
 from collections.abc import Generator
@@ -8,11 +9,13 @@ import pytest
 from conftest import BridgeEnv, SpawnProcess
 from test_leads import Team
 
+from bridge import registry
 from bridge.config import Config
 from bridge.db import connect, transaction
+from bridge.dream import convert_work_to_lines
 from bridge.guildview import map_db_to_guild
 from bridge.leads import LeadError, finish_lead_work, list_lead_work, set_lead_work
-from bridge.registry import LEAD_LABEL_FRESH_MS, LEAD_TAB_RENAME_EVERY_MS, find_lead_tab_title
+from bridge.registry import LEAD_LABEL_FRESH_MS, LEAD_TAB_RENAME_EVERY_MS, AgtermTab, find_lead_tab_title
 
 DAY_MS = 24 * 60 * 60 * 1000
 NOW = 100 * DAY_MS
@@ -137,3 +140,72 @@ def test_a_locked_lead_tab_is_never_renamed(bridge_env: BridgeEnv, spawn_process
     bridge_env.cli("sessions")
 
     assert _renames(team) == []
+
+
+def test_a_short_title_is_the_label_as_written(conn: sqlite3.Connection) -> None:
+    set_lead_work(conn, "alex", "C++ SDK", None, NOW)
+    assert find_lead_tab_title(conn, "alex", NOW) == "Alex · C++ SDK"
+
+
+def test_a_chunk_named_before_titles_were_short_can_still_be_updated(conn: sqlite3.Connection) -> None:
+    old = "A long chunk name from before the limit"
+    conn.execute(
+        "INSERT INTO lead_work (lead, name, refs, created_at, updated_at) VALUES ('alex', ?, '[]', 0, 0)", (old,)
+    )
+    set_lead_work(conn, "alex", old, ["issue:ABC-1"], NOW, "now with an about")
+    assert [(c.name, c.refs, c.about) for c in list_lead_work(conn, "alex")] == [
+        (old, ("issue:ABC-1",), "now with an about")
+    ]
+
+
+def test_a_rename_failed_or_done_takes_the_ten_minute_slot(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn.execute("UPDATE leads SET surface = 'PANE'")
+    set_lead_work(conn, "alex", "Nightly export", None, NOW)
+    tabs = {"PANE": AgtermTab("Alex · Data", "W", "TAB")}
+    calls: list[str] = []
+
+    def rename(agtermctl: str, session_id: str, name: str) -> bool:
+        calls.append(name)
+        return len(calls) > 1
+
+    monkeypatch.setattr(registry, "rename_agterm_tab", rename)
+    failed = registry.name_lead_tabs_after_work(conn, Config(), tabs, NOW)
+    registry.name_lead_tabs_after_work(conn, Config(), tabs, NOW + LEAD_TAB_RENAME_EVERY_MS - 1)
+    renamed = registry.name_lead_tabs_after_work(conn, Config(), tabs, NOW + LEAD_TAB_RENAME_EVERY_MS)
+    registry.name_lead_tabs_after_work(conn, Config(), tabs, NOW + LEAD_TAB_RENAME_EVERY_MS + 1)
+
+    assert calls == ["Alex · Nightly export"] * 2
+    assert failed["PANE"].tab_name == "Alex · Data"
+    assert renamed["PANE"].tab_name == "Alex · Nightly export"
+
+
+def test_another_session_in_a_pane_of_the_lead_tab_does_not_rename_it(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    team = Team(bridge_env, spawn_process)
+    team.enroll()
+    tab = {"id": "TAB-A", "name": "Alex · Data", "surfaces": [{"paneID": "PANE-A"}, {"paneID": "PANE-B"}]}
+    tree = {
+        "ok": True,
+        "result": {"tree": {"workspaces": [{"id": "WS", "name": "\U0001f441 GUILD", "sessions": [tab]}]}},
+    }
+    bridge_env.stub_tree.write_text(json.dumps(tree))
+    projects = Path(bridge_env.env["BRIDGE_CLAUDE_PROJECTS_DIR"]) / "p"
+    projects.mkdir(parents=True)
+    (projects / "conv-b3.jsonl").write_text(
+        json.dumps({"type": "custom-title", "customTitle": "Something else"}) + "\n"
+    )
+    bridge_env.write_session_file(team.b, "conv-b3")
+    team.start(team.b, "conv-b3", "clear")
+    bridge_env.stub_log.write_text("")
+
+    bridge_env.cli("sessions")
+
+    assert "Something else" not in team.log()
+
+
+def test_the_night_review_reads_the_about_beside_the_title(conn: sqlite3.Connection) -> None:
+    set_lead_work(conn, "alex", "Nightly export", None, NOW, "Move the CSV export to a worker")
+    assert convert_work_to_lines(conn, "alex", 0) == "- Nightly export — Move the CSV export to a worker (open)"

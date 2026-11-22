@@ -601,6 +601,12 @@ def name_tabs_after_sessions(
         """
     ).fetchall()
     renamed = dict(tabs)
+    # A lead's tab is named after its work (name_lead_tabs_after_work), whoever else runs in a pane of it.
+    lead_tabs = {
+        tabs[str(r[0])].session_id
+        for r in conn.execute("SELECT surface FROM leads WHERE retired_at IS NULL AND surface IS NOT NULL")
+        if str(r[0]) in tabs
+    }
     # Right Hand is found by its handle, which follows its tab's name unless pinned; a split pane renames the tab too.
     assistant = find_assistant_surface(conn, config)
     assistant_tab = str(assistant["agterm_session"]) if assistant and assistant["agterm_session"] else None
@@ -610,7 +616,9 @@ def name_tabs_after_sessions(
         tab = renamed.get(surface)
         if tab is None or not tab.session_id or config.hides(tab.tab_name, tab.workspace_name):
             continue
-        if tab.session_id == assistant_tab or convert_tab_name_to_handle(tab.tab_name) in assistant_names:
+        if tab.session_id in lead_tabs or tab.session_id == assistant_tab:
+            continue
+        if convert_tab_name_to_handle(tab.tab_name) in assistant_names:
             continue
         # A worker's tab is named after its task, and its session's title is only about the brief file.
         if (
@@ -656,6 +664,8 @@ LEAD_TAB_RENAME_EVERY_MS = 10 * 60 * 1000
 
 def convert_work_name_to_label(name: str) -> str:
     """Whole words that fit; a chunk named before titles were short gives its first ones."""
+    if len(name.split()) <= LEAD_LABEL_MAX_WORDS and len(name) <= LEAD_LABEL_MAX_CHARS:
+        return name
     words = name.split()[:LEAD_LABEL_MAX_WORDS]
     while len(words) > 1 and len(" ".join(words)) > LEAD_LABEL_MAX_CHARS:
         words.pop()
@@ -689,16 +699,21 @@ def name_lead_tabs_after_work(
         tab = renamed.get(str(row["surface"]))
         if tab is None or not tab.session_id or config.hides(tab.tab_name, tab.workspace_name):
             continue
-        if row["tab_renamed_at"] is not None and at_ms - int(row["tab_renamed_at"]) < LEAD_TAB_RENAME_EVERY_MS:
-            continue
         name = find_lead_tab_title(conn, str(row["name"]), at_ms)
-        if name == tab.tab_name or not rename_agterm_tab(config.agtermctl, tab.session_id, name):
+        if name == tab.tab_name:
+            continue
+        # The serve loop and hook processes sync at once; the one that takes the slot renames.
+        with transaction(conn):
+            taken = conn.execute(
+                "UPDATE leads SET tab_renamed_at = ?1 WHERE name = ?2 AND coalesce(tab_renamed_at, 0) <= ?1 - ?3",
+                (at_ms, row["name"], LEAD_TAB_RENAME_EVERY_MS),
+            ).rowcount
+        # A failed rename keeps the slot too, so an agterm that refuses is asked again in 10 minutes, not every pass.
+        if not taken or not rename_agterm_tab(config.agtermctl, tab.session_id, name):
             continue
         for pane, other in renamed.items():
             if other.session_id == tab.session_id:
                 renamed[pane] = replace(other, tab_name=name)
-        with transaction(conn):
-            conn.execute("UPDATE leads SET tab_renamed_at = ? WHERE name = ?", (at_ms, row["name"]))
     return renamed
 
 

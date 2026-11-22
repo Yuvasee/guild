@@ -650,7 +650,7 @@ def read_memory_index(transcripts: list[Path]) -> str:
 
 def convert_work_to_lines(conn: sqlite3.Connection, handle: str, since: int) -> str:
     rows = conn.execute(
-        "SELECT name, refs, done_at FROM lead_work WHERE lead = ? AND (done_at IS NULL OR done_at >= ?) "
+        "SELECT name, about, refs, done_at FROM lead_work WHERE lead = ? AND (done_at IS NULL OR done_at >= ?) "
         "ORDER BY created_at",
         (handle, since),
     )
@@ -658,7 +658,8 @@ def convert_work_to_lines(conn: sqlite3.Connection, handle: str, since: int) -> 
     for row in rows:
         refs = ", ".join(cast(list[str], json.loads(str(row["refs"]))))
         state = f"done {_stamp(int(row['done_at']))}" if row["done_at"] else "open"
-        lines.append(f"- {row['name']} ({state}){f': {refs}' if refs else ''}")
+        about = f" — {row['about']}" if row["about"] else ""
+        lines.append(f"- {row['name']}{about} ({state}){f': {refs}' if refs else ''}")
     return "\n".join(lines)
 
 
