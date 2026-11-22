@@ -506,7 +506,7 @@ def cmd_compact_drive(args: argparse.Namespace, conn: sqlite3.Connection, config
         with transaction(conn):
             if read_phase(conn, conversation_id) != expected:
                 return
-            if not take_told_once(conn, TOLD_HELD, conversation_id, now_ms()):
+            if phase == "compact" and not take_told_once(conn, TOLD_HELD, conversation_id, now_ms()):
                 told_unsure = True
                 return
             told = tell_of_held_drive(conn, config, tree, conversation_id, instance_id, phase, "unsure", box)
@@ -535,13 +535,13 @@ def cmd_compact_drive(args: argparse.Namespace, conn: sqlite3.Connection, config
             return 0
         end_driving(conn, conversation_id, now_ms())
         # "unwanted" with the phase still ours: its tab ended or moved to another conversation, so nothing is owed.
-        # Told of the box's text at the start, they already know the wait would end like this. A retried drive held
-        # again is told once per cycle.
+        # Told of the box's text at the start, they already know the wait would end like this. A retried /compact
+        # held again is told once per cycle; a "continue" is never retried.
         told = (
             []
             if result == "unwanted"
             or (result == "draft" and told_unsure)
-            or not take_told_once(conn, TOLD_HELD, conversation_id, now_ms())
+            or (phase == "compact" and not take_told_once(conn, TOLD_HELD, conversation_id, now_ms()))
             else tell_of_held_drive(conn, config, tree, conversation_id, instance_id, phase, result)
         )
     if result in _DRIVE_FAILED:

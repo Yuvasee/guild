@@ -282,7 +282,8 @@ def _record_screen(
         _request_compaction(conn, tab, pct, at_ms, actions)
         return
     waited = phase == PHASE_REQUESTED and since_request is not None and since_request >= REQUEST_PATIENCE_MS
-    stale = phase == PHASE_COMPACTING and since_request is not None and since_request >= STALE_DRIVE_MS
+    # Undated, it predates drives dating their start.
+    stale = phase == PHASE_COMPACTING and (since_request is None or since_request >= STALE_DRIVE_MS)
     full = dead is not None or (pct is not None and pct >= COMPACT_NOW_PCT)
     if not full or not (phase is None or waited or stale) or not map_screen_to_waiting(screen):
         return
@@ -334,10 +335,8 @@ def _start_compaction(
 def _tell_forced(
     conn: sqlite3.Connection, config: Config, tab: ContextTab, pct: int, at_ms: int, actions: ContextActions
 ) -> None:
-    if not take_told_once(conn, TOLD_FORCED, tab.conversation_id, at_ms):
-        return
     recipients = find_alert_recipients(conn, config, tab)
-    if not recipients:
+    if not recipients or not take_told_once(conn, TOLD_FORCED, tab.conversation_id, at_ms):
         return
     body = (
         f'Tab "{tab.name}" ({tab.session}) is at {pct}% of its window and has not compacted, so bridge is typing '

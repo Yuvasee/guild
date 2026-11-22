@@ -300,6 +300,37 @@ def test_a_compacting_phase_that_outlived_its_drive_is_taken_over(
     assert stale[0] == ["conv-b"]
 
 
+def test_an_undated_compacting_phase_from_before_drives_were_dated_is_taken_over(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    _, tabs = _worker_team(bridge_env, spawn_process)
+    _stuck_cycle(bridge_env, PHASE_COMPACTING)
+    with bridge_env.connect() as conn, transaction(conn):
+        conn.execute("UPDATE conversations SET compact_requested_at = NULL WHERE conversation_id = 'conv-b'")
+
+    drives, _ = _look(bridge_env, tabs, _screen("  Opus 5.5 | 92% ctx | ~/x"), DAY_MS)
+
+    assert drives == ["conv-b"]
+
+
+def test_a_forced_notice_with_no_one_to_hear_it_waits_for_someone(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    _, tabs = _worker_team(bridge_env, spawn_process)
+    lone = [ContextTab(t.conversation_id, t.instance_id, t.session, t.pane, t.name, None) for t in tabs]
+    _stuck_cycle(bridge_env)
+    screen = _screen("  Opus 5.5 | 90% ctx | ~/x")
+    nobody = Config(compact_at_tokens=600_000, assistant_handle="nobody")
+    with bridge_env.connect() as conn, transaction(conn):
+        unheard = record_context_screens(conn, nobody, lone, {"conv-b": (screen, DAY_MS)}, DAY_MS)
+        end_driving(conn, "conv-b", DAY_MS)
+
+    drives, bodies = _look(bridge_env, tabs, screen, DAY_MS + 31 * 60_000)
+
+    assert [d[1] for d in unheard.drives] == ["conv-b"] and unheard.messages == []
+    assert drives == ["conv-b"] and len(bodies) == 1 and "is at 90% of its window" in bodies[0]
+
+
 def test_the_window_is_estimated_from_tokens_and_the_footer(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:
     _, tabs = _worker_team(bridge_env, spawn_process)
     config = Config(compact_at_tokens=600_000)

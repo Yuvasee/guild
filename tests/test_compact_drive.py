@@ -140,6 +140,22 @@ def test_a_retried_drive_held_by_the_same_draft_types_only_the_probe_and_tells_n
     assert second == []
 
 
+def test_a_held_continue_leaves_the_next_held_compact_its_notice(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    team = Team(bridge_env, spawn_process)
+    team.enroll()
+    fake = FakeClaudeBox({"TAB-A": DRAFT})
+
+    _start_cycle(bridge_env, PHASE_CONTINUE)
+    _, after_compaction = _drive(bridge_env, fake, phase="continue")
+    _start_cycle(bridge_env)
+    _, next_cycle = _drive(bridge_env, fake)
+
+    assert [r.handle for _, r in after_compaction] == ["old-b"]
+    assert [r.handle for _, r in next_cycle] == ["old-b"]
+
+
 def test_a_stray_key_left_in_the_box_is_cleared_and_compact_typed_with_no_notice(
     bridge_env: BridgeEnv, spawn_process: SpawnProcess
 ) -> None:
