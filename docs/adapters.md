@@ -119,6 +119,11 @@ Set `watcher_alert_to = "<handle>"` and a watcher that leaves ok (failed, stale,
 session once, by bridge; still not ok after `watcher_escalate_after_min` (default 60), the assistant hears it once too,
 and everyone told hears when it is back to ok. Empty, the default, tells nobody.
 
+A failure whose end is known ahead, such as a usage limit with a reset time, may carry `"known_until":
+"2026-01-01T11:00:00Z"` (UTC; a bad value is ignored). Until then the alert goes out once, ending "Expected back by
+<local time>", the assistant is not told, and failing again with the same summary after a short ok (which still says
+back to ok once) is the same outage, not a new alert. Still failing after it, the usual escalation follows.
+
 A failed status with `"needs_owner": true` is also a Needs-you card on the page, with its summary, for as long as
 the file reads so: for what only the owner's hands can fix, such as a login.
 

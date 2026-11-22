@@ -84,12 +84,11 @@ def map_json_to_status(data: object) -> dict[str, object]:
     last_run = fields.get("last_run_utc")
     if not isinstance(last_run, str):
         raise ValueError("no last_run_utc")
-    try:
-        when = datetime.fromisoformat(last_run)
-    except ValueError:
-        raise ValueError("last_run_utc is not ISO 8601") from None
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=UTC)
+    when = _parse_utc(last_run)
+    if when is None:
+        raise ValueError("last_run_utc is not ISO 8601")
+    known_until = fields.get("known_until")
+    until = _parse_utc(known_until) if isinstance(known_until, str) else None
     stale_after = fields.get("stale_after_min", DEFAULT_STALE_AFTER_MIN)
     if not isinstance(stale_after, int) or isinstance(stale_after, bool) or stale_after <= 0:
         stale_after = DEFAULT_STALE_AFTER_MIN
@@ -98,6 +97,7 @@ def map_json_to_status(data: object) -> dict[str, object]:
         "name": name.strip()[:SUMMARY_CHARS] if isinstance(name, str) else "",
         "status": status,
         "last_run_at": int(when.timestamp() * 1000),
+        "known_until_at": int(until.timestamp() * 1000) if until else 0,
         "stale_after_min": stale_after,
         "summary": summary.strip()[:SUMMARY_CHARS] if isinstance(summary, str) else "",
         "detail": detail.strip()[:DETAIL_CHARS] if isinstance(detail, str) else "",
@@ -105,6 +105,16 @@ def map_json_to_status(data: object) -> dict[str, object]:
     }
 
 
+def _parse_utc(text: str) -> datetime | None:
+    try:
+        when = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return when if when.tzinfo else when.replace(tzinfo=UTC)
+
+
+KNOWN = "known "
+"""Marks a failure with a known end: the key carries its summary, posted_at its end."""
 STALE_GRACE_MS = 10 * 60_000
 SLEPT_GAP_MS = 2 * 60_000
 """A longer pause between two alert rounds means the Mac slept (rounds run every 30 s)."""
@@ -124,7 +134,9 @@ def note_awake(now: int) -> int:
 def alert_watchers(conn: sqlite3.Connection, config: Config, now: int) -> list[tuple[int, Recipient]]:
     """Once per spell away from ok: watcher_alert_to hears it, the assistant hears if it outlasts
     watcher_escalate_after_min, and everyone told hears when it is back. signal_posts keeps the spell, as serve
-    restarts with most deploys. A message that reached nobody is not recorded, so the next round tries again."""
+    restarts with most deploys. A message that reached nobody is not recorded, so the next round tries again.
+    A failure whose file names its end (known_until) is not escalated before then, and failing again before then with
+    the same summary is the same outage: no new spell."""
     # Off, every spell is forgotten: one left open would silence the next spell once alerts are back on.
     paths = {w.path for w in config.watchers} if config.watcher_alert_to else set[str]()
     for (key,) in conn.execute("SELECT key FROM signal_posts WHERE substr(key, 1, 8) = 'watcher:'").fetchall():
@@ -139,41 +151,61 @@ def alert_watchers(conn: sqlite3.Connection, config: Config, now: int) -> list[t
         name, state = str(shown["name"]), str(shown["state"])
         spell = f"watcher:{watcher.path}"
         row = conn.execute("SELECT posted_at FROM signal_posts WHERE key = ?", (spell,)).fetchone()
-        told = {
-            str(k).rsplit("\n", 1)[1]: int(at)
-            for k, at in conn.execute(
-                "SELECT key, posted_at FROM signal_posts WHERE substr(key, 1, ?) = ?", (len(spell) + 1, spell + "\n")
-            )
-        }
+        told: dict[str, int] = {}
+        known: tuple[str, int] | None = None
+        for k, at in conn.execute(
+            "SELECT key, posted_at FROM signal_posts WHERE substr(key, 1, ?) = ?", (len(spell) + 1, spell + "\n")
+        ):
+            what = str(k).split("\n", 1)[1]
+            if what.startswith(KNOWN):
+                known = (what, int(at))
+            else:
+                told[what] = int(at)
+        summary = _summarize(shown)
+        until = cast(int, shown.get("known_until_at") or 0) if state == "failed" else 0
+        expected = f"{KNOWN}{' '.join(summary.split())}"
+        if known and known[1] <= now:
+            conn.execute("DELETE FROM signal_posts WHERE key = ?", (f"{spell}\n{known[0]}",))
+            known = None
         if state == "ok":
             if row is None:
                 continue
             for handle in sorted({k.split(" ", 1)[1] for k in told}):
                 text = f"{name} watch is back to ok (not ok since {_clock(int(row[0]))})."
                 sent += send_from_bridge(conn, config, handle, text, now)
-            conn.execute("DELETE FROM signal_posts WHERE key = ? OR substr(key, 1, ?) = ?",
-                         (spell, len(spell) + 1, spell + "\n"))  # fmt: skip
+            # Only a told outage silences its flaps: one nobody heard must be told when it fails again.
+            kept = f"{spell}\n{known[0]}" if known and told else ""
+            conn.execute("DELETE FROM signal_posts WHERE (key = ? OR substr(key, 1, ?) = ?) AND key != ?",
+                         (spell, len(spell) + 1, spell + "\n", kept))  # fmt: skip
             continue
+        if known and known[0] == expected and row is None and shown.get("known_until_at") in (0, known[1]):
+            continue
+        if known:
+            conn.execute("DELETE FROM signal_posts WHERE key = ?", (f"{spell}\n{known[0]}",))
         if row is None:
             # message_id 0: the spell's start is a mark, not a message.
             conn.execute("INSERT INTO signal_posts (key, message_id, posted_at) VALUES (?, 0, ?)", (spell, now))
             since = now
         else:
             since = int(row[0])
-        summary = _summarize(shown)
+        if until > now:
+            conn.execute("INSERT OR REPLACE INTO signal_posts (key, message_id, posted_at) VALUES (?, 0, ?)",
+                         (f"{spell}\n{expected}", until))  # fmt: skip
         alert_key = f"alert {config.watcher_alert_to}"
         # After the Mac sleeps, every watcher reads stale until its job's next run: wait one grace of the Mac awake.
         if state == "stale" and alert_key not in told and now - max(since, awake_since) < STALE_GRACE_MS:
             continue
         if alert_key not in told:
             detail = f" {shown['detail']}" if state == "failed" and shown.get("detail") else ""
-            text = f"{name} watch: {state}: {summary} (since {_clock(since)}).{detail}"
+            back_by = f" Expected back by {_clock(until)}." if until > now else ""
+            text = f"{name} watch: {state}: {summary} (since {_clock(since)}).{detail}{back_by}"
             alerted = _send_once(conn, config, f"{spell}\n{alert_key}", config.watcher_alert_to, text, now)
             if alerted:
                 told[alert_key] = now
             sent += alerted
         escalation_key = f"escalation {config.assistant_handle}"
-        if escalation_key not in told and now - since >= config.watcher_escalate_after_min * 60_000:
+        due = now - since >= config.watcher_escalate_after_min * 60_000
+        if escalation_key not in told and due and until <= now:
             who = (
                 f"{config.watcher_alert_to} was told at {_clock(told[alert_key])}."
                 if alert_key in told

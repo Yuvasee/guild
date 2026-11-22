@@ -55,6 +55,7 @@ def test_fresh_ok_sweep_is_ok(tmp_path: Path) -> None:
         "summary": "0 new",
         "detail": "",
         "needs_owner": False,
+        "known_until_at": 0,
     }
 
 
@@ -359,10 +360,11 @@ def conn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[sqlite3.C
     c.close()
 
 
-def _job(tmp_path: Path, status: str, at: int, summary: str = "3 checks", detail: str = "") -> Config:
+def _job(tmp_path: Path, status: str, at: int, summary: str = "3 checks", detail: str = "", **extra: object) -> Config:
     path = tmp_path / "job.json"
     run = datetime.fromtimestamp(at / 1000, UTC).isoformat()
     fields = {"name": "nightly sync", "status": status, "last_run_utc": run, "summary": summary, "detail": detail}
+    fields.update(extra)
     path.write_text(json.dumps(fields))
     return replace(ALERT_CONFIG, watchers=(Watcher(path=str(path)),))
 
@@ -492,3 +494,84 @@ def test_an_alert_that_gets_through_as_the_escalation_falls_due_is_named_so(
     renamed = replace(_job(tmp_path, "failed", NOW + 60 * MIN), watcher_alert_to="tooling")
     assert len(alert_watchers(conn, renamed, NOW + 60 * MIN)) == 2
     assert re.search(r"tooling was told at [\d-]+ [\d:]+\.$", _told(conn)[-1][1])
+
+
+def _utc(at: int) -> str:
+    return datetime.fromtimestamp(at / 1000, UTC).isoformat()
+
+
+LIMIT = "hit its weekly limit"
+
+
+def test_a_failure_with_a_known_end_is_told_once_and_not_escalated_before_it(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    until = _utc(NOW + 180 * MIN)
+    assert len(alert_watchers(conn, _job(tmp_path, "failed", NOW, LIMIT, known_until=until), NOW)) == 1
+    [(handle, body)] = _told(conn)
+    assert handle == "tooling"
+    assert re.fullmatch(
+        rf"nightly sync watch: failed: {LIMIT} \(since [\d-]+ [\d:]+\)\. Expected back by [\d-]+ [\d:]+\.", body
+    )
+    for minutes in (61, 120, 179):
+        at = NOW + minutes * MIN
+        assert alert_watchers(conn, _job(tmp_path, "failed", at, LIMIT, known_until=until), at) == []
+
+    at = NOW + 181 * MIN
+    assert len(alert_watchers(conn, _job(tmp_path, "failed", at, LIMIT, known_until=until), at)) == 1
+    assert _told(conn)[-1][0] == "aide", "still failing past its known end escalates"
+    assert _told(conn)[-1][1].startswith("nightly sync watch is still not ok after 181 min: failed: ")
+
+
+def test_a_flap_before_the_known_end_is_the_same_outage_and_back_is_said_once(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    until = _utc(NOW + 180 * MIN)
+    alert_watchers(conn, _job(tmp_path, "failed", NOW, LIMIT, known_until=until), NOW)
+    assert len(alert_watchers(conn, _job(tmp_path, "ok", NOW + 10 * MIN), NOW + 10 * MIN)) == 1
+    assert _told(conn)[-1][1].startswith("nightly sync watch is back to ok")
+    at = NOW + 20 * MIN
+    assert alert_watchers(conn, _job(tmp_path, "failed", at, LIMIT, known_until=until), at) == []
+    assert alert_watchers(conn, _job(tmp_path, "failed", at + 100 * MIN, LIMIT), at + 100 * MIN) == []
+    assert alert_watchers(conn, _job(tmp_path, "ok", NOW + 130 * MIN), NOW + 130 * MIN) == [], "back said once"
+    assert len(_told(conn)) == 2
+
+    at = NOW + 140 * MIN
+    assert len(alert_watchers(conn, _job(tmp_path, "failed", at, "db unreachable"), at)) == 1, "another failure"
+    alert_watchers(conn, _job(tmp_path, "ok", at + MIN), at + MIN)
+    at = NOW + 181 * MIN
+    assert len(alert_watchers(conn, _job(tmp_path, "failed", at, LIMIT), at)) == 1, "past its end, a new spell"
+    assert conn.execute("SELECT count(*) FROM signal_posts WHERE key LIKE '%known %'").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("until", ["tomorrow", 1764000000, "", _utc(NOW - MIN)])
+def test_a_bad_or_past_known_end_keeps_the_usual_alerts(
+    conn: sqlite3.Connection, tmp_path: Path, until: object
+) -> None:
+    alert_watchers(conn, _job(tmp_path, "failed", NOW, LIMIT, known_until=until), NOW)
+    assert "Expected back" not in _told(conn)[-1][1]
+    at = NOW + 60 * MIN
+    assert len(alert_watchers(conn, _job(tmp_path, "failed", at, LIMIT, known_until=until), at)) == 1
+    assert _told(conn)[-1][0] == "aide"
+
+
+def test_a_naive_known_end_is_utc(tmp_path: Path) -> None:
+    watcher = _write(tmp_path, status="failed", last_run_utc="2026-11-04T11:53:00Z", known_until="2026-11-04T13:00:00")
+    assert read_watcher(watcher, NOW)["known_until_at"] == NOW + 60 * MIN
+
+
+def test_a_moved_known_end_or_an_unheard_alert_is_not_kept_quiet_by_a_flap(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    until = _utc(NOW + 180 * MIN)
+    alert_watchers(conn, _job(tmp_path, "failed", NOW, LIMIT, known_until=until), NOW)
+    alert_watchers(conn, _job(tmp_path, "ok", NOW + 10 * MIN), NOW + 10 * MIN)
+    at = NOW + 20 * MIN
+    sooner = _utc(NOW + 30 * MIN)
+    assert len(alert_watchers(conn, _job(tmp_path, "failed", at, LIMIT, known_until=sooner), at)) == 1
+
+    conn.execute("DELETE FROM signal_posts")
+    unheard = replace(_job(tmp_path, "failed", NOW, LIMIT, known_until=until), watcher_alert_to="nobody-here")
+    assert alert_watchers(conn, unheard, NOW) == []
+    alert_watchers(conn, replace(_job(tmp_path, "ok", NOW + 10 * MIN), watcher_alert_to="nobody-here"), NOW + 10 * MIN)
+    assert len(alert_watchers(conn, _job(tmp_path, "failed", at, LIMIT, known_until=until), at)) == 1
