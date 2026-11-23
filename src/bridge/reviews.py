@@ -377,6 +377,14 @@ def record_poll_error(conn: sqlite3.Connection, error: str, now: int) -> None:
     )
 
 
+def read_github_failure(conn: sqlite3.Connection) -> tuple[str, int] | None:
+    """The error of the poll's last GitHub read and when it came, while no read has worked since."""
+    poll = conn.execute("SELECT ok_at, error, error_at FROM review_poll WHERE id = 1").fetchone()
+    if poll is None or poll["error_at"] is None or int(poll["error_at"]) < int(poll["ok_at"] or 0):
+        return None
+    return str(poll["error"]), int(poll["error_at"])
+
+
 def list_missing_refs(conn: sqlite3.Connection, prs: list[OpenPr]) -> list[str]:
     seen = {pr.ref for pr in prs}
     return [

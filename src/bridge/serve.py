@@ -169,6 +169,7 @@ from bridge.reviews import (
     find_owner_of_ref,
     map_db_to_reviews,
     poll_review_queue,
+    read_github_failure,
     record_merge_ok,
     send_to_handle,
 )
@@ -272,6 +273,18 @@ def serve(config: Config, port: int) -> None:
     server.serve_forever()
 
 
+POLL_FAILING = (
+    "bridge: the review-queue poll has failed for {minutes} min, so new PR comments, review notices and auto-merges "
+    "reach no one. Last error: {error}. bridge says once when it works again.",
+    "bridge: the review-queue poll works again after {minutes} min.",
+)
+GITHUB_FAILING = (
+    "GitHub is failing: the review poll has not read it for {minutes} min, so new PR comments, review notices and "
+    "auto-merges wait. Last error: {error}. bridge says once when GitHub answers again.",
+    "GitHub answers the review poll again after {minutes} min.",
+)
+
+
 class DashboardState:
     def __init__(self, config: Config) -> None:
         self.config = config
@@ -284,6 +297,7 @@ class DashboardState:
         self._wake = WakeWatch()
         self._outages = OutageNotices()
         self._poll_spell = FailureSpell()
+        self._github_spell = FailureSpell()
         self._projects_retry_at = 0
         self._unpublished_told: dict[str, int] = {}
         self._weekly_failure: str | None = None
@@ -847,7 +861,9 @@ class DashboardState:
             time.sleep(REMOTE_EVERY_S)
 
     def poll_reviews_forever(self) -> None:
-        """With every page closed too: the queue stays current and the owner's comments reach their owners."""
+        """With every page closed too: the queue stays current and the owner's comments reach their owners. A GitHub
+        read that fails ends the round as usual, kept as the poll's error, so GitHub failing is told apart from bridge
+        failing."""
         while True:
             try:
                 with self._connection() as conn:
@@ -867,20 +883,34 @@ class DashboardState:
             except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, MessageStateError) as exc:
                 print(f"review queue poll failed: {exc}", flush=True)
                 self._tell_of_stalls_alone()
-                minutes = self._poll_spell.fail(now_ms())
-                if minutes is not None:
-                    self._poll_spell.told = self._tell_of_bridge_failure(
-                        f"bridge: the review-queue poll has failed for {minutes} min, so new PR comments, review "
-                        f"notices and auto-merges reach no one. Last error: {str(exc).replace('/p/', 'p/')}. "
-                        "bridge says once when it works again."
-                    )
+                self._follow_spell(self._poll_spell, str(exc).replace("/p/", "p/"), POLL_FAILING)
             else:
-                minutes = self._poll_spell.recovered(now_ms())
-                if minutes is None or self._tell_of_bridge_failure(
-                    f"bridge: the review-queue poll works again after {minutes} min."
-                ):
-                    self._poll_spell.reset()
+                self._follow_spell(self._poll_spell, None, POLL_FAILING)
+            self._follow_github_spell()
             time.sleep(GITHUB_EVERY_S)
+
+    def _follow_github_spell(self) -> None:
+        """After every round, failed or not: its GitHub read is committed before the steps that may raise."""
+        try:
+            with self._connection() as conn:
+                github = read_github_failure(conn)
+        except (sqlite3.Error, OSError) as exc:
+            print(f"reading the review poll's GitHub state failed: {exc}", flush=True)
+            return
+        self._follow_spell(self._github_spell, github[0] if github else None, GITHUB_FAILING)
+
+    def _follow_spell(self, spell: FailureSpell, error: str | None, notices: tuple[str, str]) -> None:
+        """error: this round failed with it, None: it worked. notices: the failing and the back line, formatted with
+        minutes and error."""
+        failing, back = notices
+        if error is not None:
+            minutes = spell.fail(now_ms())
+            if minutes is not None:
+                spell.told = self._tell_of_failure(failing.format(minutes=minutes, error=error))
+            return
+        minutes = spell.recovered(now_ms())
+        if minutes is None or self._tell_of_failure(back.format(minutes=minutes)):
+            spell.reset()
 
     def _tell_of_stalls_alone(self) -> None:
         """A failed round never reached the guard in _advance_reviews, or rolled it back with it."""
@@ -910,8 +940,8 @@ class DashboardState:
             if not isinstance(exc, LinearError):
                 log_error("issue projects", traceback.format_exc())
 
-    def _tell_of_bridge_failure(self, text: str) -> bool:
-        """The assistant and whoever hears bridge's own failures (auto_merge_failures_to); whether anyone was told."""
+    def _tell_of_failure(self, text: str) -> bool:
+        """The assistant and whoever hears bridge's failures (auto_merge_failures_to); whether anyone was told."""
         wanted = (self.config.assistant_handle, self.config.auto_merge_failures_to)
         handles = list(dict.fromkeys(h for h in wanted if h))
         told = False

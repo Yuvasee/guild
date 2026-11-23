@@ -19,7 +19,14 @@ from bridge.review_post import (
     map_stalled_post_to_reason,
 )
 from bridge.review_worktree import is_worth_preparing
-from bridge.reviews import HIS, SETTLE_MS, WAKES_PER_HOUR_MAX, count_recent_wakes, find_owner
+from bridge.reviews import (
+    HIS,
+    SETTLE_MS,
+    WAKES_PER_HOUR_MAX,
+    count_recent_wakes,
+    find_owner,
+    read_github_failure,
+)
 
 POST_STALL_AFTER_MS = 15 * 60_000
 COMMENT_STALL_AFTER_MS = 10 * 60_000
@@ -195,14 +202,17 @@ def _reason_comments(conn: sqlite3.Connection, config: Config, w: Waiting, now: 
     whys: list[str] = []
     unblocks: list[str] = []
     if unclassified := int(pr["stall_unclassified"]):
-        poll = conn.execute("SELECT ok_at, error, error_at FROM review_poll WHERE id = 1").fetchone()
-        if poll is not None and poll["error_at"] is not None and int(poll["error_at"]) >= int(poll["ok_at"] or 0):
-            state = (
-                f"the review poll's last round failed at {_format_at(config, int(poll['error_at']))}: {poll['error']}"
-            )
-        else:
-            state = "no round has classified it: that needs a transcript scan begun after it, then a round that commits"
-        whys.append(f"{unclassified} comment(s) have no verdict, so no one was told; {state}")
+        github = read_github_failure(conn)
+        also = (
+            f"; GitHub is failing too: the review poll's last read of it failed at {_format_at(config, github[1])}: "
+            f"{github[0]}, so newer comments are not read either"
+            if github
+            else ""
+        )
+        whys.append(
+            f"{unclassified} comment(s) have no verdict, so no one was told; no round has classified it: that needs a "
+            f"transcript scan begun after it, then a round that commits{also}"
+        )
         unblocks.append(
             "fix the error that bridge's serve.log shows under 'review queue poll failed' or 'transcript scan failed'"
         )

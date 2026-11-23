@@ -213,14 +213,17 @@ def test_replay_a_poll_that_rolled_back_every_round_leaves_comments_without_a_ve
     assert "2 comment(s) have no verdict" in body and "no round has classified it" in body
 
 
-def test_a_failed_github_read_is_named_as_why_comments_wait(tmp_path: Path) -> None:
+def test_github_failing_is_named_beside_why_comments_wait_not_as_its_cause(tmp_path: Path) -> None:
+    """A round that cannot read GitHub still classifies the comments it already has."""
     conn = guarded(tmp_path)
     store(conn, comment("p1", at=1000))
     due = 1000 + SETTLE_MS + COMMENT_STALL_AFTER_MS
     with transaction(conn):
         conn.execute("UPDATE review_poll SET ok_at = 900, error = 'rate limited', error_at = ?", (due,))
     assert len(alert(conn, due)) == 2
-    assert "the review poll's last round failed at 01-01 00:10: rate limited" in last_body(conn)
+    body = last_body(conn)
+    assert "no round has classified it" in body
+    assert "GitHub is failing too: the review poll's last read of it failed at 01-01 00:10: rate limited" in body
 
 
 def test_replay_a_pr_listed_under_a_lead_that_only_mentioned_it(tmp_path: Path) -> None:
