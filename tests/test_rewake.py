@@ -251,6 +251,30 @@ def test_a_print_mode_claude_gets_no_waiter_and_a_compaction_keeps_the_turn_busy
     assert kept
 
 
+def test_a_session_start_waiter_waits_for_the_record_claude_code_writes_after_it(
+    tmp_path: Path, spawn_process: SpawnProcess
+) -> None:
+    waiter = Waiter(tmp_path / "w", spawn_process())
+    record = waiter.sessions / f"{waiter.pid}.json"
+    written = record.read_text()
+    record.unlink()
+    proc = waiter.start("SessionStart", '{"session_id":"x","source":"startup"}')
+    time.sleep(0.5)
+    started_early = waiter.listening()
+    record.write_text(written)
+    listens = wait_for(waiter.listening)
+    proc.terminate()
+    _finish(proc)
+
+    gone = Waiter(tmp_path / "g", spawn_process())
+    (gone.sessions / f"{gone.pid}.json").unlink()
+    gone.env["BRIDGE_REWAKE_RECORD_TRIES"] = "3"
+    gone_code, _ = _finish(gone.start("SessionStart", "{}"))
+
+    assert not started_early and listens
+    assert gone_code == 0 and not gone.lock.exists(), "a Claude that never writes its record gets no waiter"
+
+
 def test_a_prompt_marks_the_tab_busy_in_the_shell(tmp_path: Path) -> None:
     (tmp_path / "rewake").mkdir()
     env = {"PATH": os.environ["PATH"], "BRIDGE_STATE_DIR": str(tmp_path), "CLAUDE_PID": "4242"}

@@ -33,7 +33,9 @@ REWAKE_TAB_NAME = "bridge rewake check"
 LONG_TAB_NAME = "bridge long message check"
 LONG_MESSAGE_CHARS = 3_000
 CLAUDE_PID_FILE = "claude.pid"
-WAITER_WITHIN_S = 45.0
+READY_WITHIN_S = 45.0
+# Claude Code writes the session record the waiter needs up to 5 s after its input box shows.
+WAITER_WITHIN_S = 15.0
 ANSWER_WITHIN_S = 60.0
 DOWN = "\x1b[B"
 TRUST_ANSWER = "Yes, I trust this folder"
@@ -188,11 +190,17 @@ def _write_check_files(root: Path, work: Path, state: Path, claude: str) -> Path
 
 def _wake_and_see(config: Config, session: str, work: Path, state: Path) -> CheckResult:
     started = time.monotonic()
-    pid = _await_waiter(config, session, work, state)
+    screen = _await_input_box(config, session, work, [])
+    if screen is not None:
+        return CheckResult(False, f"the check Claude showed no input box in {READY_WITHIN_S:.0f} s: {_tail(screen)}")
+    ready_s = time.monotonic() - started
+    pid = _await_waiter(state)
     if pid is None:
         screen = run_agterm(config, ["session", "text", "--target", session]) or ""
         return CheckResult(
-            False, f"no rewake waiter started within {WAITER_WITHIN_S:.0f} s; the tab shows: {_tail(screen)}"
+            False,
+            f"no rewake waiter started within {WAITER_WITHIN_S:.0f} s of Claude's input box, which showed in "
+            f"{ready_s:.0f} s; {_describe_session_record(state)}; the tab shows: {_tail(screen)}",
         )
     word = "".join(secrets.choice(string.ascii_lowercase) for _ in range(12))
     (state / "mail").write_text(f"This is a bridge deploy check. Reply with only this word, in capitals: {word}\n")
@@ -216,19 +224,43 @@ def _wake_and_see(config: Config, session: str, work: Path, state: Path) -> Chec
     return CheckResult(False, f"the waiter {taken}; no answer within {ANSWER_WITHIN_S:.0f} s: {_tail(screen)}")
 
 
-def _await_waiter(config: Config, session: str, work: Path, state: Path) -> int | None:
-    """The waiter's pid once it listens; the trust dialog naming the check's own folder is answered yes, once."""
-    answered = False
+def _await_waiter(state: Path) -> int | None:
     started = time.monotonic()
     while time.monotonic() - started < WAITER_WITHIN_S:
         for lock in (state / "rewake").glob("*.waiter"):
             stem = lock.name.removesuffix(".waiter")
             if stem.isdigit() and (lock / "pid").exists():
                 return int(stem)
-        screen = run_agterm(config, ["session", "text", "--target", session]) or ""
+        time.sleep(0.2)
+    return None
+
+
+def _describe_session_record(state: Path) -> str:
+    """The waiter leaves silently on a missing or non-cli record; a failure says which it would have read."""
+    try:
+        pid = int((state / CLAUDE_PID_FILE).read_text().strip())
+    except (OSError, ValueError):
+        return "no Claude pid"
+    try:
+        entrypoint = json.loads((Path.home() / ".claude/sessions" / f"{pid}.json").read_text()).get("entrypoint")
+    except (OSError, ValueError, AttributeError):
+        return f"Claude {pid} has no readable session record"
+    return f"Claude {pid}'s session record says entrypoint {entrypoint!r}"
+
+
+def _await_input_box(config: Config, session: str, work: Path, text_args: list[str]) -> str | None:
+    """None once Claude Code shows its input box, empty or with its grey suggestion, and no dialog; else the last
+    screen. The trust dialog naming the check's own folder is answered yes, once."""
+    started = time.monotonic()
+    answered = False
+    screen = ""
+    while map_screen_to_draft(screen) is None or map_screen_to_busy(screen):
+        if time.monotonic() - started >= READY_WITHIN_S:
+            return screen
+        time.sleep(0.5)
+        screen = run_agterm(config, ["session", "text", "--target", session, *text_args]) or ""
         if not answered:
             answered = _answer_trust(config, session, work, screen)
-        time.sleep(0.5)
     return None
 
 
@@ -248,25 +280,15 @@ def _type_long_and_see(config: Config, session: str, work: Path, state: Path) ->
     pane = _find_pane(config, session)
     if pane is None:
         return CheckResult(False, "agterm shows no pane for the check tab")
-    started = time.monotonic()
-    answered = False
-    screen = ""
-    # Ready once Claude Code shows its input box, empty or with its grey suggestion, and no dialog.
-    while map_screen_to_draft(screen) is None or map_screen_to_busy(screen):
-        if time.monotonic() - started >= WAITER_WITHIN_S:
-            return CheckResult(
-                False, f"the check Claude showed no input box in {WAITER_WITHIN_S:.0f} s: {_tail(screen)}"
-            )
-        time.sleep(0.5)
-        screen = run_agterm(config, ["session", "text", "--target", session, "--pane-id", pane]) or ""
-        if not answered:
-            answered = _answer_trust(config, session, work, screen)
+    screen = _await_input_box(config, session, work, ["--pane-id", pane])
+    if screen is not None:
+        return CheckResult(False, f"the check Claude showed no input box in {READY_WITHIN_S:.0f} s: {_tail(screen)}")
     word = "".join(secrets.choice(string.ascii_lowercase) for _ in range(12))
     body = f"This is a bridge deploy check; reply with only the word {word}. " + "Filler to make it long. " * 120
     text = convert_user_message_to_typed_text("deploy-check", body[:LONG_MESSAGE_CHARS], 0)
     typed_at = time.monotonic()
     result = type_when_idle(
-        config, session, pane, text, lambda: True, wait_s=int(WAITER_WITHIN_S),
+        config, session, pane, text, lambda: True, wait_s=int(READY_WITHIN_S),
         may_probe_box=lambda: not is_tab_selected(config, session),
     )  # fmt: skip
     if result != "typed":

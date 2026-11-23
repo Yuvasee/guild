@@ -35,10 +35,19 @@ Stop)
 esac
 
 # A print-mode or SDK Claude waits for its async hooks before it exits, so a waiter there would hold it open.
-case $(cat "${BRIDGE_CLAUDE_SESSIONS_DIR:-$HOME/.claude/sessions}/$pid.json") in
-*'"entrypoint":"cli"'* | *'"entrypoint": "cli"'*) ;;
-*) exit 0 ;;
-esac
+# Claude Code writes its record while the SessionStart hooks already run, after up to 5 s of its own setup: a single
+# read could find none and leave the tab without a waiter until its first turn ended.
+record=${BRIDGE_CLAUDE_SESSIONS_DIR:-$HOME/.claude/sessions}/$pid.json
+tries=${BRIDGE_REWAKE_RECORD_TRIES:-200}
+while :; do
+  case $(cat "$record") in
+  *'"entrypoint":"cli"'* | *'"entrypoint": "cli"'*) break ;;
+  *'"entrypoint"'*) exit 0 ;;
+  esac
+  [ "$tries" -gt 0 ] && kill -0 "$pid" || exit 0
+  tries=$((tries - 1))
+  sleep 0.1
+done
 
 leave() {
   owner=
