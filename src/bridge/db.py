@@ -872,9 +872,20 @@ MIGRATIONS: tuple[str, ...] = (
     ALTER TABLE review_prs ADD COLUMN files TEXT;
     ALTER TABLE review_prs ADD COLUMN related_prs TEXT NOT NULL DEFAULT '[]';
     """,
-    # The repo a host worker pushed to: its checkout may hold another repo's checkout. NULL: the writer's own repo.
+    # The repo a host worker pushed to, part of the key as one branch name can live in two repos; '' is the writer's
+    # own repo.
     """
-    ALTER TABLE review_branch_writes ADD COLUMN repo TEXT;
+    CREATE TABLE review_branch_writes_new (
+        conversation_id TEXT NOT NULL,
+        branch TEXT NOT NULL,
+        at INTEGER NOT NULL,
+        repo TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY (conversation_id, branch, repo)
+    );
+    INSERT INTO review_branch_writes_new (conversation_id, branch, at)
+        SELECT conversation_id, branch, at FROM review_branch_writes;
+    DROP TABLE review_branch_writes;
+    ALTER TABLE review_branch_writes_new RENAME TO review_branch_writes;
     """,
 )
 

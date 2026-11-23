@@ -148,7 +148,7 @@ def add_session(
         (conversation, instance),
     )
     if wrote or (wrote is None and branch != "other"):
-        conn.execute("INSERT INTO review_branch_writes VALUES (?, ?, 1, NULL)", (conversation, branch))
+        conn.execute("INSERT INTO review_branch_writes VALUES (?, ?, 1, '')", (conversation, branch))
 
 
 def add_lead(conn: Any, name: str, surface: str) -> None:
@@ -2401,9 +2401,36 @@ def test_a_host_workers_push_to_a_repo_its_checkout_is_not_makes_it_that_prs_own
     last = find_last_pusher(conn, CONFIG, "Org/app", "dev/x")
     assert last is not None and last.handle == "worker"
     with transaction(conn):
+        record_host_pushes(conn, CONFIG, "w", [("org/other", "dev/x")], 8)
+    owner = find_owner(conn, CONFIG, REF, "Org/app", "dev/x")
+    assert owner is not None and owner.handle == "worker", "a later push to the same name in another repo"
+    with transaction(conn):
         conn.execute("UPDATE instances SET ended_at = 99 WHERE conversation_id = 'w'")
     owner = find_owner(conn, CONFIG, REF, "Org/app", "dev/x")
     assert owner is not None and (owner.handle, owner.via) == ("alex", "lead"), "ended: the lead that ran it"
+
+
+def test_a_checkout_on_a_same_named_branch_of_another_repo_does_not_outrank_the_latest_pusher(tmp_path: Path) -> None:
+    conn = setup_pr(tmp_path)
+    with transaction(conn):
+        add_session(conn, "a", "root-worker", repo="Org/root", branch="dev/x", wrote=False)
+        add_session(conn, "b", "app-worker", repo="Org/app", branch="0a1b2c3d4e5f", wrote=False)
+        record_host_pushes(conn, CONFIG, "a", [("org/app", "dev/x")], 5)
+        record_host_pushes(conn, CONFIG, "b", [("org/app", "dev/x")], 9)
+    owner = find_owner(conn, CONFIG, REF, "Org/app", "dev/x")
+    assert owner is not None and owner.handle == "app-worker"
+
+
+def test_a_host_push_to_an_aliased_repo_counts_whatever_its_case(tmp_path: Path) -> None:
+    conn = setup_pr(tmp_path)
+    config = replace(CONFIG, pr_repo_aliases={"Org/app-root": "Org/app"})
+    with transaction(conn):
+        add_session(conn, "w", "worker", repo="Org/app-root", branch="0a1b2c3d4e5f", wrote=False)
+        record_host_pushes(conn, config, "w", [("org/app-root", "dev/x")], 5)
+    owner = find_owner(conn, config, REF, "Org/app", "dev/x")
+    assert owner is not None and owner.handle == "worker"
+    last = find_last_pusher(conn, config, "Org/app", "dev/x")
+    assert last is not None and last.handle == "worker"
 
 
 def test_a_leads_declared_prs_are_signal_candidates_after_its_worker_ended(tmp_path: Path) -> None:

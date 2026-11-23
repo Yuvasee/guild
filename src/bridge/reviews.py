@@ -550,7 +550,7 @@ def record_branch_writes(conn: sqlite3.Connection, conversation_id: str, command
                 conn.execute(
                     """
                     INSERT INTO review_branch_writes (conversation_id, branch, at) VALUES (?, ?, ?)
-                    ON CONFLICT (conversation_id, branch) DO UPDATE SET at = max(at, excluded.at)
+                    ON CONFLICT (conversation_id, branch, repo) DO UPDATE SET at = max(at, excluded.at)
                     """,
                     (conversation_id, branch or own, at),
                 )
@@ -565,7 +565,7 @@ def record_host_pushes(
         conn.execute(
             """
             INSERT INTO review_branch_writes (conversation_id, branch, at, repo) VALUES (?, ?, ?, ?)
-            ON CONFLICT (conversation_id, branch) DO UPDATE SET at = max(at, excluded.at), repo = excluded.repo
+            ON CONFLICT (conversation_id, branch, repo) DO UPDATE SET at = max(at, excluded.at)
             """,
             (conversation_id, branch, at, repo),
         )
@@ -1031,18 +1031,26 @@ def find_owner(
     declared = _find_lead_from_work(conn, config, ref, head, by_issue=False)
     if declared is not None:
         return declared
-    for row in conn.execute(
-        """
-        SELECT i.conversation_id, i.surface, coalesce(w.repo, i.repo) AS repo, s.handle FROM review_branch_writes w
-        JOIN instances i ON i.conversation_id = w.conversation_id AND i.ended_at IS NULL
-        JOIN surfaces s ON s.surface = i.surface
-        WHERE w.branch = ?1 AND s.handle IS NOT NULL
-        ORDER BY i.branch IS ?1 DESC, w.at DESC, coalesce(i.last_activity_at, 0) DESC
-        """,
-        (head,),
-    ):
-        if _is_writer_in_repo(config, row["repo"], repo) and may_own(row):
-            return from_session(row, "branch")
+    writers = [
+        row
+        for row in conn.execute(
+            """
+            SELECT i.conversation_id, i.surface, i.branch, i.repo AS own_repo,
+                   coalesce(nullif(w.repo, ''), i.repo) AS repo, s.handle
+            FROM review_branch_writes w
+            JOIN instances i ON i.conversation_id = w.conversation_id AND i.ended_at IS NULL
+            JOIN surfaces s ON s.surface = i.surface
+            WHERE w.branch = ? AND s.handle IS NOT NULL
+            ORDER BY w.at DESC, coalesce(i.last_activity_at, 0) DESC
+            """,
+            (head,),
+        )
+        if _is_writer_in_repo(config, row["repo"], repo) and may_own(row)
+    ]
+    # A writer whose own checkout is on the branch is on it now; a same-named branch of another repo is not.
+    on_it = [r for r in writers if r["branch"] == head and _is_writer_in_repo(config, r["own_repo"], repo)]
+    if writers:
+        return from_session((on_it or writers)[0], "branch")
     ended = _find_lead_of_ended_writer(conn, config, ref, repo, head, wrote=True)
     if ended is not None or owned_only:
         return ended
@@ -1091,7 +1099,7 @@ def find_last_pusher(conn: sqlite3.Connection, config: Config, repo: str, head: 
     to no one the caller falls back to the PR's owner."""
     rows = conn.execute(
         """
-        SELECT i.conversation_id, i.surface, coalesce(w.repo, i.repo) AS repo, i.ended_at, s.handle
+        SELECT i.conversation_id, i.surface, coalesce(nullif(w.repo, ''), i.repo) AS repo, i.ended_at, s.handle
         FROM review_branch_writes w
         JOIN instances i ON i.instance_id = (
             SELECT instance_id FROM instances WHERE conversation_id = w.conversation_id
@@ -1123,7 +1131,7 @@ def _find_lead_of_ended_writer(
     named the PR, which is less: a reviewer does that too."""
     query = (
         """
-        SELECT i.conversation_id, i.surface, coalesce(w.repo, i.repo) AS repo FROM review_branch_writes w
+        SELECT i.conversation_id, i.surface, coalesce(nullif(w.repo, ''), i.repo) AS repo FROM review_branch_writes w
         JOIN instances i ON i.conversation_id = w.conversation_id
         WHERE w.branch = ?1 AND i.ended_at IS NOT NULL AND i.surface IS NOT NULL
         ORDER BY w.at DESC, coalesce(i.last_activity_at, i.last_observed_at, 0) DESC
@@ -1149,8 +1157,11 @@ def _find_lead_of_ended_writer(
 
 
 def _is_writer_in_repo(config: Config, writer_repo: str | None, repo: str) -> bool:
-    """A host push names its repo in lower case."""
-    return (config.pr_repo_for(writer_repo) or "").lower() == repo.lower()
+    """A host push names its repo in lower case, so the alias lookup ignores case too."""
+    if not writer_repo:
+        return False
+    aliases = {k.lower(): v for k, v in config.pr_repo_aliases.items()}
+    return aliases.get(writer_repo.lower(), writer_repo).lower() == repo.lower()
 
 
 def find_owner_of_ref(
