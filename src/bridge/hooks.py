@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -300,7 +301,85 @@ def _xargs_program(words: list[str]) -> str:
     return os.path.basename(words[at]) if at < len(words) else ""
 
 
+_CHECKERS = frozenset({
+    "pre-commit", "pytest", "ruff", "mypy", "pyright", "tox", "nox", "jest", "vitest", "eslint", "tsc", "make",
+})  # fmt: skip
+_RUNNERS = frozenset({"npm", "pnpm", "yarn", "go", "cargo"})
+_RUNNER_CHECKS = frozenset({"test", "lint", "check", "typecheck", "vet", "clippy"})
+_FILTERS = frozenset({"grep", "egrep", "rg", "tail", "head", "sed", "awk", "cut", "sort", "uniq", "wc", "tee", "less"})
+
+
+def find_hidden_exit_code_note(command: str) -> str | None:
+    """A test, lint, pre-commit or commit run piped into a filter reports the filter's exit code: a failed check reads
+    as passed. Not refused, since the output is often all that is wanted; the note says how to keep the real code."""
+    if _KEEPS_EXIT_CODE_RE.search(command) and not re.search(r"set\s+\+o\s+pipefail", command):
+        return None
+    segments = segment_command(command)
+    for index in range(1, len(segments)):
+        tokens, joined_by = segments[index]
+        if joined_by not in ("|", "|&") or _program_of(tokens) not in _FILTERS:
+            continue
+        # A subshell's ) leaves a segment of nothing or only redirections between the checker and the pipe.
+        before: list[str] = next(
+            (
+                t
+                for t, j in reversed(segments[:index])
+                if t and not (j == ")" and all(_REDIRECT_RE.match(w) for w in t))
+            ),
+            list[str](),
+        )
+        checker = _map_tokens_to_checker(_drop_command_prefix(before))
+        if checker:
+            return (
+                f"bridge: {checker}'s exit code is lost in this pipe: the shell reports the last command's, so a "
+                f"failed {checker} reads as passed. Add 'set -o pipefail; ' at the start, or check "
+                "${PIPESTATUS[0]} (bash) / ${pipestatus[1]} (zsh), before calling it passed."
+            )
+    return None
+
+
+_REDIRECT_RE = re.compile(r"^\d*(?:[<>]|&>)")
+_KEEPS_EXIT_CODE_RE = re.compile(
+    r"(?:set\s+-o\s+pipefail|setopt\s+pipefail|\bset\s+-\w*e\w*o\s+pipefail|pipestatus)", re.I
+)
+_RUNNER_VALUE_OPTIONS = frozenset({
+    "--project", "--python", "-p", "--with", "--directory", "--package", "--group", "--extra", "--env-file", "--index",
+    "--from",
+})  # fmt: skip
+
+
+def _map_tokens_to_checker(words: list[str]) -> str | None:
+    while words[:2] in (["uv", "run"], ["poetry", "run"]) or words[:1] in (["npx"], ["uvx"]):
+        words = words[2:] if words[0] in ("uv", "poetry") else words[1:]
+        while words and words[0].startswith("-"):
+            words = words[2:] if words[0] in _RUNNER_VALUE_OPTIONS else words[1:]
+    if words[:2] in (["python", "-m"], ["python3", "-m"]):
+        words = words[2:]
+    program = os.path.basename(words[0]) if words else ""
+    if program in _CHECKERS:
+        return program
+    if program == "git" and "commit" in words[1:6]:
+        return "git commit"
+    if program in _RUNNERS and len(words) > 1:
+        task = words[2] if words[1] == "run" and len(words) > 2 else words[1]
+        if task in _RUNNER_CHECKS:
+            return f"{program} {task}"
+    return None
+
+
 def handle_pre_tool_use(
+    conn: sqlite3.Connection, payload: dict[str, object], config: Config, host_checkout: HostRepoReader | None = None
+) -> str:
+    decision = _check_pre_tool_use(conn, payload, config, host_checkout)
+    raw_input = payload.get("tool_input")
+    command = cast(dict[str, object], raw_input).get("command") if isinstance(raw_input, dict) else None
+    if decision or payload.get("tool_name") != "Bash" or not isinstance(command, str):
+        return decision
+    note = find_hidden_exit_code_note(command)
+    return _note(note) if note else ""
+
+
+def _check_pre_tool_use(
     conn: sqlite3.Connection, payload: dict[str, object], config: Config, host_checkout: HostRepoReader | None = None
 ) -> str:
     """Denies a robot-prefixed title, a change to the owner's label, a PR that would name no issue, an answer to a
