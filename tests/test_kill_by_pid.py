@@ -7,7 +7,7 @@ from bridge.config import Config
 from bridge.db import connect
 from bridge.gbridge import may_need_guard
 from bridge.hooks import find_kill_by_name_refusal, handle_pre_tool_use
-from bridge.install import list_guard_globs
+from bridge.install import convert_event_to_command, list_guard_globs
 
 REFUSED = [
     "pkill -f 'pytest -q'",
@@ -87,3 +87,24 @@ def test_a_long_shell_flag_is_read_quickly() -> None:
     started = time.monotonic()
     find_kill_by_name_refusal("bash -c : -- -" + "c" * 64000 + "1 pkill")
     assert time.monotonic() - started < 1
+
+
+@pytest.mark.parametrize("command", ["pkill -f suite", "killall node", "pgrep -f w | xargs kill"])
+def test_the_macs_shell_gate_starts_the_hook_without_a_claim(tmp_path: Path, command: str) -> None:
+    import subprocess
+
+    hook = tmp_path / "hook"
+    hook.write_text("#!/bin/sh\ncat > /dev/null; echo started\n")
+    hook.chmod(0o755)
+    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+    gate = convert_event_to_command(str(hook), "PreToolUse")
+
+    done = subprocess.run(
+        ["sh", "-c", gate],
+        input=payload,
+        capture_output=True,
+        text=True,
+        env={"BRIDGE_STATE_DIR": str(tmp_path), "PATH": "/usr/bin:/bin"},
+    )
+
+    assert done.stdout.strip() == "started", "no claims-active file: the hook must start anyway"

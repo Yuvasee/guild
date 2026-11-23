@@ -32,7 +32,9 @@ _LABEL_GLOBS = ("*gh*label*", "*gh*create*-*l*", "*gh*new*-*l*")
 _PR_ISSUE_GLOBS = ("*gh*pr*create*", "*gh*pr*new*", "*gh*pr*edit*")
 # A comment, review or thread reply on a PR: it may answer a colleague's comment no call handles yet.
 _PR_ANSWER_GLOBS = ("*gh*pr*comment*", "*gh*pr*review*", "*gh*api*comments*", "*gh*api*reviews*")
-_PYTHON_GLOBS = (*_LABEL_GLOBS, *_PR_ISSUE_GLOBS, *_PR_ANSWER_GLOBS)
+# Killing processes by name or pattern is refused whether or not a claim exists.
+_KILL_GLOBS = ("*pkill*", "*killall*", "*pgrep*")
+_PYTHON_GLOBS = (*_LABEL_GLOBS, *_PR_ISSUE_GLOBS, *_PR_ANSWER_GLOBS, *_KILL_GLOBS)
 
 type JsonObject = dict[str, object]
 
@@ -113,13 +115,10 @@ def convert_event_to_command(executable: str, event: str) -> str:
     )
 
 
-_KILL_GLOBS = ["*pkill*", "*killall*", "*pgrep*"]
-
-
 def list_guard_globs() -> list[str]:
     """The shell guard's gate: a command matching none of these cannot push, merge, set a robot-prefixed title, change
     a label, open or edit a PR, comment on one, or kill processes by name."""
-    return [*(convert_trigger_to_glob(t) for t in DEFAULT_TRIGGERS), f"*{ROBOT}*", *_PYTHON_GLOBS, *_KILL_GLOBS]
+    return [*(convert_trigger_to_glob(t) for t in DEFAULT_TRIGGERS), f"*{ROBOT}*", *_PYTHON_GLOBS]
 
 
 def uninstall_hooks(settings_path: Path) -> None:
