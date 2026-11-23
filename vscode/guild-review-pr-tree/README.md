@@ -24,6 +24,7 @@ and once more five seconds later: the "Changes In Pull Request" view appears onl
 
 It then opens the PR's changes itself: the worktree's HEAD against its merge base with `origin/<base>` (the base
 branch from the workspace's `guild.reviewBase`, fetched first), in one "Changes in Pull Request #N at <commit>" tab.
-Each time HEAD moves (bridge fast-forwards the review branch when the PR gets new commits) it builds the view again and
-closes the older one. The GitHub Pull Requests extension's own changes view keeps the file list it fetched first, and
+When HEAD moves later (bridge fast-forwards the review branch when the PR gets new commits) it does not switch views
+on its own: a notice offers "Show changes", and asks to submit or save any open review comment first. It never closes
+a tab, as an open editor may hold a review comment being written. The GitHub Pull Requests extension's own changes view keeps the file list it fetched first, and
 its refresh does not refetch it, so after a push it went on showing the old diff.

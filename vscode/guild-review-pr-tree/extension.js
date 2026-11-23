@@ -9,6 +9,7 @@ const DELETED = new Set([2, 6]); // INDEX_DELETED, DELETED
 
 let shownHead;
 let showing = false;
+let offeredHead;
 
 async function activate() {
   const workspaceFile = vscode.workspace.workspaceFile;
@@ -21,7 +22,7 @@ async function activate() {
   if (!git) return;
   const watch = (repository) => {
     showChanges(git, repository);
-    repository.state.onDidChange(() => showChanges(git, repository));
+    repository.state.onDidChange(() => offerChanges(git, repository));
   };
   git.repositories.forEach(watch);
   git.onDidOpenRepository(watch);
@@ -35,9 +36,23 @@ async function openPrContainer() {
   }
 }
 
+// Once the window is open, a moved head is only offered: opening a view takes focus, and the owner may be typing a
+// review comment in an editor that must not be closed or left.
+async function offerChanges(git, repository) {
+  const head = repository.state.HEAD?.commit;
+  if (!head || head === shownHead || head === offeredHead) return;
+  offeredHead = head;
+  const match = PR_URL.exec(vscode.workspace.getConfiguration('guild').get('reviewPullRequest') || '');
+  const pick = await vscode.window.showInformationMessage(
+    `Pull Request #${match ? match[3] : ''} has new commits (now ${head.slice(0, 9)}). Submit or save any open comment before switching views.`,
+    'Show changes',
+  );
+  if (pick === 'Show changes' && repository.state.HEAD?.commit === head) await showChanges(git, repository);
+}
+
 // The PR's changes as the worktree has them now. The GitHub Pull Requests extension's own changes view keeps the file
-// list it fetched first, so after bridge moved the review branch it showed an old diff; this view is rebuilt each
-// time HEAD moves.
+// list it fetched first, so after bridge moved the review branch it showed an old diff. Older views stay open: closing
+// one could drop a review comment being written in it.
 async function showChanges(git, repository) {
   const settings = vscode.workspace.getConfiguration('guild');
   const match = PR_URL.exec(settings.get('reviewPullRequest') || '');
@@ -59,22 +74,14 @@ async function showChanges(git, repository) {
       ADDED.has(change.status) ? undefined : git.toGitUri(change.originalUri, mergeBase),
       DELETED.has(change.status) ? undefined : git.toGitUri(change.uri, head),
     ]);
-    const prefix = `Changes in Pull Request #${match[3]}`;
-    const title = `${prefix} at ${head.slice(0, 9)}`;
+    const title = `Changes in Pull Request #${match[3]} at ${head.slice(0, 9)}`;
     await vscode.commands.executeCommand('vscode.changes', title, entries);
     shownHead = head;
-    // An older head's view, or the GitHub Pull Requests extension's own, would show a diff that is no longer the PR's.
-    const stale = vscode.window.tabGroups.all
-      .flatMap((group) => group.tabs)
-      .filter((tab) => tab.label.startsWith(prefix) && tab.label !== title);
-    if (stale.length) await vscode.window.tabGroups.close(stale);
   } catch (error) {
     console.warn('guild-review-pr-tree: could not show the PR changes', error);
   } finally {
     showing = false;
   }
-  // HEAD may have moved again while this view was built.
-  if (shownHead === head && repository.state.HEAD?.commit !== head) showChanges(git, repository);
 }
 
 module.exports = { activate, deactivate() {} };

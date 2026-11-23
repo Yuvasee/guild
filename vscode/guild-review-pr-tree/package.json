@@ -2,7 +2,7 @@
   "name": "guild-review-pr-tree",
   "displayName": "Review window: PR changes",
   "description": "In a review-*.code-workspace window, opens the GitHub Pull Request side bar and the PR's changes as the worktree has them, again each time its head moves.",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "publisher": "guild",
   "license": "MIT",
   "engines": {
