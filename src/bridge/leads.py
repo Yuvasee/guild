@@ -212,15 +212,20 @@ def map_names_to_brief_rules(names: list[str], config: Config) -> str:
     reviews = read_overlay(config, "brief-reviews", BRIEF_REVIEWS_RULE, owner=owner)
     review_doc = (
         f"A PR's review doc follows {REVIEW_DOC_SPEC}: its sections, order and rules. It opens with the plain story "
-        "of what is changed, in full sentences, for a reader who never saw the code, then a User story: one person, "
-        "at least three numbered steps, what they do and see today and after the PR; every internal name is a click "
+        "of what is changed, in full sentences, for a reader who never saw the code, then a User story only when the "
+        "PR changes what a real person (a user, an admin, an operator) does or sees: one person, at least three "
+        "numbered steps, what they do and see today and after the PR; internal plumbing (stored records, clean-up "
+        "jobs, refactors, schemas) gets none, never a stretched one. A PR that adds or changes a model, schema, "
+        "API or event contract or stored shape has a visible Fields section: each changed field, what it is, why "
+        "it is needed (who writes and reads it), its limits. Every internal name is a click "
         "term at its first use in each section; one concrete scenario per change. A PR that only enables something "
         "(a flag off by default, an opt-in value, one step of a plan) has a description section 'How this will be "
         "used': the problem today, the plan's numbered steps with links (built / not built), what switches it on "
         "and who decides, what happens if it never is, the risk of using it wrong. Before writing, read the reference "
         "example house.md names, if any; before registering, pass the spec's first-reader check. A PR's description "
         "opens, for a colleague with no context, with the spec's three parts: context (what, where from, why now), a "
-        "user story in numbered steps with concrete actors, and how it is solved in principle; an enabling PR's 'How "
+        "user story in numbered steps with concrete actors only when the PR changes what a person does or sees "
+        "(otherwise skip it), and how it is solved in principle; an enabling PR's 'How "
         "this will be used' comes right after them, not folded; other details folded after; "
         'a few key terms defined at first use as <ins title="definition">term</ins>.'
     )

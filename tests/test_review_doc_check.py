@@ -282,10 +282,9 @@ def test_the_limits_must_be_at_least_one() -> None:
         map_toml_to_config({"doc_sentence_max_words": 0})
 
 
-def test_a_user_story_of_at_least_three_numbered_steps_comes_right_after_in_short() -> None:
+def test_a_user_story_is_optional_and_one_that_is_there_has_three_numbered_steps_right_after_in_short() -> None:
     assert problems(make_top("<p>Fine.</p>", story=steps(3))) == []
-    (missing,) = problems(make_top("<p>Fine.</p>", story=""))
-    assert missing.startswith("it has no 'User story' h2: right after 'In short'")
+    assert problems(make_top("<p>Fine.</p>", story="")) == [], "a PR no person meets differently has no story"
     (short,) = problems(make_top("<p>Fine.</p>", story=steps(2)))
     assert short.startswith("'User story' has 2 numbered steps; at least 3")
     late = make_top("<p>Fine.</p>", story="").replace(
@@ -306,6 +305,11 @@ def test_only_visible_top_level_items_of_a_numbered_list_count_as_steps() -> Non
     assert problems(make_top("<p>Fine.</p>", story=hidden)) == [
         "'User story' is inside a fold; it is a visible h2, right after 'In short'"
     ]
+
+
+def test_without_a_user_story_what_changes_and_why_keeps_the_plain_doc_limits() -> None:
+    (refused,) = problems(make_top("<p>Fine.</p>", "<p>" + words(31) + "</p>", story=""))
+    assert refused.startswith("a sentence above the folds has 31 words")
 
 
 def test_the_user_storys_sentences_keep_the_plain_doc_limits() -> None:

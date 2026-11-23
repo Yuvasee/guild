@@ -104,9 +104,9 @@ class _DocOutline(HTMLParser):
 
 @dataclass
 class VisibleTop:
-    """What the owner reads before opening anything: In short, User story and What changes and why, without the bodies
-    of folds, diagrams, code blocks and marks. `blocks` are paragraphs, list items, table cells and fold summaries as
-    text."""
+    """What the owner reads before opening anything: In short, User story if any and What changes and why, without
+    the bodies of folds, diagrams, code blocks and marks. `blocks` are paragraphs, list items, table cells and fold
+    summaries as text."""
 
     blocks: list[str] = field(default_factory=list[str])
     bullets: list[str] = field(default_factory=list[str])
@@ -323,15 +323,11 @@ def find_plainness_problems(top: VisibleTop, limits: PlainLimits) -> list[str]:
 
 
 def find_story_problems(headings: list[str], steps: int | None) -> list[str]:
-    """`headings` are every h2, folded ones too; `steps` is None when the second visible h2 is not User story."""
-    if steps is None and headings:
+    """`headings` are every h2, folded ones too; `steps` is None when the second visible h2 is not User story. A doc
+    without a User story passes: only a PR that changes what a person does or sees has one."""
+    if steps is None:
         story = [index for index, text in enumerate(headings) if _USER_STORY_RE.match(text)]
-        if not story:
-            return [
-                f"it has no '{USER_STORY}' h2: right after '{IN_SHORT}', one person's story as numbered steps (an "
-                "<ol>), each what they do and see today and after this PR"
-            ]
-        if story[0] == 0:
+        if not story or story[0] == 0:
             return []
         if story[0] == 1:
             return [f"'{USER_STORY}' is inside a fold; it is a visible h2, right after '{IN_SHORT}'"]
@@ -354,8 +350,8 @@ def find_first_reader_problems(verified: str) -> list[str]:
         return []
     return [
         "Verified does not say the first reader (with the reader profile) passed: before registering, a fresh reader "
-        "gets the reader profile, In short, User story, What changes and why and the diff, and explains back what "
-        "changes and why; wrong or vague means rewrite, and the doc says once it passed"
+        "gets the reader profile, In short, User story if any, What changes and why and the diff, and explains back "
+        "what changes and why; wrong or vague means rewrite, and the doc says once it passed"
     ]
 
 
