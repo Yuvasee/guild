@@ -38,8 +38,10 @@ def test_a_failing_loop_is_told_once_after_ten_minutes_and_once_when_it_works_ag
     assert spell.fail(LOOP_FAILING_TELL_AFTER_MS) == 10
     spell.told = True
     assert spell.fail(30 * MIN) is None, "told once per spell"
-    assert spell.recover(67 * MIN) == 67
-    assert spell.recover(68 * MIN) is None
+    assert spell.recovered(67 * MIN) == 67
+    assert spell.recovered(68 * MIN) == 68, "a back line that did not go out is tried again"
+    spell.reset()
+    assert spell.recovered(69 * MIN) is None
     assert spell.fail(70 * MIN) is None, "a new spell starts its own ten minutes"
 
 
@@ -48,4 +50,4 @@ def test_a_spell_nobody_heard_of_is_tried_again_and_ends_without_a_back_line() -
     spell.fail(0)
     assert spell.fail(LOOP_FAILING_TELL_AFTER_MS) == 10
     assert spell.fail(LOOP_FAILING_TELL_AFTER_MS + MIN) == 11, "the notice did not go out: try again next round"
-    assert spell.recover(20 * MIN) is None
+    assert spell.recovered(20 * MIN) is None, "nobody heard of it, so no back line"

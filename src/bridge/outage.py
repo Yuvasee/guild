@@ -50,8 +50,9 @@ class FailureSpell:
             return None
         return (now - self.since) // 60_000
 
-    def recover(self, now: int) -> int | None:
-        """Minutes it failed, when a told spell just ended."""
-        since, told = self.since, self.told
+    def recovered(self, now: int) -> int | None:
+        """Minutes it failed, when a told spell is to be told over; reset() once that is said."""
+        return (now - self.since) // 60_000 if self.told and self.since is not None else None
+
+    def reset(self) -> None:
         self.since, self.told = None, False
-        return (now - since) // 60_000 if told and since is not None else None

@@ -847,13 +847,15 @@ class DashboardState:
                 if minutes is not None:
                     self._poll_spell.told = self._tell_of_bridge_failure(
                         f"bridge: the review-queue poll has failed for {minutes} min, so new PR comments, review "
-                        f"notices and auto-merges reach no one. Last error: {exc}. "
+                        f"notices and auto-merges reach no one. Last error: {str(exc).replace('/p/', 'p/')}. "
                         "bridge says once when it works again."
                     )
             else:
-                minutes = self._poll_spell.recover(now_ms())
-                if minutes is not None:
-                    self._tell_of_bridge_failure(f"bridge: the review-queue poll works again after {minutes} min.")
+                minutes = self._poll_spell.recovered(now_ms())
+                if minutes is None or self._tell_of_bridge_failure(
+                    f"bridge: the review-queue poll works again after {minutes} min."
+                ):
+                    self._poll_spell.reset()
             time.sleep(GITHUB_EVERY_S)
 
     def _tell_of_bridge_failure(self, text: str) -> bool:
@@ -868,10 +870,13 @@ class DashboardState:
             except (sqlite3.Error, AddressError, MessageStateError) as exc:
                 print(f"telling {handle} of a bridge failure failed: {exc}", flush=True)
                 continue
-            if recipient.pid:
-                write_hint(recipient.pid, HINT_SENT)
-            spawn_typed_delivery(message_id, [recipient])
             told = True
+            try:
+                if recipient.pid:
+                    write_hint(recipient.pid, HINT_SENT)
+                spawn_typed_delivery(message_id, [recipient])
+            except OSError as exc:
+                print(f"delivering the bridge-failure notice to {handle} failed: {exc}", flush=True)
         return told
 
     def read_slack_forever(self) -> None:
