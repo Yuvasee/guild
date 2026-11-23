@@ -24,10 +24,10 @@ class Deploy:
     def root(self) -> Path:
         return self.home / ".local/share/bridge"
 
-    def run(self, *args: str, check: str = "--help") -> subprocess.CompletedProcess[str]:
+    def run(self, *args: str, check: str = "--help", typecheck: str = "true") -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [str(self.checkout / "scripts/deploy.sh"), *args],
-            env={**self.env, "BRIDGE_DEPLOY_CHECK": check},
+            env={**self.env, "BRIDGE_DEPLOY_CHECK": check, "BRIDGE_DEPLOY_TYPECHECK": typecheck},
             capture_output=True,
             text=True,
             timeout=300,
@@ -186,6 +186,18 @@ def test_a_second_deploy_waits_for_nobody_and_stops_while_one_runs(deploy: Deplo
     assert result.returncode != 0
     assert "already locked" in result.stderr
     assert not (deploy.root / "current").exists()
+
+
+def test_a_type_error_stops_the_deploy_before_anything_is_installed(deploy: Deploy, bridge_env: BridgeEnv) -> None:
+    result = deploy.run(typecheck="false")
+
+    assert result.returncode == 1
+    assert "stopped at 'pyright' (exit 1): type errors: see" in result.stderr
+    assert not (deploy.root / "current").exists()
+    assert not [*(deploy.root / "releases").iterdir()], "nothing installed"
+    assert [*(bridge_env.state_dir / "deploys").glob("*-pyright.txt")]
+    with bridge_env.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM messages WHERE board = 1").fetchone()[0] == 0, "nothing announced"
 
 
 def test_an_entry_point_that_is_no_venvs_is_not_taken_as_the_release_to_roll_back_to(deploy: Deploy) -> None:

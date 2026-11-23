@@ -18,6 +18,8 @@ bin=$HOME/.local/bin
 keep=5
 # Tests set a check that opens no agterm tab and starts no Claude.
 check=${BRIDGE_DEPLOY_CHECK:-deploy-check}
+# Tests set a type check that needs no network: pyright fetches its own Node package on first use under a new HOME.
+typecheck=${BRIDGE_DEPLOY_TYPECHECK:-uv run --frozen pyright}
 export PATH="$bin:$PATH"
 mkdir -p "$root"
 # One deploy or rollback at a time; the kernel drops the lock when the script exits, however it ends.
@@ -77,6 +79,8 @@ release=$releases/$(date -u +%Y%m%dT%H%M%SZ)-$sha
 venv=$release/bridge
 logs=$state/deploys
 mkdir -p "$logs" "$state/backups" "$releases"
+step="pyright"
+(cd "$repo" && $typecheck) >"$logs/$sha-pyright.txt" 2>&1 || fail $? "type errors: see $logs/$sha-pyright.txt"
 step="find the installed bridge"
 command -v bridge >/dev/null || fail 1 "no bridge on PATH; install it once with uv tool install (README)"
 
