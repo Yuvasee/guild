@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Literal
 
 from bridge.compaction import (
+    is_box_text_hidden,
     map_screen_to_box_lines,
     map_screen_to_busy,
     map_screen_to_draft,
@@ -722,8 +723,9 @@ def _submit(
         if screen is None:
             break
         draft = map_screen_to_draft(screen)
-        # A started turn can hide the box behind its spinner.
-        if presses and (draft == "" or (draft is None and map_screen_to_busy(screen))):
+        # A started turn can hide the box behind its spinner; a torn frame only hides its text.
+        gone = draft is None and map_screen_to_busy(screen) and not is_box_text_hidden(screen)
+        if presses and (draft == "" or gone):
             return "sent"
         if not still_wanted():
             return "sent" if presses else "untouched"

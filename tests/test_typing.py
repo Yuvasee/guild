@@ -1301,6 +1301,49 @@ def test_a_half_typed_compact_is_cleared_when_vim_shows_insert(tmp_path: Path) -
     assert fake.submitted == ["/compact"]
 
 
+def test_compact_whose_frame_tears_before_its_enter_is_not_counted_as_submitted(tmp_path: Path) -> None:
+    class TearsAfterTyping(FakeClaudeBox):
+        shown = False
+
+        def run(self, _: Config, args: list[str]) -> str | None:
+            box = self.boxes.get("S", "")
+            if args[:2] == ["session", "text"] and box and self.shown:
+                status = "Opus 5.5 | 56% ctx | ~/acme-co"
+                drawn = box + status[len(box) :]
+                return f"{PROMPT}{NBSP}\n{RULE}\n{PROMPT}{NBSP}{drawn}\n  -- INSERT --\n"
+            self.shown = bool(box) and args[:2] == ["session", "text"]
+            return super().run(_, args)
+
+    fake = TearsAfterTyping()
+
+    with mock.patch("bridge.tabinput.TEXT_LATE_S", 3.0):
+        result = _type(tmp_path, fake, command="/compact", wait_s=5, vim=True)
+
+    assert result == "stuck"
+    assert fake.typed == ["/compact"]
+    assert fake.submitted == []
+
+
+def test_compact_whose_frame_tears_under_a_dialog_after_a_dropped_enter_is_not_counted_as_submitted(
+    tmp_path: Path,
+) -> None:
+    class TearsAfterEnter(FakeClaudeBox):
+        def run(self, _: Config, args: list[str]) -> str | None:
+            box = self.boxes.get("S", "")
+            if args[:2] == ["session", "text"] and ENTER in self.typed:
+                status = "Opus 5.5 | 56% ctx | ~/acme-co"
+                drawn = box + status[len(box) :]
+                return f"{PROMPT}{NBSP}\n{RULE}\n{PROMPT}{NBSP}{drawn}\n  -- INSERT --\n Enter to confirm\n"
+            return super().run(_, args)
+
+    fake = TearsAfterEnter(dropped_enters=99)
+
+    result = _type(tmp_path, fake, command="/compact", wait_s=5, vim=True)
+
+    assert result != "typed"
+    assert fake.submitted == []
+
+
 def test_a_grey_suggestion_after_the_clear_is_probed_and_typed_over(tmp_path: Path) -> None:
     class SuggestsAfterClearing(FakeClaudeBox):
         def run(self, _: Config, args: list[str]) -> str | None:

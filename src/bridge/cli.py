@@ -101,7 +101,8 @@ _DRIVE_HELD = {
     "draft": "its input box holds text that is not stray keys, which may be the owner's draft",
     "unproven": "its input box holds text, and the tab stayed selected, so bridge could not tell a draft from Claude "
     "Code's grey suggestion",
-    "timeout": "it stayed busy with a turn or a dialog, its vim input stayed out of INSERT mode, or the Mac slept",
+    "timeout": "it stayed busy with a turn or a dialog, its vim input stayed out of INSERT mode, its screen showed no "
+    "readable input box, or the Mac slept",
 }
 """Waits that ran out: nothing went wrong, so they are no error."""
 _DRIVE_FAILED = {
@@ -598,13 +599,15 @@ def tell_of_held_drive(
         )
     else:
         why = _DRIVE_HELD.get(result) or _DRIVE_FAILED[result]
+        # A failed drive stopped at an unexpected screen, often seconds in, not at the end of its wait.
+        within = f" within {COMPACT_WAIT_S // 60} min" if result in _DRIVE_HELD else ""
         again = (
             f"bridge tries again after {RETRY_AFTER_MS // 60_000} min and does not tell of it again; "
             if phase == "compact"
             else ""
         )
         body = (
-            f'bridge could not type {what} in tab "{tab.name}" ({tab.session}) within {COMPACT_WAIT_S // 60} min: '
+            f'bridge could not type {what} in tab "{tab.name}" ({tab.session}){within}: '
             f"{why}. {again}once the box is clear, {then}."
         )
     if not recipients:

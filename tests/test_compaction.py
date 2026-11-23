@@ -12,6 +12,8 @@ from bridge.compaction import (
     map_screen_to_box_lines,
     map_screen_to_draft,
     map_screen_to_idle,
+    map_screen_to_transcript,
+    map_screen_to_waiting,
     read_context_tokens,
 )
 
@@ -201,6 +203,38 @@ def test_a_box_whose_redraw_lost_its_closing_rule_ends_at_the_footer() -> None:
     assert map_screen_to_draft(typed) == "[bridge] Peer message #51 from xavi, not from the user"
     footer_first = TORN.replace("  Opus 5.5 | 65% ctx | ~/acme-co\n", "").replace("\u276f\u00a0", "\u276f half")
     assert map_screen_to_draft(footer_first) == "half", "the mode line ends it too"
+
+
+GLYPH_ON_STATUS = (
+    "✻ Brewed for 1m 45s · done 11:19\n"
+    "\u276f\u00a0\n"
+    "──────────────────────────────\n"
+    "\u276f\u00a0Opus 5.5 | 56% ctx | 37% wk | ~/acme-co\n"
+    "  -- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle)\n"
+    "             60        40\n"
+    "                                        (shift+tab to cycle)\n"
+)
+"""A frame torn the other way: the box's glyph sits on the status line, and the box's text is on no row."""
+
+
+def test_a_box_glyph_drawn_over_the_status_line_is_no_box() -> None:
+    probed = GLYPH_ON_STATUS.replace("\u00a0Opus", "\u00a0.pus")
+
+    assert map_screen_to_draft(GLYPH_ON_STATUS) is None
+    assert map_screen_to_draft(probed) is None, "a key typed into it shows over the status line"
+    assert not map_screen_to_waiting(GLYPH_ON_STATUS)
+    assert not map_screen_to_idle(GLYPH_ON_STATUS)
+    assert map_screen_to_draft(GLYPH_ON_STATUS.replace("\u276f\u00a0Opus", "  Opus")) is None
+    quoting = TORN.replace("\u276f\u00a0", "\u276f [bridge] Peer message #9: why is Opus 5.5 | 8% ctx shown")
+    assert map_screen_to_draft(quoting) == "[bridge] Peer message #9: why is Opus 5.5 | 8% ctx shown"
+    no_status_row = TORN.replace("  Opus 5.5 | 65% ctx | ~/acme-co\n", "")
+    quoting_alone = no_status_row.replace("\u276f\u00a0", "\u276f why is Opus 5.5 | 8% ctx shown")
+    assert map_screen_to_draft(quoting_alone) == "why is Opus 5.5 | 8% ctx shown", "no empty box row over its rule"
+    typed = GLYPH_ON_STATUS.replace("\u00a0Opus 5.5", "\u00a0/compact")
+    assert map_screen_to_draft(typed) is None
+    assert "/compact" not in map_screen_to_transcript(typed), "the glyph's line is no submitted prompt"
+    marks = GLYPH_ON_STATUS.replace("\u00a0Opus 5.5 | 56% ctx | 37% wk | ~/acme-co", "\u00a0\u23f5\u23f5 on")
+    assert map_screen_to_draft(marks) == "\u23f5\u23f5 on", "only the status line under the glyph hides the box"
 
 
 def test_screen_is_idle_only_with_an_empty_prompt_and_nothing_in_the_way() -> None:

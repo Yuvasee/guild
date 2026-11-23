@@ -4,9 +4,10 @@ import sqlite3
 import time
 from unittest import mock
 
+import pytest
 from conftest import BridgeEnv, SpawnProcess
 from test_leads import Team
-from test_typing import FakeClaudeBox
+from test_typing import NBSP, PROMPT, RULE, FakeClaudeBox
 from test_watcher_context import _screen  # pyright: ignore[reportPrivateUsage]
 
 from bridge.board import Recipient
@@ -35,6 +36,7 @@ def _drive(
     config: Config | None = None,
     tree: str | None = "",
     by_screen: bool = False,
+    vim: bool = False,
 ) -> tuple[int, list[tuple[int, Recipient]]]:
     """Drives conv-a (lead alex in TAB-A) with old-b as the assistant, its tab unselected."""
     spawned: list[tuple[int, Recipient]] = []
@@ -51,6 +53,7 @@ def _drive(
             mock.patch("bridge.cli.is_tab_selected", lambda *_: False),
             mock.patch("bridge.cli.spawn_typed_delivery", lambda m, rs: spawned.extend((m, r) for r in rs)),
             mock.patch("bridge.cli.COMPACT_WAIT_S", 6),
+            mock.patch("bridge.tabinput.is_claude_vim", lambda: vim),
         ):
             code = cmd_compact_drive(args, conn, config or Config(assistant_handle="old-b"))
     return code, spawned
@@ -78,15 +81,16 @@ def _asked_again(conn: sqlite3.Connection, at_ms: int = 1) -> str | None:
     )
 
 
+@pytest.mark.parametrize("vim", [False, True])
 def test_the_owners_draft_holds_the_drive_tells_the_assistant_once_and_logs_no_error(
-    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess, vim: bool
 ) -> None:
     team = Team(bridge_env, spawn_process)
     team.enroll()
     _start_cycle(bridge_env)
     fake = FakeClaudeBox({"TAB-A": DRAFT})
 
-    code, spawned = _drive(bridge_env, fake)
+    code, spawned = _drive(bridge_env, fake, vim=vim)
     with bridge_env.connect() as conn, transaction(conn):
         phase = read_phase(conn, "conv-a")
         body = conn.execute("SELECT body FROM messages ORDER BY id DESC LIMIT 1").fetchone()[0]
@@ -95,7 +99,7 @@ def test_the_owners_draft_holds_the_drive_tells_the_assistant_once_and_logs_no_e
 
     assert code == 0
     assert fake.boxes["TAB-A"] == DRAFT, "the probe key was taken back"
-    assert "/compact" not in fake.typed
+    assert fake.typed == [".", "\x7f"]
     assert phase is None
     assert [r.handle for _, r in spawned] == ["old-b"]
     assert 'could not type /compact in tab "Old A" (TAB-A) within 0 min: its input box holds text' in body
@@ -177,15 +181,16 @@ def test_a_safety_net_drive_types_over_the_grey_suggestion_of_a_tab_whose_refuse
     assert net_drive.submitted == ["/compact"]
 
 
+@pytest.mark.parametrize("vim", [False, True])
 def test_a_stray_key_left_in_the_box_is_cleared_and_compact_typed_with_no_notice(
-    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess, vim: bool
 ) -> None:
     team = Team(bridge_env, spawn_process)
     team.enroll()
     _start_cycle(bridge_env)
     fake = FakeClaudeBox({"TAB-A": "."})
 
-    code, spawned = _drive(bridge_env, fake)
+    code, spawned = _drive(bridge_env, fake, vim=vim)
 
     assert code == 0
     assert fake.typed == [".", "\x7f", CLEAR_KEYS, "/compact", "\r"]
@@ -239,22 +244,58 @@ def test_a_probe_key_bridge_cannot_verify_is_one_error_and_one_notice_per_cycle(
     assert fake.typed == ["."]
     assert [r.handle for _, r in spawned] == ["old-b"]
     assert "look for a stray character in the box" in body
+    assert 'could not type /compact in tab "Old A" (TAB-A): a key' in body, "no wait it never had"
     assert again is None
     assert _log("errors.log").count("compact not typed for conv-a: failed") == 1
 
 
-def test_a_tab_busy_for_the_whole_wait_is_no_error(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:
+@pytest.mark.parametrize("vim", [False, True])
+def test_a_tab_busy_for_the_whole_wait_is_no_error(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess, vim: bool
+) -> None:
     team = Team(bridge_env, spawn_process)
     team.enroll()
     _start_cycle(bridge_env)
     fake = FakeClaudeBox({"TAB-A": "1. Yes\n2. No\nEnter to confirm"})
 
-    code, _ = _drive(bridge_env, fake)
+    code, _ = _drive(bridge_env, fake, vim=vim)
 
     assert code == 0
     assert fake.typed == []
     assert "compact-drive" not in _log("errors.log")
     assert "compact not typed for conv-a in 0 min: timeout" in _log("slow.log")
+
+
+class GlyphOnStatus(FakeClaudeBox):
+    """A frame torn so that the box's glyph and its text are drawn over the status line, as a lead tab showed."""
+
+    STATUS = "Opus 5.5 | 56% ctx | 37% wk | ~/acme-co"
+
+    def run(self, _: Config, args: list[str]) -> str | None:
+        if args[:2] != ["session", "text"]:
+            return super().run(_, args)
+        box = self.boxes.get(args[args.index("--target") + 1], "")
+        drawn = box + self.STATUS[len(box) :]
+        return f"{PROMPT}{NBSP}\n{RULE}\n{PROMPT}{NBSP}{drawn}\n  -- INSERT -- \u23f5\u23f5 bypass permissions on\n"
+
+
+def test_a_torn_frame_that_shows_the_status_line_as_the_box_gets_no_probe_key(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    team = Team(bridge_env, spawn_process)
+    team.enroll()
+    _start_cycle(bridge_env)
+    fake = GlyphOnStatus()
+
+    code, spawned = _drive(bridge_env, fake, vim=True)
+    with bridge_env.connect() as conn:
+        body = conn.execute("SELECT body FROM messages ORDER BY id DESC LIMIT 1").fetchone()[0]
+
+    assert fake.typed == [], "a key would land in a box the screen does not show, beyond any check"
+    assert code == 0
+    assert [r.handle for _, r in spawned] == ["old-b"]
+    assert "its screen showed no readable input box" in body
+    assert "compact-drive" not in _log("errors.log")
 
 
 def test_with_no_one_to_tell_the_owner_hears_on_the_page(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:

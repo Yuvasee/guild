@@ -67,6 +67,7 @@ Only at the line's start: the transcript indents what it quotes."""
 _OPTION_LINE_RE = re.compile(r"^\u276f\s*\d+\.")
 _FOOTER_RE = re.compile(r"^\s+(?:-- (?:INSERT|NORMAL|VISUAL) --|.*\u23f5\u23f5|\? for shortcuts|\S.* \| \d+% ctx\b)")
 """Claude Code's footer under the input box (mode, permissions, model and context): where a torn box ends."""
+_STATUS_RE = re.compile(r"^\s+\S.* \| \d+% ctx\b")
 CHARS_PER_TOKEN = 4
 IMAGE_TOKENS = 3_000
 """An image in a tool result costs the model a few thousand tokens however long its base64 is."""
@@ -405,6 +406,23 @@ def _find_live_tail(screen: str) -> list[str]:
     return [line for i, line in enumerate(lines) if i >= len(lines) - 14 and i not in quoted]
 
 
+def _is_box_text_hidden(lines: list[str], box: tuple[int, int]) -> bool:
+    """A frame torn so that the box's row shows empty above its rule and the box's glyph sits on the status line under
+    it: what the box holds is on no row. Typed text quoting a status line has no empty prompt line over its rule."""
+    start = box[0]
+    return (
+        start >= 2
+        and _EMPTY_PROMPT_RE.match(lines[start - 2]) is not None
+        and _STATUS_RE.match(" " + lines[start].lstrip()[1:]) is not None
+    )
+
+
+def is_box_text_hidden(screen: str) -> bool:
+    lines = [line for line in screen.splitlines() if line.strip()]
+    box = _find_input_box(lines)
+    return box is not None and _is_box_text_hidden(lines, box)
+
+
 def map_screen_to_draft(screen: str) -> str | None:
     """Text in Claude Code's input box (the last prompt line under a rule, up to the next rule); None without a box.
 
@@ -412,7 +430,7 @@ def map_screen_to_draft(screen: str) -> str | None:
     """
     lines = [line for line in screen.splitlines() if line.strip()]
     box = _find_input_box(lines)
-    if box is None or box[1] < len(lines) - 14:
+    if box is None or box[1] < len(lines) - 14 or _is_box_text_hidden(lines, box):
         return None
     body = [_CLEAR_HINT_RE.sub("", line).strip() for line in lines[box[0] : box[1]]]
     return " ".join(body).lstrip("\u276f").replace("\u00a0", " ").strip()
@@ -425,7 +443,7 @@ def map_screen_to_box_lines(screen: str) -> list[str] | None:
     kept = [i for i, line in enumerate(raw) if line.strip()]
     lines = [raw[i] for i in kept]
     box = _find_input_box(lines)
-    if box is None or box[1] < len(lines) - 14:
+    if box is None or box[1] < len(lines) - 14 or _is_box_text_hidden(lines, box):
         return None
     start = kept[box[0]]
     # Closed by a rule, every row up to it is the box's; a torn box's blank rows may be the frame's.
