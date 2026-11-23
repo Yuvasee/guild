@@ -872,6 +872,10 @@ MIGRATIONS: tuple[str, ...] = (
     ALTER TABLE review_prs ADD COLUMN files TEXT;
     ALTER TABLE review_prs ADD COLUMN related_prs TEXT NOT NULL DEFAULT '[]';
     """,
+    # The repo a host worker pushed to: its checkout may hold another repo's checkout. NULL: the writer's own repo.
+    """
+    ALTER TABLE review_branch_writes ADD COLUMN repo TEXT;
+    """,
 )
 
 HOOK_BUSY_TIMEOUT_MS = 200

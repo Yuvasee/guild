@@ -559,22 +559,15 @@ def record_branch_writes(conn: sqlite3.Connection, conversation_id: str, command
 def record_host_pushes(
     conn: sqlite3.Connection, config: Config, conversation_id: str, pushes: list[tuple[str, str]], at: int
 ) -> None:
-    """A host worker's transcript stays on its host: the push the guard passed is what tells bridge it wrote there.
-    Only pushes to the session's own repo count, as the table names a branch that find_owner reads as in that repo."""
-    row = conn.execute(
-        "SELECT repo FROM instances WHERE conversation_id = ? ORDER BY last_observed_at DESC LIMIT 1",
-        (conversation_id,),
-    ).fetchone()
-    own = {str(r).lower() for r in (row["repo"], config.pr_repo_for(row["repo"])) if r} if row else set[str]()
+    """A host worker's transcript stays on its host: the push the guard passed is what tells bridge it wrote there,
+    and to which repo, which is often not the one its checkout holds."""
     for repo, branch in pushes:
-        if repo.lower() not in own:
-            continue
         conn.execute(
             """
-            INSERT INTO review_branch_writes (conversation_id, branch, at) VALUES (?, ?, ?)
-            ON CONFLICT (conversation_id, branch) DO UPDATE SET at = max(at, excluded.at)
+            INSERT INTO review_branch_writes (conversation_id, branch, at, repo) VALUES (?, ?, ?, ?)
+            ON CONFLICT (conversation_id, branch) DO UPDATE SET at = max(at, excluded.at), repo = excluded.repo
             """,
-            (conversation_id, branch, at),
+            (conversation_id, branch, at, repo),
         )
 
 
@@ -1040,7 +1033,7 @@ def find_owner(
         return declared
     for row in conn.execute(
         """
-        SELECT i.conversation_id, i.surface, i.repo, s.handle FROM review_branch_writes w
+        SELECT i.conversation_id, i.surface, coalesce(w.repo, i.repo) AS repo, s.handle FROM review_branch_writes w
         JOIN instances i ON i.conversation_id = w.conversation_id AND i.ended_at IS NULL
         JOIN surfaces s ON s.surface = i.surface
         WHERE w.branch = ?1 AND s.handle IS NOT NULL
@@ -1048,7 +1041,7 @@ def find_owner(
         """,
         (head,),
     ):
-        if config.pr_repo_for(row["repo"]) == repo and may_own(row):
+        if _is_writer_in_repo(config, row["repo"], repo) and may_own(row):
             return from_session(row, "branch")
     ended = _find_lead_of_ended_writer(conn, config, ref, repo, head, wrote=True)
     if ended is not None or owned_only:
@@ -1098,7 +1091,8 @@ def find_last_pusher(conn: sqlite3.Connection, config: Config, repo: str, head: 
     to no one the caller falls back to the PR's owner."""
     rows = conn.execute(
         """
-        SELECT i.conversation_id, i.surface, i.repo, i.ended_at, s.handle FROM review_branch_writes w
+        SELECT i.conversation_id, i.surface, coalesce(w.repo, i.repo) AS repo, i.ended_at, s.handle
+        FROM review_branch_writes w
         JOIN instances i ON i.instance_id = (
             SELECT instance_id FROM instances WHERE conversation_id = w.conversation_id
             ORDER BY last_observed_at DESC LIMIT 1
@@ -1108,7 +1102,7 @@ def find_last_pusher(conn: sqlite3.Connection, config: Config, repo: str, head: 
         """,
         (head,),
     ).fetchall()
-    row = next((r for r in rows if r["repo"] is None or config.pr_repo_for(r["repo"]) == repo), None)
+    row = next((r for r in rows if r["repo"] is None or _is_writer_in_repo(config, r["repo"], repo)), None)
     if row is None:
         return None
     if is_conversation_locked(conn, config, str(row["conversation_id"])):
@@ -1129,7 +1123,7 @@ def _find_lead_of_ended_writer(
     named the PR, which is less: a reviewer does that too."""
     query = (
         """
-        SELECT i.conversation_id, i.surface, i.repo FROM review_branch_writes w
+        SELECT i.conversation_id, i.surface, coalesce(w.repo, i.repo) AS repo FROM review_branch_writes w
         JOIN instances i ON i.conversation_id = w.conversation_id
         WHERE w.branch = ?1 AND i.ended_at IS NOT NULL AND i.surface IS NOT NULL
         ORDER BY w.at DESC, coalesce(i.last_activity_at, i.last_observed_at, 0) DESC
@@ -1143,7 +1137,7 @@ def _find_lead_of_ended_writer(
         """
     )
     for row in conn.execute(query, (head,) if wrote else (head, ref)):
-        if row["repo"] is not None and config.pr_repo_for(row["repo"]) != repo:
+        if row["repo"] is not None and not _is_writer_in_repo(config, row["repo"], repo):
             continue
         if is_conversation_locked(conn, config, str(row["conversation_id"])):
             continue
@@ -1152,6 +1146,11 @@ def _find_lead_of_ended_writer(
         if owner is not None:
             return owner
     return None
+
+
+def _is_writer_in_repo(config: Config, writer_repo: str | None, repo: str) -> bool:
+    """A host push names its repo in lower case."""
+    return (config.pr_repo_for(writer_repo) or "").lower() == repo.lower()
 
 
 def find_owner_of_ref(
@@ -1276,12 +1275,12 @@ def _find_owner_from_claim(
 
 
 def _find_lead_from_work(conn: sqlite3.Connection, config: Config, ref: str, head: str, by_issue: bool) -> Owner | None:
-    """The lead whose live work names the PR; by_issue, the lead whose work, else scope, names an issue its title or
-    branch names."""
+    """The lead whose live work names the PR; by_issue, the one lead whose work, else the one whose scope, names an
+    issue its title or branch names."""
     row = conn.execute("SELECT title FROM review_prs WHERE ref = ?", (ref,)).fetchone()
     keys = set(_ISSUE_KEY_RE.findall(f"{row['title'] if row else ''} {head}".upper())) if by_issue else set[str]()
     wanted = {f"issue:{key}" for key in keys} if by_issue else {ref}
-    # Of two leads whose work names the same PR or issue, the one that declared it last is the one on it now.
+    # Of two leads whose work names the same PR, the one that declared it last is the one on it now.
     named: dict[str, int] = {}
     for chunk in conn.execute("SELECT lead, refs, updated_at FROM lead_work WHERE done_at IS NULL"):
         if wanted & {str(r) for r in json.loads(str(chunk["refs"]))}:
@@ -1293,6 +1292,8 @@ def _find_lead_from_work(conn: sqlite3.Connection, config: Config, ref: str, hea
         matches.append(
             [lead for lead in leads if keys & set(_ISSUE_KEY_RE.findall(f"{lead.scope} {lead.linear_refs}".upper()))]
         )
+        # An issue several leads name is an umbrella, or one a lead did a part of: any pick could be wrong.
+        matches = [found for found in matches if len(found) == 1]
     for found in matches:
         for lead in found:
             owner = map_lead_to_owner(conn, config, lead.surface, lead.display_name)

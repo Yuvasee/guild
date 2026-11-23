@@ -61,6 +61,7 @@ from bridge.reviews import (
     classify_pending_comments,
     count_commits_since,
     find_issue_lead,
+    find_last_pusher,
     find_owner,
     find_owner_of_ref,
     load_known_heads,
@@ -147,7 +148,7 @@ def add_session(
         (conversation, instance),
     )
     if wrote or (wrote is None and branch != "other"):
-        conn.execute("INSERT INTO review_branch_writes VALUES (?, ?, 1)", (conversation, branch))
+        conn.execute("INSERT INTO review_branch_writes VALUES (?, ?, 1, NULL)", (conversation, branch))
 
 
 def add_lead(conn: Any, name: str, surface: str) -> None:
@@ -550,7 +551,8 @@ def test_a_leads_declared_work_comes_before_the_session_that_pushed_the_branch(t
     assert owner is not None and owner.handle == "quinn"
 
 
-def test_of_two_leads_whose_work_names_the_prs_issue_the_one_that_declared_it_last_owns_it(tmp_path: Path) -> None:
+def test_an_issue_two_leads_work_names_guesses_no_owner_and_a_later_signal_decides(tmp_path: Path) -> None:
+    """The shape that misrouted a PR: an umbrella issue in two leads' work, the newer one not the PR's owner."""
     conn = setup_pr(tmp_path, head="theo/proj-7-tests")
     with transaction(conn):
         add_session(conn, "alex-c", "alex")
@@ -560,8 +562,32 @@ def test_of_two_leads_whose_work_names_the_prs_issue_the_one_that_declared_it_la
         add_work(conn, "alex", "issue:PROJ-7", "issue:PROJ-8")
         add_work(conn, "quinn", "issue:PROJ-7")
         conn.execute("UPDATE lead_work SET updated_at = CASE lead WHEN 'quinn' THEN 9 ELSE 1 END")
+    assert find_owner(conn, CONFIG, REF, "Org/app", "theo/proj-7-tests") is None, "no guess beats a wrong one"
+    with transaction(conn):
+        add_session(conn, "kai-c", "kai")
+        conn.execute("INSERT INTO refs VALUES ('kai-c', ?, 'prompt', 0, 9, 0, 1)", (REF,))
     owner = find_owner(conn, CONFIG, REF, "Org/app", "theo/proj-7-tests")
-    assert owner is not None and owner.handle == "quinn"
+    assert owner is not None and (owner.handle, owner.via) == ("kai", "ref")
+    with transaction(conn):
+        conn.execute("UPDATE lead_work SET done_at = 10 WHERE lead = 'quinn'")
+    owner = find_owner(conn, CONFIG, REF, "Org/app", "theo/proj-7-tests")
+    assert owner is not None and (owner.handle, owner.via) == ("alex", "lead"), "one lead's work left: its guess"
+
+
+def test_a_lead_whose_scope_alone_names_the_issue_owns_its_pr_over_two_leads_whose_work_does(tmp_path: Path) -> None:
+    """Another lead's chunk on a part of the issue, declared later, no longer takes the PR from the lead running it."""
+    conn = setup_pr(tmp_path, head="theo/proj-15-11-monitoring", title="PROJ-15 [11/11]: mirror into monitoring")
+    with transaction(conn):
+        add_session(conn, "dana-c", "dana")
+        add_lead(conn, "Dana", "s-dana")
+        add_session(conn, "bo-c", "bo")
+        add_lead(conn, "Bo", "s-bo")
+        conn.execute("UPDATE leads SET scope = 'Sidebar mirror, PROJ-15' WHERE name = 'dana'")
+        add_work(conn, "dana", "issue:PROJ-15")
+        add_work(conn, "bo", "issue:PROJ-15")
+        conn.execute("UPDATE lead_work SET updated_at = CASE lead WHEN 'bo' THEN 9 ELSE 1 END")
+    owner = find_owner(conn, CONFIG, REF, "Org/app", "theo/proj-15-11-monitoring")
+    assert owner is not None and (owner.handle, owner.via) == ("dana", "lead")
 
 
 def test_an_ended_reader_of_the_branch_does_not_route_the_pr_to_its_lead(tmp_path: Path) -> None:
@@ -2360,13 +2386,24 @@ def test_an_ended_reader_on_the_branch_yields_to_the_issues_lead_but_beats_a_liv
     assert owner is not None and owner.handle == "alex"
 
 
-def test_a_host_push_to_another_repo_does_not_make_its_branch_ours(tmp_path: Path) -> None:
+def test_a_host_workers_push_to_a_repo_its_checkout_is_not_makes_it_that_prs_owner(tmp_path: Path) -> None:
+    """A host worker in a root checkout pushes from a nested checkout of another repo, the PR's."""
     conn = setup_pr(tmp_path)
     with transaction(conn):
-        add_session(conn, "w", "worker", wrote=False)
-        record_host_pushes(conn, CONFIG, "w", [("org/other", "dev/x"), ("ORG/APP", "dev/y")], 5)
-    assert [r[0] for r in conn.execute("SELECT branch FROM review_branch_writes")] == ["dev/y"]
-    assert find_owner(conn, CONFIG, REF, "Org/app", "dev/x") is None
+        add_session(conn, "alex-c", "alex", session="tab-alex")
+        add_lead(conn, "Alex", "s-alex")
+        add_session(conn, "w", "worker", repo="Org/root", branch="0a1b2c3d4e5f", session="tab-w", wrote=False)
+        conn.execute("INSERT INTO tab_parents (agterm_session, parent_session) VALUES ('tab-w', 'tab-alex')")
+        record_host_pushes(conn, CONFIG, "w", [("org/app", "dev/x"), ("org/other", "dev/y")], 5)
+    owner = find_owner(conn, CONFIG, REF, "Org/app", "dev/x")
+    assert owner is not None and (owner.handle, owner.lead, owner.via) == ("worker", "Alex", "branch")
+    assert find_owner(conn, CONFIG, REF, "Org/app", "dev/y") is None, "the same branch name in another repo"
+    last = find_last_pusher(conn, CONFIG, "Org/app", "dev/x")
+    assert last is not None and last.handle == "worker"
+    with transaction(conn):
+        conn.execute("UPDATE instances SET ended_at = 99 WHERE conversation_id = 'w'")
+    owner = find_owner(conn, CONFIG, REF, "Org/app", "dev/x")
+    assert owner is not None and (owner.handle, owner.via) == ("alex", "lead"), "ended: the lead that ran it"
 
 
 def test_a_leads_declared_prs_are_signal_candidates_after_its_worker_ended(tmp_path: Path) -> None:

@@ -382,7 +382,7 @@ def test_a_move_and_a_grooming_note_reach_the_lead_above_the_worker_that_wrote_t
             "INSERT INTO conversations (conversation_id, instance_id, first_seen_at, last_seen_at) "
             "VALUES ('c-w', 'i-w', 0, 0)"
         )
-        conn.execute("INSERT INTO review_branch_writes VALUES ('c-w', 'dev/q', 1)")
+        conn.execute("INSERT INTO review_branch_writes VALUES ('c-w', 'dev/q', 1, NULL)")
         conn.execute("INSERT INTO tab_parents (agterm_session, parent_session) VALUES ('t-w', 't')")
     prs = [github_pr(5, head="dev/q", body="Fixes PROJ-5"), github_pr(6, head="dev/q", body="Fixes PROJ-6")]
     linear = FakeLinear({"PROJ-5": issue("Todo", "PROJ-5"), "PROJ-6": issue("Grooming", "PROJ-6")})

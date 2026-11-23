@@ -1241,7 +1241,7 @@ def test_a_host_worker_from_a_directory_not_committed_is_refused_and_leaves_no_w
     assert "g-b-0000" not in _git(shared, "worktree", "list")
 
 
-def test_a_push_the_guard_passes_on_a_host_records_the_branch_the_worker_wrote_in_its_own_repo(tmp_path: Path) -> None:
+def test_a_push_the_guard_passes_on_a_host_records_the_branch_and_the_repo_it_went_to(tmp_path: Path) -> None:
     conn = connect(tmp_path / "t.db")
     conn.execute(
         "INSERT INTO instances (instance_id, pid, proc_start_ms, conversation_id, repo, first_seen_at,"
@@ -1262,6 +1262,7 @@ def test_a_push_the_guard_passes_on_a_host_records_the_branch_the_worker_wrote_i
     on_mac = handle_pre_tool_use(conn, {**payload, "session_id": "mac"}, config)
 
     assert on_host == "" and to_fork == "" and on_mac == ""
-    assert [tuple(r) for r in conn.execute("SELECT conversation_id, branch FROM review_branch_writes")] == [
-        (CONV, "feat/y")
+    assert [tuple(r) for r in conn.execute("SELECT conversation_id, branch, repo FROM review_branch_writes")] == [
+        (CONV, "feat/y", "acme/web"),
+        (CONV, "feat/z", "me/web"),
     ]
