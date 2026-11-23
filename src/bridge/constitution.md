@@ -37,3 +37,9 @@ These come before any other rule.
 - Build for the need we have, not one we imagine. No generalization, extension point or support for a future consumer without a clear requirement and a real need today.
 - Between a generic, more complex option and a focused, simpler one, pick the simpler and name what it gives up. Keeping complexity needs evidence that it is needed, not the other way round.
 - A plan, design doc or PR says what was cut and which simpler option was considered, and why it was or wasn't taken.
+
+## 6. Every mistake improves the system
+
+- A mistake is not done when it is fixed. Whoever made it also changes what let it happen: the harness, a process, a skill, a rule or a test, whichever applies, so it is less likely to happen again. Not fix and forget.
+- Prefer a mechanism (a check, a test, an alert, a tool change) over a written rule; a rule that must be remembered is the weakest fix.
+- A report on a mistake names both: what was fixed, and what was changed so it does not repeat.
