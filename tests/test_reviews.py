@@ -751,6 +751,8 @@ def test_git_commit_and_push_name_the_branches_a_command_writes() -> None:
     assert map_command_to_branch_writes("git push origin HEAD") == [None]
     assert map_command_to_branch_writes("git push --dry-run origin x; git log --oneline; gh pr view 7") == []
     assert map_command_to_branch_writes("git checkout dev/x && git pull && git show HEAD") == []
+    assert map_command_to_branch_writes("git push -q origin HEAD:dev/z 2>&1 | tail -1") == ["dev/z"], "not '2>'"
+    assert map_command_to_branch_writes("git push origin dev/z >/dev/null; git push 2> err.txt") == ["dev/z", None]
 
 
 def test_branch_writes_come_from_scanned_commands_on_the_sessions_branch(tmp_path: Path) -> None:

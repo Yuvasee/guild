@@ -163,6 +163,7 @@ _GRAPHQL_WRITE_RE = re.compile(
     r"\bgh\s+api\b[^\n;|&]*?\bgraphql\b.*\b(?:addPullRequestReview\w*|addComment|submitPullRequestReview)\b", re.S
 )
 _GIT_WRITE_RE = re.compile(r"\bgit((?:\s+-[Cc]\s+\S+)*)\s+(commit|push)\b([^\n;&|]*)")
+_REDIRECT_RE = re.compile(r"\d*[<>]")
 _WAITING_COMMAND_RE = re.compile(r"--watch\b|\bsleep\b|\buntil\b|\bwhile\b|\bwait\b")
 _OPAQUE_BODY_RE = re.compile(
     r"--body-file|-F\s+\S*=@|body=@|--input|-[fF]\s+body=[\"']?\$|--body\s+[\"']?\$[^(]|-b\s+[\"']?\$[^(]"
@@ -526,7 +527,7 @@ def map_command_to_branch_writes(command: str) -> list[str | None]:
     same GitHub account, so a session's own git commands are what tells who wrote to a branch."""
     branches: list[str | None] = []
     for match in _GIT_WRITE_RE.finditer(command.replace("\\\n", " ")):
-        args = match.group(3).split()
+        args = list(itertools.takewhile(lambda arg: not _REDIRECT_RE.match(arg), match.group(3).split()))
         if "--dry-run" in args or ("-n" in args and match.group(2) == "push"):
             continue
         positional = [arg for arg in args if not arg.startswith("-")]
