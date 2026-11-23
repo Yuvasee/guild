@@ -52,6 +52,7 @@ from bridge.guard import (
     CLOSE,
     MERGE,
     PUSH,
+    SHELL_KEYWORDS,
     WRAPPED,
     HostRepoReader,
     Unreadable,
@@ -62,6 +63,7 @@ from bridge.guard import (
     map_command_to_targets,
     map_held_writes_to_lines,
     map_merge_blocks_to_lines,
+    segment_command,
 )
 from bridge.inject import Packed, Part, add_part, cap_context, pack_parts, save_later_parts, take_later_parts
 from bridge.leads import (
@@ -228,6 +230,76 @@ def run_artifact_hook() -> int:
     return 0
 
 
+_KILL_BY_NAME = frozenset({"pkill", "killall"})
+_SHELLS = frozenset({"sh", "bash", "zsh", "dash"})
+_SUDO_VALUE_OPTIONS = frozenset({"-u", "-g", "-U", "-C", "-D", "-h", "-p", "-r", "-t"})
+_XARGS_VALUE_OPTIONS = frozenset({"-n", "-L", "-I", "-P", "-s", "-d", "-E", "-a"})
+
+
+def find_kill_by_name_refusal(command: str, depth: int = 0) -> str | None:
+    """A name or pattern also matches other sessions' processes, the owner's own and shared ones: kill by PID. Read
+    with the guard's lexer, so quoted text, heredoc bodies and comments are data; a command run through ssh or a
+    shell's -c is read too."""
+    segments = segment_command(command)
+    for index, (tokens, joined_by) in enumerate(segments):
+        words = _drop_command_prefix(tokens)
+        program = os.path.basename(words[0]) if words else ""
+        after = segments[index + 1] if index + 1 < len(segments) else None
+        before = segments[index - 1] if index else None
+        if (
+            program in _KILL_BY_NAME
+            or (program == "kill" and any(w.startswith("`pgrep") for w in words))
+            or (program == "kill" and words[-1] == "$" and after is not None and after[1] == "("
+                and _program_of(after[0]) == "pgrep")
+            or (program == "xargs" and joined_by in ("|", "|&") and before is not None
+                and _program_of(before[0]) == "pgrep"
+                and _xargs_program(words) == "kill")
+        ):  # fmt: skip
+            return (
+                "killing by name or pattern (pkill, killall, pgrep | xargs kill, kill $(pgrep …)) can hit other "
+                "sessions' and the owner's processes. Find the PID first (pgrep -fl …, ps), check it is yours, then "
+                "kill <PID>."
+            )
+        if depth < 2 and (program == "ssh" or program in _SHELLS):
+            inner = (
+                words[2:]
+                if program == "ssh"
+                else [
+                    words[at + 1]
+                    for at, w in enumerate(words[:-1])
+                    if (w[:1] == "-" and w[1:2] != "-" and "c" in w and w[1:].isalpha() and len(w) < 8)
+                ]
+            )
+            for text in inner:
+                if refusal := find_kill_by_name_refusal(text, depth + 1):
+                    return refusal
+    return None
+
+
+def _drop_command_prefix(tokens: list[str]) -> list[str]:
+    words = list(tokens)
+    while words and words[0] in SHELL_KEYWORDS:
+        words = words[1:]
+    if words and words[0] == "sudo":
+        at = 1
+        while at < len(words) and words[at].startswith("-"):
+            at += 2 if words[at] in _SUDO_VALUE_OPTIONS else 1
+        words = words[at:]
+    return words
+
+
+def _program_of(tokens: list[str]) -> str:
+    words = _drop_command_prefix(tokens)
+    return os.path.basename(words[0]) if words else ""
+
+
+def _xargs_program(words: list[str]) -> str:
+    at = 1
+    while at < len(words) and words[at].startswith("-"):
+        at += 2 if words[at] in _XARGS_VALUE_OPTIONS else 1
+    return os.path.basename(words[at]) if at < len(words) else ""
+
+
 def handle_pre_tool_use(
     conn: sqlite3.Connection, payload: dict[str, object], config: Config, host_checkout: HostRepoReader | None = None
 ) -> str:
@@ -246,6 +318,8 @@ def handle_pre_tool_use(
     command = tool_input.get("command")
     if tool != "Bash" or not isinstance(command, str):
         return ""
+    if kill := find_kill_by_name_refusal(command):
+        return _deny(kill)
     titles = find_prefixed_titles(command)
     if titles:
         return _deny(map_titles_to_denial(titles))
