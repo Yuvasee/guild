@@ -400,6 +400,15 @@ def _close_host_worker(worker: Worker, line: str = HOST_LINE, ran_on_host: bool 
 def test_a_host_worker_reopens_like_a_fresh_one_with_gbridge_under_its_lead(
     worker: Worker, spawn_process: SpawnProcess, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    home = worker.env.root / "home"
+    (home / ".claude/skills/bridge").mkdir(parents=True)
+    (home / ".claude/skills/bridge/review-doc.md").write_text("spec\n")
+    (home / ".team/overlay").mkdir(parents=True)
+    (home / ".team/overlay/reader-profile.md").write_text("reader\n")
+    (home / ".team/overlay/reader-profile.md.bak-1").write_text("old\n")
+    config = Path(worker.env.env["BRIDGE_CONFIG"])
+    config.write_text(config.read_text() + 'overlay_dir = "~/.team/overlay"\n')
+    worker.env.env["HOME"] = str(home)
     for key, value in worker.env.env.items():
         monkeypatch.setenv(key, value)
     closed_id = _close_host_worker(worker)
@@ -439,6 +448,10 @@ def test_a_host_worker_reopens_like_a_fresh_one_with_gbridge_under_its_lead(
     )
     assert sent["claude_flags"].endswith("--model default --effort high") and len(sent["token"]) == 64
     assert "brief" not in sent and host_side.GBRIDGE_MARK in sent["gbridge"]
+    assert sent["rule_files"] == [
+        {"path": ".claude/skills/bridge/review-doc.md", "text": "spec\n", "mode": 0o644},
+        {"path": ".team/overlay/reader-profile.md", "text": "reader\n", "mode": 0o600},
+    ]
     record = read_record("g-task-ab12")
     assert record is not None
     assert (record.parent, record.name, record.host, record.remote_worktree) == (

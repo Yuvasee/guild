@@ -198,6 +198,12 @@ missing file keeps the generic text, or drops the line. `{owner}` and `{assistan
 House rules for the bridge skill go in `agent/skills/bridge/house.md` next to `SKILL.md`, which reads it when
 present; it is ignored by git, so a link to a file of yours keeps it out of any commit.
 
+A host worker reads them on its host: each start and reopen of one copies the top-level text files of
+`~/.claude/skills/bridge` and of `overlay_dir` (when it is under your home) to the same paths under the host's home,
+in the ssh call that starts it. Backups (`*.bak*`, `*.orig`, `*.proposed`) and hidden files stay behind; a file is
+written only when its content differs, overlay files as 0600; a file only the host has is kept; one under a symlink
+on the host is left alone and named in the start's output. Over 1 MB in all, nothing is copied and the start says so.
+
 **The people file** (`people_dir`): `people.toml` holds the keys about people, and once `people_dir` is set,
 `config.toml` may not hold them, so a config you share or commit names no one:
 

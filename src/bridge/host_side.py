@@ -129,6 +129,7 @@ def launch(worker: str, payload: dict[str, Any]) -> dict[str, Any]:
     error = install_gbridge(str(payload["gbridge"]))
     if error:
         return {"ok": False, "error": error}
+    updated, warnings = sync_rule_files(payload.get("rule_files") or [])
     os.makedirs(base_dir(), mode=0o700, exist_ok=True)
     added = add_worktree(worker, cwd)
     if isinstance(added, str):
@@ -154,8 +155,8 @@ def launch(worker: str, payload: dict[str, Any]) -> dict[str, Any]:
         "worktree": worktree_dir(worker),
     }  # fmt: skip
     if trust_error:
-        result["warning"] = f"Claude Code may ask whether to trust {worktree_dir(worker)}: {trust_error}"
-    return result
+        warnings.append(f"Claude Code may ask whether to trust {worktree_dir(worker)}: {trust_error}")
+    return add_sync_outcome(result, updated, warnings)
 
 
 def check_free(worker: str) -> str | None:
@@ -189,6 +190,7 @@ def relaunch(worker: str, payload: dict[str, Any]) -> dict[str, Any]:
     error = install_gbridge(str(payload["gbridge"]))
     if error:
         return {"ok": False, "error": error}
+    updated, warnings = sync_rule_files(payload.get("rule_files") or [])
     restored = not os.path.isdir(worktree)
     if restored:
         os.makedirs(worktrees_dir(), mode=0o700, exist_ok=True)
@@ -218,8 +220,8 @@ def relaunch(worker: str, payload: dict[str, Any]) -> dict[str, Any]:
         "worktree": worktree, "restored": restored,
     }  # fmt: skip
     if trust_error:
-        result["warning"] = f"Claude Code may ask whether to trust {worktree}: {trust_error}"
-    return result
+        warnings.append(f"Claude Code may ask whether to trust {worktree}: {trust_error}")
+    return add_sync_outcome(result, updated, warnings)
 
 
 def start_session(worker: str, directory: str, cwd: str, payload: dict[str, Any]) -> subprocess.CompletedProcess[str]:
@@ -381,6 +383,61 @@ def install_gbridge(source: str) -> str | None:
     os.makedirs(os.path.dirname(target), exist_ok=True)
     write(target, source, 0o755)
     return None
+
+
+def sync_rule_files(files: list[Any]) -> tuple[list[str], list[str]]:
+    """Writes each of the Mac's rule files (skill, overlay) at its home-relative path when its content differs.
+
+    Returns (paths written, why a file was left alone). A host file the Mac lacks stays: it may be the host's own,
+    and with no record of what bridge wrote, a deletion could take it.
+    """
+    home = os.path.realpath(os.path.expanduser("~"))
+    updated: list[str] = []
+    warnings: list[str] = []
+    for entry in files:
+        relative, text, mode = str(entry["path"]), str(entry["text"]), int(entry["mode"])
+        parts = relative.split("/")
+        if relative.startswith("/") or any(part in ("", ".", "..") for part in parts):
+            warnings.append(f"rule file {relative!r} is not a plain home-relative path; skipped")
+            continue
+        target = os.path.join(home, *parts)
+        # Through a symlink the write would land in whatever it points at, such as a checkout of its own.
+        if os.path.realpath(target) != target:
+            warnings.append(f"~/{relative} is or sits under a symlink here; left alone")
+            continue
+        # Reading a FIFO would block the launch until ssh times out.
+        if os.path.lexists(target) and not os.path.isfile(target):
+            warnings.append(f"~/{relative} is not a regular file here; left alone")
+            continue
+        data = text.encode("utf-8")
+        try:
+            with open(target, "rb") as f:
+                same = f.read() == data
+            if same:
+                if os.stat(target).st_mode & 0o777 != mode:
+                    os.chmod(target, mode)
+                continue
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            warnings.append(f"~/{relative} could not be read ({exc}); left alone")
+            continue
+        try:
+            os.makedirs(os.path.dirname(target), mode=0o700, exist_ok=True)
+            write(target, text, mode)
+        except OSError as exc:
+            warnings.append(f"~/{relative} could not be written ({exc})")
+            continue
+        updated.append(f"~/{relative}")
+    return updated, warnings
+
+
+def add_sync_outcome(result: dict[str, Any], updated: list[str], warnings: list[str]) -> dict[str, Any]:
+    if updated:
+        result["updated"] = updated
+    if warnings:
+        result["warning"] = "; ".join(warnings)
+    return result
 
 
 def write(path: str, text: str, mode: int) -> None:

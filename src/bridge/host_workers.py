@@ -44,6 +44,10 @@ _SLUG_MAX_CHARS = 32
 # Kept for the tab's processes: a test serve and its state run beside the live one.
 _PASSED_ENV = ("BRIDGE_STATE_DIR", "BRIDGE_CONFIG")
 CLAUDE_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+BRIDGE_SKILL_DIR = "~/.claude/skills/bridge"
+# Every launch carries them over ssh's stdin; ours come to about 300 KB.
+RULE_FILES_MAX_BYTES = 1_000_000
+_SKIPPED_RULE_FILE_RE = re.compile(r"^\.|\.bak|\.proposed$|\.orig$")
 
 
 @dataclass(frozen=True)
@@ -302,6 +306,51 @@ def build_host_brief_note(config: Config, host: str, worker: str, lead: str, map
         f"Files someone will read after you (a review doc, a report) go under {mapped_root}/_tmp or a worktree there, "
         "never in ~/.local/state/gbridge: that folder goes when your tab is closed.\n"
     )
+
+
+def read_host_rule_files(config: Config) -> tuple[list[dict[str, Any]], list[str]]:
+    """The bridge skill and overlay_dir as a host worker must read them, at their paths relative to this Mac's home,
+    which host_side writes under the host's home; and why any folder is not sent.
+
+    Top-level text files only. Over RULE_FILES_MAX_BYTES none is sent: half a set would mix old rules with new.
+    """
+    home = Path.home()
+    folders = [(Path(BRIDGE_SKILL_DIR).expanduser(), 0o644)]
+    if config.overlay_dir:
+        folders.append((Path(config.overlay_dir).expanduser(), 0o600))
+    rule_files: list[dict[str, Any]] = []
+    notes: list[str] = []
+    size = 0
+    for folder, mode in folders:
+        if not folder.is_dir():
+            continue
+        if not folder.is_relative_to(home):
+            notes.append(f"{folder} is not under {home}, so it has no path on the host")
+            continue
+        try:
+            paths = sorted(folder.iterdir())
+        except OSError as exc:
+            notes.append(f"{folder} could not be listed ({exc}); not sent")
+            continue
+        for path in paths:
+            try:
+                if _SKIPPED_RULE_FILE_RE.search(path.name) or not path.is_file():
+                    continue
+                size += path.stat().st_size
+                if size > RULE_FILES_MAX_BYTES:
+                    notes.append(f"rule files come to over {RULE_FILES_MAX_BYTES} bytes, the cap; none was sent")
+                    return [], notes
+                text = path.read_bytes().decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            except OSError as exc:
+                notes.append(f"{path} could not be read ({exc}); not sent")
+                continue
+            if "\0" in text:
+                continue
+            relative = folder.relative_to(home) / path.name
+            rule_files.append({"path": relative.as_posix(), "text": text, "mode": mode})
+    return rule_files, notes
 
 
 def run_on_host(remote: Remote, payload: dict[str, Any], timeout_s: int = SETUP_TIMEOUT_S) -> dict[str, Any]:

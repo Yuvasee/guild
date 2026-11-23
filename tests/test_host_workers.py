@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import subprocess
 import sys
 import time
@@ -28,6 +29,7 @@ from bridge.host_workers import (
     make_worker_name,
     map_cwd_to_host_path,
     map_worker_to_exact_target,
+    read_host_rule_files,
     read_local_model_flags,
     read_session_state,
     write_record,
@@ -199,6 +201,106 @@ def test_host_side_never_overwrites_a_gbridge_it_did_not_install(
     target.write_text(f"{host_side.GBRIDGE_MARK}\nold\n")
     assert host_side.install_gbridge(f"{host_side.GBRIDGE_MARK}\nnew\n") is None
     assert target.read_text().endswith("new\n")
+
+
+def test_host_rule_files_replace_stale_copies_and_leave_the_rest_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    skill = tmp_path / ".claude/skills/bridge"
+    skill.mkdir(parents=True)
+    (skill / "review-doc.md").write_text("old spec\n")
+    (skill / "SKILL.md").write_text("same\n")
+    (skill / "host-only.md").write_text("the host's own\n")
+    (tmp_path / ".team/overlay").mkdir(parents=True)
+    (tmp_path / ".team/overlay/house.md").write_text("house\n")
+    (tmp_path / ".team/overlay/house.md").chmod(0o644)
+    os.mkfifo(tmp_path / ".team/overlay/pipe.md")
+    same_before = (skill / "SKILL.md").stat()
+    elsewhere = tmp_path / "checkout"
+    elsewhere.mkdir()
+    (tmp_path / ".linked").symlink_to(elsewhere)
+    files = [
+        {"path": ".claude/skills/bridge/review-doc.md", "text": "new spec\n", "mode": 0o644},
+        {"path": ".claude/skills/bridge/SKILL.md", "text": "same\n", "mode": 0o644},
+        {"path": ".team/overlay/reader-profile.md", "text": "reader\n", "mode": 0o600},
+        {"path": ".team/overlay/house.md", "text": "house\n", "mode": 0o600},
+        {"path": ".team/overlay/pipe.md", "text": "x\n", "mode": 0o600},
+        {"path": ".linked/rules.md", "text": "x\n", "mode": 0o600},
+        {"path": ".team/../../escape.md", "text": "x\n", "mode": 0o600},
+    ]
+
+    updated, warnings = host_side.sync_rule_files(files)
+
+    assert updated == ["~/.claude/skills/bridge/review-doc.md", "~/.team/overlay/reader-profile.md"]
+    assert (skill / "review-doc.md").read_text() == "new spec\n"
+    same_after = (skill / "SKILL.md").stat()
+    assert (same_after.st_ino, same_after.st_mtime_ns) == (same_before.st_ino, same_before.st_mtime_ns)
+    assert (skill / "host-only.md").read_text() == "the host's own\n"
+    overlay = tmp_path / ".team/overlay/reader-profile.md"
+    assert overlay.read_text() == "reader\n" and overlay.stat().st_mode & 0o777 == 0o600
+    assert (tmp_path / ".team/overlay/house.md").stat().st_mode & 0o777 == 0o600
+    assert not (elsewhere / "rules.md").exists() and not (tmp_path.parent / "escape.md").exists()
+    assert warnings == [
+        "~/.team/overlay/pipe.md is not a regular file here; left alone",
+        "~/.linked/rules.md is or sits under a symlink here; left alone",
+        "rule file '.team/../../escape.md' is not a plain home-relative path; skipped",
+    ]
+    assert [f for f in tmp_path.rglob("*.tmp")] == []
+    assert host_side.sync_rule_files(files)[0] == []
+
+
+def test_host_rule_files_are_the_skill_and_overlay_text_files_under_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    skill = tmp_path / "checkout/agent/skills/bridge"
+    skill.mkdir(parents=True)
+    (skill / "review-doc.md").write_text("spec\n")
+    (tmp_path / ".claude/skills").mkdir(parents=True)
+    (tmp_path / ".claude/skills/bridge").symlink_to(skill)
+    overlay = tmp_path / ".team/overlay"
+    overlay.mkdir(parents=True)
+    for name in ("house.md", "house.md.bak-20260101", "house.md.proposed", "house.md.orig", ".DS_Store"):
+        (overlay / name).write_text(name)
+    (overlay / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00")
+    (overlay / "drafts").mkdir()
+    config = Config(overlay_dir="~/.team/overlay")
+
+    files, notes = read_host_rule_files(config)
+
+    assert files == [
+        {"path": ".claude/skills/bridge/review-doc.md", "text": "spec\n", "mode": 0o644},
+        {"path": ".team/overlay/house.md", "text": "house.md", "mode": 0o600},
+    ]
+    assert notes == []
+    outside = tmp_path.parent / f"{tmp_path.name}-overlay"
+    outside.mkdir()
+    (outside / "house.md").write_text("x")
+    files, notes = read_host_rule_files(Config(overlay_dir=str(outside)))
+    assert [f["path"] for f in files] == [".claude/skills/bridge/review-doc.md"]
+    assert notes == [f"{outside} is not under {tmp_path}, so it has no path on the host"]
+
+
+def test_host_rule_files_over_the_cap_send_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    overlay = tmp_path / ".team/overlay"
+    overlay.mkdir(parents=True)
+    (overlay / "a.md").write_text("a" * 600_000)
+    (overlay / "b.html").write_text("b" * 600_000)
+
+    files, notes = read_host_rule_files(Config(overlay_dir="~/.team/overlay"))
+
+    assert files == []
+    assert notes == ["rule files come to over 1000000 bytes, the cap; none was sent"]
+    (overlay / "b.html").unlink()
+    (overlay / "locked.md").write_text("x")
+    (overlay / "locked.md").chmod(0o000)
+
+    files, notes = read_host_rule_files(Config(overlay_dir="~/.team/overlay"))
+
+    assert [f["path"] for f in files] == [".team/overlay/a.md"]
+    assert len(notes) == 1 and notes[0].startswith(f"{overlay / 'locked.md'} could not be read")
 
 
 def test_gbridge_source_is_marked_for_the_installer() -> None:
@@ -641,6 +743,7 @@ def _relaunch_payload(checkout: Path, cwd: str) -> dict[str, Any]:
         "op": "launch", "worker": "g-a-0000", "resume": CONV, "checkout": str(checkout), "cwd": cwd, "token": "tok",
         "gbridge": f"{host_side.GBRIDGE_MARK}\n", "claude_flags": "--model default", "globs": [],
         "disabled_plugins": ["playwright@x"], "mapped_root": str(checkout),
+        "rule_files": [{"path": ".claude/skills/bridge/review-doc.md", "text": "new spec\n", "mode": 0o644}],
     }  # fmt: skip
 
 
@@ -696,8 +799,9 @@ def test_a_reopened_host_worker_gets_gbridge_in_its_old_worktree_restored_at_the
     directory = Path(host_side.worker_dir("g-a-0000"))
     assert started == {
         "ok": True, "dir": str(directory), "home": str(tmp_path), "cwd": f"{worktree}/svc", "checkout": str(shared),
-        "worktree": str(worktree), "restored": True,
+        "worktree": str(worktree), "restored": True, "updated": ["~/.claude/skills/bridge/review-doc.md"],
     }  # fmt: skip
+    assert (tmp_path / ".claude/skills/bridge/review-doc.md").read_text() == "new spec\n"
     assert (worktree / "svc" / "a.py").exists() and cwd == str(worktree)
     assert sessions == [
         ["new-session", "-d", "-s", "g-a-0000", "-x", "200", "-y", "50", "-c", f"{worktree}/svc",

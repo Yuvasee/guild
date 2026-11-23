@@ -82,6 +82,7 @@ from bridge.host_workers import (
     map_cwd_to_host_path,
     new_token,
     read_gbridge_source,
+    read_host_rule_files,
     read_local_model_flags,
     read_record,
     read_session_state,
@@ -908,13 +909,14 @@ def _launch_host_worker(
     if payload.get("resume"):
         # bind_conversation gives a worker only conversations bridge has never seen; this one was its own.
         append_conversation(record.worker, str(payload["resume"]))
+    rule_files, rule_notes = read_host_rule_files(config)
     launched = run_on_host(
         remote,
         {
             "op": "launch", "worker": record.worker, "gbridge": read_gbridge_source(),
             "claude_flags": f"{WORKER_CLAUDE_FLAGS} {record.model_flags}",
             "disabled_plugins": [*WORKER_DISABLED_PLUGINS, *config.host_worker_disabled_plugins],
-            "globs": list_guard_globs(), **payload,
+            "globs": list_guard_globs(), "rule_files": rule_files, **payload,
         },
     )  # fmt: skip
     if not launched.get("ok"):
@@ -930,6 +932,10 @@ def _launch_host_worker(
         remote_worktree=str(launched.get("worktree") or ""),
     )
     write_record(record)
+    for note in rule_notes:
+        print(f"rule files for {remote.name}: {note}")
+    if launched.get("updated"):
+        print(f"on {remote.name}: updated {', '.join(map(str, cast(list[object], launched['updated'])))}")
     if launched.get("warning"):
         print(f"on {remote.name}: {launched['warning']}")
     try:
