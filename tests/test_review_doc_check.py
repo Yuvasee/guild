@@ -316,3 +316,27 @@ def test_the_user_storys_sentences_keep_the_plain_doc_limits() -> None:
     long_step = "<h2>User story</h2><ol><li>" + words(31) + "</li><li>Two.</li><li>Three.</li></ol>"
     (refused,) = problems(make_top("<p>Fine.</p>", story=long_step))
     assert refused.startswith("a sentence above the folds has 31 words")
+
+
+def test_each_table_of_fields_has_an_example_column() -> None:
+    header = "<tr><th>Field</th><th>What it is</th><th>Written by → read by</th><th>Limits</th>{}</tr>"
+    row = "<tr><td><code>refund_reason</code></td><td>why</td><td>form → report</td><td>text</td>{}</td></tr>"
+    bare = f"<h2>Fields</h2><table>{header.format('')}{row.format('')}</table>"
+    with_example = (
+        f"<h2>Fields</h2><table>{header.format('<th>Example</th>')}{row.format('<td>arrived damaged')}</table>"
+    )
+    other = "<h2>Fields</h2><table><tr><th>Reader</th><th>Reads</th></tr></table>"
+    later = f"<h2>How it works</h2><table>{header.format('')}</table>"
+
+    found = problems(make_doc(last=bare), files=FILES)
+
+    assert found == [
+        "Fields has 1 table(s) of fields with no Example column (columns: Field | What it is | Written by → read by "
+        "| Limits); give each field a realistic example value in its real shape, invented, never real customer data"
+    ]
+    assert problems(make_doc(last=with_example), files=FILES) == []
+    assert problems(make_doc(last=other), files=FILES) == [], "a table that lists no fields is not checked"
+    assert problems(make_doc(last=later), files=FILES) == [], "only tables under Fields are checked"
+    loose = "<h2>3. Fields</h2><table><tr><th>Field<th>Meaning<tr><td>mode<td>example</table>"
+    assert len(problems(make_doc(last=loose), files=FILES)) == 1, "a numbered heading, rows with no end tags"
+    assert len(problems(make_doc(last="<h2>Fields</h2><table><tr><th>Field<th>Meaning"), files=FILES)) == 1

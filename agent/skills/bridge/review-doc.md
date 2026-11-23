@@ -18,7 +18,7 @@ there is one, skim the headings and the one-line summaries, and open only what t
    **What changes and why** and **Fields** (when it has one), the top of the PR's description (its three opening parts,
    see **The PR description** below), and the PR's diff, and ask it to retell the user story, if there is one, in its
    own words, step by step, today and after; to explain back from the doc and the diff what changes, why and how, and
-   what each field in **Fields** is for; to list every term that reader would not understand; and to list the sentences
+   what each field in **Fields** is for and whether its example value looks real; to list every term that reader would not understand; and to list the sentences
    that could be deleted without losing anything the reader needs to decide or review. A wrong retelling of the story, a
    wrong or vague explain-back, or a flagged term the doc neither explains nor drops, means rewrite and ask a new fresh
    reader. The deletion list is advice: cut what you agree with; readers differ there, so it never blocks a pass. It
@@ -41,7 +41,8 @@ attention, in three parts (the second only when it applies):
 3. **How it is solved, in principle**: two to four sentences, no file or function names.
 
 A PR that adds or changes a model, a schema, an API or event contract, or a stored shape then lists each added or
-changed field, one line each: what it is and why it is needed (who writes it, who reads it).
+changed field, one line each: what it is, why it is needed (who writes it, who reads it) and a realistic example
+value.
 
 A PR that only enables something (a flag off by default, an opt-in value, one step of a plan) keeps its **How this
 will be used** section right after these three parts, not folded: the merge check looks for it near the top; its long
@@ -90,7 +91,8 @@ sharp but has never seen this code.
   **What changes and why**.
 - **A changed model shows its fields.** A PR that adds or changes a model, a schema, an API or event contract, or a
   stored shape has a visible **Fields** section: each added or changed field, what it is, why it is needed (who
-  writes it, who reads it) and its limits. A field nobody reads is flagged there, not left for the reader to find.
+  writes it, who reads it), its limits and a realistic example value. A field nobody reads is flagged there, not left
+  for the reader to find.
 - **Details folded**, as above: clarity is not length.
 - **A decision you made yourself is marked decided.** An open question the lead settled is moved out of
   `needs-decision` before the doc is registered, so the owner never sees a question that has an answer.
@@ -119,7 +121,7 @@ Use these `h2` headings, in this order, worded as here. Inside a section, use `h
 | 1 | **In short** | First, two or three plain sentences that tell the story: what the thing being changed is and does today, what goes wrong or is missing, and what this PR makes different. Then at most five bullets of at most 25 words each, readable in 30 seconds: what the PR does, for whom, why now, what the owner must decide (or "nothing to decide"), and what is not done yet. |
 | 2 | **User story** (only when it applies) | Only when the PR changes what a real person (a user, an admin, an operator) does or sees; internal plumbing (stored records, clean-up jobs, refactors, schemas) gets none, never a stretched one: leave the section out and **What changes and why** follows **In short**. When it applies: one concrete person, named by role (a support agent, a tenant admin; never a real customer or colleague), and what happens to them, as a numbered list (`<ol>`) of at least three steps, outside closed folds. Each step says in plain words what they do and see today and after this PR ("Today: … After: …"); a code name appears only as a term that explains it. One short line before the list may set the scene. |
 | 3 | **What changes and why** | The essence. Before and after, with a diagram, and the reasons as bullets, each with its provenance mark; when there is a **User story**, a bullet names the step it changes ("step 3"). Small changes as bullets. What it deliberately does not change. |
-| 4 | **Fields** (only when it applies) | Only for a PR that adds or changes a model, a schema, an API or event contract, or a stored shape; visible, not folded. A table with one row per added or changed field: what it is, in plain words; why it is needed: who writes it and who reads it; its limits (type, allowed values, empty or not, size). A field with no reader is flagged as such in its row. Example (invented): why `OrderOut` gains `refund_reason`, and what `include` and `exclude` on `OrderFilter` mean. |
+| 4 | **Fields** (only when it applies) | Only for a PR that adds or changes a model, a schema, an API or event contract, or a stored shape; visible, not folded. A table with one row per added or changed field: what it is, in plain words; why it is needed: who writes it and who reads it; its limits (type, allowed values, empty or not, size); an example value: realistic and in the field's real shape (a plausible id, date, amount or allowed value; a short JSON for an object or list), invented, never real customer data. A field with no reader is flagged as such in its row. Example (invented): why `OrderOut` gains `refund_reason` (`"arrived damaged"`), and what `include` and `exclude` on `OrderFilter` mean (`{"include": ["shipped"], "exclude": ["test"]}`). |
 | 5 | **How it works** | The mechanism, with diagrams: flow, sequence, data, where it runs. One `h3` per mechanism. Tables for structured facts (what each counter or field means). Extra essence sections, if any (for example, infrastructure the PR needs), go here as `h3`s or as `h2`s right after this one. |
 | 6 | **Decisions** | One folded block per decision. Open ones first, marked `needs-decision`: the summary line is the question and the recommendation; the body has the options, what each costs, and why. Then the ones taken, marked `decided`: the summary line is what was chosen; the body has the alternatives and why. |
 | 7 | **Costs and risks** | One folded block per cost or risk: the summary line is what it is and its handling; the body makes it clear without guessing (below). |

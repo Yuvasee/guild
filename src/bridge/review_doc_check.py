@@ -15,6 +15,9 @@ _NOT_FROM_ROOT_RE = re.compile(r"^(?:/|~|…)|(?:^|/)\.{1,3}(?:/|$)")
 _LINE_SUFFIX_RE = re.compile(r":\d[\d,\s\u2013-]*$")
 _WHAT_CHANGES_RE = re.compile(r"^\W*what changes\b", re.I)
 _VERIFIED_RE = re.compile(r"^\W*verified\b", re.I)
+_FIELDS_RE = re.compile(r"^[\W\d]*fields\b", re.I)
+_FIELD_COLUMN_RE = re.compile(r"^\W*fields?\b", re.I)
+_EXAMPLE_COLUMN_RE = re.compile(r"\bexamples?\b", re.I)
 _FIRST_READER_PASSED_RE = re.compile(r"\bfirst[- ]reader\b(?![^.;]*\b(?:not|never|failed|pending)\b)[^.;]*\bpass", re.I)
 _TOP_SECTIONS = ("short", "story", "changes")
 _HIDDEN_TAGS = frozenset({"script", "style", "template", "textarea"})
@@ -100,6 +103,95 @@ class _DocOutline(HTMLParser):
 
     def _in_where_to_look(self) -> bool:
         return self._heading is None and bool(self.headings) and bool(_WHERE_TO_LOOK_RE.match(self.headings[-1]))
+
+
+class _FieldTables(HTMLParser):
+    """The header cells (the first row) of each table under the Fields h2."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.headers: list[list[str]] = []
+        self._hidden = 0
+        self._heading: list[str] | None = None
+        self._in_fields = False
+        self._row: list[str] | None = None
+        self._cell: list[str] | None = None
+        self._first_row = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in _HIDDEN_TAGS:
+            self._hidden += 1
+        elif self._hidden:
+            return
+        elif tag == "h2":
+            self._end_row()
+            self._heading, self._in_fields = [], False
+        elif not self._in_fields:
+            return
+        elif tag == "table":
+            self._first_row = True
+        elif tag in ("tr", "tbody") and self._row is not None:
+            self._end_row()
+        elif tag == "tr" and self._first_row:
+            self._row, self._first_row = [], False
+        elif tag in ("th", "td") and self._row is not None:
+            self._end_cell()
+            self._cell = []
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in _HIDDEN_TAGS:
+            self._hidden = max(0, self._hidden - 1)
+        elif self._hidden:
+            return
+        elif tag == "h2" and self._heading is not None:
+            self._in_fields = bool(_FIELDS_RE.match(" ".join("".join(self._heading).split())))
+            self._heading = None
+        elif tag in ("th", "td"):
+            self._end_cell()
+        elif tag in ("tr", "thead", "table"):
+            self._end_row()
+
+    def handle_data(self, data: str) -> None:
+        if self._hidden:
+            return
+        if self._heading is not None:
+            self._heading.append(data)
+        if self._cell is not None:
+            self._cell.append(data)
+
+    def close(self) -> None:
+        super().close()
+        self._end_row()
+
+    def _end_row(self) -> None:
+        self._end_cell()
+        if self._row is not None:
+            self.headers.append(self._row)
+            self._row = None
+
+    def _end_cell(self) -> None:
+        if self._cell is not None and self._row is not None:
+            self._row.append(" ".join("".join(self._cell).split()))
+        self._cell = None
+
+
+def find_field_example_problems(page: str) -> list[str]:
+    """Each table of fields under Fields has an Example column: a realistic value tells what a field holds faster
+    than its description."""
+    tables = _FieldTables()
+    tables.feed(page)
+    tables.close()
+    missing = [
+        header
+        for header in tables.headers
+        if any(_FIELD_COLUMN_RE.match(cell) for cell in header) and not any(map(_EXAMPLE_COLUMN_RE.search, header))
+    ]
+    if not missing:
+        return []
+    return [
+        f"Fields has {len(missing)} table(s) of fields with no Example column (columns: {' | '.join(missing[0])}); "
+        "give each field a realistic example value in its real shape, invented, never real customer data"
+    ]
 
 
 @dataclass
@@ -332,7 +424,7 @@ def find_story_problems(headings: list[str], steps: int | None) -> list[str]:
         if story[0] == 1:
             return [f"'{USER_STORY}' is inside a fold; it is a visible h2, right after '{IN_SHORT}'"]
         return [f"'{USER_STORY}' comes after '{headings[story[0] - 1]}'; it is the h2 right after '{IN_SHORT}'"]
-    if steps is not None and steps < MIN_STORY_STEPS:
+    if steps < MIN_STORY_STEPS:
         return [
             f"'{USER_STORY}' has {steps} numbered steps; at least {MIN_STORY_STEPS}, as items of an <ol> outside "
             "closed folds, each what the person does and sees today and after this PR"
@@ -381,6 +473,7 @@ def find_doc_problems(
     top, verified = read_visible_top(page)
     problems.extend(find_story_problems(headings, top.story_steps))
     problems.extend(find_first_reader_problems(verified))
+    problems.extend(find_field_example_problems(page.decode("utf-8", "replace")))
     since = [index for index, text in enumerate(headings) if _CHANGES_SINCE_RE.search(text)]
     if since and not owner_reviewed:
         problems.append(
