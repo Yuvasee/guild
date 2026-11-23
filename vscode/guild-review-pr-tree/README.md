@@ -22,8 +22,8 @@ Then restart VS Code once. It needs the GitHub Pull Requests extension (`GitHub.
 On a `review-*.code-workspace` window it runs the GitHub Pull Requests extension's command that opens its side bar,
 and once more five seconds later: the "Changes In Pull Request" view appears only after the PR is fetched.
 
-It then runs that extension's **Open Changes** command for the PR named in the workspace's `guild.reviewPullRequest`
-setting, which Guild writes. The extension opens a PR's changes by itself only right after its own checkout, never
-when a folder opens already on the PR's branch, so a review window needs this. The command gets the PR's number
-alone, so it looks the PR up through this window's own repository: until the extension has read the folder's GitHub
-remote the command fails, and it is tried every two seconds for up to two minutes.
+It then opens the PR's changes itself: the worktree's HEAD against its merge base with `origin/<base>` (the base
+branch from the workspace's `guild.reviewBase`, fetched first), in one "Changes in Pull Request #N at <commit>" tab.
+Each time HEAD moves (bridge fast-forwards the review branch when the PR gets new commits) it builds the view again and
+closes the older one. The GitHub Pull Requests extension's own changes view keeps the file list it fetched first, and
+its refresh does not refetch it, so after a push it went on showing the old diff.

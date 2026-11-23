@@ -1,8 +1,8 @@
 {
   "name": "guild-review-pr-tree",
   "displayName": "Review window: PR changes",
-  "description": "In a review-*.code-workspace window, opens the GitHub Pull Request side bar and the PR's changes, so its changed-files tree and diff are in view.",
-  "version": "0.0.3",
+  "description": "In a review-*.code-workspace window, opens the GitHub Pull Request side bar and the PR's changes as the worktree has them, again each time its head moves.",
+  "version": "0.0.4",
   "publisher": "guild",
   "license": "MIT",
   "engines": {
@@ -23,6 +23,11 @@
           "type": "string",
           "default": "",
           "description": "The pull request this review window is for (https://github.com/<owner>/<repo>/pull/<number>); Guild writes it into the review workspace."
+        },
+        "guild.reviewBase": {
+          "type": "string",
+          "default": "",
+          "description": "The branch the pull request merges into; the changes view diffs the worktree's HEAD against its merge base with origin/<this>. Guild writes it."
         }
       }
     }

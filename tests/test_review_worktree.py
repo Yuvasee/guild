@@ -927,6 +927,7 @@ def test_a_worktree_gets_a_workspace_beside_it_that_opens_on_its_pr(tmp_path: Pa
             "workbench.secondarySideBar.defaultVisibility": "hidden",
             "githubPullRequests.focusedMode": "overview",
             "guild.reviewPullRequest": "https://github.com/Org/app/pull/7",
+            "guild.reviewBase": "main",
             "python.defaultInterpreterPath": str(job.path / ".venv" / "bin" / "python"),
             "python.useEnvironmentsExtension": False,
         },
@@ -1292,6 +1293,12 @@ def test_an_outdated_workspace_is_rewritten_without_a_refresh(tmp_path: Path) ->
     settings = json.loads(workspace.read_text())["settings"]
     assert settings["python.useEnvironmentsExtension"] is False
     assert settings["guild.reviewPullRequest"] == "https://github.com/Org/app/pull/7"
+    assert settings["guild.reviewBase"] == "main"
+
+    # A PR retargeted onto another base: bridge's own guild.* keys follow it even though the file already has them.
+    conn.execute("UPDATE review_prs SET base = 'dev/lower'")
+    link_worktrees_to_prs(conn)
+    assert json.loads(workspace.read_text())["settings"]["guild.reviewBase"] == "dev/lower"
 
     his = {"folders": [{"path": str(job.path)}, {"path": "/x"}], "settings": {"python.useEnvironmentsExtension": True}}
     workspace.write_text(json.dumps({**his, "launch": {"configurations": []}}))

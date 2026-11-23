@@ -99,6 +99,8 @@ class WorktreeJob:
     """The repo's own env setup, relative to its root; empty for bridge's generic env."""
     python_paths: tuple[str, ...] = ()
     """review_python_paths: shared source roots added to the editor's and each service's import paths."""
+    base: str = ""
+    """The branch the PR merges into, which its review window diffs against."""
 
     @property
     def branch(self) -> str:
@@ -263,6 +265,7 @@ def _map_row_to_job(row: sqlite3.Row, action: str, path: Path, config: Config) -
         row["wt_oid"],
         map_repo_to_setup_script(config, str(row["repo"])),
         config.review_python_paths,
+        str(row["base"] or ""),
     )
 
 
@@ -296,7 +299,7 @@ def run_worktree_job(conn: sqlite3.Connection, config: Config, job: WorktreeJob,
     if job.action == "remove" and result[0] is None:
         map_worktree_to_workspace(job.path).unlink(missing_ok=True)
     elif result[0] is not None:
-        _link_worktree_to_pr(job.repo, job.number, result[0])
+        _link_worktree_to_pr(job.repo, job.number, result[0], job.base)
     with transaction(conn):
         record_worktree(conn, job.ref, result[0], result[1], result[2], result[3], now)
 
@@ -304,13 +307,13 @@ def run_worktree_job(conn: sqlite3.Connection, config: Config, job: WorktreeJob,
 def link_worktrees_to_prs(conn: sqlite3.Connection, python_paths: tuple[str, ...] = ()) -> None:
     """Worktrees made before they had a workspace, or before its current settings, get it here, without waiting for
     their head to move."""
-    for row in conn.execute("SELECT repo, number, wt_path FROM review_prs WHERE wt_path IS NOT NULL"):
+    for row in conn.execute("SELECT repo, number, base, wt_path FROM review_prs WHERE wt_path IS NOT NULL"):
         path = Path(str(row["wt_path"]))
         if not map_worktree_to_workspace(path).exists():
-            _link_worktree_to_pr(str(row["repo"]), int(row["number"]), path)
+            _link_worktree_to_pr(str(row["repo"]), int(row["number"]), path, str(row["base"] or ""))
         elif (path / ".git").exists():
             try:
-                write_workspace(path, str(row["repo"]), int(row["number"]))
+                write_workspace(path, str(row["repo"]), int(row["number"]), str(row["base"] or ""))
             except OSError as exc:
                 print(f"review workspace for {row['repo']}#{row['number']} failed: {exc}", flush=True)
         stamp = _map_worktree_to_pyright_stamp(path)
@@ -321,7 +324,7 @@ def link_worktrees_to_prs(conn: sqlite3.Connection, python_paths: tuple[str, ...
                 print(f"review pyright config for {row['repo']}#{row['number']} failed: {exc}", flush=True)
 
 
-def _link_worktree_to_pr(repo: str, number: int, path: Path) -> None:
+def _link_worktree_to_pr(repo: str, number: int, path: Path, base: str) -> None:
     """The workspace the Review link opens, and the branch key the GitHub Pull Requests extension reads to show this
     PR there. Neither stops the worktree from being used, so a failure is only printed."""
     if not (path / ".git").exists():
@@ -330,21 +333,23 @@ def _link_worktree_to_pr(repo: str, number: int, path: Path) -> None:
     try:
         key = f"branch.{map_number_to_branch(number)}.github-pr-owner-number"
         _run(["git", "-C", str(path), "config", "--local", key, f"{owner}#{name}#{number}"], GIT_TIMEOUT_S)
-        write_workspace(path, repo, number)
+        write_workspace(path, repo, number, base)
     except (StepFailed, OSError) as exc:
         print(f"review workspace for {repo}#{number} failed: {exc}", flush=True)
 
 
-def write_workspace(path: Path, repo: str, number: int) -> None:
+def write_workspace(path: Path, repo: str, number: int, base: str) -> None:
     """Bridge's settings go in where missing; the owner's folders, settings and anything else they added stay. A file
     that is not plain JSON is left alone, as rewriting it would drop their comments."""
     ours: dict[str, object] = {
         "workbench.secondarySideBar.defaultVisibility": "hidden",
         "githubPullRequests.focusedMode": "overview",
-        # The GitHub Pull Requests extension opens a PR's changes on its own only after its own checkout; the local
-        # extension in vscode/guild-review-pr-tree opens them from this.
-        "guild.reviewPullRequest": f"https://github.com/{repo}/pull/{number}",
     }
+    # The local extension in vscode/guild-review-pr-tree diffs the worktree's HEAD against this base, again each time
+    # bridge moves the head: the GitHub Pull Requests extension's own changes view keeps the file list it first fetched.
+    guild: dict[str, object] = {"guild.reviewPullRequest": f"https://github.com/{repo}/pull/{number}"}
+    if base:
+        guild["guild.reviewBase"] = base
     python = path / ".venv" / "bin" / "python"
     if python.exists():
         ours["python.defaultInterpreterPath"] = str(python)
@@ -366,7 +371,7 @@ def write_workspace(path: Path, repo: str, number: int) -> None:
     merged = {
         "folders": current.get("folders") or [{"path": str(path)}],
         **{key: value for key, value in current.items() if key not in ("folders", "settings")},
-        "settings": {**ours, **his},
+        "settings": {**ours, **his, **guild},
     }
     if merged == current:
         return
