@@ -1135,11 +1135,16 @@ def load_open_siblings(conn: sqlite3.Connection, row: sqlite3.Row) -> list[sqlit
     ]
 
 
-def map_siblings_to_wait(siblings: Sequence[sqlite3.Row], why_not: Callable[[sqlite3.Row], str | None]) -> str | None:
-    """The first sibling not ready on its own terms, which keeps the rest from merging without it."""
+def map_siblings_to_wait(
+    row: sqlite3.Row, siblings: Sequence[sqlite3.Row], why_not: Callable[[sqlite3.Row], str | None]
+) -> str | None:
+    """The first sibling not ready on its own terms, which keeps the rest from merging without it, with the sentence
+    that made them siblings."""
+    quotes: dict[str, str] = json.loads(str(row["sibling_quotes"] or "{}"))
     for sibling in siblings:
         if (reason := why_not(sibling)) is not None:
-            return f"goes with {str(sibling['ref']).removeprefix('pr:')}, which is not ready: {reason}"
+            ref = str(sibling["ref"])
+            return f"goes with {ref.removeprefix('pr:')}{quotes.get(ref, '')}, which is not ready: {reason}"
     return None
 
 
@@ -1151,13 +1156,13 @@ def find_dependency_wait(
     live: Mapping[str, Sequence[str]] | None = None,
 ) -> str | None:
     """The one dependency rule every merge path reads (the queue's Ready group and its lead's guard, the Merge button,
-    the auto-merger): a PR its body names that must merge first and has not, or a sibling (a PR it names that names it
-    back) not ready by `why_not`, the caller's own rule; by default the lead's merge rule. Siblings are judged on the
+    the auto-merger): a PR its body names that must merge first and has not, or a sibling (a PR a body says it goes
+    with) not ready by `why_not`, the caller's own rule; by default the lead's merge rule. Siblings are judged on the
     queue's last read, so a sibling that just turned ready lets the others through only after the next poll."""
     if blockers := map_row_to_dependency_blockers(row, live=live):
         return blockers[0]
     found = load_open_siblings(conn, row) if siblings is None else siblings
-    return map_siblings_to_wait(found, why_not or (lambda sibling: find_lead_wait_alone(sibling, live)))
+    return map_siblings_to_wait(row, found, why_not or (lambda sibling: find_lead_wait_alone(sibling, live)))
 
 
 def find_lead_wait_alone(row: sqlite3.Row, live: Mapping[str, Sequence[str]] | None = None) -> str | None:

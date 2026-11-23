@@ -58,7 +58,7 @@ def map_row_to_auto_merge_block(config: Config, row: sqlite3.Row, siblings: Sequ
     """The first reason, from the queue's copy, that the owner's standing rule keeps the PR from merging by itself;
     None: a candidate, to be checked live. Its siblings must each be ready on the same terms: they go together."""
     return map_row_to_own_auto_merge_block(config, row) or map_siblings_to_wait(
-        siblings, lambda sibling: map_row_to_own_auto_merge_block(config, sibling, with_siblings=False)
+        row, siblings, lambda sibling: map_row_to_own_auto_merge_block(config, sibling, with_siblings=False)
     )
 
 
@@ -103,10 +103,7 @@ def find_live_block(conn: sqlite3.Connection, config: Config, row: sqlite3.Row) 
     and the PRs it names, and the same for each open sibling: None, it may merge now."""
     if reason := find_live_block_alone(conn, config, row):
         return reason
-    for sibling in load_open_siblings(conn, row):
-        if reason := find_live_block_alone(conn, config, sibling):
-            return f"goes with {str(sibling['ref']).removeprefix('pr:')}, which is not ready: {reason}"
-    return None
+    return map_siblings_to_wait(row, load_open_siblings(conn, row), lambda s: find_live_block_alone(conn, config, s))
 
 
 def find_live_block_alone(conn: sqlite3.Connection, config: Config, row: sqlite3.Row) -> str | None:

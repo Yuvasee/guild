@@ -204,16 +204,15 @@ def store_open_prs(conn: sqlite3.Connection, prs: list[OpenPr], now: int) -> Non
                                     checks, requested, approved_by, bot_approved, others_reviewed, merge_state,
                                     in_merge_queue, commit_oids, updated_at, first_seen_at,
                                     fetched_at, threads_key, loc_rule, body_reviews, depends_on, usage_missing,
-                                    bot_cleared, named_prs, must_merge, persist_sandbox, issue_missing, files,
+                                    bot_cleared, must_merge, persist_sandbox, issue_missing, files,
                                     related_prs)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (ref) DO UPDATE SET
                 title = excluded.title, url = excluded.url, draft = excluded.draft, head = excluded.head,
                 head_oid = excluded.head_oid, base = excluded.base, stack_parent = excluded.stack_parent,
                 loc = excluded.loc, loc_rule = excluded.loc_rule, checks = excluded.checks,
                 requested = excluded.requested, body_reviews = excluded.body_reviews, depends_on = excluded.depends_on,
-                usage_missing = excluded.usage_missing, named_prs = excluded.named_prs,
+                usage_missing = excluded.usage_missing,
                 must_merge = excluded.must_merge, persist_sandbox = excluded.persist_sandbox,
                 issue_missing = excluded.issue_missing, files = excluded.files, related_prs = excluded.related_prs,
                 approved_by = excluded.approved_by, bot_approved = excluded.bot_approved,
@@ -235,7 +234,7 @@ def store_open_prs(conn: sqlite3.Connection, prs: list[OpenPr], now: int) -> Non
                 int(pr.others_reviewed),
                 pr.merge_state, int(pr.in_merge_queue), json.dumps(pr.commit_oids), pr.updated_at, now, now,
                 map_pr_to_threads_key(pr), LOC_RULE, convert_reviews_to_text(pr.body_reviews), pr.depends_on,
-                pr.usage_missing, int(pr.bot_cleared), json.dumps(pr.named_prs), json.dumps(pr.must_merge),
+                pr.usage_missing, int(pr.bot_cleared), json.dumps(pr.must_merge),
                 int(pr.persist_sandbox), int(pr.issue_missing), json.dumps(pr.files), json.dumps(pr.related_prs),
             ),
         )  # fmt: skip
@@ -271,26 +270,40 @@ class Dependencies:
     sibling_waits: tuple[str, ...] = ()
     """Siblings it merges after: one its body says it merges after, or a backport's main PR."""
     siblings: tuple[str, ...] = ()
-    """Open queue PRs it merges together with: they name each other, directly or through a chain of such pairs."""
+    """Open queue PRs it merges together with: one body says the two go together, directly or through a chain."""
+    sibling_quotes: tuple[tuple[str, str], ...] = ()
+    """(sibling ref, quote of the sentence that put it in the group) for each sibling a sentence made."""
 
 
 def map_prs_to_dependencies(
     prs: list[OpenPr], states: dict[str, str | None], backport_bases: tuple[str, ...] = ()
 ) -> dict[str, Dependencies]:
-    """Each open PR's waits on the PRs it names. Two of them naming each other cannot go one before the other, so they
-    are siblings: each merges once all are ready, in the order their depends_on gives. Those stacked on a PR are left
-    out of its waits: a stack's bottom PR whose body lists the whole stack would otherwise wait for its own children."""
+    """Each open PR's waits on the PRs it names. Two that a body says go together, or that each say they merge after
+    the other, are siblings: each merges once all are ready, in the order their depends_on gives. Those stacked on a
+    PR are left out of its waits: a stack's bottom PR whose body lists the whole stack would otherwise wait for its
+    own children."""
     children: dict[str, list[str]] = {}
     for pr in prs:
         if pr.stack_parent:
             children.setdefault(pr.stack_parent.casefold(), []).append(pr.ref.casefold())
-    names = {_map_ref_to_key(pr.ref): {r.casefold() for r in (*pr.named_prs, *pr.must_merge)} for pr in prs}
+    said_with = {(_map_ref_to_key(pr.ref), r.casefold()): (pr.ref, s) for pr in prs for r, s in pr.goes_with}
     # Two backports onto different branches name each other: neither is the other's default-branch PR.
     backports = {_map_ref_to_key(pr.ref) for pr in prs if is_backport_base(backport_bases, pr.base)}
     must = {_map_ref_to_key(pr.ref): {r.casefold() for r in pr.must_merge} - backports for pr in prs}
     refs = {_map_ref_to_key(pr.ref): pr.ref for pr in prs}
     stacked = {_map_ref_to_key(pr.ref): list_stacked_on(children, pr.ref.casefold()) for pr in prs}
-    groups = map_names_to_sibling_groups(names, stacked)
+    # Only open PRs pair, and a PR stacked on another is no pair with it: the stack gives their order.
+    said_with = {
+        (key, other): said
+        for (key, other), said in said_with.items()
+        if other in must and other not in stacked[key] and key not in stacked[other]
+    }
+    groups = map_pairs_to_sibling_groups(set(said_with), must, stacked)
+    # A sibling reached through a chain quotes a sentence that brought it into the group.
+    first_said: dict[str, tuple[str, str]] = {}
+    for pair in sorted(said_with):
+        for end in pair:
+            first_said.setdefault(end, said_with[pair])
     found: dict[str, Dependencies] = {}
     for pr in prs:
         key = _map_ref_to_key(pr.ref)
@@ -315,25 +328,43 @@ def map_prs_to_dependencies(
             (*pr.preconditions, *stack, *cycle, *map_states_to_blockers(strict, skipped, states, said)),
             order,
             tuple(sorted(refs[other] for other in group)),
+            tuple(
+                (refs[other], map_said_to_sibling_quote(pr.ref, quote))
+                for other in sorted(group)
+                if (quote := said_with.get((key, other)) or said_with.get((other, key)) or first_said.get(other))
+            ),
         )
     return found
 
 
-def map_names_to_sibling_groups(names: dict[str, set[str]], stacked: dict[str, set[str]]) -> dict[str, set[str]]:
-    """PR to the PRs linked to it by a chain of pairs that name each other; only PRs in a pair are keys. A PR stacked
-    on another is no pair with it: the stack gives their order."""
-
-    def is_pair(key: str, other: str) -> bool:
-        linked = other in names and key in names[other] and other != key
-        return linked and other not in stacked.get(key, ()) and key not in stacked.get(other, ())
-
-    pairs = {key: {other for other in named if is_pair(key, other)} for key, named in names.items()}
+def map_pairs_to_sibling_groups(
+    said_with: set[tuple[str, str]], must: dict[str, set[str]], stacked: dict[str, set[str]]
+) -> dict[str, set[str]]:
+    """PR to the PRs linked to it by a chain of pairs; only PRs in a pair are keys. A pair: one body says the two go
+    together (one side is enough: it says so for both), or each says it merges after the other, a cycle the group
+    names. A PR stacked on another is no pair with it: the stack gives their order."""
+    edges = said_with | {(key, other) for key, others in must.items() for other in others if key in must.get(other, ())}
+    pairs: dict[str, set[str]] = {}
+    for key, other in edges:
+        if key != other and other in must and other not in stacked[key] and key not in stacked[other]:
+            pairs.setdefault(key, set()).add(other)
+            pairs.setdefault(other, set()).add(key)
     groups: dict[str, set[str]] = {}
     for key, linked in pairs.items():
         if linked and key not in groups:
             group = _reach(pairs, key) | {key}
             groups.update(dict.fromkeys(group, group))
     return groups
+
+
+def map_said_to_sibling_quote(ref: str, said: tuple[str, str]) -> str:
+    """Which body to edit, when two PRs that should not go together are held as siblings."""
+    where, sentence = said
+    return (
+        f' (its body says: "{sentence}")'
+        if where == ref
+        else f' ({where.removeprefix("pr:")}\'s body says: "{sentence}")'
+    )
 
 
 def _reach(edges: dict[str, set[str]], start: str) -> set[str]:
@@ -358,10 +389,10 @@ def list_stacked_on(children: dict[str, list[str]], ref: str) -> set[str]:
 
 def store_dependencies(conn: sqlite3.Connection, dependencies: dict[str, Dependencies]) -> None:
     conn.executemany(
-        "UPDATE review_prs SET dep_blockers = ?, sibling_waits = ?, siblings = ? WHERE ref = ?",
+        "UPDATE review_prs SET dep_blockers = ?, sibling_waits = ?, siblings = ?, sibling_quotes = ? WHERE ref = ?",
         [
             (json.dumps(d.blockers) if d.blockers else None, json.dumps(d.sibling_waits) if d.sibling_waits else None,
-             json.dumps(d.siblings), ref)
+             json.dumps(d.siblings), json.dumps(dict(d.sibling_quotes)), ref)
             for ref, d in dependencies.items()
         ],
     )  # fmt: skip
@@ -2067,7 +2098,7 @@ def map_row_to_merge_ok_needs(row: sqlite3.Row, siblings: Sequence[sqlite3.Row] 
     backport, its default-branch PRs merged), CI green or none, GitHub would not refuse it, and each open sibling
     ready on the same terms."""
     return map_row_to_own_merge_ok_needs(row) or map_siblings_to_wait(
-        siblings, lambda sibling: map_row_to_own_merge_ok_needs(sibling, with_siblings=False)
+        row, siblings, lambda sibling: map_row_to_own_merge_ok_needs(sibling, with_siblings=False)
     )
 
 

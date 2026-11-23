@@ -909,6 +909,12 @@ MIGRATIONS: tuple[str, ...] = (
         fetched_at INTEGER NOT NULL
     );
     """,
+    # Siblings come only from a sentence that says so; by sibling ref, the quote of that sentence. Every PR a body
+    # named is no longer kept.
+    """
+    ALTER TABLE review_prs RENAME COLUMN named_prs TO sibling_quotes;
+    UPDATE review_prs SET sibling_quotes = '{}';
+    """,
 )
 
 HOOK_BUSY_TIMEOUT_MS = 200

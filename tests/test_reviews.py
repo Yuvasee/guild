@@ -2660,7 +2660,7 @@ def store_blockers(conn: Any, blockers: tuple[str, ...]) -> None:
 def test_the_merge_button_waits_for_each_pr_the_body_names_and_says_which(
     tmp_path: Path, blockers: tuple[str, ...], needs: str | None
 ) -> None:
-    conn = setup_pr(tmp_path, approved_by=("mira",), named_prs=("Org/lib#12",))
+    conn = setup_pr(tmp_path, approved_by=("mira",))
     store_blockers(conn, blockers)
     view = merge_ok_view(conn)
     assert (view["can_ok_merge"], view["merge_ok_needs"]) == (needs is None, needs)
@@ -2687,7 +2687,7 @@ def test_a_backport_the_bot_approved_waits_for_its_main_pr_and_one_never_approve
 
 def test_prs_it_must_merge_after_read_from_the_queue_when_open_there_and_from_github_otherwise() -> None:
     prs = [
-        make_pr(named_prs=("Org/lib#12",), must_merge=("org/app#8", "Org/lib#13", "Org/lib#14")),
+        make_pr(must_merge=("org/app#8", "Org/lib#13", "Org/lib#14")),
         make_pr(ref="pr:Org/app#8", number=8, stack_parent=None),
     ]
     with mock.patch("bridge.reviews.fetch_pr_states", return_value={"Org/lib#13": None, "Org/lib#14": "OPEN"}) as fetch:
@@ -2703,14 +2703,16 @@ def test_prs_it_must_merge_after_read_from_the_queue_when_open_there_and_from_gi
 
 
 def test_a_stack_bottom_whose_body_lists_the_stack_does_not_wait_for_its_children() -> None:
-    bottom = make_pr(named_prs=("Org/app#8", "Org/app#9"), must_merge=("Org/app#9",))
-    middle = make_pr(ref="pr:Org/app#8", number=8, stack_parent=REF, named_prs=("Org/app#7", "Org/app#9"))
-    top = make_pr(ref="pr:Org/app#9", number=9, stack_parent="pr:Org/app#8", named_prs=("Org/app#7", "Org/app#8"))
+    bottom = make_pr(goes_with=(("Org/app#8", "Goes with #8."),), must_merge=("Org/app#9",))
+    middle = make_pr(ref="pr:Org/app#8", number=8, stack_parent=REF, goes_with=(("Org/app#9", "Goes with #9."),))
+    top = make_pr(
+        ref="pr:Org/app#9", number=9, stack_parent="pr:Org/app#8", goes_with=(("Org/app#7", "Goes with #7."),)
+    )
     states: dict[str, str | None] = dict.fromkeys(("Org/app#7", "Org/app#8", "Org/app#9"), "OPEN")
     deps = map_prs_to_dependencies([bottom, middle, top], states)
     assert deps[REF] == Dependencies()
     assert deps["pr:Org/app#8"].blockers == ("stacked on Org/app#7, which merges first",)
-    unnamed = map_prs_to_dependencies([bottom, replace(middle, named_prs=()), top], states)
+    unnamed = map_prs_to_dependencies([bottom, replace(middle, goes_with=()), top], states)
     assert unnamed["pr:Org/app#8"].blockers == ("stacked on Org/app#7, which merges first",), (
         "the stack waits, not words"
     )
@@ -2730,7 +2732,8 @@ def test_a_backport_must_merge_after_the_main_prs_it_names_and_persist_sandbox_i
         "body": "Same diff as the main PR. Goes with Org/lib#3.\n<!-- PERSIST_SANDBOX -->",
     }  # fmt: skip
     pr = map_node_to_open_pr(node, config)
-    assert (pr.must_merge, pr.named_prs, pr.persist_sandbox) == (("Org/app#5",), ("Org/lib#3",), True)
+    assert (pr.must_merge, pr.persist_sandbox) == (("Org/app#5",), True)
+    assert pr.goes_with == (("Org/lib#3", "Goes with Org/lib#3."),)
     assert map_node_to_open_pr({**node, "baseRefName": "main", "body": ""}, config).must_merge == ()
 
 
@@ -2767,23 +2770,51 @@ def test_a_merge_precondition_in_the_body_blocks_the_merge_button_until_edited_o
 A, B, C = "pr:Org/app#7", "pr:Org/app#8", "pr:Org/lib#3"
 
 
+GOES_WITH_8 = (("Org/app#8", "Goes with #8."),)
+SAID_7 = ' (Org/app#7\'s body says: "Goes with #8.")'
+SAID_3 = ' (Org/lib#3\'s body says: "Goes with Org/app#8.")'
+
+
 def sibling_prs(**changes: dict[str, Any]) -> list[OpenPr]:
-    """#7 and #8 name each other; Org/lib#3 names #8, which names it back: one group of three."""
+    """#7 says it goes with #8, and Org/lib#3 says so too; #8 says nothing: one side is enough, one group of three."""
     base = {
-        A: {"named_prs": ("Org/app#8",)},
-        B: {"named_prs": ("Org/app#7", "Org/lib#3"), "ref": B, "number": 8, "head": "dev/y",
-            "url": "https://github.com/Org/app/pull/8"},
-        C: {"named_prs": ("Org/app#8",), "ref": C, "repo": "Org/lib", "number": 3, "head": "dev/z",
-            "url": "https://github.com/Org/lib/pull/3"},
+        A: {"goes_with": GOES_WITH_8},
+        B: {"ref": B, "number": 8, "head": "dev/y", "url": "https://github.com/Org/app/pull/8"},
+        C: {"goes_with": (("Org/app#8", "Goes with Org/app#8."),), "ref": C, "repo": "Org/lib", "number": 3,
+            "head": "dev/z", "url": "https://github.com/Org/lib/pull/3"},
     }  # fmt: skip
     return [make_pr(**{**base[ref], **changes.get(ref, {})}) for ref in (A, B, C)]
 
 
-def test_prs_that_name_each_other_directly_or_through_a_chain_are_siblings_and_wait_only_outside() -> None:
-    prs = sibling_prs(**{A: {"named_prs": ("Org/app#8", "Org/web#1"), "must_merge": ("Org/web#1",)}})
+def test_prs_a_body_says_go_together_directly_or_through_a_chain_are_siblings_and_wait_only_outside() -> None:
+    prs = sibling_prs(**{A: {"must_merge": ("Org/web#1",)}})
     deps = map_prs_to_dependencies(prs, {"Org/web#1": "OPEN"})
-    assert deps[A] == Dependencies(("waits for Org/web#1 to merge",), (), (B, C))
-    assert deps[C] == Dependencies((), (), (A, B))
+    assert deps[A] == Dependencies(
+        ("waits for Org/web#1 to merge",), (), (B, C), ((B, ' (its body says: "Goes with #8.")'), (C, SAID_3))
+    )
+    assert deps[B] == Dependencies((), (), (A, C), ((A, SAID_7), (C, SAID_3))), "the sentence is in the other body"
+    assert deps[C] == Dependencies((), (), (A, B), ((A, SAID_7), (B, ' (its body says: "Goes with Org/app#8.")')))
+
+
+def test_a_chain_sibling_quotes_a_sentence_that_paired_it_never_one_the_stack_set_aside() -> None:
+    def pr(number: int, *goes_with: int, parent: int | None = None) -> OpenPr:
+        said = tuple((f"Org/app#{n}", f"Goes with #{n}.") for n in goes_with)
+        return make_pr(ref=f"pr:Org/app#{number}", number=number, goes_with=said,
+                       stack_parent=f"pr:Org/app#{parent}" if parent else None)  # fmt: skip
+
+    deps = map_prs_to_dependencies([pr(7, 8), pr(8, 9, 10), pr(9, 10), pr(10, parent=8)], {})
+    assert dict(deps[REF].sibling_quotes)["pr:Org/app#10"] == ' (Org/app#9\'s body says: "Goes with #10.")'
+
+
+def test_prs_that_only_name_each_other_or_call_each_other_independent_are_no_siblings() -> None:
+    bodies = {
+        7: "Fixes the retry.\n\nRelated: #8 — independent because it changes the parser, not the retry",
+        8: "Speeds up the parser. Seen while testing #7.\n\nRelated: #7 — independent because it touches the retry",
+    }
+    prs = [map_node_to_open_pr({**github_node(), "number": n, "body": b}, CONFIG) for n, b in bodies.items()]
+    assert map_prs_to_dependencies(prs, {}) == {pr.ref: Dependencies() for pr in prs}
+    said = replace(prs[1], goes_with=(("Org/app#7", "Goes with #7."),))
+    assert map_prs_to_dependencies([prs[0], said], {})[prs[0].ref].siblings == (said.ref,), "an explicit one pairs"
 
 
 def test_a_sibling_it_merges_after_orders_them_and_a_cycle_of_merge_after_is_named() -> None:
@@ -2827,7 +2858,7 @@ def test_a_cycle_and_an_order_quote_the_sentence_that_made_each_edge() -> None:
 )
 def test_a_pr_the_body_only_names_is_no_wait_and_one_it_depends_on_is(body: str, blockers: tuple[str, ...]) -> None:
     pr = map_node_to_open_pr({**github_node(), "body": body}, CONFIG)
-    assert pr.named_prs == ("Org/lib#12",)
+    assert pr.goes_with == ()
     assert map_prs_to_dependencies([pr], {"Org/lib#12": "OPEN"})[pr.ref].blockers == blockers
 
 
@@ -2871,8 +2902,8 @@ def test_siblings_get_the_merge_button_only_once_each_is_ready_on_its_own_terms(
     conn = store_siblings(tmp_path, sibling_prs(**{A: ready, B: ready}))
     assert button(conn, A) == (
         False,
-        "goes with Org/lib#3, which is not ready: needs a colleague's approval or the review bot's approval of its "
-        "newest commit",
+        f"goes with Org/lib#3{SAID_3}, which is not ready: needs a colleague's approval or the review bot's approval "
+        "of its newest commit",
     )
     with pytest.raises(MergeOkRefused, match="goes with Org/lib#3"), transaction(conn):
         record_merge_ok(conn, CONFIG, A, "a1", "theo", 700)
@@ -2898,9 +2929,9 @@ def test_a_stack_bottom_does_not_wait_for_a_sibling_stacked_on_it(tmp_path: Path
     ready = {"approved_by": ("mira",)}
     prs = sibling_prs(
         **{
-            A: {**ready, "named_prs": ("Org/lib#3",)},
-            B: {**ready, "named_prs": ("Org/lib#3",), "stack_parent": A},
-            C: {**ready, "named_prs": ("Org/app#7", "Org/app#8")},
+            A: {**ready, "goes_with": (("Org/lib#3", "Goes with Org/lib#3."),)},
+            B: {**ready, "goes_with": (("Org/app#7", "Goes with #7."),), "stack_parent": A},
+            C: {**ready, "goes_with": (("Org/app#8", "Goes with Org/app#8."),)},
         }
     )
     conn = store_siblings(tmp_path, prs)
@@ -2923,7 +2954,7 @@ def test_the_ready_group_and_its_lead_wait_for_a_sibling_that_is_not_ready(tmp_p
     view = queue_view(conn, A)
     assert view["group"] != READY and view["merge_path"] is None
     assert view["approval_left"] == "waits on another PR"
-    assert view["waits_on"] == "goes with Org/lib#3, which is not ready: not approved"
+    assert view["waits_on"] == f"goes with Org/lib#3{SAID_3}, which is not ready: not approved"
     assert tell_ready_to_merge(conn, CONFIG, 700) == []
     with transaction(conn):
         conn.execute("""UPDATE review_prs SET approved_by = '["mira"]'""")
@@ -2937,7 +2968,10 @@ def test_a_sibling_backport_whose_diff_check_passed_at_its_head_needs_no_approva
         conn.execute("UPDATE review_prs SET reviewed_at = 550")
         conn.execute("UPDATE review_prs SET backport_waived = 1, backport_key = 'old main' WHERE ref = ?", (B,))
         store_merge_blocks(conn)
-    assert queue_view(conn, A)["waits_on"] == "goes with Org/app#8, which is not ready: not approved"
+    assert (
+        queue_view(conn, A)["waits_on"]
+        == 'goes with Org/app#8 (its body says: "Goes with #8."), which is not ready: not approved'
+    )
     with transaction(conn):
         conn.execute("UPDATE review_prs SET backport_key = head_oid || ' ' || base WHERE ref = ?", (B,))
         store_merge_blocks(conn)
@@ -2951,7 +2985,10 @@ def test_the_ready_group_waits_for_a_pr_its_body_names_and_a_backport_names_what
         conn.execute("""UPDATE review_prs SET dep_blockers = '["waits for Org/web#1 to merge"]' WHERE ref = ?""", (C,))
         store_merge_blocks(conn)
     assert queue_view(conn, C)["waits_on"] == "waits for Org/web#1 to merge"
-    assert queue_view(conn, A)["waits_on"] == ("goes with Org/lib#3, which is not ready: waits for Org/web#1 to merge")
+    assert (
+        queue_view(conn, A)["waits_on"]
+        == f"goes with Org/lib#3{SAID_3}, which is not ready: waits for Org/web#1 to merge"
+    )
     assert all(queue_view(conn, ref)["merge_path"] is None for ref in (A, B, C))
     row = conn.execute("SELECT * FROM review_prs WHERE ref = ?", (C,)).fetchone()
     assert map_row_to_backport_state(row, "waits for Org/web#1 to merge") == (
@@ -2989,15 +3026,25 @@ def test_a_cycle_of_merge_after_keeps_every_sibling_from_merging(tmp_path: Path)
     assert "a cycle" in deps[A].blockers[0] and deps[A].sibling_waits == ()
     conn = store_siblings(tmp_path, prs)
     can, needs = button(conn, C)
-    assert not can and needs is not None and "goes with Org/app#7, which is not ready" in needs and "a cycle" in needs
+    assert (
+        not can
+        and needs is not None
+        and f"goes with Org/app#7{SAID_7}, which is not ready" in needs
+        and "a cycle" in needs
+    )
 
 
-def test_two_backports_that_name_each_other_are_siblings_not_a_cycle() -> None:
-    bp7 = make_pr(base="release/1", named_prs=("Org/app#8",), must_merge=("Org/app#5", "Org/app#8"))
-    bp8 = make_pr(ref="pr:Org/app#8", number=8, base="release/2", named_prs=("Org/app#7",),
-                  must_merge=("Org/app#5", "Org/app#7"))  # fmt: skip
+def test_two_backports_that_name_each_other_are_no_cycle_and_siblings_only_when_a_body_says_so() -> None:
+    bp7 = make_pr(base="release/1", must_merge=("Org/app#5", "Org/app#8"))
+    bp8 = make_pr(ref="pr:Org/app#8", number=8, base="release/2", must_merge=("Org/app#5", "Org/app#7"))
     deps = map_prs_to_dependencies([bp7, bp8], {"Org/app#5": "MERGED"}, ("release/*",))
-    assert deps[REF] == Dependencies((), (), ("pr:Org/app#8",))
+    assert deps[REF] == Dependencies()
+    paired = map_prs_to_dependencies(
+        [replace(bp7, goes_with=GOES_WITH_8), bp8], {"Org/app#5": "MERGED"}, ("release/*",)
+    )
+    assert paired[REF] == Dependencies(
+        (), (), ("pr:Org/app#8",), (("pr:Org/app#8", ' (its body says: "Goes with #8.")'),)
+    )
 
 
 def test_its_owner_is_told_once_per_fixable_reason_a_pr_has_no_place_in_the_owners_review_order(tmp_path: Path) -> None:

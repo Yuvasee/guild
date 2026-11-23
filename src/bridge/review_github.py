@@ -13,7 +13,7 @@ from bridge.config import Config
 from bridge.refs import names_issue, needs_issue
 from bridge.review_deps import (
     map_markdown_to_dependencies,
-    map_markdown_to_named_prs,
+    map_markdown_to_goes_with,
     map_markdown_to_preconditions,
     map_markdown_to_related_prs,
 )
@@ -186,8 +186,9 @@ class OpenPr:
     dependencies: tuple[tuple[str, str], ...] = ()
     """(owner/repo#N, sentence cut to show) for each PR its body says it merges after: a wait on one quotes its
     sentence, so the owner knows what to edit when it is wrong."""
-    named_prs: tuple[str, ...] = ()
-    """owner/repo#N of every PR its body names, whatever the words: two that name each other merge together."""
+    goes_with: tuple[tuple[str, str], ...] = ()
+    """(owner/repo#N, sentence cut to show) for each PR its body says it merges together with: one side saying so
+    makes the two siblings, and a sibling's wait quotes the sentence."""
     must_merge: tuple[str, ...] = ()
     """owner/repo#N of the PRs that must be merged first: its dependencies, and a backport's default-branch PRs."""
     preconditions: tuple[str, ...] = ()
@@ -337,7 +338,7 @@ def map_node_to_open_pr(node: Any, config: Config, known: KnownHeads | None = No
         usage_missing=find_missing_usage_section(strip_agent_prefix(str(node["title"])), str(node.get("body") or "")),
         depends_on=dependencies[0][0] if len(dependencies) == 1 else None,
         dependencies=dependencies,
-        named_prs=map_markdown_to_named_prs(body, repo, number),
+        goes_with=map_markdown_to_goes_with(body, repo, number),
         related_prs=map_markdown_to_related_prs(body, repo, number),
         must_merge=map_pr_to_must_merge(config, repo, number, node, tuple(ref for ref, _ in dependencies)),
         preconditions=map_markdown_to_preconditions(body, repo, number),

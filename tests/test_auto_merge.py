@@ -241,9 +241,10 @@ def test_the_dry_run_lists_each_open_pr_with_its_verdict(tmp_path: Path) -> None
     assert conn.total_changes == before
 
 
-def sibling(number: int, named: tuple[str, ...], **changes: Any) -> Any:
+def sibling(number: int, goes_with: tuple[str, ...], **changes: Any) -> Any:
+    said = tuple((ref, f"Goes with {ref}.") for ref in goes_with)
     return make_pr(**{**CLEAN, "ref": f"pr:Org/app#{number}", "number": number, "head": f"dev/{number}",
-                      "url": f"https://github.com/Org/app/pull/{number}", "named_prs": named, **changes})  # fmt: skip
+                      "url": f"https://github.com/Org/app/pull/{number}", "goes_with": said, **changes})  # fmt: skip
 
 
 def setup_siblings(tmp_path: Path, *prs: Any) -> Any:
@@ -254,8 +255,9 @@ def setup_siblings(tmp_path: Path, *prs: Any) -> Any:
 
 
 def test_siblings_merge_one_per_round_only_once_all_are_ready(tmp_path: Path) -> None:
-    waiting = setup_siblings(tmp_path, sibling(7, ("Org/app#8",)), sibling(8, ("Org/app#7",), approved_by=()))
-    assert "goes with Org/app#8, which is not ready" in str(map_db_to_dry_run(waiting, ON)[0][1])
+    waiting = setup_siblings(tmp_path, sibling(7, ("Org/app#8",)), sibling(8, (), approved_by=()))
+    said = 'goes with Org/app#8 (its body says: "Goes with Org/app#8."), which is not ready'
+    assert said in str(map_db_to_dry_run(waiting, ON)[0][1]), "one side saying so pairs them, and the wait quotes it"
     assert run(waiting).merges == []
 
     conn = setup_siblings(tmp_path / "ready", sibling(7, ("Org/app#8",)), sibling(8, ("Org/app#7",)))

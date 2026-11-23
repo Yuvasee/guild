@@ -298,8 +298,13 @@ def test_a_wait_on_a_body_sentence_holds_only_while_the_body_read_live_still_say
     assert stale.startswith(said) and "as of the queue's last poll: reading Acme/Web#13 (gh failed: timeout)" in stale
 
     with transaction(conn):
-        conn.execute("UPDATE review_prs SET siblings = ? WHERE number = 12", (json.dumps(["pr:Acme/Web#13"]),))
-    assert blocks(12, held_body) == [f"goes with Acme/Web#13, which is not ready: {said}"]
+        conn.execute(
+            "UPDATE review_prs SET siblings = ?, sibling_quotes = ? WHERE number = 12",
+            (json.dumps(["pr:Acme/Web#13"]), json.dumps({"pr:Acme/Web#13": ' (its body says: "Goes with #13.")'})),
+        )
+    assert blocks(12, held_body) == [
+        f'goes with Acme/Web#13 (its body says: "Goes with #13."), which is not ready: {said}'
+    ]
     assert blocks(12, "Adds the warp drive.") == []
 
 

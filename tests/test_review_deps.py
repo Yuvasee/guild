@@ -4,7 +4,7 @@ import pytest
 
 from bridge.review_deps import (
     map_markdown_to_dependencies,
-    map_markdown_to_named_prs,
+    map_markdown_to_goes_with,
     map_markdown_to_preconditions,
     map_markdown_to_related_prs,
     map_states_to_blockers,
@@ -102,21 +102,100 @@ def test_a_bare_mention_a_reverse_or_an_ambiguous_dependency_names_none(body: st
     ("body", "expected"),
     [
         ("Goes with Acme-Org/acme-infra#23.", ("Acme-Org/acme-infra#23",)),
-        (
-            "Companion to Acme-Org/acme-infra#23.\n\nShip together with or after the release that contains #23.",
-            ("Acme-Org/acme-infra#23",),
-        ),
-        ("Follow-up to #45. Related: https://github.com/Org/lib/pull/7", (f"{APP}#45", "Org/lib#7")),
-        ("This is #205, the same as Acme-Org/monorepo#205.", ()),
-        ("Org/lib#3 and Org/web#3 both touch it; see #3.", ("Org/lib#3", "Org/web#3")),
-        ("<!-- template: goes with #45 -->\nNothing else.", ()),
-        ("No PR named, only PROJ-27.", ()),
+        ("Merge this PR together with #45 and Org/lib#7.", (f"{APP}#45", "Org/lib#7")),
+        ("Ships alongside https://github.com/Org/lib/pull/7.", ("Org/lib#7",)),
+        ("Related: #45 — goes with this one, both change the schema.", (f"{APP}#45",)),
+        ("This goes with\n#45 and must not land alone.", (f"{APP}#45",)),
+        ("Goes together with:\n- #45\n- Org/lib#7", (f"{APP}#45", "Org/lib#7")),
+        ("Related: #45 — goes with this; #46 — independent because it touches the parser", (f"{APP}#45",)),
+        ("Related: #45 — goes with this, **not** independent because both change the contract", (f"{APP}#45",)),
+        ("Unlike #44, #45 goes with this one, not with #46.", (f"{APP}#45",)),
+        ("Goes with #45, but not with #46.", (f"{APP}#45",)),
+        ("Goes with #45, while #46 is independent because it is older.", (f"{APP}#45",)),
+        ("Goes with #45 and also Org/related#46.", (f"{APP}#45", "Org/related#46")),
+        ("**Goes with:**\n- #45\n- #46 — independent because it is older", (f"{APP}#45",)),
+        ("Goes with:\n\n- #45", (f"{APP}#45",)),
+        ("Follow-up to #44: #45 and Org/lib#7 go together with this one.", (f"{APP}#45", "Org/lib#7")),
+        ("https://github.com/Org/lib/pull/7 goes with this.", ("Org/lib#7",)),
+        ("Goes with #45, and #46 goes with #47.", (f"{APP}#45",)),
+        ("Goes with #45, not with #46.", (f"{APP}#45",)),
+        ("Goes with:\n* #45.\n* Org/lib#7.", (f"{APP}#45", "Org/lib#7")),
+        ("Goes with:\n1. #45\n2. Org/lib#7", (f"{APP}#45", "Org/lib#7")),
+        ("Goes with:\n\n- #45\n\n- Org/lib#7", (f"{APP}#45", "Org/lib#7")),
+        ("Goes with:\n- __#45__", (f"{APP}#45",)),
+        ("Goes with #45, #46 never goes with #47.", (f"{APP}#45",)),
+    ],
+    ids=[
+        "goes-with",
+        "merge-together",
+        "alongside",
+        "pr-before",
+        "wrapped",
+        "list",
+        "mixed-line",
+        "not-independent",
+        "subject",
+        "but-not",
+        "while-independent",
+        "and-also",
+        "list-item-independent",
+        "list-after-blank-line",
+        "subject-after-colon",
+        "url-subject",
+        "next-subject",
+        "not-with",
+        "star-list",
+        "numbered-list",
+        "loose-list",
+        "emphasised-item",
+        "negated-subject",
     ],
 )
-def test_every_pr_a_body_names_is_found_and_a_bare_number_takes_its_full_name(
-    body: str, expected: tuple[str, ...]
-) -> None:
-    assert map_markdown_to_named_prs(body, APP, 205) == expected
+def test_a_sentence_that_says_two_prs_go_together_pairs_them(body: str, expected: tuple[str, ...]) -> None:
+    found = map_markdown_to_goes_with(body, APP, 205)
+    assert tuple(ref for ref, _ in found) == expected
+    first_line = body.partition("\n")[0]
+    sentence = first_line if first_line.rstrip("*").endswith(":") else body
+    assert found[0][1] == " ".join(sentence.replace("**", "").split()), "it quotes its sentence, for a list the colon's"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Follow-up to #45. Related: https://github.com/Org/lib/pull/7",
+        "Related: #45 — independent because it changes another branch of the parser",
+        "Related: #45 — stacked",
+        "This no longer goes with #45.",
+        "We go with the approach of #45.",
+        "Unlike #44, this goes with the new schema.",
+        "Merge conflicts with #45 are resolved.",
+        "<!-- template: goes with #45 -->\nNothing else.",
+        "This is #205; it goes with #205.",
+        "#44 goes with #45, both outside this change.",
+        "This does **not** go together with #45.",
+        "#44 must merge together with #45.",
+        "#44 might ship alongside #45.",
+        "Goes with:\n- #45 — independent because it is older.\nSee #46 for background.",
+    ],
+    ids=[
+        "mention",
+        "independent",
+        "stacked",
+        "negated",
+        "go-with",
+        "pr-before-other",
+        "conflict",
+        "hidden",
+        "self",
+        "other-subject",
+        "emphasised-negation",
+        "other-subject-modal",
+        "other-subject-might",
+        "only-item-independent",
+    ],
+)
+def test_a_mention_a_negation_or_an_independent_pr_makes_no_pair(body: str) -> None:
+    assert map_markdown_to_goes_with(body, APP, 205) == ()
 
 
 @pytest.mark.parametrize(
@@ -128,6 +207,23 @@ def test_a_long_run_before_a_deploy_is_read_in_linear_time(body: str) -> None:
     started = time.monotonic()
     assert map_markdown_to_dependency(body, APP, 205) is None
     assert time.monotonic() - started < 1
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "goes with " * 5000 + "#4.",
+        "#4 " * 3000 + "goes with this " * 3000,
+        "Goes with:\n- #4.\n" * 30000,
+        "#4 and " * 9000 + "goes with this",
+    ],
+    ids=["many-triggers", "many-before", "many-lists", "long-subject"],
+)
+def test_a_body_of_many_pairing_words_is_read_in_linear_time(body: str) -> None:
+    started = time.monotonic()
+    found = map_markdown_to_goes_with(body, APP, 205)
+    assert time.monotonic() - started < 1
+    assert [ref for ref, _ in found] == ([] if body.endswith("and goes with this") else [f"{APP}#4"])
 
 
 def test_a_dependency_comes_with_the_sentence_that_made_it_cut_to_show() -> None:
@@ -300,8 +396,8 @@ def test_a_sentence_naming_only_this_pr_still_holds_it_and_a_long_one_is_cut() -
 
 def test_merge_after_a_pr_stays_a_dependency_that_its_merge_clears() -> None:
     body = "Merge after #12 is deployed."
-    named = map_markdown_to_named_prs(body, APP, 7)
-    assert named == (f"{APP}#12",) and map_markdown_to_dependency(body, APP, 7) == f"{APP}#12"
+    assert map_markdown_to_dependency(body, APP, 7) == f"{APP}#12"
+    named = (f"{APP}#12",)
     assert map_states_to_blockers(named, set(), {f"{APP}#12": "OPEN"}) == (f"waits for {APP}#12 to merge",)
     assert map_states_to_blockers(named, set(), {f"{APP}#12": "MERGED"}) == ()
 
@@ -315,32 +411,3 @@ def test_related_lines_name_prs_by_number_by_repo_and_by_url() -> None:
         "See #11.\n"
     )
     assert map_markdown_to_related_prs(body, "Org/app", 7) == ("Org/app#8", "Org/app#9", "Org/lib#4")
-
-
-def test_a_pr_a_related_line_calls_independent_is_named_but_not_waited_for() -> None:
-    body = "Related: #8 — independent because it changes another branch of the parser\nRelated: #9 — stacked\n"
-    assert map_markdown_to_named_prs(body, "Org/app", 7) == ("Org/app#9",)
-    assert map_markdown_to_related_prs(body, "Org/app", 7) == ("Org/app#8", "Org/app#9")
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        "Related: #8 — not independent because both change the runtime contract",
-        "Related: #8 — stacked | independent because …",
-        "Related: #8 — stacked; #9 — independent because they touch other paths",
-        "Related: #8 — independent",
-        "Related: #8 — **not** independent because both change the runtime contract",
-        "Related: #8 — independent because it changes another parser branch\nRelated: #8 — stacked",
-    ],
-    ids=["negated", "template-pasted", "mixed-line", "no-reason", "emphasised-negation", "contradicted"],
-)
-def test_a_related_line_that_does_not_settle_independence_keeps_the_wait(body: str) -> None:
-    assert "Org/app#8" in map_markdown_to_named_prs(body, "Org/app", 7)
-
-
-def test_an_independent_pr_is_not_waited_for_though_the_body_names_it_elsewhere() -> None:
-    body = "Related: #8 — independent because it changes another parser branch.\n\nUnlike #8, this keeps the cache."
-    assert map_markdown_to_named_prs(body, "Org/app", 7) == ()
-    other_case = "Related: Org/app#8 — independent because it changes another parser branch.\n\nUnlike org/app#8, …"
-    assert map_markdown_to_named_prs(other_case, "Org/app", 7) == ()
