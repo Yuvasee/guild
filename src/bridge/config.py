@@ -149,6 +149,11 @@ class Config:
     """GitHub label bridge puts on a queue PR once the owner pressed Publish, and refuses to agents; empty is off."""
     grooming_states: tuple[str, ...] = ()
     """Tracker states issue sync never moves an issue out of, lowercase; their leads are told once instead."""
+    grooming_bot: str = ""
+    """The tracker user whose comments ask an issue's grooming questions; empty leaves its comments unread."""
+    grooming_questions_re: str = ""
+    """Matches the start of the grooming bot's comment that asks questions; its group 1 captures how many.
+    Empty leaves its comments unread."""
     pages_dir: str = "~/pages"
     """Where published pages' sources live, one folder per slug."""
     disk_folders: tuple[str, ...] = ()
@@ -332,6 +337,8 @@ def map_toml_to_config(raw: dict[str, object]) -> Config:
         review_channel_name=_str(raw, "review_channel_name", defaults.review_channel_name),
         review_owner_label=_str(raw, "review_owner_label", defaults.review_owner_label).strip(),
         grooming_states=tuple(s.lower() for s in _str_list(raw, "grooming_states", defaults.grooming_states)),
+        grooming_bot=_str(raw, "grooming_bot", defaults.grooming_bot).strip(),
+        grooming_questions_re=_questions_regex(raw, "grooming_questions_re", defaults.grooming_questions_re),
         pages_dir=_str(raw, "pages_dir", defaults.pages_dir),
         disk_folders=_str_list(raw, "disk_folders", defaults.disk_folders),
         review_generated_files=_str_list(raw, "review_generated_files", defaults.review_generated_files),
@@ -400,6 +407,17 @@ def _bool(raw: dict[str, object], key: str, default: bool) -> bool:
     if not isinstance(value, bool):
         raise ValueError(f"{key} must be a boolean")
     return value
+
+
+def _questions_regex(raw: dict[str, object], key: str, default: str) -> str:
+    pattern = _str(raw, key, default)
+    try:
+        groups = re.compile(pattern).groups
+    except re.error as exc:
+        raise ValueError(f"{key} is not a valid regular expression: {exc}") from None
+    if pattern and groups < 1:
+        raise ValueError(f"{key} must capture the number of questions as its group 1")
+    return pattern
 
 
 def _str(raw: dict[str, object], key: str, default: str) -> str:

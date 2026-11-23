@@ -7,11 +7,13 @@ import pytest
 
 import bridge.issue_sync as issue_sync
 from bridge.cli import main
-from bridge.config import Config
+from bridge.config import Config, map_toml_to_config
 from bridge.db import connect, transaction
 from bridge.issue_sync import (
+    Comment,
     Evidence,
     GitHubPr,
+    IssueComments,
     LinearError,
     LinearIssue,
     Move,
@@ -23,6 +25,7 @@ from bridge.issue_sync import (
     map_pr_to_issue_keys,
     run_issue_sync,
 )
+from bridge.reviews import Owner
 
 CONFIG = Config(
     issue_prefixes=("PROJ", "OPS", "WEB"),
@@ -251,6 +254,12 @@ class FakeLinear:
         self.later = later
         """What every read after the first sees: someone changed Linear in between."""
         self.moves: list[tuple[str, str]] = []
+        self.comments: dict[str, IssueComments] = {}
+        self.comment_reads: list[list[str]] = []
+
+    def fetch_comments(self, issue_ids: list[str]) -> dict[str, IssueComments]:
+        self.comment_reads.append(issue_ids)
+        return {i: self.comments[i] for i in issue_ids if i in self.comments}
 
     def fetch_issues(self, keys: list[str]) -> dict[str, LinearIssue | str]:
         found = {k: self.issues.get(k, issue_sync.NOT_FOUND) for k in keys}
@@ -495,3 +504,162 @@ def test_cli_dry_run_prints_the_moves(
         "1 would move, 1 skipped, 0 errors",
     ]
     assert not log_path().exists()
+
+
+QUESTIONS = replace(CONFIG, grooming_bot="Groomer", grooming_questions_re=r"^(\d+) open questions?\b")
+HOUR = 3600 * 1000
+
+
+def comment(cid: str, at: str, body: str, author: str = "Groomer") -> Comment:
+    return Comment(cid, f"day-1 {at}", body, frozenset({author.lower()}))
+
+
+def questions_linear(*comments: Comment, state_: str = "Grooming") -> FakeLinear:
+    linear = FakeLinear({"PROJ-2": issue(state_, "PROJ-2")})
+    linear.comments["id-PROJ-2"] = IssueComments("https://tracker.example/PROJ-2", tuple(comments))
+    return linear
+
+
+def sweep(conn: sqlite3.Connection, linear: FakeLinear, at: int, config: Config = QUESTIONS) -> list[tuple[str, str]]:
+    """Each message this sweep sent: to whom, and its text."""
+    before = conn.execute("SELECT coalesce(max(id), 0) FROM messages").fetchone()[0]
+    run_issue_sync(conn, config, at, dry_run=False, fetch_prs=lambda _c, _n: [], linear=linear)
+    rows = conn.execute(
+        "SELECT r.handle, m.body FROM messages m JOIN message_recipients r ON r.message_id = m.id WHERE m.id > ?",
+        (before,),
+    )
+    return [(str(r[0]), str(r[1])) for r in rows]
+
+
+def test_the_bots_questions_reach_the_lead_once_and_once_more_after_two_hours_unanswered(
+    conn: sqlite3.Connection,
+) -> None:
+    asked = comment("c1", "09:00", "2 open questions -> Grooming.\n\n- Which store?")
+    linear = questions_linear(comment("c0", "08:00", "Size: small", author="Theo"), asked)
+    first = sweep(conn, linear, NOW)
+    grooming_note, questions = first
+    assert grooming_note[0] == "alex" and "in a grooming state" in grooming_note[1]
+    assert questions[0] == "alex" and "Groomer has open questions" in questions[1]
+    assert "- PROJ-2: 2 open questions https://tracker.example/PROJ-2" in questions[1]
+    assert sweep(conn, linear, NOW + HOUR) == []
+    reminder = sweep(conn, linear, NOW + 2 * HOUR)
+    assert len(reminder) == 1 and "- PROJ-2: 2 open questions, still unanswered" in reminder[0][1]
+    assert sweep(conn, linear, NOW + 30 * HOUR) == []
+
+
+def test_a_newer_question_comment_is_told_once_more(conn: sqlite3.Connection) -> None:
+    first = comment("c1", "09:00", "2 open questions -> Grooming.")
+    sweep(conn, questions_linear(first), NOW)
+    answer = comment("c2", "09:30", "The first store.", author="Theo")
+    again = comment("c3", "10:00", "1 open question -> Grooming.")
+    told = sweep(conn, questions_linear(first, answer, again), NOW + HOUR)
+    assert len(told) == 1 and "- PROJ-2: 1 open question https://" in told[0][1]
+    assert sweep(conn, questions_linear(first, answer, again), NOW + HOUR + 1) == []
+
+
+def test_the_rest_of_a_split_assessment_is_no_answer_but_a_reply_or_no_questions_is(conn: sqlite3.Connection) -> None:
+    asked = comment("c1", "09:00", "4 open questions -> Grooming. (part 1/2)")
+    rest = comment("c2", "09:00", "Assessment continued (part 2/2).")
+    assert "4 open questions" in sweep(conn, questions_linear(asked, rest), NOW)[-1][1]
+    reply = comment("c3", "09:30", "Answers below.", author="Theo")
+    assert sweep(conn, questions_linear(asked, rest, reply), NOW + 3 * HOUR) == []
+    settled = comment("c4", "10:00", "0 open questions -> Grooming.")
+    assert sweep(conn, questions_linear(asked, rest, reply, settled), NOW + 6 * HOUR) == []
+
+
+def test_questions_on_an_issue_no_lead_owns_go_to_the_assistant(conn: sqlite3.Connection) -> None:
+    with transaction(conn):
+        conn.execute("DELETE FROM lead_work")
+        conn.execute("UPDATE instances SET branch = 'main'")
+        conn.execute(
+            "INSERT INTO surfaces (surface, agterm_session, handle, updated_at) VALUES ('s-aide', 't-a', 'aide', 0)"
+        )
+        conn.execute(
+            "INSERT INTO instances (instance_id, pid, proc_start_ms, conversation_id, surface, status, "
+            "first_seen_at, last_observed_at) VALUES ('i-aide', 4545, 1, 'c-aide', 's-aide', 'idle', 0, 0)"
+        )
+        conn.execute(
+            "INSERT INTO conversations (conversation_id, instance_id, first_seen_at, last_seen_at) "
+            "VALUES ('c-aide', 'i-aide', 0, 0)"
+        )
+    linear = questions_linear(comment("c1", "09:00", "1 open question -> Grooming."))
+    prs = [github_pr(7, title="PROJ-2 sizing", head="me/sizing")]
+    run_issue_sync(conn, QUESTIONS, NOW, dry_run=False, fetch_prs=lambda _c, _n: prs, linear=linear)
+    told = [(str(r[0]), str(r[1])) for r in conn.execute(
+        "SELECT r.handle, m.body FROM messages m JOIN message_recipients r ON r.message_id = m.id"
+    )]  # fmt: skip
+    assert [h for h, b in told if "open question" in b] == ["aide"]
+
+
+def test_nothing_is_read_with_the_feature_off_nor_for_an_issue_out_of_grooming(conn: sqlite3.Connection) -> None:
+    asked = comment("c1", "09:00", "1 open question -> Grooming.")
+    off = questions_linear(asked)
+    assert not any("open question" in b for _, b in sweep(conn, off, NOW, config=CONFIG))
+    assert off.comment_reads == []
+    moved_on = questions_linear(asked, state_="In Progress")
+    assert sweep(conn, moved_on, NOW) == [] and moved_on.comment_reads == []
+
+
+def test_a_dry_run_names_who_would_hear_of_questions_and_records_nothing(conn: sqlite3.Connection) -> None:
+    linear = questions_linear(comment("c1", "09:00", "1 open question -> Grooming."))
+    report = run_issue_sync(conn, QUESTIONS, NOW, dry_run=True, fetch_prs=lambda _c, _n: [], linear=linear)
+    assert report.questions == ["alex: - PROJ-2: 1 open question https://tracker.example/PROJ-2"]
+    assert "would tell alex: - PROJ-2" in issue_sync.map_report_to_lines(report, dry_run=True)[-1]
+    assert conn.execute("SELECT count(*) FROM messages").fetchone()[0] == 0
+    assert not issue_sync.questions_told_path().exists()
+
+
+def test_linears_comments_answer_is_read_with_every_name_of_the_author(monkeypatch: pytest.MonkeyPatch) -> None:
+    answer = {"data": {"i0": {"id": "id-1", "url": "https://tracker.example/PROJ-1", "comments": {"nodes": [
+        {"id": "c1", "createdAt": "t", "body": "1 open", "user": {"name": "Groomer Bot", "displayName": "groomer"}},
+        {"id": "c2", "createdAt": "t", "body": None, "user": None, "botActor": {"name": "Tracker App"}},
+    ]}}}}  # fmt: skip
+    api = issue_sync.LinearApi("k")
+
+    def post(_payload: dict[str, object]) -> object:
+        return answer
+
+    monkeypatch.setattr(api, "_post", post)
+    found = api.fetch_comments(["id-1"])["id-1"]
+    assert [(c.id, c.body, set(c.authors)) for c in found.newest] == [
+        ("c1", "1 open", {"groomer bot", "groomer"}),
+        ("c2", "", {"tracker app"}),
+    ]
+
+
+def test_a_questions_pattern_that_does_not_compile_or_count_is_refused() -> None:
+    with pytest.raises(ValueError, match="grooming_questions_re is not a valid"):
+        map_toml_to_config({"grooming_questions_re": "(unclosed"})
+    with pytest.raises(ValueError, match="group 1"):
+        map_toml_to_config({"grooming_questions_re": r"^\d+ open questions?"})
+
+
+def test_a_sweep_that_planned_from_an_older_told_file_sends_nothing_twice(conn: sqlite3.Connection) -> None:
+    linear = questions_linear(comment("c1", "09:00", "1 open question -> Grooming."))
+    planned = issue_sync.plan_question_notices(
+        conn, QUESTIONS, linear, {"PROJ-2": issue("Grooming", "PROJ-2")}, {}, NOW, dry_run=False
+    )
+    assert len(planned) == 1 and len(sweep(conn, linear, NOW)) == 2
+    assert issue_sync.tell_of_questions(conn, QUESTIONS, planned, NOW) == ([], [])
+
+
+def test_a_long_list_of_questions_is_split_and_every_issue_is_told(conn: sqlite3.Connection) -> None:
+    alex = Owner("alex", "c-alex", "s-alex", "alex", "lead")
+    notices = [
+        issue_sync.QuestionNotice(f"c{n}", f"- PROJ-{n}: 1 open question https://tracker.example/{'x' * 80}", alex,
+                                  "alex", reminder=False)
+        for n in range(60)
+    ]  # fmt: skip
+    sent, lines = issue_sync.tell_of_questions(conn, QUESTIONS, notices, NOW)
+    bodies = "\n".join(str(r[0]) for r in conn.execute("SELECT body FROM messages"))
+    assert len(sent) > 1 and len(lines) == 60 and all(n.line in bodies for n in notices)
+    assert len(issue_sync.read_questions_told()) == 60
+
+
+def test_a_told_entry_it_cannot_read_stays_silent(conn: sqlite3.Connection) -> None:
+    issue_sync.questions_told_path().write_text('{"c1": {"told_at": null}, "c2": "x"}')
+    assert issue_sync.read_questions_told() == {
+        "c1": {"told_at": 0, "reminded": 1},
+        "c2": {"told_at": 0, "reminded": 1},
+    }
+    assert sweep(conn, questions_linear(comment("c1", "09:00", "1 open question -> Grooming.")), NOW)[1:] == []

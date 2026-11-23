@@ -35,7 +35,9 @@ PR linked to it has merged.
 - **Issue sync** (`bridge issue-sync`, also run by the dashboard service) moves a Linear issue forward when its PRs
   and the work on it say it has moved. It runs only with `review_org`, `review_author` and `issue_prefixes` set, and
   needs a key that may write. `grooming_states` names the states it never moves an issue out of; the lead
-  is told once instead.
+  is told once instead. With `grooming_bot` and `grooming_questions_re` set, it also reads the newest comments of each
+  issue it holds in grooming: when the newest word is that bot's comment asking questions, the issue's lead (no lead:
+  the assistant) is told once, and once more if the comment is still unanswered two hours later.
 
 ### Another tracker
 
@@ -161,6 +163,8 @@ review_ignored_posts = ["1700000000.000100"]  # Slack ts of review-channel posts
 agent_prefix_from_ms = 1700000000000      # when agents began prefixing GitHub posts; older unprefixed ones stay unclear
 host_worker_disabled_plugins = ["example@plugins"]  # plugins host workers run without, besides the defaults
 grooming_states = ["Grooming"]            # tracker states issue sync never moves an issue out of
+grooming_bot = "groomer"                  # the tracker user that asks grooming questions in comments
+grooming_questions_re = '^(\d+) open questions?'  # start of its asking comment; group 1 counts them
 review_generated_files = ["api-client.ts"]  # left out of a PR's line count, besides lockfiles
 review_python_paths = ["lib/python"]      # extra Python roots for review worktrees' editor and services
 pages_dir = "~/pages"                     # where published pages' sources live (the default)
@@ -186,6 +190,7 @@ missing file keeps the generic text, or drops the line. `{owner}` and `{assistan
 | `brief-reviews.md` | worker briefs, in place of the generic Reviews rule ({owner}) |
 | `doc-reviews.md` | bridge's request for a large PR's review doc |
 | `issue-sync-grooming.md` | issue sync's note to a lead about issues held in grooming ({owner}) |
+| `issue-sync-grooming-questions.md` | issue sync's note that the grooming bot waits for answers ({bot}) |
 | `merge-rule.md` | how an approval names the merge rule (default "the merge rule") |
 | `ready-to-merge.md` | how the "may merge" message says ready (default "ready to merge") |
 | `host-worker-codex.md` | a host worker's brief, a note on running Codex there ({lead}); none by default |

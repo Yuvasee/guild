@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol, cast
 
+from bridge.asks import send_bodies_from_bridge, split_text_to_bodies
 from bridge.board import BODY_MAX_CHARS, SYSTEM_CONVERSATION, MessageStateError, Party, Recipient, send_message
 from bridge.config import Config, read_overlay, state_dir
 from bridge.db import transaction
@@ -21,7 +22,7 @@ from bridge.errlog import log_error
 from bridge.feed import resolve_tab
 from bridge.refs import map_prefixes_to_key_re
 from bridge.review_github import GitHubError, run_gh
-from bridge.reviews import find_issue_lead
+from bridge.reviews import Owner, find_issue_lead
 
 LINEAR_URL = "https://api.linear.app/graphql"
 LINEAR_TIMEOUT_S = 20
@@ -30,6 +31,9 @@ PR_WINDOW_DAYS = 30
 PR_PAGE_SIZE = 50
 PR_PAGES_MAX = 10
 EVIDENCE_SHOWN = 3
+QUESTION_COMMENTS_READ = 5
+"""Enough to see past the bot's own follow-ups: a split assessment, a note that it moved the issue back."""
+QUESTIONS_REMINDER_MS = 2 * 3600 * 1000
 
 BACKLOG = "Backlog"
 IN_PROGRESS = "In Progress"
@@ -74,6 +78,7 @@ query($q: String!, $after: String) {{
 _ISSUE_FIELDS = (
     "id state { id name type } assignee { name isMe } team { key states(first: 100) { nodes { id name type } } }"
 )
+_COMMENT_FIELDS = "id createdAt body user { name displayName } botActor { name }"
 _MOVE_MUTATION = (
     "mutation($id: String!, $stateId: String!) { issueUpdate(id: $id, input: { stateId: $stateId }) "
     "{ success issue { state { id name } } } }"
@@ -161,6 +166,21 @@ class Skip:
     grooming: bool = False
 
 
+@dataclass(frozen=True)
+class Comment:
+    id: str
+    created_at: str
+    body: str
+    authors: frozenset[str]
+    """Every name the comment's author goes by, lowercase."""
+
+
+@dataclass(frozen=True)
+class IssueComments:
+    url: str
+    newest: tuple[Comment, ...]
+
+
 @dataclass
 class SyncReport:
     moves: list[Move] = field(default_factory=list[Move])
@@ -168,6 +188,8 @@ class SyncReport:
     skips: list[Skip] = field(default_factory=list[Skip])
     errors: list[Skip] = field(default_factory=list[Skip])
     sent: list[tuple[int, Recipient]] = field(default_factory=list[tuple[int, Recipient]])
+    questions: list[str] = field(default_factory=list[str])
+    """Who hears of the grooming bot's open questions, and of which, one line each."""
     note: str = ""
     failed: bool = False
     """The sweep could not run: GitHub or the Linear key failed."""
@@ -177,6 +199,8 @@ class Linear(Protocol):
     def fetch_issues(self, keys: list[str]) -> dict[str, LinearIssue | str]: ...
 
     def move(self, issue_id: str, state_id: str) -> str: ...
+
+    def fetch_comments(self, issue_ids: list[str]) -> dict[str, IssueComments]: ...
 
 
 FetchPrs = Callable[[Config, int], list[GitHubPr]]
@@ -369,7 +393,9 @@ def run_issue_sync(
             report.moves.append(decision)
         elif isinstance(decision, Skip):
             report.skips.append(decision)
+    notices = plan_question_notices(conn, config, linear, issues, evidence, now, dry_run)
     if dry_run:
+        report.questions = [f"{n.to}: {n.line}" for n in notices]
         return report
     with hold_sweep_lock() as held:
         if not held:
@@ -378,6 +404,8 @@ def run_issue_sync(
             return report
         _apply_moves(conn, config, linear, evidence, moved_before, report, now)
         report.sent += tell_leads_of_grooming(conn, config, report.skips, evidence, now)
+        sent, report.questions = tell_of_questions(conn, config, notices, now)
+        report.sent += sent
     return report
 
 
@@ -443,6 +471,178 @@ def write_grooming_told(told: set[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(sorted(told)) + "\n")
+    os.replace(tmp, path)
+
+
+GROOMING_QUESTIONS_HEAD = (
+    "{bot} has open questions on these issues. Answer under its comment on each issue; it moves the issue on when "
+    "none are left."
+)
+
+
+@dataclass(frozen=True)
+class QuestionNotice:
+    comment_id: str
+    line: str
+    owner: Owner | None
+    """None: no live lead owns the issue, and the assistant hears."""
+    to: str
+    reminder: bool
+
+
+def plan_question_notices(
+    conn: sqlite3.Connection,
+    config: Config,
+    linear: Linear,
+    issues: dict[str, LinearIssue | str],
+    evidence: dict[str, Evidence],
+    now: int,
+    dry_run: bool,
+) -> list[QuestionNotice]:
+    """Once per bot comment that asks questions and is still the newest word on its issue, and once more after
+    QUESTIONS_REMINDER_MS with no reply. A newer such comment is a new one: its notice is the reminder."""
+    if not (config.grooming_bot and config.grooming_questions_re):
+        return []
+    held = [
+        i
+        for i in issues.values()
+        if isinstance(i, LinearIssue)
+        and i.state.name.lower() in config.grooming_states
+        and not (i.assignee and not i.assignee_is_me)
+    ]
+    comments: dict[str, IssueComments] = {}
+    try:
+        for start in range(0, len(held), LINEAR_BATCH):
+            comments.update(linear.fetch_comments([i.id for i in held[start : start + LINEAR_BATCH]]))
+    except LinearError as exc:
+        _log_failure(dry_run, f"issue sync: reading grooming comments failed: {exc}")
+        return []
+    pattern = re.compile(config.grooming_questions_re)
+    told = read_questions_told()
+    notices: list[QuestionNotice] = []
+    for issue in held:
+        found = comments.get(issue.id)
+        asked = find_open_questions(found.newest, config.grooming_bot, pattern) if found else None
+        if found is None or asked is None:
+            continue
+        comment, count = asked
+        reminder = comment.id in told
+        if not is_question_due(told.get(comment.id), now):
+            continue
+        prs = evidence.get(issue.key, Evidence()).prs
+        owner = find_issue_lead(
+            conn,
+            config,
+            f"issue:{issue.key}",
+            [p.ref for p in prs],
+            [p.ref for p in prs if p.closes],
+            map_prs_to_heads(prs),
+        )
+        how_many = f"{count} open question{'' if count == 1 else 's'}"
+        line = f"- {issue.key}: {how_many}" + (", still unanswered" if reminder else "") + f" {found.url}"
+        to = owner.handle if owner else config.assistant_handle
+        notices.append(QuestionNotice(comment.id, line, owner, to, reminder))
+    return notices
+
+
+def is_question_due(seen: dict[str, int] | None, now: int) -> bool:
+    return seen is None or (not seen["reminded"] and now - seen["told_at"] >= QUESTIONS_REMINDER_MS)
+
+
+def find_open_questions(newest: tuple[Comment, ...], bot: str, pattern: re.Pattern[str]) -> tuple[Comment, int] | None:
+    """The bot's question comment when no one wrote after it; the bot's own later notes, such as the rest of a split
+    assessment, do not count as an answer."""
+    for comment in sorted(newest, key=lambda c: c.created_at, reverse=True):
+        if bot.lower() not in comment.authors:
+            return None
+        match = pattern.match(comment.body)
+        if match is None:
+            continue
+        count = int(match.group(1)) if (match.group(1) or "").isdigit() else 0
+        return (comment, count) if count > 0 else None
+    return None
+
+
+def tell_of_questions(
+    conn: sqlite3.Connection, config: Config, notices: list[QuestionNotice], now: int
+) -> tuple[list[tuple[int, Recipient]], list[str]]:
+    """Under the sweep lock; the told file is read again, so a sweep that planned from an older one sends nothing
+    twice. It is written before the messages commit: a failed write sends nothing."""
+    told = read_questions_told()
+    by_to: dict[str, list[QuestionNotice]] = {}
+    for notice in notices:
+        if is_question_due(told.get(notice.comment_id), now):
+            by_to.setdefault(notice.to, []).append(notice)
+    if not by_to:
+        return [], []
+    head = read_overlay(config, "issue-sync-grooming-questions", GROOMING_QUESTIONS_HEAD, bot=config.grooming_bot)
+    sent: list[tuple[int, Recipient]] = []
+    lines: list[str] = []
+    with transaction(conn):
+        for to, mine in by_to.items():
+            text = "\n".join([head, *(n.line for n in mine)])
+            owner = mine[0].owner
+            delivered = (
+                send_bodies_from_bridge(conn, config, to, text, now)
+                if owner is None
+                else _send_bodies_to_owner(conn, owner, text, now)
+            )
+            bodies = "\n".join(body for body, _, _ in delivered)
+            sent += [(message_id, recipient) for _, message_id, recipient in delivered]
+            for notice in mine:
+                if notice.line in bodies:
+                    told[notice.comment_id] = {"told_at": now, "reminded": int(notice.reminder)}
+                    lines.append(f"{to}: {notice.line}")
+                else:
+                    log_error("issue sync", f"telling {to} of grooming questions failed: {notice.line}")
+        write_questions_told(told)
+    return sent, lines
+
+
+def _send_bodies_to_owner(
+    conn: sqlite3.Connection, owner: Owner, text: str, now: int
+) -> list[tuple[str, int, Recipient]]:
+    recipient = resolve_tab(conn, owner.conversation_id, owner.handle)
+    delivered: list[tuple[str, int, Recipient]] = []
+    for body in split_text_to_bodies(text, BODY_MAX_CHARS):
+        try:
+            result = send_message(conn, Party(SYSTEM_CONVERSATION, "bridge"), [recipient], "info", body, now)
+        except MessageStateError:
+            continue
+        delivered.append((body, result.message_id, recipient))
+    return delivered
+
+
+def questions_told_path() -> Path:
+    return state_dir() / "issue-sync-grooming-questions-told.json"
+
+
+def read_questions_told() -> dict[str, dict[str, int]]:
+    """Per bot comment id: when its notice went out, and whether its reminder did."""
+    try:
+        raw: object = json.loads(questions_told_path().read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    told: dict[str, dict[str, int]] = {}
+    for key, value in cast(dict[object, object], raw).items():
+        entry = cast(dict[object, object], value) if isinstance(value, dict) else {}
+        told_at = entry.get("told_at")
+        # An entry it cannot read counts as told and reminded: silence, never a repeat.
+        told[str(key)] = (
+            {"told_at": told_at, "reminded": int(bool(entry.get("reminded")))}
+            if isinstance(told_at, int)
+            else {"told_at": 0, "reminded": 1}
+        )
+    return told
+
+
+def write_questions_told(told: dict[str, dict[str, int]]) -> None:
+    path = questions_told_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(told, sort_keys=True) + "\n")
     os.replace(tmp, path)
 
 
@@ -542,6 +742,7 @@ def map_report_to_lines(report: SyncReport, dry_run: bool) -> list[str]:
     lines += [f"skip {s.key}: {s.reason}" for s in report.skips]
     lines += [f"error {s.key}: {s.reason}" for s in report.errors]
     lines.append(f"{len(done)} {verb}, {len(report.skips)} skipped, {len(report.errors)} errors")
+    lines += [f"{'would tell' if dry_run else 'told'} {q}" for q in report.questions]
     return lines
 
 
@@ -684,6 +885,26 @@ class LinearApi:
             raise LinearError("Linear did not confirm the new state")
         return str(_dig(update, "issue", "state", "name") or "")
 
+    def fetch_comments(self, issue_ids: list[str]) -> dict[str, IssueComments]:
+        """Each issue's newest comments, replies among them, in one query."""
+        # Linear lists comments newest first.
+        comments = f"comments(first: {QUESTION_COMMENTS_READ}) {{ nodes {{ {_COMMENT_FIELDS} }} }}"
+        fields = " ".join(f"i{n}: issue(id: {json.dumps(i)}) {{ id url {comments} }}" for n, i in enumerate(issue_ids))
+        data = self.query(f"query {{ {fields} }}", {})
+        found: dict[str, IssueComments] = {}
+        for n in range(len(issue_ids)):
+            node: Any = _dig(data, f"i{n}")
+            if node is None:
+                continue
+            try:
+                found[str(node["id"])] = IssueComments(
+                    url=str(node["url"]),
+                    newest=tuple(map_node_to_comment(c) for c in node["comments"]["nodes"]),
+                )
+            except (KeyError, TypeError) as exc:
+                raise LinearError("unexpected comments answer from Linear") from exc
+        return found
+
     def query(self, query: str, variables: dict[str, object]) -> object:
         """The answer's data; any error Linear names is raised."""
         raw = self._post({"query": query, "variables": variables})
@@ -749,3 +970,13 @@ def map_node_to_linear_issue(node: Any, key: str) -> LinearIssue | str:
         )
     except (KeyError, TypeError):
         return "unexpected issue answer from Linear"
+
+
+def map_node_to_comment(node: Any) -> Comment:
+    names = [_dig(node, "user", "name"), _dig(node, "user", "displayName"), _dig(node, "botActor", "name")]
+    return Comment(
+        id=str(node["id"]),
+        created_at=str(node["createdAt"]),
+        body=str(node.get("body") or ""),
+        authors=frozenset(str(n).lower() for n in names if n),
+    )
