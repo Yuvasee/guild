@@ -310,7 +310,7 @@ def link_worktrees_to_prs(conn: sqlite3.Connection, python_paths: tuple[str, ...
             _link_worktree_to_pr(str(row["repo"]), int(row["number"]), path)
         elif (path / ".git").exists():
             try:
-                write_workspace(path)
+                write_workspace(path, str(row["repo"]), int(row["number"]))
             except OSError as exc:
                 print(f"review workspace for {row['repo']}#{row['number']} failed: {exc}", flush=True)
         stamp = _map_worktree_to_pyright_stamp(path)
@@ -330,17 +330,20 @@ def _link_worktree_to_pr(repo: str, number: int, path: Path) -> None:
     try:
         key = f"branch.{map_number_to_branch(number)}.github-pr-owner-number"
         _run(["git", "-C", str(path), "config", "--local", key, f"{owner}#{name}#{number}"], GIT_TIMEOUT_S)
-        write_workspace(path)
+        write_workspace(path, repo, number)
     except (StepFailed, OSError) as exc:
         print(f"review workspace for {repo}#{number} failed: {exc}", flush=True)
 
 
-def write_workspace(path: Path) -> None:
+def write_workspace(path: Path, repo: str, number: int) -> None:
     """Bridge's settings go in where missing; the owner's folders, settings and anything else they added stay. A file
     that is not plain JSON is left alone, as rewriting it would drop their comments."""
     ours: dict[str, object] = {
         "workbench.secondarySideBar.defaultVisibility": "hidden",
         "githubPullRequests.focusedMode": "overview",
+        # The GitHub Pull Requests extension opens a PR's changes on its own only after its own checkout; the local
+        # extension in vscode/guild-review-pr-tree opens them from this.
+        "guild.reviewPullRequest": f"https://github.com/{repo}/pull/{number}",
     }
     python = path / ".venv" / "bin" / "python"
     if python.exists():

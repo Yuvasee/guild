@@ -926,6 +926,7 @@ def test_a_worktree_gets_a_workspace_beside_it_that_opens_on_its_pr(tmp_path: Pa
         "settings": {
             "workbench.secondarySideBar.defaultVisibility": "hidden",
             "githubPullRequests.focusedMode": "overview",
+            "guild.reviewPullRequest": "https://github.com/Org/app/pull/7",
             "python.defaultInterpreterPath": str(job.path / ".venv" / "bin" / "python"),
             "python.useEnvironmentsExtension": False,
         },
@@ -1281,12 +1282,16 @@ def test_an_outdated_workspace_is_rewritten_without_a_refresh(tmp_path: Path) ->
     job = pick_worktree_job(conn, config, NOW)
     assert job is not None
     run_worktree_job(conn, config, job, NOW)
+    workspace = tmp_path / "wt" / "review-app-7.code-workspace"
+    before_pr_setting = json.loads(workspace.read_text())
+    del before_pr_setting["settings"]["guild.reviewPullRequest"]
+    workspace.write_text(json.dumps(before_pr_setting))
     (job.path / ".venv" / "bin").mkdir(parents=True)
     (job.path / ".venv" / "bin" / "python").write_text("")
     link_worktrees_to_prs(conn)
-    workspace = tmp_path / "wt" / "review-app-7.code-workspace"
     settings = json.loads(workspace.read_text())["settings"]
     assert settings["python.useEnvironmentsExtension"] is False
+    assert settings["guild.reviewPullRequest"] == "https://github.com/Org/app/pull/7"
 
     his = {"folders": [{"path": str(job.path)}, {"path": "/x"}], "settings": {"python.useEnvironmentsExtension": True}}
     workspace.write_text(json.dumps({**his, "launch": {"configurations": []}}))
