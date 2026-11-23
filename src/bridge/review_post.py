@@ -21,7 +21,6 @@ from bridge.config import Config, read_overlay, state_dir
 from bridge.db import now_ms, transaction
 from bridge.leads import REVIEW_DOC_SPEC, find_internal_names, list_internal_names
 from bridge.review_worktree import (
-    DOC_MIN_TERMS,
     DOC_SHA_CHARS,
     is_worth_preparing,
     map_doc_to_diff_key,
@@ -407,8 +406,8 @@ def fit_title(text: str, title: str) -> str:
 
 
 DOC_REVIEWS_RULE = (
-    "Give the doc a section headed Reviews: each review that ran, its findings one per line, each outcome (`bridge` "
-    "skill)."
+    "Give the doc's Checks section a part headed Reviews: each review that ran, its findings one per line, each "
+    "outcome (`bridge` skill)."
 )
 """The generic text of the doc-reviews overlay slot, the reviews this install wants before the owner's queue."""
 DOC_UPDATE_EVERY_MS = 15 * 60_000
@@ -659,13 +658,13 @@ def ask_for_docs(conn: sqlite3.Connection, config: Config, now: int) -> list[tup
         name = f"{row['repo']}#{row['number']}"
         text = (
             f"{row['url']} ({TITLE_SLOT}) is large, so {config.owner_name}'s review needs a document. Write a local "
-            f"HTML file exactly as {REVIEW_DOC_SPEC} lays it out: essence visible, details folded; its h2 "
-            "sections in order, with diagrams; it opens with the plain story of what is changed, for a reader who "
-            "never saw this code, then a User story only when the PR changes what a real person (a user, an admin, an "
-            "operator) does or sees: one person, at least three numbered steps, today and after (internal plumbing "
-            "gets none, never a stretched one); "
-            "full sentences, a concrete scenario per change; every internal name a click term "
-            f"(at least {DOC_MIN_TERMS}), no glossary or legend; every Cost and "
+            f"HTML file exactly as {REVIEW_DOC_SPEC} lays it out: essence visible, details folded; a verdict strip, "
+            "then the h2 sections the PR's type needs, in order, with a diagram; it opens with the plain story of "
+            "what is changed, for a reader who never saw this code, then a User story only when the PR changes what a "
+            "real person (a user, an admin, an operator) does or sees: one person, at least three numbered steps, "
+            "today and after (internal plumbing gets none, never a stretched one); full sentences, a concrete scenario "
+            "per change; In short explains its few key terms in its own words, every other internal name a click "
+            "term, no glossary or legend; every Cost and "
             "Risk clear without guessing; each reason marked observed, reproduced or from-code. It informs, it does "
             "not sell. "
             f"{read_overlay(config, 'doc-reviews', DOC_REVIEWS_RULE)} "

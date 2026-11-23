@@ -63,7 +63,7 @@ def test_worker_brief_rules_take_the_overlays_grooming_and_reviews_texts(tmp_pat
     from bridge.leads import map_names_to_brief_rules
 
     generic = map_names_to_brief_rules(["Alex", "Aide"], Config(owner_name="Sam", assistant_handle="aide"))
-    assert "review doc gets a section headed Reviews" in generic and "Grooming" not in generic
+    assert "a part headed Reviews" in generic and "Grooming" not in generic
     (tmp_path / "grooming.md").write_text("In Grooming, ask {owner} through {assistant}.\n")
     (tmp_path / "brief-reviews.md").write_text("Two reviews before {owner}'s queue.\n")
     config = Config(owner_name="Sam", assistant_handle="aide", overlay_dir=str(tmp_path))

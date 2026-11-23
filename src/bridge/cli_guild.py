@@ -94,7 +94,6 @@ from bridge.install import list_guard_globs
 from bridge.leads import (
     GUILD_WORKSPACE,
     NOTES_INJECT_MAX_CHARS,
-    REVIEW_DOC_SPEC,
     Lead,
     LeadError,
     append_handover,
@@ -146,7 +145,7 @@ from bridge.review_post import (
     record_unhold,
     reopen_unsent_post,
 )
-from bridge.review_worktree import DOC_MIN_TERMS, REVIEW_LARGE_LOC, DocError, count_doc_terms, register_doc
+from bridge.review_worktree import DocError, register_doc
 from bridge.reviews import clear_approval_waiver, find_owner, map_db_to_reviews, record_approval_waiver
 from bridge.start_context import CONSTITUTION_PATH
 from bridge.stats import convert_week_to_lines
@@ -1446,18 +1445,9 @@ def cmd_review_doc(args: argparse.Namespace, conn: sqlite3.Connection, config: C
         ref = map_arg_to_ref(conn, str(args.pr))
         source = Path(str(args.file)).expanduser()
         page = register_doc(conn, config, ref, source, now_ms())
-        loc = int(conn.execute("SELECT loc FROM review_prs WHERE ref = ?", (ref,)).fetchone()["loc"] or 0)
     print(f"{ref}: document registered")
     for warning in screen_doc_for_warnings(page, config):
         print(f"warning: {warning}", file=sys.stderr)
-    terms = count_doc_terms(page)
-    if loc >= REVIEW_LARGE_LOC and terms < DOC_MIN_TERMS:
-        print(
-            f"warning: {terms} click terms for a PR of {loc} lines; {config.owner_name} reads it without knowing the "
-            f"code, so every internal name or concept is a term at its first use in each section (at least "
-            f"{DOC_MIN_TERMS}), and the doc opens with the plain story of what changes: {REVIEW_DOC_SPEC}",
-            file=sys.stderr,
-        )
     return 0
 
 

@@ -334,11 +334,13 @@ check(attrs["data-theme"] === "light", "the stored choice sets data-theme before
 check(dark.mediaText === "screen and (max-width:0.001px)", "a dark-only rule is off under a forced light theme");
 check(nested.mediaText === "(min-width:0px)", "a nested light-only rule is on under a forced light theme");
 check(print.mediaText === "print", "other media rules are left alone");
-stored = null;
-onWindow.storage({ key: "bridge-theme" });
+stored = "auto";
+onWindow.storage({ key: "bridge-theme", newValue: "auto" });
 check(!("data-theme" in attrs), "auto, chosen in another tab, drops data-theme");
 check(dark.mediaText === "screen and (prefers-color-scheme: dark)", "auto gives the page its own rule back");
 check(nested.mediaText === "(prefers-color-scheme:light)", "auto gives the nested rule back");
+onWindow.storage({ key: "bridge-theme", newValue: null });
+check(attrs["data-theme"] === "light", "no choice at all is light, not the system's");
 """
 
 BREAKS = """

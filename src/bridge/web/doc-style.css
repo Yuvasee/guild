@@ -215,3 +215,10 @@ border-radius:999px;white-space:nowrap;color:var(--c);background:color-mix(in sr
 :where(.ds-figure svg){display:block;width:100%;height:auto}
 :where(.ds-figure figcaption){font-size:.85em;color:var(--ds-muted);margin-top:8px}
 :where(svg.ds-wide){min-width:760px}
+
+/* The verdict strip a review doc puts above In short: label and line side by side, stacked on a phone. */
+:where(dl.verdict){display:grid;grid-template-columns:max-content 1fr;gap:.35em 1em;margin:1em 0 1.8em;
+padding:.8em 1.1em;border-radius:14px;background:var(--ds-tint);max-width:none}
+:where(dl.verdict dt){font-weight:650;color:var(--ds-muted)}
+:where(dl.verdict dd){margin:0}
+@media (max-width:560px){:where(dl.verdict){grid-template-columns:1fr;gap:.1em}:where(dl.verdict dd){margin-bottom:.5em}}

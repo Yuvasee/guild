@@ -123,9 +123,10 @@ ASSISTANT_ROLE_TEMPLATE = "\n".join(
 ASSISTANT_RULES = "- No deploys without {owner}'s OK. PR mentions carry full URLs."
 """The generic text of the assistant-rules overlay slot."""
 BRIEF_REVIEWS_RULE = (
-    "Every code PR's review doc gets a section headed Reviews: each review that ran, its findings one line each, and "
-    "the outcome (fixed in <commit> / deferred: reason + issue / rejected: reason). Under 100 lines the same short "
-    "list goes in the PR body."
+    "Every code PR's review doc gets, in its folded Checks section, a part headed Reviews: each review that ran, its "
+    "findings that changed code or are still open one line each with the outcome (fixed in <commit> / deferred: "
+    "reason + issue), the rejected ones with their reasons in a plain fold. Under 100 lines the same short list goes "
+    "in the PR body."
 )
 """The generic text of the brief-reviews overlay slot."""
 FIRST_JOB = (

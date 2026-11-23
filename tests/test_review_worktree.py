@@ -25,7 +25,6 @@ from bridge.review_worktree import (
     SSH_KEY_NOT_LOADED,
     DocError,
     StepFailed,
-    count_doc_terms,
     fill_doc_heads,
     fill_doc_reviews,
     find_requirement_files,
@@ -54,7 +53,14 @@ LONG_AGO = "2026-01-01T00:00:00+00:00"
 
 REVIEWS_CONFIG = Config(required_reviews=("Codex", "Claude"))
 
-TOP = "<h2>In short</h2><h2>User story</h2><ol><li>a<li>b<li>c</ol><h2>Verified</h2><p>First reader: passed.</p>"
+STRIP = (
+    '<dl class="verdict"><dt>Type</dt><dd>Docs only</dd><dt>You decide</dt><dd>Nothing</dd>'
+    "<dt>Could break</dt><dd>Nothing</dd><dt>Main risk</dt><dd>None</dd><dt>Checks</dt><dd>All pass</dd></dl>"
+)
+TOP = (
+    f"{STRIP}<h2>In short</h2><h2>User story</h2><ol><li>a<li>b<li>c</ol><h2>Where to look</h2>"
+    "<h2>Checks</h2><h3>Verified</h3><p>First reader: passed.</p>"
+)
 
 
 def config_for(root: Path) -> Config:
@@ -782,14 +788,14 @@ def test_a_served_doc_gets_its_contents_bar_under_the_stale_line(
     monkeypatch.setenv("BRIDGE_STATE_DIR", str(tmp_path / "state"))
     conn = setup_pr(tmp_path, **large())
     source = tmp_path / "doc.html"
-    original = f'<html><head><meta name="pr-head" content="c0ffee123"></head><body>{TOP}<h2>Reviews</h2>'.encode()
+    original = f'<html><head><meta name="pr-head" content="c0ffee123"></head><body>{TOP}<h3>Reviews</h3>'.encode()
     source.write_bytes(original)
     with transaction(conn):
         register_doc(conn, REVIEWS_CONFIG, REF, source, NOW)
     served = map_doc_to_served(conn, "Org/app", 7)
     assert served is not None and source.read_bytes() == original
     assert served.index(b"PR at a1)</div>") < served.index(b'<nav id="bridge-doc-nav"') < served.index(b"<h2 id=")
-    assert b'<a href="#in-short">In short</a>' in served and b'<h2 id="reviews">Reviews</h2>' in served
+    assert b'<a href="#in-short">In short</a>' in served and b'<h3 id="reviews">Reviews</h3>' in served
 
 
 def test_a_doc_registered_before_markers_were_read_gets_its_marker_once(
@@ -1078,15 +1084,15 @@ def test_a_large_pr_is_ready_for_the_owner_only_once_its_doc_names_codex_and_cla
     assert pr["reviews_gap"] == "no doc yet" and REF not in ranking
     for html, gap, ran in (
         (f"{TOP}<p>codex, Claude</p>", "doc lacks Reviews section", []),
-        (f"{TOP}<h2>Reviews</h2><p>ReviewBot: none</p>", "Codex / Claude review missing", ["ReviewBot"]),
-        (f"{TOP}<h2>Reviews</h2><p>Codex: 2 fixed in abc</p>", "Claude review missing", ["Codex"]),
+        (f"{TOP}<h3>Reviews</h3><p>ReviewBot: none</p>", "Codex / Claude review missing", ["ReviewBot"]),
+        (f"{TOP}<h3>Reviews</h3><p>Codex: 2 fixed in abc</p>", "Claude review missing", ["Codex"]),
     ):
         source.write_text(html)
         with transaction(conn):
             register_doc(conn, REVIEWS_CONFIG, REF, source, NOW)
         pr, ranking = view()
         assert (pr["reviews_gap"], pr["reviews_ran"]) == (gap, ran) and REF not in ranking
-    source.write_text(f"{TOP}<h2>Reviews</h2><p>Codex: fixed in abc. Claude: deferred, PROJ-1</p>")
+    source.write_text(f"{TOP}<h3>Reviews</h3><p>Codex: fixed in abc. Claude: deferred, PROJ-1</p>")
     with transaction(conn):
         register_doc(conn, REVIEWS_CONFIG, REF, source, NOW)
     pr, ranking = view()
@@ -1106,7 +1112,7 @@ def test_a_doc_registered_before_reviews_were_read_gets_them_once(
     monkeypatch.setenv("BRIDGE_STATE_DIR", str(tmp_path / "state"))
     conn = setup_pr(tmp_path, **large())
     source = tmp_path / "doc.html"
-    source.write_text(f"{TOP}<h2>Reviews</h2><p>Codex, Claude</p>")
+    source.write_text(f"{TOP}<h3>Reviews</h3><p>Codex, Claude</p>")
     with transaction(conn):
         register_doc(conn, REVIEWS_CONFIG, REF, source, NOW)
         conn.execute("UPDATE review_prs SET doc_reviews = NULL")
@@ -1121,7 +1127,7 @@ def test_a_long_title_keeps_the_doc_request_under_the_message_limit(tmp_path: Pa
         add_session(conn, "c1", "worker", branch="dev/x")
         assert len(ask_for_docs(conn, config, NOW)) == 1
     body = conn.execute("SELECT body FROM messages").fetchone()[0]
-    assert "section headed Reviews" in body and len(body) <= BODY_MAX_CHARS
+    assert "a part headed Reviews" in body and len(body) <= BODY_MAX_CHARS
 
 
 def test_a_long_repo_and_title_still_fit_the_doc_request(tmp_path: Path) -> None:
@@ -1595,14 +1601,6 @@ def test_the_longest_waiting_stale_checkout_is_refreshed_first_and_a_try_moves_i
         conn.execute("UPDATE review_prs SET wt_at = ? WHERE ref = ?", (NOW, REF))
     second = pick_worktree_job(conn, config, NOW)
     assert second is not None and second.ref == "pr:Org/app#8"
-
-
-def test_doc_terms_are_counted_by_their_class_alone() -> None:
-    html = (
-        b'<span class="term" data-def="x">a</span><span data-def="y" class="x term">b</span>'
-        b"<b class='term'>c</b><span class=\"terms\">not one</span><p>term</p>"
-    )
-    assert count_doc_terms(html) == 3
 
 
 def test_editor_settings_add_the_configured_shared_source_roots_that_exist(tmp_path: Path) -> None:

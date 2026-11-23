@@ -32,15 +32,34 @@ STORY = (
 )
 
 
-def make_doc(where: str = WHERE, first: str = "In short", last: str = "") -> bytes:
+def strip(kind: str = "New feature", **lines: str) -> str:
+    """The verdict strip; a keyword argument replaces a label's line, None drops it."""
+    labels = {"Type": kind, "You decide": "Nothing", "Could break": "Nothing", "Main risk": "None", "Checks": "Pass"}
+    labels.update({label.replace("_", " "): line for label, line in lines.items()})
+    rows = "".join(f"<dt>{label}</dt><dd>{line}</dd>" for label, line in labels.items() if line != "None ")
+    return f'<dl class="verdict">{rows}</dl>'
+
+
+CLOSE = "<h2>What else could break</h2><p>Reuse: no existing helper looks alike.</p>"
+CHECKS = (
+    "<h2>Checks</h2><details><summary>All pass, 2 reviews, 0 open</summary>"
+    f"<h3>Tests</h3><h3>Reviews</h3><p>Codex, Claude</p><h3>Verified and not verified</h3>{PASSED}</details>"
+)
+
+
+def make_doc(where: str = WHERE, first: str = "In short", last: str = "", kind: str = "New feature") -> bytes:
     sections = ["What changes and why", "How it works", "Costs and risks"]
     body = f"<h2>{first}</h2><p>text</p>{STORY}" + "".join(f"<h2>{title}</h2><p>text</p>" for title in sections)
-    tail = f"<h2>Tests</h2><h2>Reviews</h2><p>Codex, Claude</p><h2>Verified and not verified</h2>{PASSED}"
-    return f"<html><body>{body}{where}{tail}{last}</body></html>".encode()
+    return f"<html><body>{strip(kind)}{body}{CLOSE}{where}{CHECKS}{last}</body></html>".encode()
 
 
 DEFAULTS = Config()
-LIMITS = PlainLimits(DEFAULTS.doc_in_short_max_bullets, DEFAULTS.doc_bullet_max_words, DEFAULTS.doc_sentence_max_words)
+LIMITS = PlainLimits(
+    DEFAULTS.doc_in_short_max_bullets,
+    DEFAULTS.doc_bullet_max_words,
+    DEFAULTS.doc_sentence_max_words,
+    DEFAULTS.doc_visible_max_words,
+)
 
 
 def problems(page: bytes, reviewed: bool = False, files: frozenset[str] | None = None) -> list[str]:
@@ -58,9 +77,12 @@ def test_a_doc_in_the_specs_order_with_full_paths_passes() -> None:
 
 def test_the_doc_opens_with_in_short() -> None:
     assert problems(make_doc(first="Why")) == [
-        "its first h2 is 'Why'; it opens with 'In short', with nothing before it"
+        "its first h2 is 'Why'; it opens with 'In short', with only the verdict strip before it"
     ]
-    assert problems(b"<h1>Doc</h1><p>no sections</p>")[0] == "it has no h2 headings; it opens with the h2 'In short'"
+    assert (
+        problems(strip().encode() + b"<h1>Doc</h1><p>no sections</p>")[0]
+        == "it has no h2 headings; it opens with the h2 'In short'"
+    )
     hidden = b"<script>document.write('<h2>Top</h2>')</script>" + make_doc()
     assert problems(hidden) == [], "a heading inside a script is not the doc's"
 
@@ -92,9 +114,11 @@ def test_where_to_look_names_each_file_once_by_its_path_from_the_repo_root() -> 
 
 
 def test_markup_a_browser_shows_is_read_as_it_shows_it() -> None:
-    story = STORY.encode() + f"<h2>Verified</h2>{PASSED}".encode()
-    assert len(problems(b"<h2>Why<h2>In short</h2>" + story)) == 2, "a heading left open ends at the next one"
-    assert len(problems(b"<h2>In short</h2>" + story + b"<h2>Changes since the last review")) == 1, "or at the end"
+    story = STORY.encode() + f"<h2>Where to look</h2><h2>Checks</h2><h3>Verified</h3>{PASSED}".encode()
+    docs = strip("Docs only").encode()
+    assert len(problems(docs + b"<h2>Why<h2>In short</h2>" + story)) == 2, "a heading left open ends at the next one"
+    since = docs + b"<h2>In short</h2>" + story + b"<h2>Changes since the last review"
+    assert len(problems(since)) == 1, "or at the end"
     unclosed = make_doc(WHERE.replace("<code>tests/test_run.py</code>", "<code>tests/missing.py"))
     assert len(problems(unclosed, files=FILES)) == 1, "a code left open ends with its row"
     nested = "<ul><li><code>src/app</code><ul><li>Check retries.</li></ul> then <code>retry()</code>.</li></ul>"
@@ -194,10 +218,11 @@ def steps(count: int, tag: str = "ol") -> str:
 def make_top(
     short: str, changes: str = "<p>One plain line.</p>", verified: str = PASSED, story: str = steps(3)
 ) -> bytes:
-    rest = "<h2>How it works</h2><p>" + "word " * 60 + "ends here.</p>"
+    rest = "<h2>How it works</h2><p>" + "word " * 60 + "ends here.</p><h2>Costs and risks</h2>"
     return (
-        f"<html><body><h1>Title</h1><p>{'lead ' * 40}</p><h2>In short</h2>{short}{story}"
-        f"<h2>What changes and why</h2>{changes}{rest}<h2>Verified and not verified</h2>{verified}</body></html>"
+        f"<html><body><h1>Title</h1>{strip()}<p>{'lead ' * 40}</p><h2>In short</h2>{short}{story}"
+        f"<h2>What changes and why</h2>{changes}{rest}{CLOSE}<h2>Where to look</h2><h2>Checks</h2><h3>Verified</h3>"
+        f"{verified}</body></html>"
     ).encode()
 
 
@@ -226,7 +251,7 @@ def test_no_sentence_above_the_folds_runs_over_30_words() -> None:
     (refused,) = problems(make_top("<p>Fine.</p>", "<p>" + words(31) + "</p>"))
     assert refused.startswith('a sentence above the folds has 31 words, over 30; split it or fold it: "Alpha')
     hidden = (
-        "<details class='item'><summary>D1. Short summary</summary><p>" + words(60) + "</p></details>"
+        "<details class='item'><summary>Short summary, D1</summary><p>" + words(60) + "</p></details>"
         "<pre>" + words(60) + "</pre><svg><text>" + words(60) + "</text></svg>"
         "<p>" + words(29, "") + ' <span class="mark observed">observed</span></p>'
     )
@@ -246,8 +271,13 @@ def test_no_sentence_above_the_folds_runs_over_30_words() -> None:
     folded_heading = "<details><summary>More</summary><h2>Background</h2></details><p>" + words(31) + "</p>"
     assert len(problems(make_top(folded_heading))) == 1, "a heading in a fold starts no section"
     unclosed = (
-        b"<h2>In short" + STORY.encode() + b"<h2>What changes and why</h2><p>" + words(31).encode() + b"</p>"
-    ) + f"<h2>Verified</h2>{PASSED}".encode()
+        strip("Docs only").encode()
+        + b"<h2>In short"
+        + STORY.encode()
+        + b"<h2>What changes and why</h2><p>"
+        + words(31).encode()
+        + b"</p>"
+    ) + f"<h2>Where to look</h2><h2>Checks</h2><h3>Verified</h3>{PASSED}".encode()
     assert len(problems(unclosed)) == 1, "a heading left open ends at the next one"
     abbreviations = "<p>Seen in docs, e.g. Alpha and Beta, vs. Gamma, and " + words(22) + "</p>"
     assert len(problems(make_top("<p>Fine.</p>", abbreviations))) == 1, "e.g. and vs. end no sentence"
@@ -256,20 +286,22 @@ def test_no_sentence_above_the_folds_runs_over_30_words() -> None:
 def test_the_limits_come_from_config() -> None:
     page = make_top(bullets(8, 8, 8), "<p>" + words(12) + "</p>")
     assert problems(page) == []
-    strict = find_doc_problems(page, False, "Sam", None, PlainLimits(bullets=2, bullet_words=7, sentence_words=10))
-    assert [line.split(";")[0].split(",")[0] for line in strict] == [
+    strict = PlainLimits(bullets=2, bullet_words=7, sentence_words=10, visible_words=150)
+    assert [line.split(";")[0].split(",")[0] for line in find_doc_problems(page, False, "Sam", None, strict)] == [
         "In short has 3 bullets",
         "an In short bullet has 8 words",
         "an In short bullet has 8 words",
         "an In short bullet has 8 words",
         "a sentence above the folds has 12 words",
+        "it shows 195 words before anything is opened (Fields left out)",
     ]
+    assert map_toml_to_config({"doc_visible_max_words": 600}).doc_visible_max_words == 600
 
 
 def test_a_doc_whose_first_reader_did_not_pass_is_refused() -> None:
     assert problems(make_top("<p>x.</p>")) == []
     (refused,) = problems(make_top("<p>x.</p>", verified="<p>Unit tests pass. A reader read it.</p>"))
-    assert refused.startswith("Verified does not say the first reader (with the reader profile) passed")
+    assert refused.startswith("Checks does not say the first reader (with the reader profile) passed")
     assert "the diff, and explains back what changes and why" in refused
     assert len(problems(make_top("<p>x.</p>", verified="<p>The first reader did not pass.</p>"))) == 1
     cells = "<table><tr><td>First reader</td><td>passed</td></tr></table>"
@@ -318,7 +350,7 @@ def test_the_user_storys_sentences_keep_the_plain_doc_limits() -> None:
     assert refused.startswith("a sentence above the folds has 31 words")
 
 
-def test_each_table_of_fields_has_an_example_column() -> None:
+def test_each_table_of_fields_is_visible_with_what_why_limits_and_example_columns() -> None:
     header = "<tr><th>Field</th><th>What it is</th><th>Written by → read by</th><th>Limits</th>{}</tr>"
     row = "<tr><td><code>refund_reason</code></td><td>why</td><td>form → report</td><td>text</td>{}</td></tr>"
     bare = f"<h2>Fields</h2><table>{header.format('')}{row.format('')}</table>"
@@ -331,8 +363,9 @@ def test_each_table_of_fields_has_an_example_column() -> None:
     found = problems(make_doc(last=bare), files=FILES)
 
     assert found == [
-        "Fields has 1 table(s) of fields with no Example column (columns: Field | What it is | Written by → read by "
-        "| Limits); give each field a realistic example value in its real shape, invented, never real customer data"
+        "Fields has a table of fields with no Example column (columns: Field | What it is | Written by → read by "
+        "| Limits); per field: what it is, why it is needed (who writes, who reads), its limits, and a realistic "
+        "example value in its real shape, invented, never real customer data"
     ]
     assert problems(make_doc(last=with_example), files=FILES) == []
     assert problems(make_doc(last=other), files=FILES) == [], "a table that lists no fields is not checked"
@@ -340,3 +373,120 @@ def test_each_table_of_fields_has_an_example_column() -> None:
     loose = "<h2>3. Fields</h2><table><tr><th>Field<th>Meaning<tr><td>mode<td>example</table>"
     assert len(problems(make_doc(last=loose), files=FILES)) == 1, "a numbered heading, rows with no end tags"
     assert len(problems(make_doc(last="<h2>Fields</h2><table><tr><th>Field<th>Meaning"), files=FILES)) == 1
+    (no_why,) = problems(make_doc(last=with_example.replace("Written by → read by", "Notes")), files=FILES)
+    assert "with no Why column" in no_why
+    folded = with_example.replace("<table>", "<details><summary>All fields</summary><table>") + "</details>"
+    assert problems(make_doc(last=folded), files=FILES) == [
+        "Fields has 1 table(s) of fields inside a closed fold; every changed field of every changed model stays "
+        "visible (only writer and reader file paths may fold)"
+    ]
+    assert problems(make_doc(last=folded.replace("<details>", "<details open>")), files=FILES) == []
+    record = "<pre>{&quot;refund_reason&quot;: &quot;arrived damaged&quot;}</pre>"
+    assert problems(make_doc(last=with_example.replace("<table>", record + "<table>")), files=FILES) == []
+
+
+def test_a_verdict_strip_with_every_line_comes_before_in_short() -> None:
+    page = make_doc()
+    assert problems(page.replace(strip().encode(), b"")) == [
+        "it has no verdict strip before 'In short': a <dl class=\"verdict\"> with Type, You decide, Could break, "
+        "Main risk, Checks, one short line each"
+    ]
+    assert problems(page.replace(strip().encode(), strip(Main_risk="None ").encode())) == [
+        "the verdict strip has no 'Main risk' line"
+    ]
+    (long_line,) = problems(page.replace(strip().encode(), strip(You_decide=words(26)).encode()))
+    assert long_line == "the verdict strip's 'You decide' line has 26 words, over 25"
+    later = page.replace(strip().encode(), b"").replace(b"<h2>How it works", strip().encode() + b"<h2>How it works")
+    assert problems(later)[0].startswith("it has no verdict strip before 'In short'"), "a strip further down is not one"
+
+
+def test_the_prs_type_picks_the_sections_it_needs() -> None:
+    assert problems(make_doc(kind="Docs only")) == []
+    (unknown,) = problems(make_doc(kind="Misc"))
+    assert unknown.startswith('the verdict strip\'s Type "Misc" names no PR type; use one or two of: model / contract')
+    assert problems(make_doc(kind="Bug fix")) == ["a bug fix PR has no 'Root cause' h2"]
+    root_cause = make_doc(kind="Bug fix", where="<h2>Root cause</h2><p>x</p>" + WHERE)
+    assert problems(root_cause) == []
+    assert problems(make_doc(kind="Model / contract + enabling")) == [
+        "a model / contract PR has no 'Fields' h2",
+        "an enabling PR has no 'How this will be used' h2",
+        "an enabling PR has no 'Rollout' h2",
+    ]
+    assert problems(make_doc(kind="Refactor")) == ["a refactor PR has no 'No behaviour change' h2"]
+    assert problems(make_doc(kind="Backport")) == ["a backport PR has no 'Differences from the original' h2"]
+    no_close = make_doc(kind="Infra / chart").replace(CLOSE.encode(), b"<h2>Rollout</h2><p>x</p>")
+    assert problems(no_close) == ["an infra / chart PR has no 'What else could break' h2"]
+    no_reuse = make_doc().replace(b"Reuse: no existing helper looks alike.", b"Callers: none.")
+    assert problems(no_reuse) == [
+        "'What else could break' has no Reuse line: a PR that adds a model, helper or concept names the existing "
+        "one closest to it, and whether it was reused or why not"
+    ]
+    assert problems(make_doc(kind="Refactor").replace(b"Reuse", b"Callers")) == [
+        "a refactor PR has no 'No behaviour change' h2"
+    ], "only a PR that adds something needs a Reuse line"
+
+
+def test_tests_reviews_and_verified_sit_folded_under_checks() -> None:
+    loose = make_doc().replace(CHECKS.encode(), f"<h2>Tests</h2><h2>Reviews</h2><h2>Verified</h2>{PASSED}".encode())
+    assert problems(loose) == [
+        "'Tests' is an h2; Tests, Reviews and Verified are h3s inside the folded 'Checks' section",
+        "'Reviews' is an h2; Tests, Reviews and Verified are h3s inside the folded 'Checks' section",
+        "'Verified' is an h2; Tests, Reviews and Verified are h3s inside the folded 'Checks' section",
+        "it has no 'Checks' h2: Tests, Reviews and Verified sit in one fold under it, its summary line the verdict",
+    ]
+
+
+def test_the_visible_layer_has_a_word_budget_that_leaves_fields_out() -> None:
+    long_story = "<details open><summary>More</summary>" + ("<p>" + words(20) + "</p>") * 40 + "</details>"
+    (refused,) = problems(make_doc(where=long_story + WHERE))
+    assert refused.startswith("it shows 9")
+    assert "words before anything is opened (Fields left out), over 900; fold detail" in refused
+    assert problems(make_doc(where=long_story.replace(" open", "") + WHERE)) == [], (
+        "a closed fold's body is not counted"
+    )
+    row = "<tr><td>f</td><td>" + words(20) + "</td><td>w</td><td>l</td><td>e</td></tr>"
+    fields = "<h2>Fields</h2><table><tr><th>Field</th><th>What</th><th>Why</th><th>Limits</th><th>Example</th></tr>"
+    assert problems(make_doc(last=fields + row * 60 + "</table>")) == [], "every field stays visible, uncounted"
+
+
+def test_a_folds_summary_starts_with_the_point_not_an_id() -> None:
+    fold = "<details class='item'><summary>{}</summary><p>body</p></details>"
+    ids = "".join(fold.format(f"D{n}. Metrics capped at 12") for n in range(1, 6))
+    assert problems(make_doc(where=ids + WHERE)) == [
+        "5 fold summaries start with an id (D1., D2., D3., D4., …); start each with its point, the id after it if kept"
+    ]
+    for fine in ("Metrics capped at 12 (D3)", "S3 bucket kept", "2. Plan"):
+        assert problems(make_doc(where=fold.format(fine) + WHERE)) == [], fine
+
+
+def test_markup_that_hides_or_breaks_a_part_is_read_as_a_browser_shows_it() -> None:
+    page = make_doc()
+    only_tests = page.replace(b"<h3>Verified and not verified</h3>" + PASSED.encode(), b"<h3>Verified</h3><p>x</p>")
+    only_tests = only_tests.replace(b"<h3>Tests</h3>", b"<h3>Tests</h3>" + PASSED.encode())
+    assert problems(only_tests)[0].startswith("Checks does not say the first reader"), "only its Verified part says it"
+    assert problems(page.replace(strip().encode(), f"<details><summary>V</summary>{strip()}</details>".encode()))[
+        0
+    ].startswith("it has no verdict strip"), "a folded strip is not seen first"
+    unclosed_strip = page.replace(b"</dl>", b"")
+    assert problems(unclosed_strip) == [], "each line ends with its dd, and the strip at the first h2"
+    reuse_word = page.replace(b"Reuse: no existing helper looks alike.", b"Other services reuse this key.")
+    assert problems(reuse_word)[0].startswith("'What else could break' has no Reuse line")
+    open_heading = page.replace(CLOSE.encode(), b"<h2>What else could break")
+    assert problems(open_heading)[0].startswith("'What else could break' has no Reuse line"), "an unclosed h2"
+    titled = page.replace(b"<html>", b"<html><head><title>" + b"word " * 900 + b"</title></head>")
+    assert problems(titled) == [], "the page title is not shown in the doc"
+    fold = "<details class='item'><summary>{}</summary><p>body</p></details>"
+    for refused in ("D3 — Metrics capped", "D100. Metrics capped"):
+        assert problems(make_doc(where=fold.format(refused) + WHERE))[0].startswith("1 fold summaries start"), refused
+
+
+def test_the_type_is_read_from_the_start_of_its_line_and_a_folded_fields_is_folded() -> None:
+    assert problems(make_doc(kind="New feature, 120 lines plus model tests")) == []
+    assert problems(make_doc(kind="Docs only, 40 lines on a bug fix")) == []
+    table = "<table><tr><th>Field</th><th>What</th><th>Why</th><th>Limits</th><th>Example</th></tr></table>"
+    folded = f"<details><summary>More</summary><h2>Fields</h2>{table}</details>"
+    assert problems(make_doc(kind="Model / contract", last=folded))[0].startswith(
+        "Fields has 1 table(s) of fields inside a closed fold"
+    )
+    hidden_heading = "<details><summary>More</summary><h2>Fields</h2></details><p>" + "word " * 1000 + "</p>"
+    assert problems(make_doc(where=hidden_heading + WHERE))[0].startswith("it shows 1"), "a folded h2 exempts nothing"

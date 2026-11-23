@@ -5,7 +5,7 @@ from typing import Any
 from unittest import mock
 
 import pytest
-from test_review_worktree import NOW, REVIEWS_CONFIG, compare_docs, config_for, large
+from test_review_worktree import NOW, REVIEWS_CONFIG, TOP, compare_docs, config_for, large
 from test_reviews import REF, add_lead, add_session, add_work, make_pr, setup_pr
 
 from bridge.config import Config
@@ -31,8 +31,6 @@ from bridge.reviews import (
 
 DOC_COMMIT = "d0c" * 13 + "d"
 HEAD = "e1e" * 13 + "e"
-
-TOP = "<h2>In short</h2><h2>User story</h2><ol><li>a<li>b<li>c</ol><h2>Verified</h2><p>First reader: passed.</p>"
 
 
 def compare(*files: dict[str, Any], status: str = "ahead", ahead_by: int = 2) -> dict[str, Any]:

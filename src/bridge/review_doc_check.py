@@ -14,21 +14,109 @@ _WHERE_TO_LOOK_RE = re.compile(r"^\W*where to look\b", re.I)
 _NOT_FROM_ROOT_RE = re.compile(r"^(?:/|~|…)|(?:^|/)\.{1,3}(?:/|$)")
 _LINE_SUFFIX_RE = re.compile(r":\d[\d,\s\u2013-]*$")
 _WHAT_CHANGES_RE = re.compile(r"^\W*what changes\b", re.I)
-_VERIFIED_RE = re.compile(r"^\W*verified\b", re.I)
+_CHECKS_RE = re.compile(r"^[\W\d]*(?:checks|verified)\b", re.I)
+_VERIFIED_PART_RE = re.compile(r"^[\W\d]*verified\b", re.I)
 _FIELDS_RE = re.compile(r"^[\W\d]*fields\b", re.I)
 _FIELD_COLUMN_RE = re.compile(r"^\W*fields?\b", re.I)
-_EXAMPLE_COLUMN_RE = re.compile(r"\bexamples?\b", re.I)
+_FIELD_COLUMNS = {
+    "What": re.compile(r"\bwhat\b|\bmean|\bdescription\b", re.I),
+    "Why": re.compile(r"\bwhy\b|\bwrit|\bread", re.I),
+    "Limits": re.compile(r"\blimit|\ballowed\b|\bconstraint|\btype\b", re.I),
+    "Example": re.compile(r"\bexamples?\b", re.I),
+}
+CHECKS = "Checks"
+_OWN_CHECKS_RE = re.compile(r"^[\W\d]*checks\b", re.I)
+_LOOSE_CHECK_RE = re.compile(r"^[\W\d]*(?:tests|reviews|verified)\b", re.I)
+_SUMMARY_ID_RE = re.compile(r"^\W*[A-Z]{1,2}\d{1,3}(?:[.:)]|\s+[-\u2013\u2014])\s")
+VERDICT_LABELS = {
+    "Type": re.compile(r"^\W*type\b", re.I),
+    "You decide": re.compile(r"\bdecide", re.I),
+    "Could break": re.compile(r"\bbreak", re.I),
+    "Main risk": re.compile(r"\brisk", re.I),
+    "Checks": re.compile(r"^\W*checks?\b", re.I),
+}
+_CLOSE_BREAK = "What else could break"
+_WORKS = "How it works"
+_RISKS = "Costs and risks"
+_CHANGES = "What changes and why"
+_SECTION_RES = {
+    _CHANGES: _WHAT_CHANGES_RE,
+    _WORKS: re.compile(r"^[\W\d]*how it works\b", re.I),
+    _RISKS: re.compile(r"^[\W\d]*costs? and risks?\b", re.I),
+    "Fields": _FIELDS_RE,
+    _CLOSE_BREAK: re.compile(r"^[\W\d]*what else could break\b", re.I),
+    "Root cause": re.compile(r"^[\W\d]*root cause\b", re.I),
+    "No behaviour change": re.compile(r"^[\W\d]*no behaviou?r change\b", re.I),
+    "Rollout": re.compile(r"^[\W\d]*rollout\b", re.I),
+    "How this will be used": re.compile(r"^[\W\d]*how this will be used\b", re.I),
+    "Differences from the original": re.compile(r"^[\W\d]*differences from the original\b", re.I),
+}
+_REUSE_RE = re.compile(r"\breuse\s*:", re.I)
+_TYPE_END_RE = re.compile(r"[,;:(\u00b7\u2013\u2014\d]| - ")
+_INLINE_TAGS = frozenset(
+    {
+        "a",
+        "abbr",
+        "b",
+        "code",
+        "em",
+        "i",
+        "ins",
+        "kbd",
+        "mark",
+        "s",
+        "samp",
+        "small",
+        "span",
+        "strong",
+        "sub",
+        "sup",
+        "u",
+    }
+)
 _FIRST_READER_PASSED_RE = re.compile(r"\bfirst[- ]reader\b(?![^.;]*\b(?:not|never|failed|pending)\b)[^.;]*\bpass", re.I)
 _TOP_SECTIONS = ("short", "story", "changes")
 _HIDDEN_TAGS = frozenset({"script", "style", "template", "textarea"})
 _ROW_TAGS = ("li", "tr")
 _UNREAD_TAGS = _HIDDEN_TAGS | {"svg", "pre"}
+_BODY_UNREAD_TAGS = _UNREAD_TAGS | {"title"}
 _BLOCK_TAG_RE = re.compile(
     r"p|li|[uo]l|t[dhr]|table|div|summary|details|fig(?:ure|caption)|blockquote|d[dt]|h[13-6]|section|hr"
 )
 _SENTENCE_END_RE = re.compile(r"(?<=[.!?])[\"')\]\u201d\u2019]*\s+(?=\S)")
 _ABBREVIATION_END_RE = re.compile(r"(?:\b(?:e\.g|i\.e|vs|etc|cf|approx|no|nr|incl)\.)$", re.I)
 _WORD_RE = re.compile(r"\S*\w\S*")
+
+
+@dataclass(frozen=True)
+class PrType:
+    name: str
+    signal: re.Pattern[str]
+    sections: tuple[str, ...]
+    """The h2s a PR of this type needs, beyond In short, Where to look and Checks."""
+    reuse: bool = False
+    """Adds a model, helper or concept, so What else could break says which existing one looks alike."""
+
+
+PR_TYPES = (
+    PrType(
+        "model / contract",
+        re.compile(r"\bmodel|\bcontract|\bschema", re.I),
+        (_CHANGES, "Fields", _CLOSE_BREAK, _RISKS),
+        reuse=True,
+    ),
+    PrType("refactor", re.compile(r"\brefactor", re.I), (_CHANGES, "No behaviour change", _CLOSE_BREAK)),
+    PrType("bug fix", re.compile(r"\bbug\b|\bfix", re.I), (_CHANGES, "Root cause", _CLOSE_BREAK, _RISKS)),
+    PrType("new feature", re.compile(r"\bfeature", re.I), (_CHANGES, _CLOSE_BREAK, _WORKS, _RISKS), reuse=True),
+    PrType("infra / chart", re.compile(r"\binfra|\bchart", re.I), (_CHANGES, "Rollout", _CLOSE_BREAK, _RISKS)),
+    PrType("docs only", re.compile(r"\bdocs?\b", re.I), ()),
+    PrType(
+        "enabling",
+        re.compile(r"\benabl", re.I),
+        (_CHANGES, "How this will be used", "Rollout", _CLOSE_BREAK, _RISKS),
+    ),
+    PrType("backport", re.compile(r"\bbackport", re.I), ("Differences from the original",)),
+)
 
 
 class _DocOutline(HTMLParser):
@@ -106,11 +194,14 @@ class _DocOutline(HTMLParser):
 
 
 class _FieldTables(HTMLParser):
-    """The header cells (the first row) of each table under the Fields h2."""
+    """The header cells (the first row) of each table under the Fields h2, and whether the table sits in a closed
+    fold."""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
-        self.headers: list[list[str]] = []
+        self.headers: list[tuple[list[str], bool]] = []
+        self._details: list[list[bool]] = []
+        self._table_folded = False
         self._hidden = 0
         self._heading: list[str] | None = None
         self._in_fields = False
@@ -126,10 +217,15 @@ class _FieldTables(HTMLParser):
         elif tag == "h2":
             self._end_row()
             self._heading, self._in_fields = [], False
+        elif tag == "details":
+            self._details.append(["open" in dict(attrs), False])
+        elif tag == "summary" and self._details:
+            self._details[-1][1] = True
         elif not self._in_fields:
             return
         elif tag == "table":
             self._first_row = True
+            self._table_folded = any(not opened and not in_summary for opened, in_summary in self._details)
         elif tag in ("tr", "tbody") and self._row is not None:
             self._end_row()
         elif tag == "tr" and self._first_row:
@@ -150,6 +246,10 @@ class _FieldTables(HTMLParser):
             self._end_cell()
         elif tag in ("tr", "thead", "table"):
             self._end_row()
+        elif tag == "summary" and self._details:
+            self._details[-1][1] = False
+        elif tag == "details" and self._details:
+            self._details.pop()
 
     def handle_data(self, data: str) -> None:
         if self._hidden:
@@ -166,7 +266,7 @@ class _FieldTables(HTMLParser):
     def _end_row(self) -> None:
         self._end_cell()
         if self._row is not None:
-            self.headers.append(self._row)
+            self.headers.append((self._row, self._table_folded))
             self._row = None
 
     def _end_cell(self) -> None:
@@ -175,23 +275,250 @@ class _FieldTables(HTMLParser):
         self._cell = None
 
 
-def find_field_example_problems(page: str) -> list[str]:
-    """Each table of fields under Fields has an Example column: a realistic value tells what a field holds faster
-    than its description."""
+def find_field_table_problems(page: str) -> list[str]:
+    """Each table of fields under Fields is visible and has What, Why, Limits and Example columns: the owner reads
+    every changed field of every changed model there, and a realistic value tells what a field holds fastest."""
     tables = _FieldTables()
     tables.feed(page)
     tables.close()
-    missing = [
-        header
-        for header in tables.headers
-        if any(_FIELD_COLUMN_RE.match(cell) for cell in header) and not any(map(_EXAMPLE_COLUMN_RE.search, header))
+    problems: list[str] = []
+    fields = [(header, folded) for header, folded in tables.headers if any(map(_FIELD_COLUMN_RE.match, header))]
+    if folded := sum(folded for _, folded in fields):
+        problems.append(
+            f"Fields has {folded} table(s) of fields inside a closed fold; every changed field of every changed model "
+            "stays visible (only writer and reader file paths may fold)"
+        )
+    for header, _ in fields:
+        missing = [name for name, column in _FIELD_COLUMNS.items() if not any(map(column.search, header))]
+        if missing:
+            problems.append(
+                f"Fields has a table of fields with no {' / '.join(missing)} column (columns: {' | '.join(header)}); "
+                "per field: what it is, why it is needed (who writes, who reads), its limits, and a realistic example "
+                "value in its real shape, invented, never real customer data"
+            )
+            break
+    return problems
+
+
+@dataclass
+class DocBody:
+    """What the doc shows before anything is opened, and the text of each h2 section, folds included."""
+
+    strip: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
+    """The verdict strip before the first h2: each label (dt) and its line (dd)."""
+    visible_words: int = 0
+    """Words outside closed folds (fold summaries count), diagrams, code blocks and Fields."""
+    sections: dict[str, str] = field(default_factory=dict[str, str])
+    summaries: list[str] = field(default_factory=list[str])
+
+
+class _BodyReader(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.body = DocBody()
+        self._unread = 0
+        self._details: list[list[bool]] = []
+        self._heading: list[str] | None = None
+        self._section: list[str] | None = None
+        self._section_name = ""
+        self._in_fields = False
+        self._visible: list[str] = []
+        self._summary: list[str] | None = None
+        self._strip = 0
+        self._label: list[str] | None = None
+        self._line: list[str] | None = None
+        self._line_label = ""
+
+    def _folded(self) -> bool:
+        return any(not opened and not in_summary for opened, in_summary in self._details)
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in _BODY_UNREAD_TAGS:
+            self._unread += 1
+            return
+        if self._unread:
+            return
+        if tag not in _INLINE_TAGS:
+            self._space()
+        if tag == "h2" and not self._folded():
+            self._end_heading()
+            self._end_section()
+            self._strip = 0
+            self._end_strip_line()
+            self._heading = []
+        elif tag == "details":
+            self._details.append(["open" in dict(attrs), False])
+        elif tag == "summary" and self._details:
+            self._details[-1][1] = True
+            self._summary = []
+        elif tag == "dl" and (self._strip or self._opens_strip(attrs)):
+            self._strip += 1
+        elif tag == "dt" and self._strip == 1:
+            self._end_strip_line()
+            self._label = []
+        elif tag == "dd" and self._strip == 1 and self._label is not None:
+            self._line_label = " ".join("".join(self._label).split())
+            self._label, self._line = None, []
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in _BODY_UNREAD_TAGS:
+            self._unread = max(0, self._unread - 1)
+            return
+        if self._unread:
+            return
+        if tag not in _INLINE_TAGS:
+            self._space()
+        if tag == "h2":
+            self._end_heading()
+        elif tag == "dd" and self._strip == 1:
+            self._end_strip_line()
+        elif tag == "summary" and self._details:
+            self._details[-1][1] = False
+            if self._summary is not None:
+                self.body.summaries.append(" ".join("".join(self._summary).split()))
+                self._summary = None
+        elif tag == "details" and self._details:
+            self._details.pop()
+        elif tag == "dl" and self._strip:
+            self._strip -= 1
+            if not self._strip:
+                self._end_strip_line()
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if not self._unread and tag not in _INLINE_TAGS:
+            self._space()
+
+    def handle_data(self, data: str) -> None:
+        if self._unread:
+            return
+        for part in (self._heading, self._section, self._summary, self._label, self._line):
+            if part is not None:
+                part.append(data)
+        if not self._folded() and not self._in_fields:
+            self._visible.append(data)
+
+    def close(self) -> None:
+        super().close()
+        self._end_heading()
+        self._end_section()
+        self._end_strip_line()
+        self.body.visible_words = count_words("".join(self._visible))
+
+    def _space(self) -> None:
+        self.handle_data(" ")
+
+    def _opens_strip(self, attrs: list[tuple[str, str | None]]) -> bool:
+        """Only before the first h2 and outside closed folds: a strip further down or folded is not read first."""
+        verdict = "verdict" in (dict(attrs).get("class") or "").split()
+        return verdict and self._section is None and self._heading is None and not self._folded()
+
+    def _end_heading(self) -> None:
+        if self._heading is not None:
+            self._section_name = " ".join("".join(self._heading).split())
+            self._in_fields = bool(_FIELDS_RE.match(self._section_name))
+            self._section, self._heading = [], None
+
+    def _end_section(self) -> None:
+        if self._section is not None:
+            self.body.sections.setdefault(self._section_name, " ".join("".join(self._section).split()))
+        self._section = None
+        self._in_fields = False
+
+    def _end_strip_line(self) -> None:
+        if self._line is not None:
+            self.body.strip.append((self._line_label, " ".join("".join(self._line).split())))
+        self._label = self._line = None
+
+
+def read_doc_body(page: str) -> DocBody:
+    reader = _BodyReader()
+    try:
+        reader.feed(page)
+        reader.close()
+    except (AssertionError, ValueError):
+        pass
+    return reader.body
+
+
+def find_strip_problems(body: DocBody, limits: "PlainLimits") -> list[str]:
+    """The verdict strip tells in seconds whether to read on; its Type picks the sections the doc needs."""
+    if not body.strip:
+        return [
+            f"it has no verdict strip before '{IN_SHORT}': a <dl class=\"verdict\"> with "
+            f"{', '.join(VERDICT_LABELS)}, one short line each"
+        ]
+    problems = [
+        f"the verdict strip has no '{label}' line"
+        for label, pattern in VERDICT_LABELS.items()
+        if not any(pattern.search(name) for name, _ in body.strip)
     ]
-    if not missing:
-        return []
-    return [
-        f"Fields has {len(missing)} table(s) of fields with no Example column (columns: {' | '.join(missing[0])}); "
-        "give each field a realistic example value in its real shape, invented, never real customer data"
-    ]
+    for name, line in body.strip:
+        if (words := count_words(line)) > limits.bullet_words:
+            problems.append(f"the verdict strip's '{name}' line has {words} words, over {limits.bullet_words}")
+    return problems
+
+
+def read_pr_types(body: DocBody) -> list[PrType]:
+    line = next((line for name, line in body.strip if VERDICT_LABELS["Type"].search(name)), "")
+    declared = _TYPE_END_RE.split(line, maxsplit=1)[0]
+    return [kind for kind in PR_TYPES if kind.signal.search(declared)]
+
+
+def find_section_problems(body: DocBody, headings: list[str]) -> list[str]:
+    """Sections follow the PR's type; Tests, Reviews and Verified sit folded under Checks."""
+    problems: list[str] = []
+    if any(VERDICT_LABELS["Type"].search(name) for name, _ in body.strip):
+        kinds = read_pr_types(body)
+        if not kinds:
+            line = next(line for name, line in body.strip if VERDICT_LABELS["Type"].search(name))
+            problems.append(
+                f'the verdict strip\'s Type "{_shorten(line)}" names no PR type; use one or two of: '
+                f"{', '.join(kind.name for kind in PR_TYPES)}"
+            )
+        missing: dict[str, str] = {}
+        for kind in kinds:
+            for needed in kind.sections:
+                if not any(_SECTION_RES[needed].match(text) for text in headings):
+                    missing.setdefault(needed, kind.name)
+        problems.extend(
+            f"{'an' if kind[0] in 'aeiou' else 'a'} {kind} PR has no '{needed}' h2" for needed, kind in missing.items()
+        )
+        if any(kind.reuse for kind in kinds):
+            close = next((text for name, text in body.sections.items() if _SECTION_RES[_CLOSE_BREAK].match(name)), None)
+            if close is not None and not _REUSE_RE.search(close):
+                problems.append(
+                    f"'{_CLOSE_BREAK}' has no Reuse line: a PR that adds a model, helper or concept names the existing "
+                    "one closest to it, and whether it was reused or why not"
+                )
+    for text in headings:
+        if _LOOSE_CHECK_RE.match(text):
+            problems.append(
+                f"'{text}' is an h2; Tests, Reviews and Verified are h3s inside the folded '{CHECKS}' section"
+            )
+    if not any(_WHERE_TO_LOOK_RE.match(text) for text in headings):
+        problems.append("it has no 'Where to look' h2: the files in reading order, each with what to check there")
+    if not any(_OWN_CHECKS_RE.match(text) for text in headings):
+        problems.append(
+            f"it has no '{CHECKS}' h2: Tests, Reviews and Verified sit in one fold under it, its summary line the "
+            "verdict"
+        )
+    return problems
+
+
+def find_layer_problems(body: DocBody, limits: "PlainLimits") -> list[str]:
+    problems: list[str] = []
+    if body.visible_words > limits.visible_words:
+        problems.append(
+            f"it shows {body.visible_words} words before anything is opened (Fields left out), over "
+            f"{limits.visible_words}; fold detail under one-line summaries and cut what the reader does not need"
+        )
+    ids = [match.group(0).strip() for summary in body.summaries if (match := _SUMMARY_ID_RE.match(summary))]
+    if ids:
+        problems.append(
+            f"{len(ids)} fold summaries start with an id ({', '.join(ids[:4])}{', …' if len(ids) > 4 else ''}); start "
+            "each with its point, the id after it if kept"
+        )
+    return problems
 
 
 @dataclass
@@ -225,6 +552,9 @@ class _TopReader(HTMLParser):
         self._ordered = False
         self._block: list[str] = []
         self._bullet: list[str] | None = None
+        self._part: list[str] | None = None
+        self._in_verified = False
+        """Under Checks, only its Verified part says the first reader passed; an old Verified h2 says it anywhere."""
 
     def _reading(self) -> bool:
         return self._section in _TOP_SECTIONS and not self._unread and not self._marks and not self._folded()
@@ -237,6 +567,9 @@ class _TopReader(HTMLParser):
             self._unread += 1
             return
         if self._unread:
+            return
+        if tag == "h3" and self._section == "verified":
+            self._part = []
             return
         if tag == "h2" and not self._folded():
             if self._in_heading:
@@ -285,6 +618,10 @@ class _TopReader(HTMLParser):
         if tag == "h2" and self._in_heading:
             self._end_heading()
             return
+        if tag == "h3" and self._part is not None:
+            self._in_verified = bool(_VERIFIED_PART_RE.match(" ".join("".join(self._part).split())))
+            self._part = None
+            return
         if tag == "span":
             if self._span_marks:
                 self._marks -= self._span_marks.pop()
@@ -307,7 +644,9 @@ class _TopReader(HTMLParser):
             return
         if self._in_heading:
             self._heading.append(data)
-        elif self._section == "verified" and not self._marks:
+        elif self._part is not None:
+            self._part.append(data)
+        elif self._section == "verified" and self._in_verified and not self._marks:
             self.verified.append(data)
         elif self._reading():
             self._block.append(data)
@@ -332,8 +671,9 @@ class _TopReader(HTMLParser):
             self.top.story_steps = 0
         elif self._section in _TOP_SECTIONS and _WHAT_CHANGES_RE.match(text):
             self._section = "changes"
-        elif _VERIFIED_RE.match(text):
+        elif _CHECKS_RE.match(text):
             self._section = "verified"
+            self._in_verified = bool(_VERIFIED_PART_RE.match(text))
         else:
             self._section = "done" if self._section in _TOP_SECTIONS else ""
         self._lists = 0
@@ -356,7 +696,7 @@ class _TopReader(HTMLParser):
 
 
 def read_visible_top(page: bytes) -> tuple[VisibleTop, str]:
-    """The visible top, and the text of the Verified and not verified section."""
+    """The visible top, and the text of the Checks section, folds included."""
     reader = _TopReader()
     try:
         reader.feed(page.decode("utf-8", "replace"))
@@ -391,6 +731,7 @@ class PlainLimits:
     bullets: int
     bullet_words: int
     sentence_words: int
+    visible_words: int
 
 
 def find_plainness_problems(top: VisibleTop, limits: PlainLimits) -> list[str]:
@@ -441,9 +782,10 @@ def find_first_reader_problems(verified: str) -> list[str]:
     if _FIRST_READER_PASSED_RE.search(verified):
         return []
     return [
-        "Verified does not say the first reader (with the reader profile) passed: before registering, a fresh reader "
-        "gets the reader profile, In short, User story if any, What changes and why and the diff, and explains back "
-        "what changes and why; wrong or vague means rewrite, and the doc says once it passed"
+        f"{CHECKS} does not say the first reader (with the reader profile) passed: before registering, a fresh reader "
+        "gets the reader profile, the verdict strip, In short, User story if any, What changes and why, Fields if any, "
+        "What else could break and the diff, and explains back what changes and why; wrong or vague means rewrite, "
+        "and the doc says once it passed"
     ]
 
 
@@ -469,11 +811,17 @@ def find_doc_problems(
     if not headings:
         problems.append(f"it has no h2 headings; it opens with the h2 '{IN_SHORT}'")
     elif not _IN_SHORT_RE.match(headings[0]):
-        problems.append(f"its first h2 is '{headings[0]}'; it opens with '{IN_SHORT}', with nothing before it")
+        problems.append(
+            f"its first h2 is '{headings[0]}'; it opens with '{IN_SHORT}', with only the verdict strip before it"
+        )
+    text = page.decode("utf-8", "replace")
+    body = read_doc_body(text)
+    problems.extend(find_strip_problems(body, limits))
+    problems.extend(find_section_problems(body, headings))
     top, verified = read_visible_top(page)
     problems.extend(find_story_problems(headings, top.story_steps))
     problems.extend(find_first_reader_problems(verified))
-    problems.extend(find_field_example_problems(page.decode("utf-8", "replace")))
+    problems.extend(find_field_table_problems(text))
     since = [index for index, text in enumerate(headings) if _CHANGES_SINCE_RE.search(text)]
     if since and not owner_reviewed:
         problems.append(
@@ -485,6 +833,7 @@ def find_doc_problems(
     elif since and since[0] != len(headings) - 1:
         problems.append(f"'{headings[since[0] + 1]}' comes after '{CHANGES_SINCE}', which is always the last h2")
     problems.extend(find_plainness_problems(top, limits))
+    problems.extend(find_layer_problems(body, limits))
     paths = [path for path in (map_row_to_path(row) for row in outline.rows if row) if path]
     for path, count in Counter(paths).items():
         if count > 1:

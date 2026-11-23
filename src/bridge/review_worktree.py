@@ -60,7 +60,6 @@ _SAFE_NAME_RE = re.compile(r"[\w.-]+")
 _VERSION_PART_RE = re.compile(r"\s*[<>=!~].*$")
 _REQUIREMENT_NAME_RE = re.compile(r"[A-Za-z0-9][\w.-]*")
 _META_RE = re.compile(rb"<meta\b[^>]*>", re.I)
-_TERM_RE = re.compile(rb"""<[a-z]+\b[^>]*\bclass\s*=\s*["'](?:[^"']*\s)?term(?:\s[^"']*)?["']""", re.I)
 _PR_HEAD_NAME_RE = re.compile(rb"""\bname\s*=\s*["']?pr-head\b""", re.I)
 _CONTENT_SHA_RE = re.compile(rb"""\bcontent\s*=\s*["']?([0-9a-fA-F]{7,40})\b""")
 _BODY_TAG_RE = re.compile(rb"<body\b[^>]*>", re.I)
@@ -69,7 +68,6 @@ _SSH_REMOTE_RE = re.compile(r"(?:ssh://git@([\w.-]+)(?::\d+)?/|git@([\w.-]+):/*)
 SSH_KEY_NOT_LOADED = "GitHub SSH key not loaded: run ssh-add"
 _WORKSPACE_SUFFIX = ".code-workspace"
 DOC_SHA_CHARS = 9
-DOC_MIN_TERMS = 8
 
 
 class DocError(Exception):
@@ -985,7 +983,12 @@ def register_doc(conn: sqlite3.Connection, config: Config, ref: str, source: Pat
     page = source.read_bytes()
     commit = read_doc_head(page) or str(row["head_oid"])
     files = list_files_at(Path(str(row["wt_path"])), commit) if row["wt_path"] else None
-    limits = PlainLimits(config.doc_in_short_max_bullets, config.doc_bullet_max_words, config.doc_sentence_max_words)
+    limits = PlainLimits(
+        config.doc_in_short_max_bullets,
+        config.doc_bullet_max_words,
+        config.doc_sentence_max_words,
+        config.doc_visible_max_words,
+    )
     problems = find_doc_problems(page, has_owner_reviewed(row), config.owner_name, files, limits)
     if problems:
         listed = "".join(f"\n- {problem}" for problem in problems)
@@ -1030,10 +1033,6 @@ def list_files_at(worktree: Path, commit: str) -> frozenset[str] | None:
     except (OSError, subprocess.SubprocessError):
         return None
     return frozenset(name.decode("utf-8", "replace") for name in listed.split(b"\0") if name)
-
-
-def count_doc_terms(html: bytes) -> int:
-    return len(_TERM_RE.findall(html))
 
 
 def read_doc_head(html: bytes) -> str:

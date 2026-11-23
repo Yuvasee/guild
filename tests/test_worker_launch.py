@@ -110,7 +110,7 @@ def test_guild_worker_starts_claude_without_chrome_and_briefs_it_on_the_browser(
     assert brief.startswith("# The Guild constitution") and "# Your task\n\nFix the thing\n" in brief
     assert "codex exec ... </dev/null" in brief
     assert BROWSER_RULE in brief
-    assert "review doc gets a section headed Reviews" in brief
+    assert "a part headed Reviews" in brief
 
 
 @pytest.mark.parametrize(

@@ -193,6 +193,9 @@ class Config:
     doc_sentence_max_words: int = 30
     """For each sentence of a review doc's visible top: In short, User story if any and What changes and why, folds
     left out."""
+    doc_visible_max_words: int = 900
+    """For all a review doc shows before anything is opened, Fields left out: fold summaries count, fold bodies,
+    diagrams and code blocks do not."""
     auto_merge: str = "off"
     """off, dry-run (logs what it would merge) or on: bridge merges a queue PR by itself under the owner's standing
     rule (a colleague approved, CI green, the review bot cleared the head, no PR it merges after open)."""
@@ -368,6 +371,7 @@ def map_toml_to_config(raw: dict[str, object]) -> Config:
         doc_in_short_max_bullets=_positive(raw, "doc_in_short_max_bullets", defaults.doc_in_short_max_bullets),
         doc_bullet_max_words=_positive(raw, "doc_bullet_max_words", defaults.doc_bullet_max_words),
         doc_sentence_max_words=_positive(raw, "doc_sentence_max_words", defaults.doc_sentence_max_words),
+        doc_visible_max_words=_positive(raw, "doc_visible_max_words", defaults.doc_visible_max_words),
         auto_merge=_choice(raw, "auto_merge", defaults.auto_merge, AUTO_MERGE_MODES),
         auto_merge_decision=_str(raw, "auto_merge_decision", defaults.auto_merge_decision),
         auto_merge_failures_to=_str(raw, "auto_merge_failures_to", defaults.auto_merge_failures_to),

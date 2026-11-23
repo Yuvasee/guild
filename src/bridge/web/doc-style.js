@@ -19,9 +19,11 @@
   function storedTheme() {
     // Bridge keeps the choice and says it here: a review doc is sandboxed and has no storage of its own.
     var v = window.bridgeTheme;
-    if (!v) try { v = localStorage.getItem(THEME_KEY); } catch (e) { /* private window: auto */ }
-    return v === "light" || v === "dark" ? v : "auto";
+    if (!v) try { v = localStorage.getItem(THEME_KEY); } catch (e) { /* private window: light */ }
+    return knownTheme(v);
   }
+  // With no choice made, light: dark text on a light page reads best; Auto, picked, follows the system.
+  function knownTheme(v) { return v === "dark" || v === "auto" ? v : "light"; }
   function forceMedia(media, forced) {
     if (!media || !media.mediaText) return;
     var text = originals.has(media) ? originals.get(media) : media.mediaText;
@@ -359,7 +361,7 @@
   window.addEventListener("load", function () { applyTheme(chosen); theme(); stickyTop(); });
   window.addEventListener("resize", function () { stickyTop(); wideTables(); });
   window.addEventListener("storage", function (e) {
-    if (e.key === THEME_KEY) switchTheme(e.newValue === "light" || e.newValue === "dark" ? e.newValue : "auto");
+    if (e.key === THEME_KEY) switchTheme(knownTheme(e.newValue));
   });
   var dark = window.matchMedia && matchMedia("(prefers-color-scheme: dark)");
   if (dark && dark.addEventListener) dark.addEventListener("change", function () { setTimeout(theme, 0); });
