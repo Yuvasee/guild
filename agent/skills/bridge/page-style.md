@@ -9,6 +9,16 @@ have zero specificity, so any rule of your own wins; write CSS only for what the
 No borders or lines: blocks and rows are told apart by background. Every colour is a token with a light and a dark
 value; use them in your own CSS and SVG so the page follows the reader's theme.
 
+A few rules are forced over your CSS, so every page reads the same:
+
+- Text is 18px, tables 0.92 of it, inline code 0.88 of its text. A size you set in px on other elements stays.
+- Inline code never breaks inside a name: short code stays on one line, code over 32 characters wraps only after
+  `/`, `_`, `-` (and `.` when it is not a path). A table wider than its column scrolls sideways in its own box.
+- A light / dark / auto switch sits top right. The reader's choice holds for every page on the same address and
+  applies before the page paints: it sets `data-theme="light|dark"` on `<html>` and turns your own
+  `prefers-color-scheme` rules on or off to match. Key dark colours on either and both work; a page with no
+  background of its own gets the chosen theme's canvas.
+
 ## Classes
 
 | Class | What it is |

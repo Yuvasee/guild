@@ -153,9 +153,12 @@ globalThis.getComputedStyle = () => ({ backgroundColor: "rgb(255, 255, 255)", co
 function run() {
   globalThis.document = {
     readyState: "complete",
-    documentElement: { hasAttribute: () => false, setAttribute: () => {}, style: { setProperty: () => {} },
+    documentElement: { hasAttribute: () => false, setAttribute: () => {}, getAttribute: () => null,
+      removeAttribute: () => {}, style: { setProperty: () => {} },
       classList: { add: () => {}, remove: () => {}, toggle: (name, on) => { toggled[name] = on; } } },
-    body: { getElementsByTagName: () => [] },
+    body: { getElementsByTagName: () => [], appendChild: () => {} },
+    styleSheets: [],
+    createElement: () => ({ setAttribute: () => {}, addEventListener: () => {}, appendChild: () => {} }),
     querySelectorAll: (selector) => selector === "h2" ? heads : [],
     createTreeWalker: () => ({ nextNode: () => false }),
     getElementById: () => null,
@@ -294,3 +297,101 @@ def test_decision_fields_are_checked(bridge_env: BridgeEnv, spawn_process: Spawn
         assert done.returncode == 2 and error in done.stderr, (extra, done.stderr)
     done = bridge_env.cli("post", "insight", "Note", "--what", "w", pid=team.a)
     assert done.returncode == 2 and "are for blocked and decision posts" in done.stderr
+
+
+THEME = """
+const attrs = {};
+const media = (text) => ({ mediaText: text });
+const dark = media("screen and (prefers-color-scheme: dark)"), print = media("print");
+const nested = media("(prefers-color-scheme:light)");
+const sheet = { media: media(""), cssRules: [{ media: dark, cssRules: [{ media: nested }] }, { media: print }] };
+let stored = null;
+globalThis.window = globalThis;
+const onWindow = {};
+globalThis.addEventListener = (name, fn) => { onWindow[name] = fn; };
+globalThis.localStorage = { getItem: () => stored, setItem: (k, v) => { stored = v; } };
+globalThis.location = { href: "http://127.0.0.1/", host: "127.0.0.1" };
+globalThis.NodeFilter = { SHOW_TEXT: 4, FILTER_REJECT: 2, FILTER_ACCEPT: 1 };
+globalThis.getComputedStyle = () => ({ backgroundColor: "rgb(255, 255, 255)", colorScheme: "normal" });
+const listeners = {};
+globalThis.document = {
+  readyState: "loading",
+  documentElement: { hasAttribute: () => false, setAttribute: (k, v) => { attrs[k] = v; }, getAttribute: () => null,
+    removeAttribute: (k) => { delete attrs[k]; }, classList: { add: () => {}, remove: () => {}, toggle: () => {} } },
+  body: null,
+  styleSheets: [sheet],
+  addEventListener: (name, fn) => { listeners[name] = fn; },
+  querySelectorAll: () => [],
+  dispatchEvent: () => true,
+};
+const check = (cond, what) => { if (!cond) throw new Error(`${what}: ${JSON.stringify([attrs, dark, nested])}`); };
+stored = "light";
+eval(SCRIPT);
+check(attrs["data-theme"] === "light", "the stored choice sets data-theme before the body is parsed");
+check(dark.mediaText === "screen and (max-width:0.001px)", "a dark-only rule is off under a forced light theme");
+check(nested.mediaText === "(min-width:0px)", "a nested light-only rule is on under a forced light theme");
+check(print.mediaText === "print", "other media rules are left alone");
+stored = null;
+onWindow.storage({ key: "bridge-theme" });
+check(!("data-theme" in attrs), "auto, chosen in another tab, drops data-theme");
+check(dark.mediaText === "screen and (prefers-color-scheme: dark)", "auto gives the page its own rule back");
+check(nested.mediaText === "(prefers-color-scheme:light)", "auto gives the nested rule back");
+"""
+
+BREAKS = """
+const made = (tag) => ({ tag, children: [], className: "", textContent: "" });
+const code = (text, cls) => ({
+  textContent: text, children: [], parts: [], closest: () => null,
+  classList: { contains: (c) => c === cls, add: function (c) { this.added = c; } },
+  appendChild: function (n) { this.parts.push(n.tag === "wbr" ? "|" : n.tag ? n.textContent : n.text); },
+});
+const codes = [code("a_really_long_configuration_filename.py", "ds-path"),
+  code("services/order_service/handlers/refund.py:120", "ds-path"), code("billing.invoices.render_summary_lines"),
+  code("short_name"), code("x".repeat(40))];
+globalThis.window = globalThis;
+globalThis.addEventListener = () => {};
+globalThis.location = { href: "http://127.0.0.1/", host: "127.0.0.1" };
+globalThis.NodeFilter = { SHOW_TEXT: 4, FILTER_REJECT: 2, FILTER_ACCEPT: 1 };
+globalThis.getComputedStyle = () => ({ backgroundColor: "rgb(255, 255, 255)", colorScheme: "normal" });
+globalThis.document = {
+  readyState: "complete",
+  documentElement: { hasAttribute: () => false, setAttribute: () => {}, getAttribute: () => null,
+    removeAttribute: () => {}, style: { setProperty: () => {} }, classList: { add: () => {}, remove: () => {},
+      toggle: () => {}, contains: () => false } },
+  body: { getElementsByTagName: () => [], appendChild: () => {} },
+  styleSheets: [],
+  querySelectorAll: (selector) => selector === "code" ? codes : [],
+  createElement: (tag) => Object.assign(made(tag), { setAttribute: () => {}, addEventListener: () => {},
+    appendChild: () => {} }),
+  createTextNode: (text) => ({ text }),
+  createTreeWalker: () => ({ nextNode: () => false }),
+  getElementById: () => null,
+};
+eval(SCRIPT);
+const got = codes.map((c) => c.parts.join(""));
+const want = ["a_|really_|long_|configuration_|filename.py", "services/|order_|service/|handlers/|refund.py:120",
+  "billing.|invoices.|render_|summary_|lines", "", ""];
+if (JSON.stringify(got) !== JSON.stringify(want)) throw new Error(JSON.stringify(got));
+"""
+
+
+def test_long_code_wraps_only_after_its_separators_and_a_file_keeps_its_extension(tmp_path: Path) -> None:
+    run_node(tmp_path, f"const SCRIPT = {json.dumps((WEB / 'doc-style.js').read_text())};\n{BREAKS}")
+
+
+def test_a_stored_theme_applies_before_the_page_paints(tmp_path: Path) -> None:
+    run_node(tmp_path, f"const SCRIPT = {json.dumps((WEB / 'doc-style.js').read_text())};\n{THEME}")
+    script = (WEB / "doc-style.js").read_text()
+    assert script.index("applyTheme(chosen);") < script.index("function start()"), "not deferred to load"
+    uses = [line for line in script.splitlines() if "localStorage" in line]
+    assert uses and all("try {" in line for line in uses), "storage can throw in a private window"
+
+
+def test_names_in_code_never_break_inside_and_text_reads_large() -> None:
+    css = re.sub(r"/\*.*?\*/", "", (WEB / "doc-style.css").read_text(), flags=re.S)
+    nav = (Path(__file__).parent.parent / "src/bridge/doc_nav.py").read_text()
+    assert not re.search(r"overflow-wrap:\s*anywhere|word-break:\s*break-all", css)
+    assert ":not(pre)>code{overflow-wrap:anywhere}" not in nav and "code{overflow-wrap:anywhere}" not in nav
+    code = ":not(pre)>code{font-size:.88em!important;white-space:nowrap!important;overflow-wrap:normal!important;"
+    assert code in css
+    assert "body{font-size:18px!important}" in css

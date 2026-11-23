@@ -10,6 +10,102 @@
   var SKIP = "svg,script,style,textarea,pre,code,kbd,samp,#bridge-doc-nav,#bdv-pop,.ds-chip,.mark,.tag,[data-ds-skip]";
   var root = document.documentElement;
 
+  // The reader's theme choice, kept for every page on this origin. It runs before the body is parsed, so the page
+  // paints in the chosen theme: data-theme for docs that key on it, and the page's own prefers-color-scheme rules
+  // rewritten to match, for docs that only follow the system.
+  var THEME_KEY = "bridge-theme", OWN_THEME = root.getAttribute("data-theme");
+  var SCHEME = /\(\s*prefers-color-scheme\s*:\s*(dark|light)\s*\)/gi;
+  var originals = new Map();
+  function storedTheme() {
+    var v;
+    try { v = localStorage.getItem(THEME_KEY); } catch (e) { /* private window: auto */ }
+    return v === "light" || v === "dark" ? v : "auto";
+  }
+  function forceMedia(media, forced) {
+    if (!media || !media.mediaText) return;
+    var text = originals.has(media) ? originals.get(media) : media.mediaText;
+    SCHEME.lastIndex = 0;
+    if (!SCHEME.test(text)) return;
+    originals.set(media, text);
+    media.mediaText = forced ? text.replace(SCHEME, function (_, kind) {
+      return kind.toLowerCase() === forced ? "(min-width:0px)" : "(max-width:0.001px)";
+    }) : text;
+  }
+  function forceRules(rules, forced) {
+    for (var i = 0; i < rules.length; i++) {
+      var rule = rules[i], inner = rule.cssRules;
+      forceMedia(rule.media, forced);
+      if (!inner && rule.styleSheet) try { inner = rule.styleSheet.cssRules; } catch (e) { /* another origin */ }
+      if (inner) forceRules(inner, forced);
+    }
+  }
+  function applyTheme(choice) {
+    var forced = choice === "auto" ? null : choice;
+    if (forced) root.setAttribute("data-theme", forced);
+    else if (OWN_THEME === null) root.removeAttribute("data-theme");
+    else root.setAttribute("data-theme", OWN_THEME);
+    [].forEach.call(document.styleSheets || [], function (sheet) {
+      forceMedia(sheet.media, forced);
+      var rules;
+      try { rules = sheet.cssRules; } catch (e) { return; }
+      if (rules) forceRules(rules, forced);
+    });
+    // Before the body exists only the root can be read; start() reads again with the body.
+    root.classList.remove("ds-cs");
+    var own = [root].concat(document.body ? [document.body] : []).some(function (el) {
+      return !clear(getComputedStyle(el).backgroundColor);
+    });
+    if (own) return;
+    root.classList.add("ds-cs");
+    // Text the page coloured itself must stay readable on the new canvas, or the page keeps the default one.
+    if (!document.body) return;
+    var dark = forced ? forced === "dark" : !!(window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches);
+    if (luma(getComputedStyle(document.body).color) < 128 === dark) root.classList.remove("ds-cs");
+  }
+  var chosen = storedTheme();
+  applyTheme(chosen);
+
+  var THEMES = [["light", "\u2600\ufe0e", "Light"], ["dark", "\u263e", "Dark"], ["auto", "Auto", "Follow the system"]];
+  function themeSwitch() {
+    if (document.getElementById("ds-theme")) return;
+    var bar = document.createElement("div");
+    bar.id = "ds-theme";
+    bar.setAttribute("role", "group");
+    bar.setAttribute("aria-label", "Theme");
+    bar.setAttribute("data-ds-skip", "");
+    THEMES.forEach(function (t) {
+      var b = document.createElement("button");
+      b.type = "button";
+      b.textContent = t[1];
+      b.title = t[2];
+      b.setAttribute("aria-label", t[2]);
+      b.setAttribute("data-theme-choice", t[0]);
+      b.addEventListener("click", function () {
+        try { localStorage.setItem(THEME_KEY, t[0]); } catch (e) { /* kept for this page only */ }
+        switchTheme(t[0]);
+      });
+      bar.appendChild(b);
+    });
+    document.body.appendChild(bar);
+    pressed(chosen);
+  }
+  function pressed(choice) {
+    [].forEach.call(document.querySelectorAll("#ds-theme button"), function (b) {
+      b.setAttribute("aria-pressed", String(b.getAttribute("data-theme-choice") === choice));
+    });
+  }
+  function switchTheme(choice) {
+    chosen = choice;
+    // The palette classes the last reading left would hold the old palette while the page is read again.
+    root.classList.remove("ds-light", "ds-dark", "bdv-light", "bdv-dark");
+    applyTheme(choice);
+    pressed(choice);
+    if (!document.body) return;
+    theme();
+    // The contents bar and the review viewer read the page's colours again.
+    document.dispatchEvent(new Event("ds-theme"));
+  }
+
   function clear(c) { return !c || c === "transparent" || /rgba\(.*,\s*0\)$/.test(c); }
   function theme() {
     var bg = getComputedStyle(document.body).backgroundColor;
@@ -36,6 +132,41 @@
       if (url.host === location.host || /^(127\.0\.0\.1|localhost)(:|$)/.test(url.host)) return;
       a.classList.add("ds-ext");
       if (!a.title) a.title = url.host;
+    });
+  }
+
+  // Long inline code may wrap after / . _ - and nowhere else; a short one stays on one line.
+  var LONG_CODE = 32;
+  function codeBreaks() {
+    [].forEach.call(document.querySelectorAll("code"), function (c) {
+      if (c.closest("pre,svg,[data-ds-skip]") || c.children.length || c.classList.contains("ds-long")) return;
+      var t = c.textContent;
+      // A path breaks after / _ -, so a file keeps its extension; a dotted name also after each dot.
+      var at = c.classList.contains("ds-path") || /\//.test(t) ? /(?<=[\/_-])(?=.)/ : /(?<=[._-])(?=.)/;
+      if (t.length <= LONG_CODE || t.split(at).length < 2) return;
+      c.textContent = "";
+      t.split(at).forEach(function (part, i) {
+        // The first part keeps a path's icon on its line.
+        var piece = i ? document.createTextNode(part) : document.createElement("span");
+        if (i) c.appendChild(document.createElement("wbr"));
+        else { piece.className = "ds-head"; piece.textContent = part; }
+        c.appendChild(piece);
+      });
+      c.classList.add("ds-long");
+    });
+  }
+
+  // A table wider than its column scrolls sideways in its own box; one that fits keeps its sticky header.
+  function wideTables() {
+    [].forEach.call(document.querySelectorAll("table"), function (t) {
+      var box = t.parentElement;
+      if (!box || t.closest("[data-ds-skip],#bridge-doc-nav") || box.classList.contains("ds-scroll")) return;
+      var cs = getComputedStyle(box), room = box.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+      if (/auto|scroll/.test(cs.overflowX) || t.offsetWidth <= room + 1) return;
+      var wrap = document.createElement("div");
+      wrap.className = "ds-scroll";
+      box.insertBefore(wrap, t);
+      wrap.appendChild(t);
     });
   }
 
@@ -215,11 +346,15 @@
   function start() {
     if (root.hasAttribute("data-ds-done")) return;
     root.setAttribute("data-ds-done", "");
-    theme(); borders(); ownNumbers(); links(); inlineCode(); chips(); callouts(); blocks(); stickyTop();
+    applyTheme(chosen);
+    theme(); borders(); ownNumbers(); links(); inlineCode(); codeBreaks(); chips(); callouts(); blocks(); stickyTop();
+    wideTables(); themeSwitch();
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start); else start();
-  window.addEventListener("load", function () { theme(); stickyTop(); });
-  window.addEventListener("resize", stickyTop);
+  // Stylesheets that arrived after the first pass get the chosen theme too.
+  window.addEventListener("load", function () { applyTheme(chosen); theme(); stickyTop(); });
+  window.addEventListener("resize", function () { stickyTop(); wideTables(); });
+  window.addEventListener("storage", function (e) { if (e.key === THEME_KEY) switchTheme(storedTheme()); });
   var dark = window.matchMedia && matchMedia("(prefers-color-scheme: dark)");
   if (dark && dark.addEventListener) dark.addEventListener("change", function () { setTimeout(theme, 0); });
 })();

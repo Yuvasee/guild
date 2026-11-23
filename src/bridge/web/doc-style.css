@@ -1,6 +1,7 @@
 /* Shared doc style, injected into every review doc and page: a magazine look. No borders or lines anywhere: rows and
-   blocks are told apart by background. Base rules sit in :where() so a doc's own colours and sizes win; only the
-   no-line rule and square table cells are forced. Opt-in classes are listed in agent/skills/bridge/page-style.md. */
+   blocks are told apart by background. Base rules sit in :where() so a doc's own colours and sizes win; forced are only
+   the no-line rule, square table cells, the reading size and code that never breaks mid-name. Opt-in classes are listed
+   in agent/skills/bridge/page-style.md. */
 :root{
 --ds-fg:#1f2328;--ds-muted:#59636e;--ds-zebra:rgba(110,118,129,.075);--ds-hover:rgba(11,90,216,.08);
 --ds-th:rgba(110,118,129,.15);--ds-tint:rgba(110,118,129,.085);
@@ -39,6 +40,29 @@
 --ds-h1-a:#1d2550;--ds-h1-b:#0f363c;--ds-band-a:#1a2155;--ds-band-b:#0a4f59;--ds-on-band:#ffffff;
 --ds-band-tint:rgba(255,255,255,.16);--ds-band-chip:rgba(255,255,255,.9);--ds-band-chip-fg:#1b1d21;
 --ds-add:#aff5b4;--ds-add-bg:#033a16;--ds-del:#ffdcd7;--ds-del-bg:#67060c;--ds-hunk:#79c0ff;--ds-hunk-bg:#0c2d6b}
+/* A page with no background of its own takes the chosen theme's canvas, on auto the system's unless it set its own
+   color-scheme; the script sets ds-cs only then. */
+:where(:root.ds-cs){color-scheme:light dark}
+:root.ds-cs[data-theme="dark"]{color-scheme:dark!important}:root.ds-cs[data-theme="light"]{color-scheme:light!important}
+
+/* Theme switch: light / dark / auto, top right. */
+#ds-theme{position:fixed;top:8px;right:8px;z-index:2147483100;display:flex;gap:2px;padding:3px;border-radius:999px;
+background:color-mix(in srgb,var(--ds-fg) 9%,transparent);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+font:600 13px/1 var(--ds-sans)}
+#ds-theme button{all:unset;box-sizing:border-box;min-width:30px;height:26px;padding:0 8px;border-radius:999px;
+cursor:pointer;text-align:center;color:var(--ds-fg);opacity:.7}
+#ds-theme button:hover{opacity:1}
+#ds-theme button[aria-pressed="true"]{opacity:1;color:var(--ds-on-accent);background:var(--ds-link)}
+#ds-theme button:focus-visible{outline:2px solid var(--ds-focus)!important;outline-offset:1px}
+#bridge-doc-nav.bdn-top summary{padding-right:128px}
+@media print{#ds-theme{display:none}}
+
+/* Reading size, forced: most docs set a smaller base of their own. What a page sizes in px elsewhere keeps its size. */
+body{font-size:18px!important}
+table{font-size:.92em!important}
+:is(td,th) table{font-size:1em!important}
+:is(td,th){font-size:inherit!important}
+:where(p,li,dd,blockquote){max-width:76ch}
 
 /* No lines. The script lifts .ds-measure for a moment to see which boxes had a border and tints them instead. */
 :root:not(.ds-measure) body *:not(.ds-keep,[data-ds-skip],[data-ds-skip] *){border-style:none!important;
@@ -56,8 +80,8 @@ outline-style:none!important}
 /* Headings: h1 a tinted band, h2 numbered with a coloured badge (unless the doc numbers them itself), the paragraph
    right after h1 a lead. Headings inside an opt-in band or section header are left to it. */
 :where(h1,h2,h3){font-family:var(--ds-serif)}
-:where(h1:not(.ds-band *,.band *)){font-size:1.9em;line-height:1.2;font-weight:700;letter-spacing:-.01em;
-margin:.4em 0 .6em;padding:.55em .8em;border-radius:16px;background:linear-gradient(120deg,var(--ds-h1-a),var(--ds-h1-b))}
+:where(h1:not(.ds-band *,.band *)){font-size:clamp(1.5em,5vw,1.9em);line-height:1.2;font-weight:700;
+letter-spacing:-.01em;margin:.4em 0 .6em;padding:.55em .8em;border-radius:16px;background:linear-gradient(120deg,var(--ds-h1-a),var(--ds-h1-b))}
 :where(h1:not(.ds-band *,.band *)+p,.ds-lead,.lead){font-family:var(--ds-serif);font-size:1.17em;line-height:1.55}
 :where(h2){font-size:1.5em;line-height:1.25;font-weight:700;letter-spacing:-.01em;margin:2em 0 .6em}
 :where(h3){font-size:1.18em;line-height:1.3;font-weight:650;margin:1.5em 0 .45em}
@@ -79,16 +103,26 @@ a.ds-ext::after{content:"\2197";display:inline-block;margin-left:.12em;font-size
 text-decoration:none;vertical-align:.12em}
 
 /* Inline code, and its two roles: file paths and code identifiers. */
-:where(:not(pre)>code){font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.88em;
-background:var(--ds-code-bg);padding:.08em .4em;border-radius:6px;overflow-wrap:anywhere}
+:where(:not(pre)>code){font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+background:var(--ds-code-bg);padding:.08em .4em;border-radius:6px}
+/* A name never breaks inside: a short one stays on one line, a long one (ds-long, given <wbr> after / . _ - by the
+   script) wraps only there. Forced, since many docs set overflow-wrap:anywhere and a larger size on code. */
+:not(pre)>code{font-size:.88em!important;white-space:nowrap!important;overflow-wrap:normal!important;
+word-break:normal!important}
+:not(pre)>code.ds-long{white-space:normal!important;overflow-wrap:break-word!important}
+code.ds-long .ds-head{white-space:nowrap}
+/* A table that scrolls keeps room for its text columns, not one word per line. */
+.ds-scroll{overflow-x:auto;max-width:100%}
+.ds-scroll>table{min-width:40em}
 code.ds-path{color:var(--ds-path);background:color-mix(in srgb,var(--ds-path) 12%,transparent)}
-code.ds-path::before{content:"";display:inline-block;width:.5em;height:.66em;margin-right:.32em;vertical-align:-.02em;
+code.ds-path:not(.ds-long)::before,code.ds-path .ds-head::before{content:"";
+display:inline-block;width:.5em;height:.66em;margin-right:.32em;vertical-align:-.02em;
 background:currentColor;border-radius:1px 3px 1px 1px;opacity:.45}
 code.ds-ident{color:var(--ds-ident);background:color-mix(in srgb,var(--ds-ident) 11%,transparent)}
 a code.ds-path,a code.ds-ident{color:inherit}
 
 /* Code blocks and syntax colours (highlight.js token classes). */
-:where(pre){font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.9em;line-height:1.5;
+:where(pre){font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.85em;line-height:1.5;
 background:var(--ds-pre-bg);color:var(--ds-pre-fg);border-radius:12px;padding:12px 14px;overflow-x:auto;tab-size:4}
 :where(pre code){background:none;padding:0;font-size:inherit;border-radius:0}
 pre[data-ds-lang]{position:relative;padding-top:1.8em}
@@ -133,7 +167,7 @@ padding:10px 14px;margin:12px 0}
 .ds-callout.ds-decision{--c:var(--ds-violet)}
 .ds-callout.ds-ok{--c:var(--ds-green)}
 .ds-callout .label,.ds-callout .ds-label,.ds-label{display:block;margin-bottom:.35em;color:var(--c,var(--ds-s1));
-font:700 .72rem/1.2 var(--ds-sans);letter-spacing:.14em;text-transform:uppercase}
+font:700 .7em/1.2 var(--ds-sans);letter-spacing:.14em;text-transform:uppercase}
 :where(blockquote){margin:12px 0;padding:8px 14px;background:var(--ds-tint);border-radius:12px;color:var(--ds-muted)}
 
 /* Tables: one rounded block (clipped, so the header still sticks), rows told apart by alternating background, a
@@ -147,7 +181,7 @@ z-index:1}
 :root:not(.ds-measure) :is(td,th):not([data-ds-skip] *){border-radius:0!important}
 
 /* Opt-in magazine parts. Each takes the ds- name and, where the reference pages used one, the short name too. */
-:where(.ds-kicker,.kicker){display:block;font:700 .72rem/1.2 var(--ds-sans);letter-spacing:.14em;
+:where(.ds-kicker,.kicker){display:block;font:700 .7em/1.2 var(--ds-sans);letter-spacing:.14em;
 text-transform:uppercase;color:var(--ds-sc,var(--ds-s1))}
 :where(.ds-band,.band){display:block;margin:0 0 24px;padding:30px 28px 24px;border-radius:20px;color:var(--ds-on-band);
 background:linear-gradient(120deg,var(--ds-band-a),var(--ds-band-b))}
