@@ -22,6 +22,7 @@ from bridge.attention import (
 from bridge.board import (
     AddressError,
     MessageStateError,
+    Party,
     add_ack,
     resolve_handle,
     send_message,
@@ -163,11 +164,13 @@ from bridge.workers import (
     count_busy_agents,
     find_closed_worker,
     find_conversation_runs,
+    find_live_lead,
     find_mid_turn,
     find_reopened_tabs,
     find_tab_sessions,
     find_undelivered_reports,
     forget_closed_workers,
+    hand_closed_workers_to_lead,
     hold_reopen_lock,
     is_host_resume,
     is_lead_of_closed,
@@ -234,6 +237,12 @@ def build_worker_lifecycle_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("close", help="close your own nested tab and keep what resumes it")
     p.add_argument("tab", help="the tab's name or agterm id")
     p.add_argument("--force", action="store_true", help="close even if it is mid-turn or has a live background run")
+    p.add_argument(
+        "--to",
+        metavar="LEAD",
+        help="hand it to that lead (yours or the assistant's call): it becomes the worker's lead, is told, and brings "
+        "it back with its whole conversation by guild worker reopen from its own tab",
+    )
     p.set_defaults(func=cmd_worker_close)
     p = sub.add_parser("closed", help="closed workers, newest first, with the command that reopens each")
     p.add_argument("--limit", type=int, default=30)
@@ -1021,6 +1030,8 @@ def cmd_worker_close(args: argparse.Namespace, conn: sqlite3.Connection, config:
     me = current_party(conn)
     if is_surface_locked(conn, config, _my_surface(conn)):
         raise UsageError("this tab is locked, and Guild ignores locked tabs")
+    mine = find_lead_on_surface(conn, _my_surface(conn))
+    to = _read_handover_lead(conn, config, me.handle, mine, str(args.to)) if args.to else None
     tab = _read_child_tab(conn, config, parent, str(args.tab))
     if config.hides(tab.name, tab.workspace_name):
         raise UsageError(f"{tab.name} is locked, and Guild ignores locked tabs")
@@ -1047,7 +1058,13 @@ def cmd_worker_close(args: argparse.Namespace, conn: sqlite3.Connection, config:
     for line in blockers:
         print(f"forced past: {line}")
     records = map_host_tab_to_closed_records(host, sessions) if host else map_tab_to_closed_records(tab, sessions)
-    mine = find_lead_on_surface(conn, _my_surface(conn))
+    if to and not records:
+        raise UsageError(f"no conversation is known in {tab.name}, so there is nothing to hand to {to.display_name}")
+    if to and host and not all(map_resume_command_to_host_resume(r.resume_command, r.conversation_id) for r in records):
+        raise UsageError(f"{tab.name} could not be reopened with gbridge, so it is not handed over; it stays open")
+    if to:
+        # The checks above reconciled the registry and took seconds: the lead may have stopped meanwhile.
+        _read_handover_lead(conn, config, me.handle, mine, to.name)
     with transaction(conn):
         ids = record_closed_workers(conn, records, tab.name, me.handle, parent, mine.name if mine else None, now_ms())
     # Recorded first: a crash between the two leaves an extra line, never a closed tab nobody can resume.
@@ -1063,6 +1080,7 @@ def cmd_worker_close(args: argparse.Namespace, conn: sqlite3.Connection, config:
             print(f"agterm could not close {tab.name}; it stays open", file=sys.stderr)
             return 1
     print(f"closed {tab.name}")
+    removed: dict[str, Any] = {}
     if host:
         removed = run_on_host(Remote(name=host.host, ssh=host.ssh), {"op": "remove", "worker": host.worker})
         if removed.get("ok"):
@@ -1085,7 +1103,58 @@ def cmd_worker_close(args: argparse.Namespace, conn: sqlite3.Connection, config:
         print(f"{BY_HAND} {record.resume_command}")
     if not records:
         print("no conversation was known in that tab, so there is nothing to resume")
+    if to and host and not removed.get("ok"):
+        # Its host record stays, and reopen refuses a host worker that still has one.
+        print(f"NOT handed to {to.display_name}: {tab.name} stays yours until it is cleaned up on {host.host}",
+              file=sys.stderr)  # fmt: skip
+    elif to:
+        with transaction(conn):
+            hand_closed_workers_to_lead(conn, [r.conversation_id for r in records], tab.id, to.name)
+        _tell_handover_lead(conn, me, mine.display_name if mine else me.handle, to, tab.name, ids, host)
     return 0
+
+
+def _read_handover_lead(
+    conn: sqlite3.Connection, config: Config, my_handle: str, mine: Lead | None, wanted: str
+) -> Lead:
+    if mine is None and my_handle != config.assistant_handle:
+        raise UsageError(f"only a lead or {config.assistant_handle} hands a worker to another lead")
+    lead = get_lead(conn, wanted)
+    if lead.retired_at is not None:
+        raise LeadError(f"{lead.display_name} is retired")
+    if mine is not None and mine.name == lead.name:
+        raise UsageError(f"you are {lead.display_name}: guild worker close without --to")
+    if find_live_lead(conn, lead.name) is None:
+        raise UsageError(f"{lead.display_name} is not running, so it could not reopen the worker")
+    if is_surface_locked(conn, config, lead.surface):
+        raise UsageError(f"{lead.display_name}'s tab is locked, and Guild ignores locked tabs")
+    return lead
+
+
+def _tell_handover_lead(
+    conn: sqlite3.Connection, me: Party, old_lead: str, to: Lead, tab_name: str, ids: list[int], host: HostWorker | None
+) -> None:
+    reopen = " and ".join(f"'guild worker reopen {closed_id}'" for closed_id in ids)
+    body = (
+        f"{old_lead} handed you worker {tab_name}: run {reopen} from your tab; it comes back with its whole "
+        "conversation"
+    )
+    if host:
+        body += f". It ran on {host.host}: the reopen brings its worktree there back at its old path"
+    try:
+        with transaction(conn):
+            recipient = resolve_handle(conn, to.name)
+            result = send_message(conn, me, [recipient], "info", body, now_ms())
+    except (AddressError, MessageStateError) as exc:
+        print(
+            f"warning: {tab_name} is {to.display_name}'s now, but {to.display_name} was not told: {exc}",
+            file=sys.stderr,
+        )
+        return
+    print(f"handed to {to.display_name}, who was told how to reopen it")
+    nudge_recipients([recipient])
+    for line in map_wake_to_lines(result.wake):
+        print(line)
 
 
 def _read_child_tab(conn: sqlite3.Connection, config: Config, parent: str, wanted: str) -> ChildTab:

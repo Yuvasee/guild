@@ -171,7 +171,8 @@ A tab enrolled with `guild lead add` is a named team lead. Its role, scope and n
   or id) closes your own nested tab and prints its id; `guild worker closed` lists closed workers. It
   refuses a worker that is mid-turn or has a live background run, and warns about a report not delivered to you yet;
   `--force` closes anyway and says what it passed over. Closing never stops a run on another machine, and the owner's PR
-  comments reach you or a resumed worker.
+  comments reach you or a resumed worker. A worker whose project moves to another lead goes with it: `guild worker
+  close <tab> --to <lead>` makes that lead its lead and tells it to reopen it from its own tab.
 - Reopen a closed worker with `guild worker reopen <id or tab name>`, never by hand: it resumes the worker in a tab
   nested under yours, with its old name, within the 5-worker cap and the laptop cap (queued when the laptop is full). A
   raw `claude --resume` or `agtermctl session new` makes a tab with no lead; bridge tells you once when it sees one.

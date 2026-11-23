@@ -809,7 +809,7 @@ options:
 close your own nested tab and keep what resumes it
 
 ```text
-usage: guild worker close [-h] [--force] tab
+usage: guild worker close [-h] [--force] [--to LEAD] tab
 
 positional arguments:
   tab         the tab's name or agterm id
@@ -817,6 +817,8 @@ positional arguments:
 options:
   -h, --help  show this help message and exit
   --force     close even if it is mid-turn or has a live background run
+  --to LEAD   hand it to that lead (yours or the assistant's call): it becomes the worker's lead, is told, and brings
+              it back with its whole conversation by guild worker reopen from its own tab
 ```
 
 ### guild worker closed

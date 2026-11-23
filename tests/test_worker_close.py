@@ -56,10 +56,10 @@ class Worker:
         workspaces = [{"id": "WS", "name": "Work", "sessions": list(tabs)}]
         self.env.stub_tree.write_text(json.dumps({"ok": True, "result": {"tree": {"workspaces": workspaces}}}))
 
-    def guild(self, *args: str, session: str = LEAD_TAB) -> subprocess.CompletedProcess[str]:
+    def guild(self, *args: str, session: str = LEAD_TAB, pid: int | None = None) -> subprocess.CompletedProcess[str]:
         env = {
             **self.env.env,
-            "CLAUDE_PID": str(self.team.a),
+            "CLAUDE_PID": str(pid or self.team.a),
             "AGTERM_SESSION_ID": session,
             "PATH": f"{self.stubs}{os.pathsep}{self.env.env['PATH']}",
         }

@@ -1,5 +1,7 @@
 import ast
 import json
+import os
+import signal
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -487,3 +489,136 @@ def test_a_conversation_that_never_ran_on_the_host_is_not_given_a_host_token(wor
     assert done.returncode == 2
     assert "Task one's conversation never ran on devbox, so it is not reopened there" in done.stderr
     assert _launches(worker) == [] and not (worker.stubs / "ssh.stdin").exists()
+
+
+OTHER_LEAD = {"id": "TAB-C", "name": "Other", "surfaces": [{"paneID": "PANE-C"}]}
+WORKER = {"id": WORKER_TAB, "name": "Task one", "parent": LEAD_TAB, "surfaces": [{"paneID": "PANE-B"}]}
+
+
+def _start_other_lead(worker: Worker, spawn_process: SpawnProcess, enroll: bool = True) -> int:
+    """A second running tab, TAB-C, enrolled as lead Quinn; the first tab, TAB-A, as lead Alex."""
+    pid = spawn_process(env={"AGTERM_PANE_ID": "PANE-C", "AGTERM_SESSION_ID": "TAB-C"})
+    worker.env.write_session_file(pid, "conv-c")
+    worker.write_tabs(LEAD, WORKER, OTHER_LEAD)
+    payload = {"session_id": "conv-c", "cwd": str(worker.env.root), "source": "startup"}
+    worker.env.hook("SessionStart", payload, pid, {"AGTERM_PANE_ID": "PANE-C"})
+    worker.env.cli("sessions")
+    if enroll:
+        assert worker.team.enroll("Alex", "old-a").returncode == 0
+        assert worker.team.enroll("Quinn", "other").returncode == 0
+    return pid
+
+
+def _handover_messages(worker: Worker) -> list[str]:
+    conn = worker.env.connect()
+    try:
+        rows = conn.execute(
+            "SELECT m.body FROM messages m JOIN message_recipients r ON r.message_id = m.id "
+            "WHERE r.conversation_id = 'conv-c' AND m.body LIKE '%handed you worker%'"
+        ).fetchall()
+        return [str(r[0]) for r in rows]
+    finally:
+        conn.close()
+
+
+def test_close_to_another_lead_makes_it_the_workers_lead_and_tells_it_once(
+    worker: Worker, spawn_process: SpawnProcess
+) -> None:
+    other = _start_other_lead(worker, spawn_process)
+    conn = worker.env.connect()
+    [earlier] = record_closed_workers(conn, [ClosedRecord(WORKER_CONV, "x")], "Task one", "alex", LEAD_TAB, "alex", 1)
+    mark_reopened(conn, WORKER_CONV, "TAB-OLD", 2)
+    conn.execute("INSERT INTO tab_parents (agterm_session, parent_session) VALUES ('TAB-OLD', ?)", (LEAD_TAB,))
+    # An older tab of the conversation that no record names: a later reopen overwrote its reopened_tab.
+    conn.execute("INSERT INTO surfaces (surface, agterm_session, updated_at) VALUES ('PANE-FIRST', 'TAB-FIRST', 1)")
+    conn.execute(
+        "INSERT INTO instances (instance_id, pid, proc_start_ms, conversation_id, surface, status, first_seen_at, "
+        "last_observed_at, ended_at) VALUES ('1@1', 1, 1, ?, 'PANE-FIRST', 'ended', 1, 1, 1)",
+        (WORKER_CONV,),
+    )
+    conn.execute("INSERT INTO tab_parents (agterm_session, parent_session) VALUES ('TAB-FIRST', ?)", (LEAD_TAB,))
+
+    done = worker.close("Task one", "--to", "Quinn")
+
+    assert done.returncode == 0, done.stderr
+    assert worker.closed_tabs() == [f"session close --target {WORKER_TAB}"]
+    assert "handed to Quinn" in done.stdout
+    rows = conn.execute("SELECT id, parent_handle, parent_lead, parent_session FROM closed_workers").fetchall()
+    assert [list(r)[1:] for r in rows] == [["quinn", "quinn", ""]] * 2
+    closed_id = max(r[0] for r in rows if r[0] != earlier)
+    assert (
+        conn.execute(
+            "SELECT agterm_session FROM tab_parents WHERE agterm_session IN (?, 'TAB-OLD', 'TAB-FIRST')", (WORKER_TAB,)
+        ).fetchall()
+        == []
+    )
+    assert _handover_messages(worker) == [
+        f"Alex handed you worker Task one: run 'guild worker reopen {closed_id}' from your tab; it comes back with "
+        "its whole conversation"
+    ]
+    _end_worker_run(worker)
+
+    old_lead = _reopen(worker, str(closed_id))
+    assert old_lead.returncode == 2 and "only its lead quinn or aide" in old_lead.stderr
+    assert _launches(worker) == []
+
+    worker.write_tabs(LEAD, OTHER_LEAD, {**REOPENED, "parent": "TAB-C"})
+    reopened = worker.guild("worker", "reopen", str(closed_id), session="TAB-C", pid=other)
+    assert reopened.returncode == 0, reopened.stderr
+    [launch] = _launches(worker)
+    assert "--parent TAB-C" in launch and f"--resume {WORKER_CONV}" in launch
+
+
+@pytest.mark.parametrize("target", ["Nobody", "Retired"])
+def test_close_to_an_unknown_or_retired_lead_is_refused_before_closing(
+    worker: Worker, spawn_process: SpawnProcess, target: str
+) -> None:
+    _start_other_lead(worker, spawn_process)
+    if target == "Retired":
+        assert worker.team.guild("lead", "retire", "Quinn").returncode == 0, "retire"
+
+    done = worker.close("Task one", "--to", "Nobody" if target == "Nobody" else "Quinn")
+
+    assert done.returncode == 2
+    assert ("no lead named" if target == "Nobody" else "Quinn is retired") in done.stderr
+    assert worker.closed_tabs() == [] and worker.records() == 0
+    assert _handover_messages(worker) == []
+
+
+def test_only_a_lead_or_the_assistant_hands_a_worker_over(worker: Worker, spawn_process: SpawnProcess) -> None:
+    _start_other_lead(worker, spawn_process, enroll=False)
+    assert worker.team.enroll("Quinn", "other").returncode == 0
+
+    refused = worker.close("Task one", "--to", "Quinn")
+
+    assert refused.returncode == 2 and "only a lead or aide hands a worker" in refused.stderr
+    assert worker.closed_tabs() == [] and worker.records() == 0
+    assert worker.env.cli("handle", "aide", pid=worker.team.a).returncode == 0
+    done = worker.close("Task one", "--to", "Quinn")
+    assert done.returncode == 0, done.stderr
+    assert [m.split(":")[0] for m in _handover_messages(worker)] == ["aide handed you worker Task one"]
+
+
+def test_close_to_a_lead_that_stopped_running_is_refused_before_closing(
+    worker: Worker, spawn_process: SpawnProcess
+) -> None:
+    other = _start_other_lead(worker, spawn_process)
+    os.kill(other, signal.SIGKILL)
+    os.waitpid(other, 0)
+
+    done = worker.close("Task one", "--to", "Quinn")
+
+    assert done.returncode == 2 and "Quinn is not running" in done.stderr, done.stderr
+    assert worker.closed_tabs() == [] and worker.records() == 0
+
+
+def test_close_to_a_lead_whose_tab_is_locked_is_refused_before_closing(
+    worker: Worker, spawn_process: SpawnProcess
+) -> None:
+    _start_other_lead(worker, spawn_process)
+    worker.write_tabs(LEAD, WORKER, {**OTHER_LEAD, "name": "Other \U0001f512"})
+
+    done = worker.close("Task one", "--to", "Quinn")
+
+    assert done.returncode == 2 and "Quinn's tab is locked" in done.stderr, done.stderr
+    assert worker.closed_tabs() == [] and worker.records() == 0

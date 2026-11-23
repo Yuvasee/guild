@@ -405,6 +405,24 @@ def record_closed_workers(
     return ids
 
 
+def hand_closed_workers_to_lead(conn: sqlite3.Connection, conversation_ids: list[str], tab: str, lead: str) -> None:
+    """Every record of the conversations, older ones too, else an old id still reopens it under the old lead."""
+    # A tab's parent link outlives the tab, and is read before parent_lead to find an ended worker's lead.
+    conn.execute("DELETE FROM tab_parents WHERE agterm_session = ?", (tab,))
+    for conversation_id in conversation_ids:
+        conn.execute(
+            "DELETE FROM tab_parents WHERE agterm_session IN (SELECT s.agterm_session FROM surfaces s "
+            "JOIN instances i ON i.surface = s.surface WHERE i.conversation_id = ?1 "
+            "UNION SELECT reopened_tab FROM closed_workers WHERE conversation_id = ?1)",
+            (conversation_id,),
+        )
+        conn.execute(
+            "UPDATE closed_workers SET parent_handle = ?, parent_lead = ?, parent_session = '' "
+            "WHERE conversation_id = ?",
+            (lead, lead, conversation_id),
+        )
+
+
 def forget_closed_workers(conn: sqlite3.Connection, ids: list[int]) -> None:
     conn.executemany("DELETE FROM closed_workers WHERE id = ?", [(i,) for i in ids])
 
