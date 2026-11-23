@@ -425,14 +425,16 @@ def test_stale_and_missing_count_as_not_ok(conn: sqlite3.Connection, tmp_path: P
     config = _job(tmp_path, "ok", NOW - 30 * MIN)
     assert alert_watchers(conn, config, NOW) == [], "stale waits one grace: a Mac waking from sleep reads stale"
     stay_awake(NOW, NOW + 10 * MIN)
-    assert len(alert_watchers(conn, config, NOW + 10 * MIN)) == 1
+    assert alert_watchers(conn, config, NOW + 10 * MIN) == [], "its own 20-min window, not a fixed 10, after a wake"
+    stay_awake(NOW + 10 * MIN, NOW + 20 * MIN)
+    assert len(alert_watchers(conn, config, NOW + 20 * MIN)) == 1
     assert re.match(
         r"nightly sync watch: stale: last run [\d-]+ [\d:]+, over its 20-min limit \(since ", _told(conn)[0][1]
     )
     (tmp_path / "job.json").unlink()
-    assert alert_watchers(conn, config, NOW + 11 * MIN) == [], "stale to missing is the same spell"
+    assert alert_watchers(conn, config, NOW + 21 * MIN) == [], "stale to missing is the same spell"
     missing = replace(config, watchers=(Watcher(path=str(tmp_path / "gone.json"), name="backup"),))
-    alert_watchers(conn, missing, NOW + 12 * MIN)
+    alert_watchers(conn, missing, NOW + 22 * MIN)
     assert _told(conn)[-1][1].startswith("backup watch: missing: no status file (since ")
 
 
@@ -447,7 +449,9 @@ def test_the_stale_grace_counts_only_time_the_mac_is_awake(conn: sqlite3.Connect
     assert alert_watchers(conn, config, NOW) == [], "a brief wake starts the spell"
     assert alert_watchers(conn, config, NOW + 16 * MIN) == [], "after a sleep the grace starts again"
     stay_awake(NOW + 16 * MIN, NOW + 26 * MIN)
-    assert len(alert_watchers(conn, config, NOW + 26 * MIN)) == 1
+    assert alert_watchers(conn, config, NOW + 26 * MIN) == [], "10 min awake is under the watcher's 20-min window"
+    stay_awake(NOW + 26 * MIN, NOW + 36 * MIN)
+    assert len(alert_watchers(conn, config, NOW + 36 * MIN)) == 1
 
 
 def test_a_stale_watcher_that_runs_again_within_the_grace_tells_nobody(

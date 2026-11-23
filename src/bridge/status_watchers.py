@@ -192,8 +192,10 @@ def alert_watchers(conn: sqlite3.Connection, config: Config, now: int) -> list[t
             conn.execute("INSERT OR REPLACE INTO signal_posts (key, message_id, posted_at) VALUES (?, 0, ?)",
                          (f"{spell}\n{expected}", until))  # fmt: skip
         alert_key = f"alert {config.watcher_alert_to}"
-        # After the Mac sleeps, every watcher reads stale until its job's next run: wait one grace of the Mac awake.
-        if state == "stale" and alert_key not in told and now - max(since, awake_since) < STALE_GRACE_MS:
+        # After the Mac sleeps, every watcher reads stale until its job's next run, and launchd does not run a missed
+        # interval on wake: wait one of the watcher's own stale windows of the Mac awake (at least the grace).
+        grace = max(STALE_GRACE_MS, int(cast(int, shown.get("stale_after_min") or 0)) * 60_000)
+        if state == "stale" and alert_key not in told and now - max(since, awake_since) < grace:
             continue
         if alert_key not in told:
             detail = f" {shown['detail']}" if state == "failed" and shown.get("detail") else ""
