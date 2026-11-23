@@ -212,7 +212,7 @@ def test_the_live_read_finds_a_colleagues_comment_posted_since_the_queues_copy(t
         node("ci-helper", "2026-11-02T10:04:00Z", "Coverage 90%", kind="Bot"),
         node("bot", "2026-11-02T10:04:00Z", "Findings: none"),
     ]
-    pr = {
+    pr: dict[str, object] = {
         "isDraft": False, "mergeStateStatus": "CLEAN",
         "commits": {"nodes": [{"commit": {"oid": "a1", "statusCheckRollup": None}}]},
         "reviews": {"nodes": [{k: v for k, v in r.items() if k != "createdAt"} for r in reviews]},

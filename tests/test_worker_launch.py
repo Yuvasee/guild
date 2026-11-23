@@ -260,11 +260,18 @@ def test_a_model_switch_dialog_is_confirmed_once_and_the_switch_is_read_back(mon
     from bridge import cli_guild
     from bridge.config import Config
 
-    screens = iter(["Switch model?\n\u276f 1. Yes, switch to Fable 5.2\n  2. No, go back", "⎿  Set model to Fable 5.2"])
+    screens = ["Switch model?\n\u276f 1. Yes, switch to Fable 5.2\n  2. No, go back", "⎿  Set model to Fable 5.2"]
     typed: list[list[str]] = []
-    monkeypatch.setattr(cli_guild, "read_screen_tail", lambda config, session: next(screens))
-    monkeypatch.setattr(cli_guild, "run_agterm", lambda config, args: typed.append(args) or "")
-    monkeypatch.setattr(cli_guild.time, "sleep", lambda s: None)
+
+    def run_agterm(config: Config, args: list[str]) -> str:
+        typed.append(args)
+        return ""
+
+    monkeypatch.setattr(
+        cli_guild, "read_screen_tail", mock.create_autospec(cli_guild.read_screen_tail, side_effect=screens)
+    )
+    monkeypatch.setattr(cli_guild, "run_agterm", run_agterm)
+    monkeypatch.setattr(cli_guild.time, "sleep", mock.create_autospec(time.sleep))
     assert cli_guild.confirm_model_switch(Config(), "S1") == "switched"
     assert typed == [["session", "type", "--target", "S1", "\r"]]
 
@@ -285,14 +292,26 @@ def test_a_busy_tab_reads_queued_not_stuck(monkeypatch: pytest.MonkeyPatch, tmp_
     from bridge import cli_guild
     from bridge.config import Config
 
-    monkeypatch.setattr(cli_guild, "read_screen_tail", lambda config, session: "busy")
-    monkeypatch.setattr(cli_guild, "type_when_idle", lambda *a, **k: "stuck")
-    monkeypatch.setattr(cli_guild, "confirm_model_switch", lambda *a, **k: None)
-    monkeypatch.setattr(cli_guild, "is_surface_locked", lambda *a: False)
+    monkeypatch.setattr(
+        cli_guild, "read_screen_tail", mock.create_autospec(cli_guild.read_screen_tail, return_value="busy")
+    )
+    monkeypatch.setattr(
+        cli_guild, "type_when_idle", mock.create_autospec(cli_guild.type_when_idle, return_value="stuck")
+    )
+    monkeypatch.setattr(
+        cli_guild, "confirm_model_switch", mock.create_autospec(cli_guild.confirm_model_switch, return_value=None)
+    )
+    monkeypatch.setattr(
+        cli_guild, "is_surface_locked", mock.create_autospec(cli_guild.is_surface_locked, return_value=False)
+    )
     conn: Any = mock.Mock()
     conn.execute.return_value.fetchone.return_value = {"surface": "P1", "agterm_session": "S1"}
     args: Any = mock.Mock(model="claude-opus-5-5", names=["alex"], all=False)
     printed: list[str] = []
-    monkeypatch.setattr("builtins.print", lambda *a, **k: printed.append(" ".join(map(str, a))))
+
+    def capture_print(*a: object, **k: object) -> None:
+        printed.append(" ".join(map(str, a)))
+
+    monkeypatch.setattr("builtins.print", capture_print)
     assert cli_guild.cmd_lead_model(args, conn, Config()) == 0
     assert printed[0].startswith("alex: queued")

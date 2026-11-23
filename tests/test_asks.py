@@ -421,7 +421,7 @@ def test_the_panel_lists_only_what_needs_attention_oldest_first_capped(conn: sql
     stale = add_ask(conn, "alex", "aide", "No update today", "tab", [], 6 * DAY).id
     note_ask(conn, stale, LEAD, "Export fix in review", 10 * DAY - 5 * HOUR)
 
-    def panel(config: Config) -> tuple[list[tuple[int, str]], object]:
+    def panel(config: Config) -> tuple[list[tuple[object, object]], object]:
         page = map_db_to_asks_page(conn, config, 10 * DAY)
         return [(a["id"], a["why"]) for a in cast(list[dict[str, object]], page["attention"])], page["more"]
 

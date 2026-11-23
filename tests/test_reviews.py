@@ -2091,7 +2091,7 @@ def test_the_review_bot_clears_a_head_it_reviewed_without_asking_for_changes() -
 
 def test_the_guards_live_read_counts_the_review_bots_approval_only_at_the_head() -> None:
     def answer(review_oid: str) -> str:
-        pr = {
+        pr: dict[str, object] = {
             "isDraft": False, "mergeStateStatus": "CLEAN",
             "commits": {"nodes": [{"commit": {"oid": "b2", "statusCheckRollup": {"state": "SUCCESS"}}}]},
             "reviews": {"nodes": [
@@ -2706,7 +2706,7 @@ def test_a_stack_bottom_whose_body_lists_the_stack_does_not_wait_for_its_childre
     bottom = make_pr(named_prs=("Org/app#8", "Org/app#9"), must_merge=("Org/app#9",))
     middle = make_pr(ref="pr:Org/app#8", number=8, stack_parent=REF, named_prs=("Org/app#7", "Org/app#9"))
     top = make_pr(ref="pr:Org/app#9", number=9, stack_parent="pr:Org/app#8", named_prs=("Org/app#7", "Org/app#8"))
-    states = dict.fromkeys(("Org/app#7", "Org/app#8", "Org/app#9"), "OPEN")
+    states: dict[str, str | None] = dict.fromkeys(("Org/app#7", "Org/app#8", "Org/app#9"), "OPEN")
     deps = map_prs_to_dependencies([bottom, middle, top], states)
     assert deps[REF] == Dependencies()
     assert deps["pr:Org/app#8"].blockers == ("stacked on Org/app#7, which merges first",)

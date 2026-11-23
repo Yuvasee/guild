@@ -1,5 +1,6 @@
 import json
 import time
+from typing import cast
 
 from conftest import BridgeEnv, SpawnProcess, http_request, wait_for
 
@@ -37,6 +38,10 @@ def state(base: str) -> dict[str, object]:
     return json.loads(http_request(base + "/api/state"))
 
 
+def items(base: str) -> list[dict[str, object]]:
+    return cast(list[dict[str, object]], state(base)["items"])
+
+
 def test_decision_answer_is_typed_into_the_idle_tab(
     bridge_env: BridgeEnv, spawn_process: SpawnProcess, dashboard: str
 ) -> None:
@@ -50,7 +55,7 @@ def test_decision_answer_is_typed_into_the_idle_tab(
     rejected = bridge_env.cli("post", "decision", "x", "--link", "file:///etc/passwd", pid=pids["a"])
     assert rejected.returncode != 0 and "not a web link" in rejected.stderr
 
-    [item] = state(dashboard)["items"]  # type: ignore[misc]
+    [item] = items(dashboard)
     assert (item["kind"], item["options"], item["links"]) == (
         "decision",
         ["Ship", "Wait"],
@@ -63,7 +68,7 @@ def test_decision_answer_is_typed_into_the_idle_tab(
     assert wait_for(lambda: bridge_env.stub_log.exists() and typed in bridge_env.stub_log.read_text(), 15)
     assert "--target TAB-A --pane-id PANE-A" in bridge_env.stub_log.read_text()
     assert wait_for(lambda: prompt(bridge_env, pids["a"], "conv-a", "next", True) == "", 5), "typed means delivered"
-    [answered] = state(dashboard)["items"]  # type: ignore[misc]
+    [answered] = items(dashboard)
     assert answered["answer"] == "Ship" and answered["resolved_at"]
 
 
@@ -177,7 +182,7 @@ def guild_needs(base: str) -> list[dict[str, object]]:
 
 
 def answer_on_page(base: str, item_id: object, answer: str, ask: bool = False) -> str:
-    data = {"answer": answer, "ask": ask}
+    data: dict[str, object] = {"answer": answer, "ask": ask}
     sent = json.loads(http_request(base + f"/api/items/{item_id}/answer", post=True, data=data))
     return str(sent["detail"])
 
@@ -187,12 +192,12 @@ def test_free_text_on_the_card_answers_and_closes_it_even_with_a_question_mark(
 ) -> None:
     pids = start(bridge_env, spawn_process, agterm_tabs=False)
     bridge_env.cli("post", "decision", "Ship v2?", "--option", "Ship", "--option", "Wait", pid=pids["a"])
-    [item] = state(dashboard)["items"]  # type: ignore[misc]
+    [item] = items(dashboard)
 
     assert answer_on_page(dashboard, item["id"], "Ship, but why not Friday? Fine either way.") == "sent"
     context = prompt(bridge_env, pids["a"], "conv-a", "next")
     assert 'Answer to your decision Q#1 "Ship v2?": Ship, but why not Friday? Fine either way.' in context
-    [answered] = state(dashboard)["items"]  # type: ignore[misc]
+    [answered] = items(dashboard)
     assert answered["answer"] and answered["resolved_at"]
 
 
@@ -201,7 +206,7 @@ def test_ask_back_on_the_card_reaches_the_session_and_keeps_the_card_open(
 ) -> None:
     pids = start(bridge_env, spawn_process, agterm_tabs=False)
     bridge_env.cli("post", "decision", "Ship v2?", "--option", "Ship", "--option", "Wait", pid=pids["a"])
-    [item] = state(dashboard)["items"]  # type: ignore[misc]
+    [item] = items(dashboard)
 
     asked = answer_on_page(dashboard, item["id"], "Why does it happen? Keep it simple.", ask=True)
     context = prompt(bridge_env, pids["a"], "conv-a", "next")
@@ -211,7 +216,7 @@ def test_ask_back_on_the_card_reaches_the_session_and_keeps_the_card_open(
     assert 'Question on your decision Q#1 "Ship v2?"' in context
     assert "Why does it happen? Keep it simple." in context
     assert (card["id"], card["question_ref"], "delivering" in card) == (1, "Q#1", False)
-    [still_open] = state(dashboard)["items"]  # type: ignore[misc]
+    [still_open] = items(dashboard)
     assert still_open["answer"] is None and still_open["resolved_at"] is None
 
     [thread] = [p for p in json.loads(http_request(dashboard + "/api/guild"))["room"] if p["kind"] == "post"]
@@ -223,7 +228,7 @@ def test_ask_back_on_the_card_reaches_the_session_and_keeps_the_card_open(
 
     assert answer_on_page(dashboard, item["id"], "Ship") == "sent"
     assert 'Answer to your decision Q#1 "Ship v2?": Ship' in prompt(bridge_env, pids["a"], "conv-a", "again")
-    [answered] = state(dashboard)["items"]  # type: ignore[misc]
+    [answered] = items(dashboard)
     assert answered["answer"] == "Ship" and answered["resolved_at"]
 
 
@@ -234,5 +239,5 @@ def test_an_option_with_a_question_mark_still_answers(
     bridge_env.cli("post", "blocked", "Token?", "--option", "Use the staging token?", pid=pids["a"])
 
     assert answer_on_page(dashboard, 1, "Use the staging token?") == "sent"
-    [answered] = state(dashboard)["items"]  # type: ignore[misc]
+    [answered] = items(dashboard)
     assert answered["answer"] == "Use the staging token?" and answered["resolved_at"]

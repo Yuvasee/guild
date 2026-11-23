@@ -275,7 +275,7 @@ def test_a_merge_of_the_base_counts_nothing_against_the_doc() -> None:
     diff = map_compare_to_doc_diff(compare(own, from_base, ahead_by=13), {"app/svc.py"}, 1)
     assert diff == DocDiff(1, 1, False), "the base's file and commits are not the PR's change"
     assert map_compare_to_doc_diff(compare(from_base, ahead_by=12), {"app/svc.py"}, 0) == DocDiff(0, 0, True)
-    commits = [
+    commits: list[dict[str, object]] = [
         {"sha": "d0c", "parents": [{}]},
         {"sha": "a11", "parents": [{}]},
         {"sha": "m1", "parents": [{}, {}]},

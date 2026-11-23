@@ -352,7 +352,7 @@ MIN = 60_000
 @pytest.fixture
 def conn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[sqlite3.Connection]:
     monkeypatch.setenv("BRIDGE_STATE_DIR", str(tmp_path))
-    status_watchers._awake.clear()
+    monkeypatch.setattr(status_watchers, "_awake", {})
     c = connect(tmp_path / "bridge.db")
     add_session(c, "tooling", "TAB-T", "idle", 0, pid=901)
     add_session(c, "aide", "TAB-A", "idle", 0, pid=902)
@@ -363,7 +363,13 @@ def conn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[sqlite3.C
 def _job(tmp_path: Path, status: str, at: int, summary: str = "3 checks", detail: str = "", **extra: object) -> Config:
     path = tmp_path / "job.json"
     run = datetime.fromtimestamp(at / 1000, UTC).isoformat()
-    fields = {"name": "nightly sync", "status": status, "last_run_utc": run, "summary": summary, "detail": detail}
+    fields: dict[str, object] = {
+        "name": "nightly sync",
+        "status": status,
+        "last_run_utc": run,
+        "summary": summary,
+        "detail": detail,
+    }
     fields.update(extra)
     path.write_text(json.dumps(fields))
     return replace(ALERT_CONFIG, watchers=(Watcher(path=str(path)),))

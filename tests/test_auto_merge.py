@@ -8,6 +8,7 @@ import pytest
 from test_reviews import CONFIG, REF, add_lead, add_session, make_pr
 
 from bridge.auto_merge import SANDBOX_BLOCK, map_db_to_dry_run, map_row_to_auto_merge_block, run_auto_merge
+from bridge.config import Config
 from bridge.db import connect, transaction
 from bridge.review_github import GitHubError, LiveMergeFacts
 from bridge.reviews import map_prs_to_dependencies, store_dependencies, store_open_prs
@@ -258,11 +259,11 @@ def test_siblings_merge_one_per_round_only_once_all_are_ready(tmp_path: Path) ->
     assert run(waiting).merges == []
 
     conn = setup_siblings(tmp_path / "ready", sibling(7, ("Org/app#8",)), sibling(8, ("Org/app#7",)))
-    not_approved_now = mock.patch(
-        "bridge.auto_merge.read_live_merge_facts", side_effect=lambda config, repo, number, timeout: (
-            replace(LIVE, approvers=()) if number == 8 else LIVE
-        ),
-    )  # fmt: skip
+
+    def read_live_merge_facts(config: Config, repo: str, number: int, timeout_s: float) -> LiveMergeFacts:
+        return replace(LIVE, approvers=()) if number == 8 else LIVE
+
+    not_approved_now = mock.patch("bridge.auto_merge.read_live_merge_facts", side_effect=read_live_merge_facts)
     with not_approved_now, mock.patch("bridge.auto_merge.run_gh", side_effect=(gh := Gh())):
         run_auto_merge(conn, ON, 1000)
     assert gh.merges == [], "a sibling is read live too"

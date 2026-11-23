@@ -135,7 +135,10 @@ def test_tables_round_only_as_a_whole_and_every_colour_has_a_dark_value() -> Non
     rounded = [s for s, body in rules if re.search(r"\b(td|th)\b", s) and re.search(r"radius:(?!0)", body)]
     assert not rounded, "no cell is rounded"
     light, *darks = re.findall(r"\{(\s*--ds-fg:[^}]*)\}", css)
-    names = lambda block: set(re.findall(r"(--ds-[\w-]+):", block))  # noqa: E731
+
+    def names(block: str) -> set[str]:
+        return set(re.findall(r"(--ds-[\w-]+):", block))
+
     assert len(darks) == 2
     colours = {n for n in names(light) if n not in ("--ds-serif", "--ds-sans", "--ds-sticky-top")}
     assert all(colours <= names(dark) for dark in darks), colours - names(darks[0])

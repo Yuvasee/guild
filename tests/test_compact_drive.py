@@ -47,11 +47,15 @@ def _drive(
             phase=phase, instance_id=instance, conversation_id="conv-a", keep="shown", reopened=False,
             generic_keep=False, claim=False, by_screen=by_screen,
         )  # fmt: skip
+
+        def spawn_typed_delivery(message_id: int, recipients: list[Recipient]) -> None:
+            spawned.extend((message_id, r) for r in recipients)
+
         with (
             mock.patch("bridge.tabinput.run_agterm", fake.run),
-            mock.patch("bridge.watcher.run_agterm", lambda *_: tree_text),
-            mock.patch("bridge.cli.is_tab_selected", lambda *_: False),
-            mock.patch("bridge.cli.spawn_typed_delivery", lambda m, rs: spawned.extend((m, r) for r in rs)),
+            mock.patch("bridge.watcher.run_agterm", autospec=True, return_value=tree_text),
+            mock.patch("bridge.cli.is_tab_selected", autospec=True, return_value=False),
+            mock.patch("bridge.cli.spawn_typed_delivery", spawn_typed_delivery),
             mock.patch("bridge.cli.COMPACT_WAIT_S", 6),
             mock.patch("bridge.tabinput.is_claude_vim", lambda: vim),
         ):

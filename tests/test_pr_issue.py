@@ -1,10 +1,11 @@
 import argparse
 import io
 import json
+import sqlite3
 import subprocess
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from test_reviews import CONFIG as REVIEW_CONFIG
@@ -17,7 +18,7 @@ from bridge.gbridge import may_need_guard
 from bridge.gitinfo import RepoFacts
 from bridge.hooks import handle_pre_tool_use
 from bridge.install import convert_event_to_command, list_guard_globs
-from bridge.issue_sync import LinearError
+from bridge.issue_sync import LinearApi, LinearError
 from bridge.linear_cli import (
     LinearCliError,
     add_linear_commands,
@@ -132,8 +133,13 @@ def test_a_body_file_is_read(tmp_path: Path) -> None:
     rewritten = f"printf 'Fixes ACME-12' > {bare}; gh pr create -t Export -F {bare}"
     assert refusal(rewritten) is None, "a body file the command may write first is not judged"
     on_host = find_missing_issue_refusal(
-        None, CONFIG, f"gh pr create -t Export -F {bare}", "/w/app", read_repo, read_files=False
-    )  # type: ignore[arg-type]
+        cast(sqlite3.Connection, None),
+        CONFIG,
+        f"gh pr create -t Export -F {bare}",
+        "/w/app",
+        read_repo,
+        read_files=False,
+    )
     assert on_host is None, "a file on another machine is not read here"
 
 
@@ -291,9 +297,7 @@ def test_create_finds_team_and_project_and_keeps_the_description_unprefixed(monk
     )
     monkeypatch.setattr("sys.stdin", io.StringIO("Export fails on empty rows.\n"))
     lines = create_issue(
-        api,
-        args(team="acme", title="Export fails", project="Exports", description="-"),
-        CONFIG,  # type: ignore[arg-type]
+        cast(LinearApi, api), args(team="acme", title="Export fails", project="Exports", description="-"), CONFIG
     )
     assert lines == ["ACME-13  https://t/13"]
     assert api.calls[1][1] == {"name": "Exports", "team": "ACME"}

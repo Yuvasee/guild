@@ -7,7 +7,7 @@ import pytest
 
 from bridge import tabinput
 from bridge.config import Config
-from bridge.deploycheck import CAT_READY, _shows_answer, check_typing
+from bridge.deploycheck import CAT_READY, _shows_answer, check_typing  # pyright: ignore[reportPrivateUsage]
 from bridge.errlog import log_slow
 from bridge.outage import AGTERM_SILENT_NOTICE_AFTER_MS, OutageNotices
 from bridge.wake import WakeWatch

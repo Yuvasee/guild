@@ -354,7 +354,7 @@ def test_the_live_read_is_short_and_counts_only_owners_unresolved_threads() -> N
         return {"isResolved": resolved, "comments": {"nodes": [{"author": {"login": login}}]}}
 
     review = {"state": "APPROVED", "author": {"__typename": "User", "login": "mira"}}
-    answer = {"data": {"repository": {"pullRequest": {
+    answer: dict[str, object] = {"data": {"repository": {"pullRequest": {
         "isDraft": False, "mergeStateStatus": "CLEAN",
         "commits": {"nodes": [{"commit": {"oid": "a1", "statusCheckRollup": None}}]},
         "reviews": {"nodes": [review]},

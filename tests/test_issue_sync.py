@@ -116,9 +116,7 @@ def test_an_open_ready_pr_moves_it_to_in_review_or_in_progress_where_the_team_ha
 
 
 def test_a_draft_pr_or_a_live_session_on_its_branch_moves_it_to_in_progress() -> None:
-    assert target_of(decide_move(issue("Backlog"), Evidence(prs=[pr_evidence("OPEN", draft=True)]), False)) == (
-        "In Progress"
-    )
+    assert target_of(decide_move(issue("Backlog"), Evidence(prs=[pr_evidence("OPEN", draft=True)]))) == ("In Progress")
     on_branch = Evidence(sessions=["a live session on branch dev/proj-1"])
     assert target_of(decide_move(issue("Blocked"), on_branch)) == "In Progress"
     assert target_of(decide_move(issue("Todo"), on_branch)) == "In Progress"
@@ -136,14 +134,17 @@ def test_an_open_pr_next_to_a_merged_one_keeps_the_issue_out_of_done() -> None:
 
 
 def test_it_never_moves_backwards() -> None:
-    assert decide_move(issue("In Review"), Evidence(prs=[pr_evidence("OPEN", draft=True)]), False) is None
-    assert decide_move(issue("In Progress"), Evidence(sessions=["w"]), False) is None
-    assert decide_move(issue("In Review"), Evidence(prs=[pr_evidence("OPEN")]), False) is None
+    assert decide_move(issue("In Review"), Evidence(prs=[pr_evidence("OPEN", draft=True)])) is None
+    assert decide_move(issue("In Progress"), Evidence(sessions=["w"])) is None
+    assert decide_move(issue("In Review"), Evidence(prs=[pr_evidence("OPEN")])) is None
 
 
 @pytest.mark.parametrize("name", ["Done", "Canceled", "Duplicate"])
 def test_done_canceled_and_duplicate_issues_are_never_moved(name: str) -> None:
-    assert decide_move(issue(name), Evidence(prs=[pr_evidence("OPEN")], labels=["w"], sessions=["s"]), True) is None
+    assert (
+        decide_move(issue(name), Evidence(prs=[pr_evidence("OPEN")], labels=["w"], sessions=["s"]), "In Progress")
+        is None
+    )
 
 
 def test_merged_prs_that_are_only_part_of_it_do_not_make_it_done() -> None:
@@ -157,7 +158,7 @@ def test_a_pr_merged_into_another_branch_does_not_make_it_done() -> None:
 
 
 def test_only_closed_unmerged_prs_move_nothing() -> None:
-    assert decide_move(issue("Backlog"), Evidence(prs=[pr_evidence("CLOSED")]), False) is None
+    assert decide_move(issue("Backlog"), Evidence(prs=[pr_evidence("CLOSED")])) is None
 
 
 def test_a_work_label_or_a_live_branch_session_holds_done_back() -> None:
@@ -185,7 +186,7 @@ def test_an_issue_set_back_by_hand_after_a_sync_move_is_left_alone() -> None:
 
 
 def test_a_state_with_no_place_in_the_order_is_skipped() -> None:
-    skipped = decide_move(issue("QA"), Evidence(prs=[pr_evidence("MERGED")]), False)
+    skipped = decide_move(issue("QA"), Evidence(prs=[pr_evidence("MERGED")]))
     assert isinstance(skipped, Skip)
 
 
