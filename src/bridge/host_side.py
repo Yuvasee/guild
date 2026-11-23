@@ -445,6 +445,8 @@ export GBRIDGE_DIR={q(directory)}
 cd {q(cwd)} || exit 1
 # The tab writes the port once attached: from then on the tunnel is up and every hook reaches the Mac.
 for _ in $(seq 1 {PORT_WAIT_S}); do [ -s "$GBRIDGE_DIR/port" ] && break; sleep 1; done
+# The host's own environment for its workers, such as which Claude account to use; read at each start.
+[ -r "$HOME/.config/gbridge/env.sh" ] && . "$HOME/.config/gbridge/env.sh"
 exec claude {claude_flags} --settings {q(directory + "/settings.json")} {start}
 """
 

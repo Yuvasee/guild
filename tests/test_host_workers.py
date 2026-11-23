@@ -174,6 +174,7 @@ def test_run_script_waits_for_the_tunnel_and_sets_path() -> None:
     assert "cd '/h/it'\"'\"'s' || exit 1" in script
     assert '[ -s "$GBRIDGE_DIR/port" ] && break' in script
     assert ".nvm/versions/node/*/bin" in script
+    assert script.index('. "$HOME/.config/gbridge/env.sh"') < script.index("exec claude")
     assert script.rstrip().endswith("\"$(cat '/h/d/first-prompt')\"")
 
 
