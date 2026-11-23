@@ -395,3 +395,16 @@ def test_names_in_code_never_break_inside_and_text_reads_large() -> None:
     code = ":not(pre)>code{font-size:.88em!important;white-space:nowrap!important;overflow-wrap:normal!important;"
     assert code in css
     assert "body{font-size:18px!important}" in css
+
+
+def test_a_served_page_is_told_the_kept_theme_before_the_shared_style() -> None:
+    from bridge.doc_nav import DOC_STYLE_ID, convert_page_to_themed
+
+    page = f'<body><p>x</p><style id="{DOC_STYLE_ID}">a{{}}</style>'.encode()
+
+    themed = convert_page_to_themed(page, "dark")
+
+    assert themed.index(b'window.bridgeTheme="dark"') < themed.index(DOC_STYLE_ID.encode())
+    assert convert_page_to_themed(page, None) == page
+    assert convert_page_to_themed(page, '"><script>') == page
+    assert convert_page_to_themed(b"<body>no shared style</body>", "dark") == b"<body>no shared style</body>"

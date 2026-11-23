@@ -123,3 +123,32 @@ def test_merge_ok_needs_a_trusted_request_and_the_shown_head(bridge_env: BridgeE
     assert sent == {"ok": True, "detail": "worker"}
     rows = conn.execute("SELECT ref, head_oid, sent_to FROM review_merge_oks").fetchall()
     assert [tuple(row) for row in rows] == [(REF, "a1", "worker")]
+
+
+def post_theme(url: str, body: bytes, headers: dict[str, str]) -> int:
+    import urllib.error
+    import urllib.request
+
+    request = urllib.request.Request(url + "/theme", data=body, method="POST", headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return response.status
+    except urllib.error.HTTPError as error:
+        return error.code
+
+
+def test_the_theme_choice_is_kept_from_a_sandboxed_doc_and_nowhere_else(bridge_env: BridgeEnv, dashboard: str) -> None:
+    from pathlib import Path
+
+    kept = Path(bridge_env.env["BRIDGE_STATE_DIR"]) / "theme"
+    port = dashboard.rsplit(":", 1)[1]
+
+    assert post_theme(dashboard, b"dark", {"Origin": "http://evil.example"}) == 403
+    assert post_theme(dashboard, b"dark", {"Host": f"evil.example:{port}"}) == 403
+    assert post_theme(dashboard, b"<b>", {"Origin": "null"}) == 400
+    assert not kept.exists()
+
+    assert post_theme(dashboard, b"dark", {"Origin": "null"}) == 204
+    assert kept.read_text() == "dark\n"
+    assert post_theme(dashboard, b"auto", {"Origin": dashboard}) == 204
+    assert kept.read_text() == "auto\n"

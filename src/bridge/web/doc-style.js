@@ -17,8 +17,9 @@
   var SCHEME = /\(\s*prefers-color-scheme\s*:\s*(dark|light)\s*\)/gi;
   var originals = new Map();
   function storedTheme() {
-    var v;
-    try { v = localStorage.getItem(THEME_KEY); } catch (e) { /* private window: auto */ }
+    // Bridge keeps the choice and says it here: a review doc is sandboxed and has no storage of its own.
+    var v = window.bridgeTheme;
+    if (!v) try { v = localStorage.getItem(THEME_KEY); } catch (e) { /* private window: auto */ }
     return v === "light" || v === "dark" ? v : "auto";
   }
   function forceMedia(media, forced) {
@@ -81,7 +82,10 @@
       b.setAttribute("aria-label", t[2]);
       b.setAttribute("data-theme-choice", t[0]);
       b.addEventListener("click", function () {
-        try { localStorage.setItem(THEME_KEY, t[0]); } catch (e) { /* kept for this page only */ }
+        try { localStorage.setItem(THEME_KEY, t[0]); } catch (e) { /* sandboxed: bridge keeps it */ }
+        if (window.fetch && location.protocol.indexOf("http") === 0) {
+          fetch("/theme", { method: "POST", mode: "no-cors", credentials: "omit", body: t[0] }).catch(function () {});
+        }
         switchTheme(t[0]);
       });
       bar.appendChild(b);
@@ -354,7 +358,9 @@
   // Stylesheets that arrived after the first pass get the chosen theme too.
   window.addEventListener("load", function () { applyTheme(chosen); theme(); stickyTop(); });
   window.addEventListener("resize", function () { stickyTop(); wideTables(); });
-  window.addEventListener("storage", function (e) { if (e.key === THEME_KEY) switchTheme(storedTheme()); });
+  window.addEventListener("storage", function (e) {
+    if (e.key === THEME_KEY) switchTheme(e.newValue === "light" || e.newValue === "dark" ? e.newValue : "auto");
+  });
   var dark = window.matchMedia && matchMedia("(prefers-color-scheme: dark)");
   if (dark && dark.addEventListener) dark.addEventListener("change", function () { setTimeout(theme, 0); });
 })();

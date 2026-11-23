@@ -352,6 +352,18 @@ def convert_served_page_to_styled(page: bytes) -> bytes:
     return page if styled is None else styled.encode("utf-8")
 
 
+THEMES = ("light", "dark", "auto")
+
+
+def convert_page_to_themed(page: bytes, theme: str | None) -> bytes:
+    """A served doc or page told the reader's theme choice, ahead of the shared style that applies it: a review doc is
+    sandboxed and cannot keep the choice in the browser itself."""
+    at = page.find(f'<style id="{DOC_STYLE_ID}">'.encode())
+    if theme not in THEMES or at < 0:
+        return page
+    return page[:at] + f'<script>window.bridgeTheme="{theme}";</script>'.encode() + page[at:]
+
+
 @cache
 def build_doc_style() -> str:
     """The shared doc style: colours code by language and gives links, paths, names and evidence words their roles,

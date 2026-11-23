@@ -64,11 +64,11 @@ from bridge.colleague_comments import (
     settle_unfinished_choices,
 )
 from bridge.compaction import give_up_driving, map_screen_to_draft
-from bridge.config import Config, db_path
+from bridge.config import Config, db_path, state_dir
 from bridge.context_watch import CONTEXT_EVERY_S, list_context_tabs, read_pane_screen, record_context_screens
 from bridge.db import connect, now_ms, transaction
 from bridge.disk import DISK_EVERY_S, DiskReading, map_reading_to_dict, measure_disk, read_disk, send_disk_notice
-from bridge.doc_nav import convert_served_page_to_styled
+from bridge.doc_nav import THEMES, convert_page_to_themed, convert_served_page_to_styled
 from bridge.dream import ALL, map_dreamers_to_page, resolve_dreamers
 from bridge.drivers import Link, load_drivers, scan_transcripts
 from bridge.enrich import collect_watched_refs, enrich_due, load_enrichment, provider_freshness
@@ -331,7 +331,12 @@ class DashboardState:
         if html_file is None:
             self._tell_owner_of_sourceless_page(page)
             return 404, None, _HTML, map_sourceless_page_to_html(page).encode()
-        return 200, None, _HTML, convert_served_page_to_styled(html_file.read_bytes())
+        return (
+            200,
+            None,
+            _HTML,
+            convert_page_to_themed(convert_served_page_to_styled(html_file.read_bytes()), self.read_theme()),
+        )
 
     def _tell_owner_of_sourceless_page(self, page: Page) -> None:
         """Whoever opened it saw nothing, so its owner hears so, once per page per half hour."""
@@ -975,7 +980,18 @@ class DashboardState:
 
     def read_review_doc(self, repo: str, number: int) -> bytes | None:
         with self._connection() as conn:
-            return map_doc_to_served(conn, repo, number)
+            doc = map_doc_to_served(conn, repo, number)
+        return None if doc is None else convert_page_to_themed(doc, self.read_theme())
+
+    def read_theme(self) -> str | None:
+        try:
+            theme = (state_dir() / "theme").read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+        return theme if theme in THEMES else None
+
+    def write_theme(self, theme: str) -> None:
+        (state_dir() / "theme").write_text(theme + "\n", encoding="utf-8")
 
     def publish_review(
         self, ref: str, action: str, direct: bool = False, mention: tuple[str, ...] = (), comment: str = ""
@@ -1482,6 +1498,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send(404, "text/plain", b"not found")
 
     def do_POST(self) -> None:
+        if self.path == "/theme":
+            self._set_theme()
+            return
         # The custom header forces a CORS preflight, so other web pages cannot trigger actions.
         if not self._trusted_request() or self.headers.get("X-Bridge") != "1":
             self._send(403, "text/plain", b"forbidden")
@@ -1565,6 +1584,29 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except ValueError:
             return None
         return cast(dict[str, object], data) if isinstance(data, dict) else None
+
+    def _set_theme(self) -> None:
+        """The reader's light / dark / auto choice. A review doc sends it from its sandbox, whose origin is "null", as a
+        plain no-cors POST; the worst another page can do with it is change the theme."""
+        port = int(self.server.server_address[1])  # pyright: ignore[reportUnknownArgumentType, reportIndexIssue]
+        ours = {f"127.0.0.1:{port}", f"localhost:{port}"}
+        origin = self.headers.get("Origin")
+        length = self.headers.get("Content-Length") or ""
+        if self.headers.get("Host") not in ours or not (
+            origin in (None, "null") or origin.removeprefix("http://") in ours
+        ):
+            self._send(403, "text/plain", b"forbidden")
+            return
+        theme = (
+            self.rfile.read(int(length)).decode("utf-8", "replace").strip()
+            if re.fullmatch(r"[0-9]{1,2}", length)
+            else ""
+        )
+        if theme not in THEMES:
+            self._send(400, "text/plain", b"expected light, dark or auto")
+            return
+        self.state.write_theme(theme)
+        self._send(204, "text/plain", b"")
 
     def _trusted_request(self) -> bool:
         """Rejects DNS rebinding: only our own host names, and same-origin when a browser sends Origin."""
