@@ -1,4 +1,5 @@
 import re
+from collections.abc import Iterator
 
 from bridge.review_marks import MD_HIDDEN_RE
 
@@ -10,7 +11,8 @@ _PR_RE = re.compile(
 _IN_SENTENCE = r"(?:[^.!?\n]|[.!?](?=\S))"
 _TRIGGER_RE = re.compile(
     r"\bonly\s+after\b"
-    r"|(?P<verb>\b(?:merge|merges|merging|ship|ships|shipping|land|lands|landing|release|releasing|deploy|deploying)\b"
+    r"|(?P<verb>\b(?:merge|merges|merging|ship|ships|shipping|land|lands|landing|release|releasing|deploy|deploys|"
+    r"deploying)\b"
     rf"{_IN_SENTENCE}{{0,80}}?\b(?:after|until)\b)"
     r"|\bmerge\s+\S+\s+first\b"
     rf"|\bafter\b(?={_IN_SENTENCE}{{0,120}}(?:\b(?:is|are|gets?|has\s+been|have\s+been)\s+"
@@ -19,11 +21,20 @@ _TRIGGER_RE = re.compile(
     rf"|\b(?:needs|requires)\b(?={_IN_SENTENCE}{{0,120}}\b(?:merged|released|deployed|landed)\b)",
     re.I,
 )
+# Before 'deploy … after', only this PR or nothing: 'the next deploy after #12 merges' times someone else's deploy.
+# \W, not [\W_]: an underscore both ways backtracks quadratically, and emphasis is gone before it is matched.
+_DEPLOY_SUBJECT_RE = re.compile(
+    r"^\W*(?:\d+[.)]\W*)?(?:\w+:\W*)?(?:(?:please|only|then|this|it|PR|change|do|not|don['\u2019]t|never|will|should|"
+    r"must|can)\b\W*)*$",
+    re.I,
+)
+_DEPLOY_SUBJECT_MAX = 80
 _NEGATED_RE = re.compile(r"(?:\bno\s+longer|\bnot|n't|\bnever)\s+(?:\w+\s+)?$", re.I)
 _CLAUSE_END_RE = re.compile(r";|\b(?:related|see|cf|also|follow(?:s|-up)|part\s+of|refs?)\b", re.I)
 _MD_LINK_RE = re.compile(r"\[[^\]\n]*\]\((https?://github\.com/[^)\s]+)\)")
 _BACK_REF_RE = re.compile(r"\b(?:that|the\s+code|the\s+above)\s+PR\b|\bthe\s+PR\s+above\b", re.I)
-_SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+|\n")
+_SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+")
+_HEADING_RE = re.compile(r"^\s*#+\s")
 _PARAGRAPH_END_RE = re.compile(r"\n\s*\n")
 _RELATED_LINE_RE = re.compile(r"^[\s>*+-]*(?:\*\*|__)?related(?:\*\*|__)?\s*:(?P<rest>.*)$", re.I | re.M)
 # A reason must follow, and a line that also says stacked or not independent is undecided: it keeps the wait.
@@ -31,33 +42,78 @@ _INDEPENDENT_RE = re.compile(r"\bindependent\s+because\s+[^\s.…]", re.I)
 _UNDECIDED_RE = re.compile(r"\bstacked\b|\bnot\s+independent\b", re.I)
 
 
-def map_markdown_to_dependency(body: str, repo: str, number: int) -> str | None:
-    """The one PR its body says it merges only after, as owner/repo#N. A sentence that says so must name that PR in
-    the same clause after the words that say so, in the list its colon opens, or point back to the only PR its
-    paragraph names ('that PR'). A bare mention, a PR named before the words ('#12 depends on this'), a negation
-    ('no longer blocked by') or more than one PR give none."""
-    found: set[str] = set()
+def map_markdown_to_dependencies(body: str, repo: str, number: int) -> tuple[tuple[str, str], ...]:
+    """Each PR its body says it merges only after, as owner/repo#N, with the first sentence that says so, cut to show.
+    A sentence that says so must name that PR in the same clause after the words that say so, in the list its colon
+    opens, or point back to the only PR its paragraph names ('that PR'). A bare mention, a PR named before the words
+    ('#12 depends on this'), a negation ('no longer blocked by') or a deploy of something else ('the next deploy after
+    #12 merges') give none."""
+    found: dict[str, str] = {}
     text = _MD_LINK_RE.sub(r"\1", MD_HIDDEN_RE.sub("", body))
     full = _map_text_to_full_refs(text, repo)
     for paragraph in _PARAGRAPH_END_RE.split(text):
         in_paragraph = _find_prs(paragraph, repo, number, full)
-        sentences = _SENTENCE_END_RE.split(paragraph)
+        sentences = _map_paragraph_to_sentences(paragraph)
         for index, sentence in enumerate(sentences):
-            trigger = _TRIGGER_RE.search(sentence)
-            if not trigger or (trigger["state"] and _NEGATED_RE.search(sentence[: trigger.start()])):
-                continue
-            # "Merge Org/lib#4 after this PR" names the PR that waits, not the one waited for.
-            start = trigger.end() if trigger["verb"] else trigger.start()
-            clause = sentence[start:]
-            if m := _CLAUSE_END_RE.search(clause, trigger.end() - start):
-                clause = clause[: m.start()]
-            named = _find_prs(clause, repo, number, full)
-            if not named and clause.rstrip().endswith(":"):
-                named = _find_prs("\n".join(sentences[index + 1 :]), repo, number, full)
-            if not named and _BACK_REF_RE.search(clause):
-                named = in_paragraph
-            found |= named
-    return found.pop() if len(found) == 1 else None
+            shown, negated_until = "", 0
+            for trigger in _find_triggers(sentence):
+                if trigger.start() < negated_until:
+                    continue
+                # "Merge Org/lib#4 after this PR" names the PR that waits, not the one waited for.
+                start = trigger.end() if trigger["verb"] else trigger.start()
+                clause = sentence[start:]
+                if m := _CLAUSE_END_RE.search(clause, trigger.end() - start):
+                    clause = clause[: m.start()]
+                # 'No longer depends on #12, which lands after #13': the negation reaches the next ';'.
+                if trigger["state"] and _NEGATED_RE.search(sentence[: trigger.start()]):
+                    negated_until = (
+                        semicolon if (semicolon := sentence.find(";", trigger.end())) >= 0 else len(sentence)
+                    )
+                    continue
+                named = _find_prs(clause, repo, number, full)
+                if not named and clause.rstrip().endswith(":"):
+                    named = _find_prs("\n".join(sentences[index + 1 :]), repo, number, full)
+                if not named and _BACK_REF_RE.search(clause) and len(in_paragraph) == 1:
+                    named = in_paragraph
+                if named:
+                    shown = shown or _cut_to_shown(" ".join(_EMPHASIS_RE.sub("", sentence).split()))
+                    found.update({pr: shown for pr in named if pr not in found})
+    return tuple(sorted(found.items()))
+
+
+def _map_paragraph_to_sentences(paragraph: str) -> list[str]:
+    """Its sentences. A line wrapped mid-sentence goes on with the next one; a line break after a heading, a line that
+    ends in . ! ? or :, or before a list item, quote or heading, ends one, as does each table row."""
+    lines: list[str] = []
+    previous = ""
+    for line in paragraph.split("\n"):
+        ends = _HEADING_RE.match(previous) or _EMPHASIS_RE.sub("", previous).rstrip().endswith((".", "!", "?", ":"))
+        table = previous.lstrip().startswith("|") or line.lstrip().startswith("|")
+        if lines and not ends and not table and not _BLOCK_START_RE.match(line):
+            lines[-1] += " " + line.strip()
+        else:
+            lines.append(line)
+        previous = line
+    return [sentence for line in lines for sentence in _SENTENCE_END_RE.split(line)]
+
+
+def _find_triggers(sentence: str) -> Iterator[re.Match[str]]:
+    """Each run of words that says it merges after a PR. Someone else's deploy owns its 'after': only a nearer verb
+    ('To deploy, merge this after #12') takes it back, not the bare 'after #12 merges' it spans."""
+    pos, owned_until = 0, 0
+    while trigger := _TRIGGER_RE.search(sentence, pos):
+        pos = trigger.start() + 1
+        if trigger.start() < owned_until and not trigger["verb"]:
+            continue
+        verb, before = trigger["verb"] or "", sentence[: trigger.start()]
+        # Past this many characters the words before it name something else: no need to read them all again.
+        if verb.lower().startswith("deploy") and (
+            len(before) > _DEPLOY_SUBJECT_MAX or not _DEPLOY_SUBJECT_RE.match(_EMPHASIS_RE.sub("", before))
+        ):
+            owned_until = max(owned_until, trigger.end())
+            continue
+        yield trigger
+        pos = trigger.end()
 
 
 # Anchored at the sentence's start, after marks, a label ('Note:') or 'please': an instruction, not prose such as
@@ -98,15 +154,25 @@ def map_markdown_to_preconditions(body: str, repo: str, number: int) -> tuple[st
             # of that PR can tell: 'merge only after the team runs the chart from #12'.
             if _find_prs(sentence, repo, number, full) and not _DEPLOY_WORDS_RE.search(sentence):
                 continue
-            shown = (
-                sentence
-                if len(sentence) <= _PRECONDITION_SHOWN_MAX
-                else sentence[: _PRECONDITION_SHOWN_MAX - 1].rstrip() + "\u2026"
-            )
-            reason = f'{PRECONDITION_PREFIX}{shown}" (edit the body once that is done)'
+            reason = f'{PRECONDITION_PREFIX}{_cut_to_shown(sentence)}" (edit the body once that is done)'
             if reason not in found:
                 found.append(reason)
     return tuple(found)
+
+
+def _cut_to_shown(sentence: str) -> str:
+    if len(sentence) <= _PRECONDITION_SHOWN_MAX:
+        return sentence
+    return sentence[: _PRECONDITION_SHOWN_MAX - 1].rstrip() + "\u2026"
+
+
+def map_dependencies_to_quotes(dependencies: tuple[tuple[str, str], ...]) -> dict[str, str]:
+    return {ref.casefold(): sentence for ref, sentence in dependencies}
+
+
+def map_sentence_to_quote(sentence: str | None) -> str:
+    """What a wait on a PR adds so its owner sees which sentence of the body to edit."""
+    return f' (its body says: "{sentence}")' if sentence else ""
 
 
 def _map_text_to_blocks(text: str) -> list[str]:
@@ -179,18 +245,18 @@ def _find_prs(text: str, repo: str, number: int, full: dict[str, set[str]]) -> s
 
 
 def map_states_to_blockers(
-    named: tuple[str, ...],
     must_merge: tuple[str, ...],
     skipped: set[str],
     states: dict[str, str | None],
+    said: dict[str, str] | None = None,
 ) -> tuple[str, ...]:
-    """Why the PR may not merge yet, one reason per PR: a named PR is open or could not be read, or one it must merge
-    after is not merged. An issue, a number that is nothing, and a PR in `skipped` (lowercase: those stacked on this
-    one) block nothing."""
+    """Why the PR may not merge yet, one reason per PR it must merge after: it is open, closed without merging or could
+    not be read. A PR its body only names is no wait: a body cites PRs as proof, as examples or as history. An issue,
+    a number that is nothing, and a PR in `skipped` (lowercase: those stacked on this one) block nothing. A wait
+    quotes the sentence `said` has for its PR (lowercase)."""
     by_key = {ref.casefold(): state for ref, state in states.items()}
-    must = {ref.casefold() for ref in must_merge}
     blockers: list[str] = []
-    refs = {ref.casefold(): ref for ref in (*named, *must_merge)}
+    refs = {ref.casefold(): ref for ref in must_merge}
     for key, ref in sorted(refs.items()):
         if key in skipped:
             continue
@@ -198,7 +264,7 @@ def map_states_to_blockers(
         if state is None:
             blockers.append(f"could not read {ref}")
         elif state == "OPEN":
-            blockers.append(f"waits for {ref} to merge")
-        elif state == "CLOSED" and key in must:
+            blockers.append(f"waits for {ref} to merge{map_sentence_to_quote((said or {}).get(key))}")
+        elif state == "CLOSED":
             blockers.append(f"{ref} was closed without merging")
     return tuple(blockers)

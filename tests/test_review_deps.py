@@ -1,12 +1,20 @@
+import time
+
 import pytest
 
 from bridge.review_deps import (
-    map_markdown_to_dependency,
+    map_markdown_to_dependencies,
     map_markdown_to_named_prs,
     map_markdown_to_preconditions,
     map_markdown_to_related_prs,
     map_states_to_blockers,
 )
+
+
+def map_markdown_to_dependency(body: str, repo: str, number: int) -> str | None:
+    found = map_markdown_to_dependencies(body, repo, number)
+    return found[0][0] if len(found) == 1 else None
+
 
 DOCS = "Acme-Org/acme-platform-docs"
 APP = "Acme-Org/monorepo"
@@ -44,6 +52,16 @@ def test_the_docs_page_that_merges_after_its_code_pr_names_it() -> None:
         ("Merge only after:\n- https://github.com/Org/lib/pull/12", "Org/lib#12"),
         ("Do not merge until #48 is released; see #999 for context.", f"{APP}#48"),
         ("Ship together with or after the release that contains #48.", f"{APP}#48"),
+        ("Deploy after #48 merges.", f"{APP}#48"),
+        ("This deploys after #48.", f"{APP}#48"),
+        ("**Note:** please deploy this PR only after #48 is released.", f"{APP}#48"),
+        ("1) Deploy after #48 merges.", f"{APP}#48"),
+        ("To deploy, merge this PR after #48.", f"{APP}#48"),
+        (
+            "4. **After this change and Acme-Org/acme-infra#23 are deployed:** the API accepts only its own app's "
+            "tokens.",
+            "Acme-Org/acme-infra#23",
+        ),
     ],
 )
 def test_a_sentence_that_says_it_merges_after_one_pr_names_it(body: str, expected: str | None) -> None:
@@ -71,6 +89,9 @@ def test_a_sentence_that_says_it_merges_after_one_pr_names_it(body: str, expecte
         "Depends on #205, this PR.",
         "Merge only after https://github.com/Acme-Org/monorepo/issues/12 is fixed.",
         "Merge acme-infra#23 together with or after the release containing this PR.",
+        "3. **What switches it on:** `WIDGET_ALLOWED_IDS` in a deployment's environment, set by Acme-Org/acme-infra#23 "
+        "and applied by each deployment's next deploy after that PR merges.",
+        "The setting is applied by the next deploy after #48 merges.",
     ],
 )
 def test_a_bare_mention_a_reverse_or_an_ambiguous_dependency_names_none(body: str) -> None:
@@ -98,33 +119,108 @@ def test_every_pr_a_body_names_is_found_and_a_bare_number_takes_its_full_name(
     assert map_markdown_to_named_prs(body, APP, 205) == expected
 
 
+@pytest.mark.parametrize(
+    "body",
+    ["_" * 20000 + ":" + " " * 20000 + "x deploy after #48 merges.", "the deploy after " * 3000 + "#48 merges."],
+    ids=["one-long-prefix", "many-deploys"],
+)
+def test_a_long_run_before_a_deploy_is_read_in_linear_time(body: str) -> None:
+    started = time.monotonic()
+    assert map_markdown_to_dependency(body, APP, 205) is None
+    assert time.monotonic() - started < 1
+
+
+def test_a_dependency_comes_with_the_sentence_that_made_it_cut_to_show() -> None:
+    body = "Adds the widgets page.\n\n**Merge only after** #48 is released; it adds the table."
+    said = "Merge only after #48 is released; it adds the table."
+    assert map_markdown_to_dependencies(body, APP, 205) == ((f"{APP}#48", said),)
+    ((_, long),) = map_markdown_to_dependencies("Merge after #48 " + "ships to every region " * 9, APP, 205)
+    assert len(long) <= 120 and long.endswith("every\u2026")
+
+
+def test_each_pr_a_sentence_says_it_merges_after_is_a_dependency_with_its_own_sentence() -> None:
+    body = "Depends on #12 and #13.\n\nBlocked by Org/lib#4 (the queue)."
+    assert map_markdown_to_dependencies(body, APP, 205) == (
+        (f"{APP}#12", "Depends on #12 and #13."),
+        (f"{APP}#13", "Depends on #12 and #13."),
+        ("Org/lib#4", "Blocked by Org/lib#4 (the queue)."),
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Depends on #12 and\n#13.",
+        "Depends on #12; also blocked by #13.",
+        "Merge after #12 lands.\n- Merge after #13 lands.",
+    ],
+    ids=["wrapped-line", "two-triggers", "list-items"],
+)
+def test_every_pr_a_sentence_says_it_merges_after_is_found_however_the_sentence_runs(body: str) -> None:
+    assert [ref for ref, _ in map_markdown_to_dependencies(body, APP, 205)] == [f"{APP}#12", f"{APP}#13"]
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ("## Deployment\nDeploy after #12 merges.", (f"{APP}#12",)),
+        ("### What depends on this PR\n#13 (follow-up)", ()),
+        ("This no longer depends on #12 landing after #13.", ()),
+        ("Merge only after:\nOrg/lib#12", ("Org/lib#12",)),
+        ("No longer depends on #12;\nbut still blocked by #13.", (f"{APP}#13",)),
+        ("**Depends on #12.**\n#13 depends on this PR.", (f"{APP}#12",)),
+        ("No longer depends on #12, which also lands after #13.", ()),
+        ("| Action | PR |\n| --- | --- |\n| Merge after CI | |\n| Historical fix | #12 |", ()),
+    ],
+    ids=[
+        "heading-then-line",
+        "heading-then-pr",
+        "negated-sentence",
+        "colon-line",
+        "negated-clause",
+        "emphasis-end",
+        "negated-also",
+        "table-rows",
+    ],
+)
+def test_a_heading_and_a_negation_end_what_they_cover(body: str, expected: tuple[str, ...]) -> None:
+    assert tuple(ref for ref, _ in map_markdown_to_dependencies(body, APP, 205)) == expected
+
+
+def test_that_pr_in_a_paragraph_naming_two_is_no_dependency() -> None:
+    assert map_markdown_to_dependencies("Related: #8 and #9. This merges after that PR.", APP, 205) == ()
+
+
+def test_the_wait_on_the_pr_it_merges_after_quotes_its_sentence_and_a_backport_main_pr_quotes_none() -> None:
+    must = ("Org/lib#7", "Org/lib#8")
+    states: dict[str, str | None] = {"Org/lib#7": "OPEN", "Org/lib#8": "OPEN"}
+    assert map_states_to_blockers(must, set(), states, {"org/lib#7": "Merge after Org/lib#7."}) == (
+        'waits for Org/lib#7 to merge (its body says: "Merge after Org/lib#7.")',
+        "waits for Org/lib#8 to merge",
+    )
+
+
 def test_a_bare_number_in_a_dependency_sentence_is_the_pr_the_body_names_in_full() -> None:
     body = "Companion to Acme-Org/acme-infra#23. Ship only after the release that contains #23."
     assert map_markdown_to_dependency(body, APP, 205) == "Acme-Org/acme-infra#23"
 
 
 @pytest.mark.parametrize(
-    ("state", "strict", "expected"),
+    ("state", "expected"),
     [
-        ("OPEN", False, ("waits for Org/lib#7 to merge",)),
-        (None, False, ("could not read Org/lib#7",)),
-        ("MERGED", False, ()),
-        ("CLOSED", False, ()),
-        ("ISSUE", False, ()),
-        ("OPEN", True, ("waits for Org/lib#7 to merge",)),
-        ("CLOSED", True, ("Org/lib#7 was closed without merging",)),
-        ("ISSUE", True, ()),
+        ("OPEN", ("waits for Org/lib#7 to merge",)),
+        (None, ("could not read Org/lib#7",)),
+        ("MERGED", ()),
+        ("CLOSED", ("Org/lib#7 was closed without merging",)),
+        ("ISSUE", ()),
     ],
 )
-def test_a_named_pr_blocks_while_open_or_unread_and_one_it_must_merge_after_until_merged(
-    state: str | None, strict: bool, expected: tuple[str, ...]
-) -> None:
-    named = ("Org/lib#7",)
-    assert map_states_to_blockers(named, named if strict else (), set(), {"org/LIB#7": state}) == expected
+def test_a_pr_it_must_merge_after_blocks_until_merged(state: str | None, expected: tuple[str, ...]) -> None:
+    assert map_states_to_blockers(("Org/lib#7",), set(), {"org/LIB#7": state}) == expected
 
 
 def test_a_pr_stacked_on_this_one_blocks_nothing() -> None:
-    assert map_states_to_blockers(("Org/app#8",), (), {"org/app#8"}, {"Org/app#8": "OPEN"}) == ()
+    assert map_states_to_blockers(("Org/app#8",), {"org/app#8"}, {"Org/app#8": "OPEN"}) == ()
 
 
 @pytest.mark.parametrize(
@@ -206,8 +302,8 @@ def test_merge_after_a_pr_stays_a_dependency_that_its_merge_clears() -> None:
     body = "Merge after #12 is deployed."
     named = map_markdown_to_named_prs(body, APP, 7)
     assert named == (f"{APP}#12",) and map_markdown_to_dependency(body, APP, 7) == f"{APP}#12"
-    assert map_states_to_blockers(named, named, set(), {f"{APP}#12": "OPEN"}) == (f"waits for {APP}#12 to merge",)
-    assert map_states_to_blockers(named, named, set(), {f"{APP}#12": "MERGED"}) == ()
+    assert map_states_to_blockers(named, set(), {f"{APP}#12": "OPEN"}) == (f"waits for {APP}#12 to merge",)
+    assert map_states_to_blockers(named, set(), {f"{APP}#12": "MERGED"}) == ()
 
 
 def test_related_lines_name_prs_by_number_by_repo_and_by_url() -> None:

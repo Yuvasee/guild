@@ -2621,17 +2621,16 @@ def test_a_backport_the_bot_approved_waits_for_its_main_pr_and_one_never_approve
     assert "approval" in merge_ok_view(unapproved)["merge_ok_needs"]
 
 
-def test_named_prs_read_from_the_queue_when_open_there_and_from_github_otherwise() -> None:
+def test_prs_it_must_merge_after_read_from_the_queue_when_open_there_and_from_github_otherwise() -> None:
     prs = [
-        make_pr(named_prs=("org/app#8", "Org/lib#12", "Org/lib#13"), must_merge=("Org/lib#14",)),
+        make_pr(named_prs=("Org/lib#12",), must_merge=("org/app#8", "Org/lib#13", "Org/lib#14")),
         make_pr(ref="pr:Org/app#8", number=8, stack_parent=None),
     ]
-    with mock.patch(
-        "bridge.reviews.fetch_pr_states",
-        return_value={"Org/lib#12": "MERGED", "Org/lib#13": None, "Org/lib#14": "OPEN"},
-    ) as fetch:
+    with mock.patch("bridge.reviews.fetch_pr_states", return_value={"Org/lib#13": None, "Org/lib#14": "OPEN"}) as fetch:
         states = read_dependency_states(prs)
-    assert fetch.call_args.args[0] == ["Org/lib#12", "Org/lib#13", "Org/lib#14"], "the open queue PR is not read"
+    assert fetch.call_args.args[0] == ["Org/lib#13", "Org/lib#14"], (
+        "neither the open queue PR nor one only named is read"
+    )
     assert map_prs_to_dependencies(prs, states)[REF].blockers == (
         "waits for org/app#8 to merge",
         "could not read Org/lib#13",
@@ -2640,13 +2639,17 @@ def test_named_prs_read_from_the_queue_when_open_there_and_from_github_otherwise
 
 
 def test_a_stack_bottom_whose_body_lists_the_stack_does_not_wait_for_its_children() -> None:
-    bottom = make_pr(named_prs=("Org/app#8", "Org/app#9"))
+    bottom = make_pr(named_prs=("Org/app#8", "Org/app#9"), must_merge=("Org/app#9",))
     middle = make_pr(ref="pr:Org/app#8", number=8, stack_parent=REF, named_prs=("Org/app#7", "Org/app#9"))
     top = make_pr(ref="pr:Org/app#9", number=9, stack_parent="pr:Org/app#8", named_prs=("Org/app#7", "Org/app#8"))
     states = dict.fromkeys(("Org/app#7", "Org/app#8", "Org/app#9"), "OPEN")
     deps = map_prs_to_dependencies([bottom, middle, top], states)
     assert deps[REF] == Dependencies()
-    assert deps["pr:Org/app#8"].blockers == ("waits for Org/app#7 to merge",)
+    assert deps["pr:Org/app#8"].blockers == ("stacked on Org/app#7, which merges first",)
+    unnamed = map_prs_to_dependencies([bottom, replace(middle, named_prs=()), top], states)
+    assert unnamed["pr:Org/app#8"].blockers == ("stacked on Org/app#7, which merges first",), (
+        "the stack waits, not words"
+    )
 
 
 def test_a_backport_must_merge_after_the_main_prs_it_names_and_persist_sandbox_is_seen() -> None:
@@ -2713,7 +2716,7 @@ def sibling_prs(**changes: dict[str, Any]) -> list[OpenPr]:
 
 
 def test_prs_that_name_each_other_directly_or_through_a_chain_are_siblings_and_wait_only_outside() -> None:
-    prs = sibling_prs(**{A: {"named_prs": ("Org/app#8", "Org/web#1")}})
+    prs = sibling_prs(**{A: {"named_prs": ("Org/app#8", "Org/web#1"), "must_merge": ("Org/web#1",)}})
     deps = map_prs_to_dependencies(prs, {"Org/web#1": "OPEN"})
     assert deps[A] == Dependencies(("waits for Org/web#1 to merge",), (), (B, C))
     assert deps[C] == Dependencies((), (), (A, B))
@@ -2729,6 +2732,59 @@ def test_a_sibling_it_merges_after_orders_them_and_a_cycle_of_merge_after_is_nam
         "waits for Org/app#8 to merge, which merges after this one: a cycle no merge can start",
     )
     assert "a cycle" in cycle[B].blockers[0]
+
+
+def test_a_cycle_and_an_order_quote_the_sentence_that_made_each_edge() -> None:
+    said = {
+        "depends_on": "Org/app#8",
+        "dependencies": (("Org/app#8", "Merge after #8 is deployed."),),
+        "must_merge": ("Org/app#8",),
+    }
+    ordered = map_prs_to_dependencies(sibling_prs(**{A: said}), {})
+    assert ordered[A].sibling_waits == ('waits for Org/app#8 to merge (its body says: "Merge after #8 is deployed.")',)
+    cycle = map_prs_to_dependencies(sibling_prs(**{A: said, B: {"must_merge": ("Org/app#7",)}}), {})
+    assert cycle[A].blockers == (
+        "waits for Org/app#8 to merge, which merges after this one: a cycle no merge can start "
+        '(its body says: "Merge after #8 is deployed.")',
+    )
+    assert cycle[B].blockers == (
+        "waits for Org/app#7 to merge, which merges after this one: a cycle no merge can start",
+    )
+
+
+@pytest.mark.parametrize(
+    ("body", "blockers"),
+    [
+        ("Fixes the retry. Proven by the next run of a PR that triggers it (Org/lib#12).", ()),
+        ("The check turned red on open PRs, for example Org/lib#12, and stayed red after a rerun.", ()),
+        ("Depends on Org/lib#12.", ('waits for Org/lib#12 to merge (its body says: "Depends on Org/lib#12.")',)),
+    ],
+    ids=["proof", "example", "depends-on"],
+)
+def test_a_pr_the_body_only_names_is_no_wait_and_one_it_depends_on_is(body: str, blockers: tuple[str, ...]) -> None:
+    pr = map_node_to_open_pr({**github_node(), "body": body}, CONFIG)
+    assert pr.named_prs == ("Org/lib#12",)
+    assert map_prs_to_dependencies([pr], {"Org/lib#12": "OPEN"})[pr.ref].blockers == blockers
+
+
+def github_node() -> Any:
+    return {
+        "number": 7, "title": "Docs", "url": "u", "isDraft": False, "updatedAt": "U", "headRefName": "docs",
+        "headRefOid": "a1", "baseRefName": "main", "additions": 1, "deletions": 1,
+        "repository": {"nameWithOwner": "Org/app"}, "baseRef": None,
+        "commits": {"nodes": [{"commit": {"oid": "a1", "committedDate": "2026-11-02T11:00:00Z",
+                                          "statusCheckRollup": None}}]},
+        "files": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        "reviewRequests": {"nodes": []}, "reviews": {"nodes": []}, "latestReviews": {"nodes": []},
+        "reviewThreads": {"nodes": []}, "body": "",
+    }  # fmt: skip
+
+
+def test_the_pr_read_from_github_keeps_the_sentence_that_made_its_dependency() -> None:
+    body = "Docs.\n\nDepends on Org/lib#3, which adds the table."
+    pr = map_node_to_open_pr({**github_node(), "body": body}, CONFIG)
+    assert pr.depends_on == "Org/lib#3"
+    assert pr.dependencies == (("Org/lib#3", "Depends on Org/lib#3, which adds the table."),)
 
 
 def store_siblings(tmp_path: Path, prs: list[OpenPr]) -> Any:
@@ -2772,6 +2828,20 @@ def test_the_first_of_an_ordered_pair_merges_while_the_one_after_it_is_not_ready
     conn = store_siblings(tmp_path, sibling_prs(**{A: {"must_merge": ("Org/app#8",)}, B: ready, C: ready}))
     assert button(conn, B) == (True, None), "#7 merges after #8, so #8 does not wait for #7 to be ready"
     assert button(conn, A)[0] is False
+
+
+def test_a_stack_bottom_does_not_wait_for_a_sibling_stacked_on_it(tmp_path: Path) -> None:
+    ready = {"approved_by": ("mira",)}
+    prs = sibling_prs(
+        **{
+            A: {**ready, "named_prs": ("Org/lib#3",)},
+            B: {**ready, "named_prs": ("Org/lib#3",), "stack_parent": A},
+            C: {**ready, "named_prs": ("Org/app#7", "Org/app#8")},
+        }
+    )
+    conn = store_siblings(tmp_path, prs)
+    assert button(conn, A) == (True, None), "#8 is stacked on #7: it waits for #7, so #7 cannot wait for it"
+    assert button(conn, B)[0] is False
 
 
 def queue_view(conn: Any, ref: str) -> dict[str, Any]:

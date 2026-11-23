@@ -159,13 +159,20 @@ def test_github_unreadable_merges_nothing(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(("state", "merges"), [("OPEN", 0), (None, 0), ("MERGED", 1)])
-def test_the_body_is_read_again_right_before_merging_and_each_pr_it_names_now(
+def test_the_body_is_read_again_right_before_merging_and_each_pr_it_merges_after_now(
     tmp_path: Path, state: str | None, merges: int
 ) -> None:
     conn = setup(tmp_path)
     with mock.patch("bridge.auto_merge.fetch_pr_states", return_value={"Org/lib#3": state}) as states:
-        assert len(run(conn, live=replace(LIVE, body="Goes with Org/lib#3.")).merges) == merges
+        assert len(run(conn, live=replace(LIVE, body="Depends on Org/lib#3.")).merges) == merges
     assert states.call_args.args[0] == ["Org/lib#3"]
+
+
+def test_a_pr_the_body_only_names_is_no_wait_right_before_merging(tmp_path: Path) -> None:
+    conn = setup(tmp_path)
+    with mock.patch("bridge.auto_merge.fetch_pr_states") as states:
+        assert len(run(conn, live=replace(LIVE, body="Goes with Org/lib#3.")).merges) == 1
+    states.assert_not_called()
 
 
 def test_a_merge_precondition_written_since_the_poll_stops_the_merge_and_editing_it_out_lets_it_go(

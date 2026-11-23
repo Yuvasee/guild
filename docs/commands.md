@@ -603,8 +603,8 @@ options:
 With `auto_merge = "on"` the dashboard service merges, after each queue poll, at most one of the owner's PRs that the
 owner's standing rule lets through: a colleague approved it (the review bot's approval or a waiver does not count), CI
 is green or absent, the review bot's latest review is of the head and asks for no changes, GitHub says CLEAN, it is not
-a draft, held or stacked, none of the owner's comments is open, no PR its body names is open (a backport's
-default-branch PRs and a PR it says it merges after must be merged), and its body has no `PERSIST_SANDBOX`. It checks
+a draft, held or stacked, none of the owner's comments is open, a backport's default-branch PRs and a PR its body
+says it merges after are merged (a PR the body only names is no wait), and its body has no `PERSIST_SANDBOX`. It checks
 the PR live first, merges with `gh pr merge --squash --match-head-commit`, posts one feed line and tells the PR's lead
 it is merged, not deployed. Each head is tried once; a failure goes once to `auto_merge_failures_to`. `dry-run` only
 logs what it would merge.

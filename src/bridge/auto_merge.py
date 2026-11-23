@@ -26,8 +26,8 @@ from bridge.guard import (
     map_wait_to_reason,
 )
 from bridge.review_deps import (
-    map_markdown_to_dependency,
-    map_markdown_to_named_prs,
+    map_dependencies_to_quotes,
+    map_markdown_to_dependencies,
     map_markdown_to_preconditions,
     map_states_to_blockers,
 )
@@ -65,7 +65,7 @@ def map_row_to_auto_merge_block(config: Config, row: sqlite3.Row, siblings: Sequ
 def map_row_to_own_auto_merge_block(config: Config, row: sqlite3.Row, with_siblings: bool = True) -> str | None:
     """The rule, siblings aside: a colleague approved (the review bot's approval or the owner's
     waiver does not count), CI green or none, the review bot's latest review is of the head and asks for no changes,
-    GitHub says CLEAN, no PR its body names is open, not stacked, a draft or held, nothing of the owner's open and
+    GitHub says CLEAN, no PR it merges after is open, not stacked, a draft or held, nothing of the owner's open and
     every colleague's comment answered or resolved."""
     owner = config.owner_name
     if row["closed_at"] is not None:
@@ -132,8 +132,8 @@ def map_refusal_to_reason(refusal: MergeRefusal, config: Config) -> str:
 def find_live_dependency_blockers(
     conn: sqlite3.Connection, config: Config, row: sqlite3.Row, live: LiveMergeFacts
 ) -> tuple[str, ...]:
-    """Its body's merge preconditions and the PRs it names now, read again, leaving out its siblings (checked on
-    their own) and the PRs stacked on it; a backport in the queue is never another's main PR."""
+    """Its body's merge preconditions and the PRs it must merge after now, read again, leaving out its siblings
+    (checked on their own) and the PRs stacked on it; a backport in the queue is never another's main PR."""
     repo, number = str(row["repo"]), int(row["number"])
     open_rows = conn.execute("SELECT ref, base, stack_parent FROM review_prs WHERE closed_at IS NULL").fetchall()
     backports = {
@@ -143,14 +143,13 @@ def find_live_dependency_blockers(
     }
     siblings = {ref.removeprefix("pr:").casefold() for ref in json.loads(str(row["siblings"] or "[]"))}
     node = {"baseRefName": live.base or "", "title": live.title, "body": live.body, "headRefName": live.head}
-    depends_on = map_markdown_to_dependency(live.body, repo, number)
-    named = [r for r in map_markdown_to_named_prs(live.body, repo, number) if r.casefold() not in siblings]
+    dependencies = map_markdown_to_dependencies(live.body, repo, number)
     must = [
-        r for r in map_pr_to_must_merge(config, repo, number, node, depends_on)
+        r for r in map_pr_to_must_merge(config, repo, number, node, tuple(ref for ref, _ in dependencies))
         if r.casefold() not in siblings | backports
     ]  # fmt: skip
     preconditions = map_markdown_to_preconditions(live.body, repo, number)
-    if not named and not must:
+    if not must:
         return preconditions
     children: dict[str, list[str]] = {}
     for child in open_rows:
@@ -159,7 +158,7 @@ def find_live_dependency_blockers(
     skipped = list_stacked_on(children, str(row["ref"]).casefold())
     return (
         *preconditions,
-        *map_states_to_blockers(tuple(named), tuple(must), skipped, fetch_pr_states([*named, *must])),
+        *map_states_to_blockers(tuple(must), skipped, fetch_pr_states(must), map_dependencies_to_quotes(dependencies)),
     )
 
 
@@ -313,7 +312,7 @@ def post_merged(conn: sqlite3.Connection, config: Config, row: sqlite3.Row, comm
         links.append(FeedLink(commit[:7], f"https://github.com/{repo}/commit/{commit}"))
     body = (
         f"Approved by {', '.join(json.loads(str(row['approved_by'])))}; CI green or none; {config.review_bot_name} "
-        f"cleared the head; no PR its body names is open. Merged, not deployed: its lead was told."
+        f"cleared the head; no PR it merges after is open. Merged, not deployed: its lead was told."
     )
     return add_post(conn, Party(SYSTEM_CONVERSATION, "bridge"), "done", f"{head}{title}{tail}", body, links, [], now)
 

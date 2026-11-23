@@ -12,7 +12,7 @@ from bridge.agent_prefix import strip_agent_prefix
 from bridge.config import Config
 from bridge.refs import names_issue, needs_issue
 from bridge.review_deps import (
-    map_markdown_to_dependency,
+    map_markdown_to_dependencies,
     map_markdown_to_named_prs,
     map_markdown_to_preconditions,
     map_markdown_to_related_prs,
@@ -182,11 +182,14 @@ class OpenPr:
     thread_flags: str = ""
     """One letter per thread, r resolved and o open: a thread resolved and another reopened keep the count."""
     depends_on: str | None = None
-    """owner/repo#N of the PR its body says it merges only after."""
+    """owner/repo#N of the PR its body says it merges only after, when it names one."""
+    dependencies: tuple[tuple[str, str], ...] = ()
+    """(owner/repo#N, sentence cut to show) for each PR its body says it merges after: a wait on one quotes its
+    sentence, so the owner knows what to edit when it is wrong."""
     named_prs: tuple[str, ...] = ()
-    """owner/repo#N of every PR its body names: each one open keeps it from merging."""
+    """owner/repo#N of every PR its body names, whatever the words: two that name each other merge together."""
     must_merge: tuple[str, ...] = ()
-    """owner/repo#N of the PRs that must be merged first: depends_on, and a backport's default-branch PRs."""
+    """owner/repo#N of the PRs that must be merged first: its dependencies, and a backport's default-branch PRs."""
     preconditions: tuple[str, ...] = ()
     """A blocker for each sentence of its body that holds its merge without naming a PR ('Merge after X is out')."""
     issue_missing: bool = False
@@ -308,7 +311,7 @@ def map_node_to_open_pr(node: Any, config: Config, known: KnownHeads | None = No
     review_threads: Any = node.get("reviewThreads") or {}
     threads: list[Any] = review_threads.get("nodes") or []
     body = str(node.get("body") or "")
-    depends_on = map_markdown_to_dependency(body, repo, number)
+    dependencies = map_markdown_to_dependencies(body, repo, number)
     label_nodes: Any = node.get("labels") or {}
     labels: list[Any] = label_nodes.get("nodes") or []
     return OpenPr(
@@ -332,10 +335,11 @@ def map_node_to_open_pr(node: Any, config: Config, known: KnownHeads | None = No
         bot_rounds=count_review_bot_rounds(node["reviews"]["nodes"], config),
         body_reviews=map_markdown_to_reviews(str(node.get("body") or ""), config.review_names),
         usage_missing=find_missing_usage_section(strip_agent_prefix(str(node["title"])), str(node.get("body") or "")),
-        depends_on=depends_on,
+        depends_on=dependencies[0][0] if len(dependencies) == 1 else None,
+        dependencies=dependencies,
         named_prs=map_markdown_to_named_prs(body, repo, number),
         related_prs=map_markdown_to_related_prs(body, repo, number),
-        must_merge=map_pr_to_must_merge(config, repo, number, node, depends_on),
+        must_merge=map_pr_to_must_merge(config, repo, number, node, tuple(ref for ref, _ in dependencies)),
         preconditions=map_markdown_to_preconditions(body, repo, number),
         persist_sandbox=PERSIST_SANDBOX in body,
         issue_missing=needs_issue(config, repo)
@@ -351,11 +355,13 @@ def map_node_to_open_pr(node: Any, config: Config, known: KnownHeads | None = No
     )
 
 
-def map_pr_to_must_merge(config: Config, repo: str, number: int, node: Any, depends_on: str | None) -> tuple[str, ...]:
+def map_pr_to_must_merge(
+    config: Config, repo: str, number: int, node: Any, merges_after: tuple[str, ...]
+) -> tuple[str, ...]:
     # Loaded here: the backport module reads GitHub through this one.
     from bridge.backport import find_named_prs, is_backport_base
 
-    must: set[str] = {depends_on} if depends_on else set()
+    must = set(merges_after)
     if is_backport_base(config.backport_bases, str(node["baseRefName"])):
         named = find_named_prs(repo, number, str(node["title"]), str(node.get("body") or ""), str(node["headRefName"]))
         must.update(f"{repo}#{n}" for n in named)

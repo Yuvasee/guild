@@ -989,7 +989,7 @@ class MergeFacts:
     owner_reviewed: bool = False
     """The owner pressed Publish or recorded a decision: no approval by a colleague or the bot stands in for it."""
     waits_on: str | None = None
-    """Why a PR its body names keeps it from merging: see find_dependency_wait."""
+    """Why a PR it merges after keeps it from merging: see find_dependency_wait."""
     colleague_block: str | None = None
     """A colleague's comments our side has not answered: see map_logins_to_colleague_block."""
 
@@ -1105,14 +1105,34 @@ def map_row_to_dependency_blockers(
 
 
 def load_open_siblings(conn: sqlite3.Connection, row: sqlite3.Row) -> list[sqlite3.Row]:
-    """The open PRs this one merges together with. One whose body says it merges after this one is left out: it
-    comes later anyway, so this one need not wait until it is ready too."""
+    """The open PRs this one merges together with. One whose body says it merges after this one, or one stacked on it
+    however deep, is left out: it comes later anyway, so this one need not wait until it is ready too."""
     me = str(row["ref"]).removeprefix("pr:").casefold()
     siblings = conn.execute(
         "SELECT * FROM review_prs WHERE closed_at IS NULL AND ref IN (SELECT value FROM json_each(?)) ORDER BY ref",
         (str(row["siblings"] or "[]"),),
     ).fetchall()
-    return [s for s in siblings if me not in {str(r).casefold() for r in json.loads(str(s["must_merge"] or "[]"))}]
+    parents = {
+        str(r["ref"]).casefold(): str(r["stack_parent"]).casefold()
+        for r in conn.execute(
+            "SELECT ref, stack_parent FROM review_prs WHERE closed_at IS NULL AND stack_parent IS NOT NULL"
+        )
+    }
+
+    def is_stacked_on_me(ref: str) -> bool:
+        seen: set[str] = set()
+        while (ref := parents.get(ref, "")) and ref not in seen:
+            if ref == str(row["ref"]).casefold():
+                return True
+            seen.add(ref)
+        return False
+
+    return [
+        s
+        for s in siblings
+        if me not in {str(r).casefold() for r in json.loads(str(s["must_merge"] or "[]"))}
+        and not is_stacked_on_me(str(s["ref"]).casefold())
+    ]
 
 
 def map_siblings_to_wait(siblings: Sequence[sqlite3.Row], why_not: Callable[[sqlite3.Row], str | None]) -> str | None:

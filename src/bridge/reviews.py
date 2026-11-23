@@ -53,7 +53,7 @@ from bridge.guard import (
 from bridge.leads import find_lead_on_surface, is_conversation_locked, list_leads
 from bridge.refs import map_prefixes_to_key_re, map_ref_to_label
 from bridge.registry import record_tab_parent
-from bridge.review_deps import map_states_to_blockers
+from bridge.review_deps import map_dependencies_to_quotes, map_sentence_to_quote, map_states_to_blockers
 from bridge.review_github import (
     UNKNOWN_DIFF,
     ChecksRunning,
@@ -255,9 +255,9 @@ def store_open_prs(conn: sqlite3.Connection, prs: list[OpenPr], now: int) -> Non
 
 
 def read_dependency_states(prs: list[OpenPr]) -> dict[str, str | None]:
-    """The state of every PR the open PRs' bodies name: open when it is one of them, else as GitHub says."""
+    """The state of every PR the open PRs must merge after: open when it is one of them, else as GitHub says."""
     open_refs = {pr.ref.removeprefix("pr:").casefold() for pr in prs}
-    named = {ref for pr in prs for ref in (*pr.named_prs, *pr.must_merge)}
+    named = {ref for pr in prs for ref in pr.must_merge}
     states = fetch_pr_states(sorted(ref for ref in named if ref.casefold() not in open_refs))
     return {**states, **{ref: "OPEN" for ref in named if ref.casefold() in open_refs}}
 
@@ -265,10 +265,10 @@ def read_dependency_states(prs: list[OpenPr]) -> dict[str, str | None]:
 @dataclass(frozen=True)
 class Dependencies:
     blockers: tuple[str, ...] = ()
-    """Why it waits whatever its siblings do: its body holds the merge in words, a PR named outside them is open or
-    unread, one it merges after is not merged, or its merge-after order runs in a cycle."""
+    """Why it waits whatever its siblings do: its body holds the merge in words, it is stacked on an open PR, one it
+    merges after outside them is not merged, or its merge-after order runs in a cycle."""
     sibling_waits: tuple[str, ...] = ()
-    """Siblings it merges after: its depends_on or a backport's main PR."""
+    """Siblings it merges after: one its body says it merges after, or a backport's main PR."""
     siblings: tuple[str, ...] = ()
     """Open queue PRs it merges together with: they name each other, directly or through a chain of such pairs."""
 
@@ -296,20 +296,22 @@ def map_prs_to_dependencies(
         group = groups.get(key, set()) - {key}
         skipped = stacked[key] | group
         strict = tuple(r for r in pr.must_merge if r.casefold() not in backports)
+        said = map_dependencies_to_quotes(pr.dependencies)
         # A cycle keeps the whole group from merging: it is a wait of its own, not an order among siblings.
         cycle = tuple(
             f"waits for {refs[other].removeprefix('pr:')} to merge, which merges after this one: a cycle no merge can "
-            "start"
+            f"start{map_sentence_to_quote(said.get(other))}"
             for other in sorted(must[key] & group)
             if key in _reach(must, other)
         )
         order = tuple(
-            f"waits for {refs[other].removeprefix('pr:')} to merge"
+            f"waits for {refs[other].removeprefix('pr:')} to merge{map_sentence_to_quote(said.get(other))}"
             for other in sorted(must[key] & group)
             if key not in _reach(must, other)
         )
+        stack = (f"stacked on {pr.stack_parent.removeprefix('pr:')}, which merges first",) if pr.stack_parent else ()
         found[pr.ref] = Dependencies(
-            (*pr.preconditions, *cycle, *map_states_to_blockers(pr.named_prs, strict, skipped, states)),
+            (*pr.preconditions, *stack, *cycle, *map_states_to_blockers(strict, skipped, states, said)),
             order,
             tuple(sorted(refs[other] for other in group)),
         )
@@ -1712,7 +1714,7 @@ def end_reviewed_holds(conn: sqlite3.Connection) -> None:
 
 def map_row_to_merge_path(row: sqlite3.Row, merge_block: str | None, waits_on: str | None = None) -> str | None:
     """READY when the owner's rule lets the PR's lead merge it: reviewed by the owner, approved, CI green, not a draft,
-    no conflicts, nothing of the owner's open and no PR its body names in the way. A Slack post alone is no review."""
+    no conflicts, nothing of the owner's open and no PR it merges after in the way. A Slack post alone is no review."""
     return None if list_merge_waits(map_row_to_merge_facts(row, merge_block, waits_on)) else READY
 
 
@@ -2022,7 +2024,7 @@ def can_ok_merge(config: Config, row: sqlite3.Row, siblings: Sequence[sqlite3.Ro
 
 def map_row_to_merge_ok_needs(row: sqlite3.Row, siblings: Sequence[sqlite3.Row] = ()) -> str | None:
     """What keeps the Merge button off, or None: open, not a draft, not stacked (a stacked PR merges after the one
-    under it), approved by the review bot at its head or by a colleague, no PR its body names still open (for a
+    under it), approved by the review bot at its head or by a colleague, no PR it merges after still open (for a
     backport, its default-branch PRs merged), CI green or none, GitHub would not refuse it, and each open sibling
     ready on the same terms."""
     return map_row_to_own_merge_ok_needs(row) or map_siblings_to_wait(

@@ -188,7 +188,7 @@ class Config:
     left out."""
     auto_merge: str = "off"
     """off, dry-run (logs what it would merge) or on: bridge merges a queue PR by itself under the owner's standing
-    rule (a colleague approved, CI green, the review bot cleared the head, no named PR open)."""
+    rule (a colleague approved, CI green, the review bot cleared the head, no PR it merges after open)."""
     auto_merge_decision: str = ""
     """The owner's decision that set the standing rule (e.g. "Q#12"), cited in each merge's feed line."""
     auto_merge_failures_to: str = ""
