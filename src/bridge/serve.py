@@ -86,6 +86,7 @@ from bridge.feed import (
     prune_typer_locks,
     release_dead_typing_claims,
     reply_on_card,
+    resolve_tab,
     send_from_user,
     spawn_queued_retries,
     spawn_typed_delivery,
@@ -172,9 +173,10 @@ from bridge.reviews import (
 )
 from bridge.rewake_marks import prune_rewake_marks
 from bridge.shadow_filter import EVERY_S as SHADOW_EVERY_S
+from bridge.shadow_filter import LIVE_EVERY_S as LIVE_FILTER_EVERY_S
 from bridge.shadow_filter import ask_model as ask_shadow_model
 from bridge.shadow_filter import find_start_id as find_shadow_start_id
-from bridge.shadow_filter import run_shadow_tick
+from bridge.shadow_filter import run_shadow_tick, take_due_wakes
 from bridge.signals import SessionRefs, find_signals, map_enrichment_to_status, map_signal_to_dict
 from bridge.stall_guard import tell_of_stalls
 from bridge.status_watchers import alert_watchers, read_watchers
@@ -528,23 +530,35 @@ class DashboardState:
             time.sleep(NOTIFY_EVERY_S)
 
     def shadow_filter_forever(self) -> None:
-        """Its own thread, after delivery: a slow or failing model call holds up nothing else."""
+        """Its own thread: a slow or failing model call holds up nothing else. Live, it also starts the delivery of
+        each message it lets through, and of held ones whose hold ran out."""
         url, key_file = self.config.shadow_filter_url, self.config.shadow_filter_key_file
+        live = self.config.shadow_filter_live
         after: int | None = None
         while True:
             try:
                 with self._connection() as conn:
+
+                    def wake(message_id: int, conversation_id: str, handle: str) -> None:
+                        recipient = resolve_tab(conn, conversation_id, handle)
+                        if recipient.pid:
+                            write_hint(recipient.pid, HINT_SENT)
+                        spawn_typed_delivery(message_id, [recipient])
+
                     if after is None:
-                        after = find_shadow_start_id(conn)
+                        after = find_shadow_start_id(conn, self.config, now_ms())
                     after = run_shadow_tick(
-                        conn, self.config, after, now_ms(), lambda state: ask_shadow_model(url, key_file, state)
+                        conn, self.config, after, now_ms(), lambda state: ask_shadow_model(url, key_file, state), wake
                     )
+                    if live:
+                        for message_id, conversation_id, handle in take_due_wakes(conn, self.config, now_ms()):
+                            wake(message_id, conversation_id, handle)
             except Exception as exc:
-                # Any failure: an escaped exception would end the shadow log until restart. The log says how far it got.
+                # Any failure: an escaped exception would end the filter until restart. The log says how far it got.
                 after = None
                 print(f"shadow filter failed: {exc}", flush=True)
                 log_error("shadow filter", traceback.format_exc())
-            time.sleep(SHADOW_EVERY_S)
+            time.sleep(LIVE_FILTER_EVERY_S if live else SHADOW_EVERY_S)
 
     def start_queued_workers_forever(self) -> None:
         """Workers queued by the laptop cap start, oldest first, as slots free; the lead that asked is told."""

@@ -3,24 +3,29 @@ import sqlite3
 import threading
 import time
 from collections.abc import Generator
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import ClassVar
 
 import pytest
 
-from bridge.board import SYSTEM_CONVERSATION, USER_CONVERSATION, Party, Recipient, send_message
+from bridge.board import SYSTEM_CONVERSATION, USER_CONVERSATION, Party, Recipient, send_message, take_delivery
 from bridge.config import Config, map_toml_to_config
 from bridge.db import connect
+from bridge.feed import deliver_typed
 from bridge.shadow_filter import (
     CATCH_UP_MS,
+    REWAKE_AFTER_MS,
     Verdict,
     ask_model,
     find_start_id,
+    is_wake_held,
     log_path,
     map_rows_to_report,
     read_rows,
     run_shadow_tick,
+    take_due_wakes,
 )
 
 NOW = 1_800_000_000_000
@@ -85,6 +90,7 @@ def _send(
         ("reply", Party("conv-worker", "fix-login"), None, "done", "kind:reply"),
         ("info", Party("conv-worker", "fix-login"), "question", "which branch?", "type:question"),
         ("info", Party(SYSTEM_CONVERSATION, "bridge"), "blocked-tab", "tab waits on a dialog", "type:blocked-tab"),
+        ("info", Party(SYSTEM_CONVERSATION, "bridge"), "turn-cut", "your turn was cut", "type:turn-cut"),
         ("info", Party("conv-aide", "aide"), None, "the owner says: ship it", "assistant"),
         ("info", Party(USER_CONVERSATION, "owner"), None, "look at this", "owner"),
         ("info", Party("conv-worker", "fix-login"), None, "STOP the deploy", "urgent"),
@@ -199,14 +205,14 @@ def test_the_shadow_leaves_delivery_exactly_as_it_was(conn: sqlite3.Connection) 
 
 def test_a_restart_resumes_where_the_log_left_off_and_skips_old_messages(conn: sqlite3.Connection) -> None:
     _send(conn, "before the shadow was on")
-    assert find_start_id(conn) == 1
+    assert find_start_id(conn, CONFIG, NOW) == 1
 
     second = _send(conn, "deployed")
     assert run_shadow_tick(conn, CONFIG, 1, NOW, FakeModel(0.1)) == second
     stale = _send(conn, "sent while serve was down", at=NOW - CATCH_UP_MS - 1)
     fresh = _send(conn, "sent just before the restart")
 
-    after = find_start_id(conn)
+    after = find_start_id(conn, CONFIG, NOW)
     assert after == second
     run_shadow_tick(conn, CONFIG, after, NOW, FakeModel(0.1))
     assert [r["message"] for r in read_rows()] == [second, fresh]
@@ -390,3 +396,240 @@ def test_config_keys_and_their_defaults() -> None:
     assert config.shadow_filter_url == "u"
     with pytest.raises(ValueError, match="from 0 to 1"):
         map_toml_to_config({"shadow_filter_threshold": 2})
+    assert (Config().shadow_filter_live, Config().shadow_filter_hold_min) == (False, 30)
+    live = map_toml_to_config(
+        {
+            "shadow_filter": True,
+            "shadow_filter_live": True,
+            "shadow_filter_hold_min": 20,
+            "shadow_filter_refusal_phrases": ["is now off limits"],
+        }
+    )
+    assert (live.shadow_filter_live, live.shadow_filter_hold_min) == (True, 20)
+    assert live.shadow_filter_refusal_phrases == ("is now off limits",)
+    with pytest.raises(ValueError, match="needs shadow_filter"):
+        map_toml_to_config({"shadow_filter_live": True})
+
+
+@pytest.mark.parametrize(
+    ("body", "rule"),
+    [
+        ("Dana chose (via aide): ship the fix today", "owner-relay"),
+        ("Relayed from DANA: keep the old flag", "owner-relay"),
+        ("dana   (verbatim): no more merges tonight", "owner-relay"),
+        ("Live now: a push without a ticket is blocked", "new-refusal"),
+        ("A merge is refused unless CI is green", "new-refusal"),
+        ("bridge NOW REFUSES a doc without a story", "new-refusal"),
+    ],
+)
+def test_an_owner_decision_relayed_or_a_new_refusal_goes_now_by_rule(
+    conn: sqlite3.Connection, body: str, rule: str
+) -> None:
+    _send(conn, body)
+
+    run_shadow_tick(conn, replace(CONFIG, owner_name="Dana"), 0, NOW, _no_call)
+
+    [row] = read_rows()
+    assert (row["source"], row["decision"], row["rule"]) == ("rule", "now", rule)
+
+
+LIVE = replace(CONFIG, shadow_filter_live=True)
+HOLD_MS = 30 * 60_000
+
+
+def _start_tab(conn: sqlite3.Connection, lead: str = "ana") -> None:
+    conn.execute(
+        "INSERT INTO instances (instance_id, pid, proc_start_ms, conversation_id, first_seen_at, last_observed_at)"
+        " VALUES (?, 4242, 1, ?, 0, 0)",
+        (f"4242@{lead}", f"conv-{lead}"),
+    )
+
+
+def _recipient_row(conn: sqlite3.Connection, message_id: int, lead: str = "ana") -> tuple[object, ...]:
+    return tuple(
+        conn.execute(
+            "SELECT filter_passed_at, filter_held_at, typing_wanted_at FROM message_recipients"
+            " WHERE message_id = ? AND conversation_id = ?",
+            (message_id, f"conv-{lead}"),
+        ).fetchone()
+    )
+
+
+class Wakes:
+    def __init__(self) -> None:
+        self.calls: list[tuple[int, str, str]] = []
+
+    def __call__(self, message_id: int, conversation_id: str, handle: str) -> None:
+        self.calls.append((message_id, conversation_id, handle))
+
+
+def test_live_off_holds_nothing_and_writes_nothing_beyond_the_log(conn: sqlite3.Connection) -> None:
+    message = _send(conn, "deployed to staging")
+    wakes = Wakes()
+
+    run_shadow_tick(conn, CONFIG, 0, NOW, FakeModel(0.01), wakes)
+
+    assert read_rows()[-1]["decision"] == "batch"
+    assert not is_wake_held(conn, CONFIG, message, "conv-ana", NOW)
+    assert deliver_typed(conn, CONFIG, message, "conv-ana") is None
+    passed, held, wanted = _recipient_row(conn, message)
+    assert (passed, held, wanted is not None) == (None, None, True)
+    assert wakes.calls == []
+    assert "waited" not in str(take_delivery(conn, "conv-ana", NOW, False).context)
+
+
+def test_live_a_batched_message_is_not_typed_then_comes_with_the_next_message_that_goes_now(
+    conn: sqlite3.Connection,
+) -> None:
+    deployed = _send(conn, "deployed to staging")
+    # Held before the filter even judged it: the tab's waiter must not wake on it meanwhile.
+    assert is_wake_held(conn, LIVE, deployed, "conv-ana", NOW)
+    wakes = Wakes()
+
+    after = run_shadow_tick(conn, LIVE, 0, NOW, FakeModel(0.01), wakes)
+
+    assert deliver_typed(conn, LIVE, deployed, "conv-ana") is None
+    assert _recipient_row(conn, deployed) == (None, NOW, None)
+    assert wakes.calls == []
+    failing = _send(conn, "CI fails on main", at=NOW + 1000)
+    assert is_wake_held(conn, LIVE, failing, "conv-ana", NOW + 1000)
+
+    run_shadow_tick(conn, LIVE, after, NOW + 2000, FakeModel(0.9), wakes)
+
+    assert wakes.calls == [(failing, "conv-ana", "ana")]
+    assert not is_wake_held(conn, LIVE, failing, "conv-ana", NOW + 2000)
+    assert is_wake_held(conn, LIVE, deployed, "conv-ana", NOW + 2000)
+    context = str(take_delivery(conn, "conv-ana", NOW + 3000, False).context)
+    assert context.splitlines()[1:] == [
+        f'#{failing} info from fix-login: "CI fails on main"',
+        "1 notice that waited:",
+        f'#{deployed} info from fix-login: "deployed to staging"',
+    ]
+    assert [r["decision"] for r in read_rows()] == ["batch", "now"]
+
+
+def test_live_held_messages_survive_a_restart_and_go_alone_together_once_the_oldest_waited_out_its_hold(
+    tmp_path: Path, conn: sqlite3.Connection
+) -> None:
+    _start_tab(conn)
+    first = _send(conn, "deployed to staging")
+    second = _send(conn, "the nightly report is up", at=NOW + 60_000)
+    run_shadow_tick(conn, LIVE, 0, NOW + 60_000, FakeModel(0.01))
+    conn.close()
+
+    restarted = connect(tmp_path / "bridge.db")
+    try:
+        assert take_due_wakes(restarted, LIVE, NOW + HOLD_MS - 1) == []
+        assert is_wake_held(restarted, LIVE, first, "conv-ana", NOW + HOLD_MS - 1)
+
+        assert take_due_wakes(restarted, LIVE, NOW + HOLD_MS) == [(first, "conv-ana", "ana")]
+
+        assert take_due_wakes(restarted, LIVE, NOW + HOLD_MS + 2000) == []
+        assert not is_wake_held(restarted, LIVE, second, "conv-ana", NOW + HOLD_MS)
+        context = str(take_delivery(restarted, "conv-ana", NOW + HOLD_MS, False).context)
+        assert context.splitlines()[1:] == [
+            "2 notices that waited:",
+            f'#{first} info from fix-login: "deployed to staging"',
+            f'#{second} info from fix-login: "the nightly report is up"',
+        ]
+    finally:
+        restarted.close()
+
+
+def test_live_a_model_timeout_lets_the_message_through_at_once(conn: sqlite3.Connection) -> None:
+    message = _send(conn, "deployed to staging")
+    wakes = Wakes()
+
+    run_shadow_tick(conn, LIVE, 0, NOW, FakeModel(None, "timeout"), wakes)
+
+    assert wakes.calls == [(message, "conv-ana", "ana")]
+    assert _recipient_row(conn, message)[:2] == (NOW, None)
+    assert not is_wake_held(conn, LIVE, message, "conv-ana", NOW)
+    assert read_rows()[-1]["error"] == "timeout"
+
+
+def test_live_never_holds_the_assistant_or_what_a_rule_sends_now(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "INSERT INTO leads (name, display_name, scope, linear_refs, tint, created_at, domains) "
+        "VALUES ('aide', 'Aide', 'scope', '[]', 'blue', 0, '[]')"
+    )
+    _start_tab(conn, "aide")
+    to_assistant = _send(conn, "deployed to staging", to=("aide",))
+    request = _send(conn, "may I merge?", kind="request")
+    urgent = _send(conn, "URGENT: prod is down")
+
+    assert not is_wake_held(conn, LIVE, to_assistant, "conv-aide", NOW)
+    assert not is_wake_held(conn, LIVE, request, "conv-ana", NOW)
+    assert not is_wake_held(conn, LIVE, urgent, "conv-ana", NOW)
+    wakes = Wakes()
+    run_shadow_tick(conn, LIVE, 0, NOW, FakeModel(0.01), wakes)
+    assert _recipient_row(conn, to_assistant, "aide")[:2] == (None, None)
+    assert wakes.calls == []
+    assert take_due_wakes(conn, LIVE, NOW + HOLD_MS) == []
+
+
+def test_live_with_no_log_judges_the_messages_still_within_their_hold(conn: sqlite3.Connection) -> None:
+    old = _send(conn, "sent long before", at=NOW - HOLD_MS - 1)
+    _send(conn, "sent just before serve started")
+
+    assert find_start_id(conn, LIVE, NOW) == old
+    assert find_start_id(conn, CONFIG, NOW) == old + 1
+
+
+def test_live_a_wake_no_typer_took_up_is_woken_again_once_a_minute(conn: sqlite3.Connection) -> None:
+    _start_tab(conn)
+    message = _send(conn, "deployed to staging")
+    run_shadow_tick(conn, LIVE, 0, NOW, FakeModel(0.9), Wakes())
+
+    assert take_due_wakes(conn, LIVE, NOW + REWAKE_AFTER_MS - 1) == []
+    assert take_due_wakes(conn, LIVE, NOW + REWAKE_AFTER_MS) == [(message, "conv-ana", "ana")]
+    assert take_due_wakes(conn, LIVE, NOW + REWAKE_AFTER_MS + 1) == []
+    # A typer that got past the hold takes it from here, with the usual retries and alerts.
+    conn.execute("UPDATE message_recipients SET typing_wanted_at = 1 WHERE message_id = ?", (message,))
+    assert take_due_wakes(conn, LIVE, NOW + 3 * REWAKE_AFTER_MS) == []
+
+
+def test_live_a_release_wakes_with_the_oldest_held_message_a_hook_has_not_handed_over(
+    conn: sqlite3.Connection,
+) -> None:
+    _start_tab(conn)
+    first = _send(conn, "deployed to staging")
+    second = _send(conn, "the nightly report is up", at=NOW + 1000)
+    run_shadow_tick(conn, LIVE, 0, NOW + 1000, FakeModel(0.01))
+    conn.execute("UPDATE message_recipients SET offered_at = 5, acked_at = 5 WHERE message_id = ?", (first,))
+
+    assert take_due_wakes(conn, LIVE, NOW + HOLD_MS) == []
+    assert take_due_wakes(conn, LIVE, NOW + HOLD_MS + 1000) == [(second, "conv-ana", "ana")]
+    assert _recipient_row(conn, first)[0] is None
+
+
+def test_held_notices_never_crowd_out_the_message_that_woke_the_tab(conn: sqlite3.Connection) -> None:
+    held = [_send(conn, f"notice {n}: " + "x" * 300) for n in range(6)]
+    run_shadow_tick(conn, LIVE, 0, NOW, FakeModel(0.01))
+    urgent = _send(conn, "URGENT: prod is down")
+
+    delivery = take_delivery(conn, "conv-ana", NOW, False, budget_bytes=1200)
+
+    assert f"#{urgent} " in str(delivery.context)
+    assert f"#{held[0]} " in str(delivery.context) and delivery.leftover
+
+
+def test_live_no_wake_starts_where_a_typer_already_works_on_the_tab(conn: sqlite3.Connection) -> None:
+    _start_tab(conn)
+    blocked = _send(conn, "CI fails on main")
+    conn.execute("UPDATE message_recipients SET typing_wanted_at = 1 WHERE message_id = ?", (blocked,))
+    held = _send(conn, "deployed to staging")
+    run_shadow_tick(conn, LIVE, blocked, NOW, FakeModel(0.01))
+
+    assert take_due_wakes(conn, LIVE, NOW + HOLD_MS) == []
+    assert not is_wake_held(conn, LIVE, held, "conv-ana", NOW + 1)
+    assert take_due_wakes(conn, LIVE, NOW + HOLD_MS + REWAKE_AFTER_MS) == []
+
+
+def test_live_a_hold_longer_than_the_catch_up_still_gets_its_verdict(conn: sqlite3.Connection) -> None:
+    long_hold = replace(LIVE, shadow_filter_hold_min=120)
+    message = _send(conn, "deployed to staging", at=NOW - 90 * 60_000)
+
+    run_shadow_tick(conn, long_hold, 0, NOW, FakeModel(0.9))
+
+    assert [r["message"] for r in read_rows()] == [message]

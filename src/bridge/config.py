@@ -173,6 +173,13 @@ class Config:
     """A message the model gives at least this chance of needing the lead now would go at once."""
     shadow_filter_key_file: str = ""
     """File holding the classifier's API key (~ allowed); read for each call, never copied; doc_screen uses it too."""
+    shadow_filter_live: bool = False
+    """The filter decides before delivery: a message it batches does not wake its lead, but waits for the lead's next
+    message that goes now, or for shadow_filter_hold_min. Needs shadow_filter."""
+    shadow_filter_hold_min: int = 30
+    """The longest a batched message waits before it wakes its lead anyway."""
+    shadow_filter_refusal_phrases: tuple[str, ...] = ("Live now:", "is refused unless", "now refuses")
+    """A message to a lead containing one of these (any case) announces a new refusal or rule and goes at once."""
     ask_autoclose_decision: str = ""
     """The owner's decision that verified asks close by themselves (e.g. "Q#12"), cited in each automatic close."""
     asks_panel_max: int = 10
@@ -350,6 +357,11 @@ def map_toml_to_config(raw: dict[str, object]) -> Config:
         shadow_filter_url=_str(raw, "shadow_filter_url", defaults.shadow_filter_url),
         shadow_filter_threshold=_fraction(raw, "shadow_filter_threshold", defaults.shadow_filter_threshold),
         shadow_filter_key_file=_str(raw, "shadow_filter_key_file", defaults.shadow_filter_key_file),
+        shadow_filter_live=_bool(raw, "shadow_filter_live", defaults.shadow_filter_live),
+        shadow_filter_hold_min=_positive(raw, "shadow_filter_hold_min", defaults.shadow_filter_hold_min),
+        shadow_filter_refusal_phrases=_str_list(
+            raw, "shadow_filter_refusal_phrases", defaults.shadow_filter_refusal_phrases
+        ),
         ask_autoclose_decision=_str(raw, "ask_autoclose_decision", defaults.ask_autoclose_decision),
         asks_panel_max=_positive(raw, "asks_panel_max", defaults.asks_panel_max),
         doc_screen=_bool(raw, "doc_screen", defaults.doc_screen),
@@ -360,6 +372,9 @@ def map_toml_to_config(raw: dict[str, object]) -> Config:
         auto_merge_decision=_str(raw, "auto_merge_decision", defaults.auto_merge_decision),
         auto_merge_failures_to=_str(raw, "auto_merge_failures_to", defaults.auto_merge_failures_to),
     )
+    if config.shadow_filter_live and not config.shadow_filter:
+        # Only the filter's loop lets a held message through before its hold runs out.
+        raise ValueError("shadow_filter_live needs shadow_filter = true")
     named = [w for w in config.watchers if w.name == config.worker_host_watcher]
     if config.worker_host_watcher and len(named) != 1:
         raise ValueError(f"worker_host_watcher {config.worker_host_watcher!r} must name exactly one [[watchers]] entry")

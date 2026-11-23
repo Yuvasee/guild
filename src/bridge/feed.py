@@ -39,6 +39,7 @@ from bridge.procinfo import pid_alive, process_start_ms
 from bridge.refs import extract_refs
 from bridge.registry import PROC_START_TOLERANCE_MS, RECENT_REF_TURNS, current_ref_sql
 from bridge.rewake_marks import WaiterDeferral
+from bridge.shadow_filter import is_wake_held
 from bridge.tabinput import (
     BRIDGE_TEXT_PREFIX,
     PROBE_KEY,
@@ -612,6 +613,9 @@ def _is_lock_error(exc: sqlite3.OperationalError) -> bool:
 def _find_typable_row(
     conn: sqlite3.Connection, config: Config, message_id: int, conversation_id: str
 ) -> sqlite3.Row | None:
+    if is_wake_held(conn, config, message_id, conversation_id, now_ms()):
+        # The live filter starts its delivery once it lets it through.
+        return None
     # Whoever spawned this decided it is typed; the undelivered alert counts only such rows.
     conn.execute(
         "UPDATE message_recipients SET typing_wanted_at = coalesce(typing_wanted_at, ?)"

@@ -359,7 +359,7 @@ def take_delivery(
     rows = conn.execute(
         """
         SELECT m.id, m.kind, m.board, m.from_conversation, m.from_handle, m.body, m.respond_by, m.reply_to,
-               r.offered_at, r.offer_count
+               r.offered_at, r.offer_count, r.filter_held_at
         FROM message_recipients r JOIN messages m ON m.id = r.message_id
         WHERE r.conversation_id = ? AND m.cancelled_at IS NULL
           AND r.acked_at IS NULL AND r.done_at IS NULL AND r.declined_at IS NULL
@@ -375,12 +375,18 @@ def take_delivery(
         return Delivery(context=None, leftover=False)
     peer_lines: list[str] = []
     user_lines: list[str] = []
+    held_lines: list[str] = []
     offered: list[sqlite3.Row] = []
     # Both frames count up front: the budget must hold whichever groups end up non-empty.
     used = len(_FRAME.encode()) + len(_USER_FRAME.encode()) + 2 + (len(obligations.encode()) + 1 if obligations else 0)
+    if any(r["filter_held_at"] is not None for r in eligible):
+        used += len(_convert_count_to_held_header(len(eligible)).encode()) + 1
     leftover = False
     # The user's words come first: they outrank anything a peer session asks.
-    for row in sorted(eligible, key=lambda r: r["from_conversation"] != USER_CONVERSATION):
+    # What the lead filter held goes last, so it never crowds out the message that woke the tab.
+    for row in sorted(
+        eligible, key=lambda r: (r["from_conversation"] != USER_CONVERSATION, r["filter_held_at"] is not None)
+    ):
         from_user = row["from_conversation"] == USER_CONVERSATION
         line = convert_user_message_to_line(row) if from_user else convert_message_to_line(row, at_ms)
         room = budget_bytes - 60 - used
@@ -391,7 +397,7 @@ def take_delivery(
                 continue
             line = line.encode()[: room - 80].decode(errors="ignore") + f"… (full text: bridge show {row['id']})"
         size = len(line.encode()) + 1
-        (user_lines if from_user else peer_lines).append(line)
+        (user_lines if from_user else held_lines if row["filter_held_at"] is not None else peer_lines).append(line)
         offered.append(row)
         used += size
     for row in offered:
@@ -404,6 +410,9 @@ def take_delivery(
             """,
             (at_ms, row["kind"], at_ms, row["id"], conversation_id),
         )
+    if held_lines:
+        # Held by the lead filter until now; they come as one group, oldest first, after what woke the tab.
+        peer_lines += [_convert_count_to_held_header(len(held_lines)), *held_lines]
     lines = [*([_USER_FRAME, *user_lines] if user_lines else []), *([_FRAME, *peer_lines] if peer_lines else [])]
     if obligations:
         lines.append(obligations)
@@ -415,6 +424,10 @@ def take_delivery(
     if not lines:
         return Delivery(context=None, leftover=False)
     return Delivery(context="\n".join(lines), leftover=leftover)
+
+
+def _convert_count_to_held_header(count: int) -> str:
+    return f"{count} notice{'' if count == 1 else 's'} that waited:"
 
 
 def list_inbox(conn: sqlite3.Connection, conversation_id: str, include_closed: bool) -> list[sqlite3.Row]:

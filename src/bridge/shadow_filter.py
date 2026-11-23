@@ -1,5 +1,8 @@
-"""Shadow of a wake-up filter for messages to team leads: decides what a filter would hold back and logs it, after the
-message went out as usual. Nothing here changes or delays delivery."""
+"""A wake-up filter for messages to team leads: decides whether a message must reach its lead now or can wait for a
+batch, and logs each decision. In shadow mode that is all it does, after the message went out as usual. Live
+(shadow_filter_live), a message a rule does not send at once may not wake its lead's tab until the filter lets it
+through; one it batches waits for the lead's next message that goes now, or for its hold to run out. A lead's own
+tool hooks still hand it over: only the wake-up waits."""
 
 import json
 import re
@@ -13,8 +16,14 @@ from typing import cast
 from bridge.board import SYSTEM_CONVERSATION, USER_CONVERSATION
 from bridge.classifier import call_model, quotes_customer, scrub
 from bridge.config import Config, state_dir
+from bridge.db import transaction
 
 EVERY_S = 10
+LIVE_EVERY_S = 2
+"""Live, a message the model lets through waits for this tick, so it is short."""
+LIVE_MAX_PER_TICK = 10
+"""Live, a tick judges at most this many messages, so a backlog of model calls does not hold up expired holds."""
+REWAKE_AFTER_MS = 60_000
 CALL_TIMEOUT_S = 3.0
 CATCH_UP_MS = 3_600_000
 """After a restart, messages older than this are left unjudged, so a long stop does not end in a burst of calls."""
@@ -25,7 +34,7 @@ BODY_MAX_CHARS = 1500
 NOW = "now"
 BATCH = "batch"
 NOW_KINDS = frozenset({"request", "reply"})
-NOW_POST_TYPES = frozenset({"question", "blocked-tab"})
+NOW_POST_TYPES = frozenset({"question", "blocked-tab", "turn-cut"})
 _URGENT_RE = re.compile(r"\b(URGENT|STOP)\b")
 TASK = (
     "You triage messages delivered to an AI team lead: a Claude Code session that coordinates worker sessions on a "
@@ -97,6 +106,22 @@ def find_now_rule(message: LeadMessage, config: Config) -> str | None:
         return f"type:{message.post_type}"
     if _URGENT_RE.search(message.body):
         return "urgent"
+    body = " ".join(message.body.split()).casefold()
+    owner = config.owner_name.casefold()
+    if any(p in body for p in (f"{owner} chose", f"relayed from {owner}", f"{owner} (verbatim")):
+        return "owner-relay"
+    if any(p.casefold() in body for p in config.shadow_filter_refusal_phrases):
+        return "new-refusal"
+    return None
+
+
+def find_quick_decision(message: LeadMessage, config: Config) -> Decision | None:
+    """A decision that needs no model call, so live it holds nothing back."""
+    rule = find_now_rule(message, config)
+    if rule is not None:
+        return Decision(source="rule", decision=NOW, rule=rule)
+    if quotes_customer(message.body):
+        return Decision(source="skipped", decision=NOW)
     return None
 
 
@@ -115,11 +140,9 @@ def map_message_to_state(message: LeadMessage, lead_handles: frozenset[str]) -> 
 
 
 def decide(message: LeadMessage, config: Config, lead_handles: frozenset[str], ask: Ask) -> Decision:
-    rule = find_now_rule(message, config)
-    if rule is not None:
-        return Decision(source="rule", decision=NOW, rule=rule)
-    if quotes_customer(message.body):
-        return Decision(source="skipped", decision=NOW)
+    quick = find_quick_decision(message, config)
+    if quick is not None:
+        return quick
     verdict = ask(map_message_to_state(message, lead_handles))
     if verdict.p_now is None:
         return Decision(source="model", decision=NOW, latency_ms=verdict.latency_ms, error=verdict.error)
@@ -140,7 +163,9 @@ def ask_model(url: str, key_file: str, state: str, timeout_s: float = CALL_TIMEO
     return Verdict(p_now=p_now, error=None, latency_ms=reply.latency_ms)
 
 
-def list_new_lead_messages(conn: sqlite3.Connection, after_id: int, up_to_id: int, now: int) -> list[LeadMessage]:
+def list_new_lead_messages(
+    conn: sqlite3.Connection, after_id: int, up_to_id: int, now: int, catch_up_ms: int = CATCH_UP_MS
+) -> list[LeadMessage]:
     rows = conn.execute(
         """
         SELECT m.id, m.from_conversation, m.from_handle, m.kind, m.post_type, m.board, m.body,
@@ -151,7 +176,7 @@ def list_new_lead_messages(conn: sqlite3.Connection, after_id: int, up_to_id: in
         WHERE m.id > ? AND m.id <= ? AND m.created_at >= ? AND m.cancelled_at IS NULL
         ORDER BY m.id, r.handle
         """,
-        (after_id, up_to_id, now - CATCH_UP_MS),
+        (after_id, up_to_id, now - catch_up_ms),
     ).fetchall()
     messages: dict[int, LeadMessage] = {}
     for row in rows:
@@ -160,29 +185,162 @@ def list_new_lead_messages(conn: sqlite3.Connection, after_id: int, up_to_id: in
         if found is not None:
             messages[found.id] = replace(found, leads=(*found.leads, lead))
             continue
-        messages[int(row["id"])] = LeadMessage(
-            id=int(row["id"]),
-            from_conversation=str(row["from_conversation"]),
-            from_handle=str(row["from_handle"]),
-            kind=str(row["kind"]),
-            post_type=row["post_type"],
-            board=bool(row["board"]),
-            body=str(row["body"]),
-            leads=(lead,),
-        )
+        messages[int(row["id"])] = _map_row_to_message(row, (lead,))
     return list(messages.values())
 
 
-def run_shadow_tick(conn: sqlite3.Connection, config: Config, after_id: int, now: int, ask: Ask) -> int:
-    """Judges the messages to leads past after_id and logs one row per lead; returns the new after_id."""
+def _map_row_to_message(row: sqlite3.Row, leads: tuple[tuple[str, str], ...]) -> LeadMessage:
+    return LeadMessage(
+        id=int(row["id"]),
+        from_conversation=str(row["from_conversation"]),
+        from_handle=str(row["from_handle"]),
+        kind=str(row["kind"]),
+        post_type=row["post_type"],
+        board=bool(row["board"]),
+        body=str(row["body"]),
+        leads=leads,
+    )
+
+
+_LEAD_DELIVERY_SQL = """
+    SELECT m.id, m.from_conversation, m.from_handle, m.kind, m.post_type, m.board, m.body, m.created_at,
+           r.conversation_id, r.handle, r.filter_passed_at
+    FROM message_recipients r JOIN messages m ON m.id = r.message_id
+    JOIN leads l ON l.name = r.handle AND l.retired_at IS NULL
+    WHERE r.handle != :assistant
+"""
+"""Deliveries the live filter may hold: one to a lead it has not let through is held unless a quick decision sends it
+now."""
+
+
+def is_wake_held(conn: sqlite3.Connection, config: Config, message_id: int, conversation_id: str, at_ms: int) -> bool:
+    """Live, a delivery to a lead may not wake its tab, by typing or by its waiter, until the filter lets it through
+    or its hold runs out; the assistant and whatever a rule sends now are never held."""
+    if not config.shadow_filter_live:
+        return False
+    row = conn.execute(
+        _LEAD_DELIVERY_SQL
+        + " AND r.filter_passed_at IS NULL AND r.message_id = :message AND r.conversation_id = :conversation",
+        {"assistant": config.assistant_handle, "message": message_id, "conversation": conversation_id},
+    ).fetchone()
+    if row is None or int(row["created_at"]) + hold_ms(config) <= at_ms:
+        return False
+    return find_quick_decision(_map_row_to_message(row, ()), config) is None
+
+
+def hold_ms(config: Config) -> int:
+    return config.shadow_filter_hold_min * 60_000
+
+
+def take_due_wakes(conn: sqlite3.Connection, config: Config, at_ms: int) -> list[tuple[int, str, str]]:
+    """Lead tabs to wake now, each as (message, conversation, lead) of its oldest delivery let through here; the rest
+    come with the turn it starts. A tab's held deliveries are let through together once the oldest waited out its hold.
+    One let through that no typer took up within REWAKE_AFTER_MS is woken again: its wake can be lost to the sender's
+    typer still holding the typer lock, or to a stop between the verdict and the wake."""
+    rows = conn.execute(
+        _LEAD_DELIVERY_SQL
+        + """
+          AND (r.filter_passed_at IS NULL OR r.filter_passed_at <= :stale) AND r.typing_wanted_at IS NULL
+          AND r.acked_at IS NULL AND r.offered_at IS NULL AND r.done_at IS NULL AND r.declined_at IS NULL
+          AND m.cancelled_at IS NULL
+          -- A conversation with no live process gets its mail from the start hook when it resumes.
+          AND EXISTS (SELECT 1 FROM instances i WHERE i.conversation_id = r.conversation_id AND i.ended_at IS NULL)
+        ORDER BY m.id
+        """,
+        {"assistant": config.assistant_handle, "stale": at_ms - REWAKE_AFTER_MS},
+    ).fetchall()
+    held: dict[tuple[str, str], list[sqlite3.Row]] = {}
+    stale: dict[tuple[str, str], list[sqlite3.Row]] = {}
+    for row in rows:
+        tab = (str(row["conversation_id"]), str(row["handle"]))
+        if row["filter_passed_at"] is not None:
+            stale.setdefault(tab, []).append(row)
+        elif find_quick_decision(_map_row_to_message(row, ()), config) is None:
+            held.setdefault(tab, []).append(row)
+    wakes: list[tuple[int, str, str]] = []
+    for tab in held.keys() | stale.keys():
+        due = stale.get(tab, [])
+        waiting = held.get(tab, [])
+        if waiting and int(waiting[0]["created_at"]) + hold_ms(config) <= at_ms:
+            due = due + waiting
+        if not due:
+            continue
+        with transaction(conn):
+            # Checked again here: a hook may have handed some over since they were read.
+            passed = [
+                int(row["id"])
+                for row in due
+                if conn.execute(
+                    """
+                    UPDATE message_recipients SET filter_passed_at = ?
+                    WHERE message_id = ? AND conversation_id = ? AND filter_passed_at IS ?
+                      AND typing_wanted_at IS NULL AND acked_at IS NULL AND offered_at IS NULL
+                    """,
+                    (at_ms, int(row["id"]), tab[0], row["filter_passed_at"]),
+                ).rowcount
+            ]
+        typing = conn.execute(
+            """
+            SELECT 1 FROM message_recipients
+            WHERE conversation_id = ? AND typing_wanted_at IS NOT NULL AND acked_at IS NULL AND offered_at IS NULL
+              AND done_at IS NULL AND declined_at IS NULL
+            """,
+            (tab[0],),
+        ).fetchone()
+        # A typer or the retry pass already works on this tab; the turn it starts brings these too.
+        if passed and typing is None:
+            wakes.append((min(passed), *tab))
+    return sorted(wakes)
+
+
+def _record_live_decision(
+    conn: sqlite3.Connection, message_id: int, conversation_id: str, decision: Decision, at_ms: int
+) -> bool:
+    """True when the model let through a delivery that was held for its verdict and still waits to be delivered."""
+    column = "filter_passed_at" if decision.decision == NOW else "filter_held_at"
+    with transaction(conn):
+        cursor = conn.execute(
+            f"""
+            UPDATE message_recipients SET {column} = ?
+            WHERE message_id = ? AND conversation_id = ? AND filter_passed_at IS NULL
+              AND acked_at IS NULL AND offered_at IS NULL
+            """,
+            (at_ms, message_id, conversation_id),
+        )
+    return cursor.rowcount == 1 and decision.decision == NOW
+
+
+def run_shadow_tick(
+    conn: sqlite3.Connection,
+    config: Config,
+    after_id: int,
+    now: int,
+    ask: Ask,
+    wake: Callable[[int, str, str], None] | None = None,
+) -> int:
+    """Judges the messages to leads past after_id and logs one row per lead; returns the new after_id.
+
+    Live, it records each verdict first, and calls wake(message, conversation, lead) for a delivery the model let
+    through, as nothing else will start it."""
     top = conn.execute("SELECT max(id) FROM messages").fetchone()[0]
     up_to = int(top) if top is not None else after_id
     if up_to <= after_id:
         return after_id
-    messages = list_new_lead_messages(conn, after_id, up_to, now)
+    # Live, a message still within its hold waits for its verdict, however long the hold.
+    catch_up = max(CATCH_UP_MS, hold_ms(config)) if config.shadow_filter_live else CATCH_UP_MS
+    messages = list_new_lead_messages(conn, after_id, up_to, now, catch_up)
+    if config.shadow_filter_live and len(messages) > LIVE_MAX_PER_TICK:
+        messages = messages[:LIVE_MAX_PER_TICK]
+        up_to = messages[-1].id
     lead_handles = frozenset(str(r[0]) for r in conn.execute("SELECT name FROM leads"))
     for message in messages:
         decision = decide(message, config, lead_handles, ask)
+        if config.shadow_filter_live and decision.source == "model":
+            for lead, conversation in message.leads:
+                if lead == config.assistant_handle:
+                    continue
+                if _record_live_decision(conn, message.id, conversation, decision, now) and wake is not None:
+                    wake(message.id, conversation, lead)
         append_rows(
             [
                 {"at": now, "message": message.id, "lead": lead, "conversation": conversation, **asdict(decision)}
@@ -214,13 +372,17 @@ def _ends_with_newline(path: Path) -> bool:
         return f.read(1) == b"\n"
 
 
-def find_start_id(conn: sqlite3.Connection) -> int:
-    """Where the log left off, so a restart misses nothing; with no log, from now on."""
+def find_start_id(conn: sqlite3.Connection, config: Config, now: int) -> int:
+    """Where the log left off, so a restart misses nothing; with no log, from now on, or live from the messages still
+    within their hold, which wait for a verdict."""
     for row in reversed(read_rows()):
         message = row.get("message")
         if isinstance(message, int):
             return message
-    top = conn.execute("SELECT max(id) FROM messages").fetchone()[0]
+    if config.shadow_filter_live:
+        top = conn.execute("SELECT max(id) FROM messages WHERE created_at < ?", (now - hold_ms(config),)).fetchone()[0]
+    else:
+        top = conn.execute("SELECT max(id) FROM messages").fetchone()[0]
     return int(top) if top is not None else 0
 
 

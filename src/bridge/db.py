@@ -887,6 +887,11 @@ MIGRATIONS: tuple[str, ...] = (
     DROP TABLE review_branch_writes;
     ALTER TABLE review_branch_writes_new RENAME TO review_branch_writes;
     """,
+    # The live lead filter: when it let a delivery to a lead wake its tab, and when it held one back for a batch.
+    """
+    ALTER TABLE message_recipients ADD COLUMN filter_passed_at INTEGER;
+    ALTER TABLE message_recipients ADD COLUMN filter_held_at INTEGER;
+    """,
 )
 
 HOOK_BUSY_TIMEOUT_MS = 200

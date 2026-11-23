@@ -14,6 +14,7 @@ from bridge.feed import TYPED_MESSAGE_SQL, release_dead_typing_claims
 from bridge.leads import is_conversation_locked, is_surface_locked
 from bridge.procinfo import process_start_ms
 from bridge.registry import make_instance_id, record_activity
+from bridge.shadow_filter import is_wake_held
 
 WAKE = 2
 UNHEARD = 3
@@ -73,7 +74,7 @@ def write_rewake(conn: sqlite3.Connection, config: Config, pid: int, event_ns: i
             not is_delivery_owner(conn, conversation_id, instance_id)
             or is_conversation_locked(conn, config, conversation_id)
             or is_surface_locked(conn, config, row["surface"])
-            or not _has_wakeful_mail(conn, conversation_id, instance_id)
+            or not _has_wakeful_mail(conn, config, conversation_id, instance_id, at_ms)
         ):
             return False
         release_dead_typing_claims(conn, at_ms, conversation_id)
@@ -92,17 +93,18 @@ def write_rewake(conn: sqlite3.Connection, config: Config, pid: int, event_ns: i
     return True
 
 
-def _has_wakeful_mail(conn: sqlite3.Connection, conversation_id: str, instance_id: str) -> bool:
+def _has_wakeful_mail(
+    conn: sqlite3.Connection, config: Config, conversation_id: str, instance_id: str, at_ms: int
+) -> bool:
     """Mail that would be typed into the tab; anything else waits for the session's own next turn, as it always did."""
-    row = conn.execute(
+    rows = conn.execute(
         f"""
-        SELECT 1 FROM message_recipients r JOIN messages m ON m.id = r.message_id
+        SELECT r.message_id FROM message_recipients r JOIN messages m ON m.id = r.message_id
         JOIN instances i ON i.instance_id = ?
         WHERE r.conversation_id = ? AND r.acked_at IS NULL AND r.offered_at IS NULL
           AND r.done_at IS NULL AND r.declined_at IS NULL AND m.cancelled_at IS NULL
           AND {TYPED_MESSAGE_SQL}
-        LIMIT 1
         """,
         (instance_id, conversation_id),
-    ).fetchone()
-    return row is not None
+    ).fetchall()
+    return any(not is_wake_held(conn, config, int(row[0]), conversation_id, at_ms) for row in rows)
