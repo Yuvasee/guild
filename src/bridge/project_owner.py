@@ -8,7 +8,7 @@ from bridge.board import Recipient
 from bridge.cli_board import nudge_recipients
 from bridge.config import Config
 from bridge.db import now_ms, transaction
-from bridge.domains import find_domain_owner, find_issue_keys, refresh_issue_projects
+from bridge.domains import find_domain_owner, find_issue_keys, map_name_to_slug, refresh_issue_projects
 from bridge.enrich import read_linear_key
 from bridge.errlog import log_error
 from bridge.feed import spawn_typed_delivery
@@ -123,7 +123,7 @@ def find_domain_overlaps(lead: Lead, leads: list[Lead]) -> list[str]:
         f"{domain} is already {other.display_name}'s domain: one lead per project, the assistant decides"
         for domain in lead.domains
         for other in leads
-        if other.name != lead.name and domain.lower() in {d.lower() for d in other.domains}
+        if other.name != lead.name and map_name_to_slug(domain) in {map_name_to_slug(d) for d in other.domains}
     ]
 
 

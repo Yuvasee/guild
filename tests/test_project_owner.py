@@ -147,6 +147,15 @@ def test_a_domain_named_as_the_linear_project_matches_it(
     assert "ACME-30 is in docs, Cleo's project" in capsys.readouterr().err
 
 
+def test_a_domain_written_as_a_slug_matches_the_linear_project_name(
+    conn: sqlite3.Connection, capsys: pytest.CaptureFixture[str]
+) -> None:
+    add_lead(conn, "cleo", ["release-notes"])
+    linear = FakeLinear({"ACME-31": "Release Notes"})
+    warn_on_taken_issues(conn, CONFIG, get_lead(conn, "bert"), ["issue:ACME-31"], linear)
+    assert "ACME-31 is in Release Notes, Cleo's project" in capsys.readouterr().err
+
+
 def test_a_priority_project_takes_the_linear_project_most_of_its_issues_are_in(
     conn: sqlite3.Connection, capsys: pytest.CaptureFixture[str]
 ) -> None:

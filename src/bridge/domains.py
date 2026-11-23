@@ -17,6 +17,11 @@ _ANY_KEY_RE = re.compile(r"\b[A-Z]{2,}-\d+\b")
 FetchProjects = Callable[[list[str]], dict[str, str | None]]
 
 
+def map_name_to_slug(name: str) -> str:
+    """A domain and a project name compared as slugs: 'issue-detector' is the project 'Issue Detector'."""
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+
+
 @dataclass(frozen=True)
 class DomainOwner:
     lead: Lead
@@ -34,7 +39,7 @@ def find_domain_owner(conn: sqlite3.Connection, key: str) -> DomainOwner | None:
         return None
     priority = _read_priority(conn)
     listed = [
-        DomainOwner(lead, d) for lead in leads for d in lead.domains if key in priority.get(d.lower(), ())
+        DomainOwner(lead, d) for lead in leads for d in lead.domains if key in priority.get(map_name_to_slug(d), ())
     ]  # fmt: skip
     if listed:
         return listed[0] if len({o.lead.name for o in listed}) == 1 else None
@@ -44,9 +49,9 @@ def find_domain_owner(conn: sqlite3.Connection, key: str) -> DomainOwner | None:
         return None
 
     def holds(domain: str) -> bool:
-        sample = priority.get(domain.lower())
+        sample = priority.get(map_name_to_slug(domain))
         if sample is None:
-            return domain.lower() == project.lower()
+            return map_name_to_slug(domain) == map_name_to_slug(project)
         return _find_most_common([cached.get(k) for k in sample]) == project
 
     holders = [lead for lead in leads if any(holds(d) for d in lead.domains)]
@@ -92,7 +97,7 @@ def find_issue_keys(config: Config, text: str) -> set[str]:
 
 def _read_priority(conn: sqlite3.Connection) -> dict[str, tuple[str, ...]]:
     return {
-        str(r["name"]).lower(): tuple(cast(list[str], json.loads(str(r["issue_keys"]))))
+        map_name_to_slug(str(r["name"])): tuple(cast(list[str], json.loads(str(r["issue_keys"]))))
         for r in conn.execute("SELECT name, issue_keys FROM project_priority ORDER BY position")
     }
 
