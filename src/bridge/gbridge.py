@@ -55,6 +55,13 @@ _QUOTED_TILDE_RE = re.compile(r"[\"'\\]~|~[^/\s]*[\"'\\]")
 _REPO_ENV_RE = re.compile(r"^(GH_REPO|GH_HOST|GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_NAMESPACE|GIT_CONFIG\w*)$")
 # bridge.agent_prefix.LINEAR_ISSUE_TOOLS: their titles get the Mac's title check.
 LINEAR_ISSUE_TOOLS = ("mcp__claude_ai_Linear__save_issue",)
+# git before 2.44 lets these take a branch another worktree has checked out, leaving that worktree on the old commit.
+_FORCED_SWITCH_RE = re.compile(
+    r"\bgit\b[^;&|\n]*?\b(?:checkout|switch)\b[^;&|\n]*?\s(?:-[BC]|--force-create)[\s=]+([^\s;&|()]+)"
+)
+_OTHER_WORKTREES_RE = re.compile(r"\bgit\b[^;&|\n]*?\b(?:checkout|switch)\b[^;&|\n]*?\s--ignore-other-worktrees\b")
+_COMMIT_RE = re.compile(r"\bgit\b[^;&|\n]*?\scommit\b")
+LOCAL_GIT_TIMEOUT_S = 3
 
 
 class GuardDeadline(Exception):
@@ -120,6 +127,12 @@ def run_guard(home: Path) -> None:
         tool = payload.get("tool_name")
         field = "command" if tool == "Bash" else "title" if tool in LINEAR_ISSUE_TOOLS else None
         text = tool_input.get(field) if field else None
+        cwd = payload.get("cwd")
+        if field == "command" and isinstance(text, str) and isinstance(cwd, str):
+            refusal = find_worktree_refusal(text, cwd)
+            if refusal:
+                write_denial(refusal)
+                return
         globs = read_globs(home)
         if not isinstance(text, str) or not may_need_guard(globs, text):
             return
@@ -127,7 +140,6 @@ def run_guard(home: Path) -> None:
             write_denial(f"this {field} is over {GUARD_COMMAND_MAX_CHARS} characters, too long for bridge's guard to "
                          "check; split it, keeping any push or merge in a short command of its own.")  # fmt: skip
             return
-        cwd = payload.get("cwd")
         body = {
             "event": "PreToolUse",
             "payload": {
@@ -169,6 +181,91 @@ def run_guard(home: Path) -> None:
         write_denial(f"bridge's guard could not check this command ({type(exc).__name__}: {exc}), so it was not run.")
     finally:
         signal.alarm(0)
+
+
+def find_worktree_refusal(command: str, cwd: str) -> str | None:
+    """Checked on the host, not on the Mac: it reads the host's worktrees."""
+    if _OTHER_WORKTREES_RE.search(command):
+        return (
+            "--ignore-other-worktrees puts two worktrees on one branch: a commit in either leaves the other's files "
+            "and index on the old commit, and its next commit undoes yours. Work detached instead: git checkout "
+            "--detach <start commit>, commit, then git push origin HEAD:<branch>."
+        )
+    forced = [m.group(1).strip("'\"") for m in _FORCED_SWITCH_RE.finditer(command)]
+    commits = bool(_COMMIT_RE.search(command))
+    if not forced and not commits:
+        return None
+    directories = dict.fromkeys([cwd, *(path for _, path in list_command_dirs(command, cwd))])
+    for directory in list(directories)[:GUARD_CHECKOUTS_MAX]:
+        for branch in forced:
+            holder = find_other_worktree_on(directory, branch)
+            if holder:
+                return (
+                    f"{branch} is checked out in the worktree at {holder}. Taking it here with checkout -B or "
+                    "switch -C moves it under that worktree and leaves its files and index on the old commit, so "
+                    f"its next commit undoes yours. Work detached instead: git checkout --detach origin/{branch} "
+                    f"(or your start commit), commit, then git push origin HEAD:{branch}."
+                )
+        stale = read_stale_checkout(directory) if commits else None
+        if stale:
+            branch, old, head = stale
+            return (
+                f"The worktree at {directory} still has the files and index of {old[:9]}, but its branch {branch} "
+                f"has moved on to {head[:9]} from another checkout. git status shows the difference as staged "
+                "changes, and a commit now would undo those commits. Catch up first, keeping your own edits: "
+                f"git checkout --detach {old[:12]} && git checkout {branch}"
+            )
+    return None
+
+
+def find_other_worktree_on(directory: str, branch: str) -> str | None:
+    listing = run_local_git(directory, "worktree", "list", "--porcelain")
+    top = run_local_git(directory, "rev-parse", "--show-toplevel")
+    if listing is None or top is None or listing.returncode or top.returncode:
+        return None
+    own = os.path.realpath(top.stdout.strip())
+    path = None
+    for line in listing.stdout.splitlines():
+        if line.startswith("worktree "):
+            path = line.removeprefix("worktree ")
+        elif line == f"branch refs/heads/{branch}" and path and os.path.realpath(path) != own:
+            return path
+    return None
+
+
+def read_stale_checkout(directory: str) -> tuple[str, str, str] | None:
+    """(branch, the commit this worktree last checked out, the branch's head) when another checkout moved the branch
+    and this worktree's index still differs from it. A worktree moves its own HEAD reflog with every switch, commit
+    or reset; another worktree's commits on the branch log only the branch's reflog."""
+    branch = run_local_git(directory, "symbolic-ref", "-q", "--short", "HEAD")
+    git_dir = run_local_git(directory, "rev-parse", "--absolute-git-dir")
+    head = run_local_git(directory, "rev-parse", "-q", "--verify", "HEAD")
+    if not branch or not git_dir or not head or branch.returncode or git_dir.returncode or head.returncode:
+        return None
+    try:
+        last = (Path(git_dir.stdout.strip()) / "logs" / "HEAD").read_text().splitlines()[-1].split()[1]
+    except (OSError, UnicodeDecodeError, IndexError):
+        return None
+    if last == head.stdout.strip():
+        return None
+    staged = run_local_git(directory, "diff-index", "--cached", "--quiet", "HEAD")
+    if staged is None or staged.returncode != 1:
+        return None
+    return branch.stdout.strip(), last, head.stdout.strip()
+
+
+def run_local_git(directory: str, *args: str) -> subprocess.CompletedProcess[str] | None:
+    """A git that cannot run here leaves the command to git itself."""
+    try:
+        return subprocess.run(
+            ["git", "-C", directory, *args],
+            capture_output=True,
+            text=True,
+            timeout=LOCAL_GIT_TIMEOUT_S,
+            env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
 
 
 def read_globs(home: Path) -> list[str] | None:

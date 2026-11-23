@@ -573,6 +573,91 @@ def test_gbridge_asks_the_mac_only_for_what_its_gate_would_pass(
     assert gbridge.may_need_guard(list_guard_globs(), 'gh pr create --title "🤖 Claude: x"')
 
 
+def _denial(out: str) -> str:
+    decision = json.loads(out)["hookSpecificOutput"]
+    assert decision["permissionDecision"] == "deny"
+    return decision["permissionDecisionReason"]
+
+
+def test_gbridge_refuses_taking_a_branch_another_worktree_has_checked_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = _gbridge_home(tmp_path, 1)
+    (home / gbridge.GLOBS_FILE).write_text(json.dumps(list_guard_globs()))
+    sent: list[str] = []
+
+    def fake_post(home: Path, path: str, body: dict[str, Any], timeout: float) -> dict[str, Any]:
+        sent.append(body["payload"]["tool_input"]["command"])
+        return {"checked": True, "output": ""}
+
+    monkeypatch.setattr(gbridge, "post", fake_post)
+    root = _repo(tmp_path / "root")
+    _git(root, "branch", "feat/x")
+    _git(root, "worktree", "add", "-q", str(tmp_path / "lead"), "feat/x")
+    _git(root, "worktree", "add", "-q", "--detach", str(tmp_path / "worker"), "HEAD")
+    worker = str(tmp_path / "worker")
+
+    for command, cwd in (
+        ("git fetch origin feat/x && git checkout -B feat/x origin/feat/x 2>&1 | tail -2", worker),
+        ("git switch -C 'feat/x' main", worker),
+        ("git checkout --force-create=feat/x", worker),
+        (f"cd {worker}; git -C . checkout -q -B feat/x", str(tmp_path)),
+    ):
+        reason = _denial(_run_gbridge_guard(home, monkeypatch, capsys, command, cwd))
+        assert f"feat/x is checked out in the worktree at {tmp_path / 'lead'}" in reason, command
+        assert "git push origin HEAD:feat/x" in reason
+    assert "--ignore-other-worktrees puts two worktrees" in _denial(
+        _run_gbridge_guard(home, monkeypatch, capsys, "git checkout --ignore-other-worktrees feat/x", worker)
+    )
+    for command in ("git checkout -B feat/y", "git checkout -b feat/x", "git checkout --detach origin/feat/x"):
+        assert _run_gbridge_guard(home, monkeypatch, capsys, command, worker) == "", command
+    assert _run_gbridge_guard(home, monkeypatch, capsys, "git checkout -B feat/x", str(tmp_path / "lead")) == ""
+    assert sent == []
+
+
+def test_gbridge_refuses_a_commit_in_a_worktree_whose_branch_another_checkout_moved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = _gbridge_home(tmp_path, 1)
+    (home / gbridge.GLOBS_FILE).write_text(json.dumps(list_guard_globs()))
+
+    def passes(home: Path, path: str, body: dict[str, Any], timeout: float) -> dict[str, Any]:
+        return {"checked": True, "output": ""}
+
+    monkeypatch.setattr(gbridge, "post", passes)
+    root = _repo(tmp_path / "root")
+    (root / "f").write_text("old\n")
+    (root / "g").write_text("g\n")
+    _git(root, "add", ".")
+    _git(root, "commit", "-q", "-m", "old")
+    old = _git(root, "rev-parse", "HEAD").strip()
+    _git(root, "branch", "feat/x")
+    lead = tmp_path / "lead"
+    _git(root, "worktree", "add", "-q", str(lead), "feat/x")
+    worker = tmp_path / "worker"
+    _git(root, "worktree", "add", "-q", "--detach", str(worker), "HEAD")
+    (worker / "f").write_text("new\n")
+    _git(worker, "commit", "-q", "-am", "new")
+    # What git before 2.44 lets checkout -B do: move a branch another worktree has checked out.
+    _git(worker, "update-ref", "refs/heads/feat/x", "HEAD")
+    assert _git(lead, "status", "--short") == "M  f\n"
+    (lead / "g").write_text("own edit\n")
+
+    assert gbridge.read_stale_checkout(str(lead)) == ("feat/x", old, _git(worker, "rev-parse", "HEAD").strip())
+    reason = _denial(_run_gbridge_guard(home, monkeypatch, capsys, "git commit -qam fix", str(lead)))
+    assert f"{lead} still has the files and index of {old[:9]}" in reason
+    assert reason.endswith(f"git checkout --detach {old[:12]} && git checkout feat/x")
+    assert "git commit" not in reason
+    assert _run_gbridge_guard(home, monkeypatch, capsys, "git status", str(lead)) == ""
+
+    _git(lead, "checkout", "-q", "--detach", old)
+    _git(lead, "checkout", "-q", "feat/x")
+    assert _git(lead, "status", "--short") == " M g\n"
+    assert (lead / "f").read_text() == "new\n"
+    assert _run_gbridge_guard(home, monkeypatch, capsys, "git commit -qam fix", str(lead)) == ""
+    assert _run_gbridge_guard(home, monkeypatch, capsys, "git commit -qam fix", str(worker)) == ""
+
+
 def test_host_settings_send_bash_and_linear_issue_saves_to_the_guard() -> None:
     settings = host_side.build_settings("/nonexistent", [])
 
