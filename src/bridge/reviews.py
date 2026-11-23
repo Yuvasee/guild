@@ -781,15 +781,7 @@ def take_comment_wakes(conn: sqlite3.Connection, config: Config, now: int) -> li
     ).fetchall()
     for ref_row in refs:
         ref = str(ref_row[0])
-        recent = conn.execute(
-            """
-            SELECT count(DISTINCT told_at) FROM review_comments
-            WHERE ref = ? AND told_at > ? AND quiet IS NULL
-              AND NOT (verdict = ? AND state IS NOT NULL AND trim(body) = '')
-            """,
-            (ref, now - HOUR_MS, HIS),
-        ).fetchone()[0]
-        if int(recent) >= WAKES_PER_HOUR_MAX:
+        if count_recent_wakes(conn, ref, now) >= WAKES_PER_HOUR_MAX:
             # A review bot answering every push ends here. The owner's and colleagues' words are what this is for, so
             # they wait for the hour to pass and go out in one message; a misread agent reply then wakes at most 3 an
             # hour.
@@ -846,6 +838,19 @@ def take_comment_wakes(conn: sqlite3.Connection, config: Config, now: int) -> li
             [(now, ref, r["comment_id"]) for r in rows],
         )
     return [*sent, *ask_owners_about_unplaced(conn, config, now)]
+
+
+def count_recent_wakes(conn: sqlite3.Connection, ref: str, now: int) -> int:
+    return int(
+        conn.execute(
+            """
+            SELECT count(DISTINCT told_at) FROM review_comments
+            WHERE ref = ? AND told_at > ? AND quiet IS NULL
+              AND NOT (verdict = ? AND state IS NOT NULL AND trim(body) = '')
+            """,
+            (ref, now - HOUR_MS, HIS),
+        ).fetchone()[0]
+    )
 
 
 def ask_owners_about_unplaced(conn: sqlite3.Connection, config: Config, now: int) -> list[tuple[int, Recipient]]:

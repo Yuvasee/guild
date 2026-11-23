@@ -497,46 +497,6 @@ def tell_assistant_of_stale_docs(conn: sqlite3.Connection, config: Config, now: 
     return told
 
 
-POST_STALL_AFTER_MS = 15 * 60_000
-_STALLED = (WAITING_SENTENCE, WAITING_STACK, WAITING_DRAFT, FAILED, INTERRUPTED)
-
-
-def tell_assistant_of_stalled_posts(conn: sqlite3.Connection, config: Config, now: int) -> list[tuple[int, Recipient]]:
-    """Once per post and state: still not out 15 minutes after Publish, the assistant hears why and what unblocks it.
-    Not told while unreachable, so the next round tries again. A post already seen in the channel, as one whose sender
-    stopped after sending, is recorded on the next round instead."""
-    told: list[tuple[int, Recipient]] = []
-    for row in conn.execute(
-        f"""
-        SELECT * FROM review_prs p WHERE closed_at IS NULL AND reviewed_at <= ?
-        AND post_state IN ({", ".join("?" * len(_STALLED))})
-        AND NOT EXISTS (SELECT 1 FROM review_slack_posts s WHERE s.repo = lower(p.repo) AND s.number = p.number)
-        """,
-        (now - POST_STALL_AFTER_MS, *_STALLED),
-    ).fetchall():
-        key = f"post-stall:{row['ref']}:{row['post_state']}"
-        if (
-            is_backport_base(config.backport_bases, str(row["base"]))
-            or conn.execute("SELECT 1 FROM signal_posts WHERE key = ?", (key,)).fetchone()
-        ):
-            continue
-        why, unblock = map_stalled_post_to_reason(conn, config, row)
-        zone = ZoneInfo(config.work_timezone) if config.work_timezone else None
-        published = datetime.fromtimestamp(int(row["reviewed_at"]) / 1000, zone).strftime("%m-%d %H:%M")
-        text = (
-            f"{row['url']} ({row['title']}): {config.owner_name} pressed Publish at {published} and its "
-            f"{config.review_channel_name} post is still not out ({row['post_state']}). Why: {why}. To unblock: "
-            f"{unblock}. bridge tells you once for this state."
-        )
-        delivered = send_from_bridge(conn, config, config.assistant_handle, text, now)
-        if delivered:
-            conn.execute(
-                "INSERT INTO signal_posts (key, message_id, posted_at) VALUES (?, ?, ?)", (key, delivered[0][0], now)
-            )
-            told.extend(delivered)
-    return told
-
-
 def map_stalled_post_to_reason(conn: sqlite3.Connection, config: Config, row: sqlite3.Row) -> tuple[str, str]:
     name = f"{row['repo']}#{row['number']}"
     record = f"guild review published {name} <link>"

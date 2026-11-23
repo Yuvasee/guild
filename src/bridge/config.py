@@ -192,7 +192,8 @@ class Config:
     auto_merge_decision: str = ""
     """The owner's decision that set the standing rule (e.g. "Q#12"), cited in each merge's feed line."""
     auto_merge_failures_to: str = ""
-    """Handle told once when an automatic merge fails; empty: the assistant."""
+    """Handle told of bridge's own failures: an automatic merge that fails, in place of the assistant; a failing review
+    poll and a review state stalled past its limit, beside it. Empty: the assistant alone."""
 
     @property
     def owner_name_at_start(self) -> str:

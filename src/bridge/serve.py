@@ -148,7 +148,6 @@ from bridge.review_post import (
     retry_failed_post,
     spawn_review_post,
     tell_assistant_of_stale_docs,
-    tell_assistant_of_stalled_posts,
 )
 from bridge.review_slack import TOKEN_EVERY_S, apply_seen_posts, map_db_to_slack_freshness, read_slack_once
 from bridge.review_worktree import (
@@ -177,6 +176,7 @@ from bridge.shadow_filter import ask_model as ask_shadow_model
 from bridge.shadow_filter import find_start_id as find_shadow_start_id
 from bridge.shadow_filter import run_shadow_tick
 from bridge.signals import SessionRefs, find_signals, map_enrichment_to_status, map_signal_to_dict
+from bridge.stall_guard import tell_of_stalls
 from bridge.status_watchers import alert_watchers, read_watchers
 from bridge.tabinput import map_tree_to_pane_session, run_agterm
 from bridge.wake import WakeWatch
@@ -843,6 +843,7 @@ class DashboardState:
                     self._advance_reviews(conn, sent)
             except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, MessageStateError) as exc:
                 print(f"review queue poll failed: {exc}", flush=True)
+                self._tell_of_stalls_alone()
                 minutes = self._poll_spell.fail(now_ms())
                 if minutes is not None:
                     self._poll_spell.told = self._tell_of_bridge_failure(
@@ -857,6 +858,22 @@ class DashboardState:
                 ):
                     self._poll_spell.reset()
             time.sleep(GITHUB_EVERY_S)
+
+    def _tell_of_stalls_alone(self) -> None:
+        """A failed round never reached the guard in _advance_reviews, or rolled it back with it."""
+        try:
+            with self._connection() as conn, transaction(conn):
+                told = tell_of_stalls(conn, self.config, now_ms())
+        except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, MessageStateError) as exc:
+            print(f"review stall guard failed: {exc}", flush=True)
+            return
+        for message_id, recipient in told:
+            try:
+                if recipient.pid:
+                    write_hint(recipient.pid, HINT_SENT)
+                spawn_typed_delivery(message_id, [recipient])
+            except OSError as exc:
+                print(f"delivering a review stall notice to {recipient.handle} failed: {exc}", flush=True)
 
     def _tell_of_bridge_failure(self, text: str) -> bool:
         """The assistant and whoever hears bridge's own failures (auto_merge_failures_to); whether anyone was told."""
@@ -900,7 +917,7 @@ class DashboardState:
             told = [*told, *ask_for_usage_sections(conn, self.config, now_ms())]
             told = [*told, *ask_for_doc_updates(conn, self.config, now_ms())]
             told = [*told, *tell_assistant_of_stale_docs(conn, self.config, now_ms())]
-            told = [*told, *tell_assistant_of_stalled_posts(conn, self.config, now_ms())]
+            told = [*told, *tell_of_stalls(conn, self.config, now_ms())]
             told = [*told, *ask_to_clean_up(conn, self.config, now_ms())]
             told = [*told, *ask_to_mark_drafts_ready(conn, self.config, now_ms())]
             told = [*told, *ask_to_resolve_conflicts(conn, self.config, now_ms())]

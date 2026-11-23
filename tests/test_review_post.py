@@ -19,7 +19,6 @@ from bridge.review_post import (
     EXTERNAL,
     FAILED,
     INTERRUPTED,
-    POST_STALL_AFTER_MS,
     POSTED,
     POSTED_NO_LINK,
     SEND_TOOL,
@@ -43,10 +42,10 @@ from bridge.review_post import (
     retry_failed_post,
     run_review_post,
     send_to_slack,
-    tell_assistant_of_stalled_posts,
 )
 from bridge.review_worktree import REVIEW_LARGE_LOC
 from bridge.reviews import map_db_to_reviews, store_merge_blocks, store_open_prs
+from bridge.stall_guard import POST_STALL_AFTER_MS, tell_of_stalls
 
 TEXT = "https://github.com/Org/app/pull/7 - Part of the export project."
 LIVE = Config(review_post_dry_run=False, review_channel_id="C1")
@@ -492,12 +491,12 @@ def test_a_post_not_out_15_minutes_after_publish_is_told_to_the_assistant_once_p
     assert publish(conn)[0] == [] and post_state(conn) == WAITING_SENTENCE
     assert "go-ahead" in conn.execute("SELECT body FROM messages").fetchone()[0]
     with transaction(conn):
-        assert tell_assistant_of_stalled_posts(conn, CONFIG, due) == [], "no assistant to reach: tried again later"
+        assert tell_of_stalls(conn, CONFIG, due) == [], "no assistant to reach: tried again later"
         add_session(conn, "aide-c", CONFIG.assistant_handle)
-        assert tell_assistant_of_stalled_posts(conn, CONFIG, due - 1) == []
-        told = tell_assistant_of_stalled_posts(conn, CONFIG, due)
+        assert tell_of_stalls(conn, CONFIG, due - 1) == []
+        told = tell_of_stalls(conn, CONFIG, due)
         assert [recipient.handle for _, recipient in told] == [CONFIG.assistant_handle]
-        assert tell_assistant_of_stalled_posts(conn, CONFIG, due + 10 * POST_STALL_AFTER_MS) == [], "once"
+        assert tell_of_stalls(conn, CONFIG, due + 10 * POST_STALL_AFTER_MS) == [], "once"
     body = conn.execute("SELECT body FROM messages ORDER BY id DESC").fetchone()[0]
     assert body.startswith("https://github.com/Org/app/pull/7 (T): ")
     assert "pressed Publish at 01-01 00:00" in body and "still not out (waiting-sentence)" in body
@@ -506,15 +505,15 @@ def test_a_post_not_out_15_minutes_after_publish_is_told_to_the_assistant_once_p
     add_sentence(conn)
     with transaction(conn):
         assert advance_posts(conn, CONFIG, due)[0] == [] and post_state(conn) == WAITING_STACK
-        assert len(tell_assistant_of_stalled_posts(conn, CONFIG, due)) == 1
-        assert tell_assistant_of_stalled_posts(conn, CONFIG, due + 1) == []
+        assert len(tell_of_stalls(conn, CONFIG, due)) == 1
+        assert tell_of_stalls(conn, CONFIG, due + 1) == []
     body = conn.execute("SELECT body FROM messages ORDER BY id DESC").fetchone()[0]
     assert "stacked on https://github.com/Org/app/pull/6, whose post is not out (not published yet)" in body
     assert "guild review published Org/app#6 <link>; this one follows by itself" in body
     with transaction(conn):
         conn.execute("UPDATE review_prs SET post_state = ? WHERE ref = ?", (POSTED, PARENT))
         assert advance_posts(conn, CONFIG, due + 2)[0] == [REF]
-        assert tell_assistant_of_stalled_posts(conn, CONFIG, due + 3) == []
+        assert tell_of_stalls(conn, CONFIG, due + 3) == []
 
 
 def test_a_stopped_sender_whose_post_was_seen_in_the_channel_is_no_stall(tmp_path: Path) -> None:
@@ -526,9 +525,9 @@ def test_a_stopped_sender_whose_post_was_seen_in_the_channel_is_no_stall(tmp_pat
         conn.execute(
             "INSERT INTO review_slack_posts (repo, number, ts, link, seen_at) VALUES ('org/app', 7, '1', NULL, 1)"
         )
-        assert tell_assistant_of_stalled_posts(conn, CONFIG, due) == []
+        assert tell_of_stalls(conn, CONFIG, due) == []
         conn.execute("DELETE FROM review_slack_posts")
-        assert len(tell_assistant_of_stalled_posts(conn, CONFIG, due)) == 1
+        assert len(tell_of_stalls(conn, CONFIG, due)) == 1
     body = conn.execute("SELECT body FROM messages ORDER BY id DESC").fetchone()[0]
     assert "if not, guild review repost Org/app#7" in body
 
