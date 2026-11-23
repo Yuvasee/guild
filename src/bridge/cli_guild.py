@@ -124,6 +124,7 @@ from bridge.leads import (
     write_notes,
 )
 from bridge.linear_cli import add_linear_commands
+from bridge.project_owner import find_domain_overlaps, warn_on_taken_issues
 from bridge.refs import map_text_to_ref
 from bridge.registry import (
     HandleTakenError,
@@ -588,7 +589,11 @@ def cmd_lead_domains(args: argparse.Namespace, conn: sqlite3.Connection, config:
             raise UsageError(f"only {config.assistant_handle} or {lead.display_name} sets its domains")
         with transaction(conn):
             lead = set_lead_domains(conn, lead.name, domains)
-        for warning in map_domains_to_warnings(list(lead.domains), load_projects(conn)):
+        warnings = [
+            *map_domains_to_warnings(list(lead.domains), load_projects(conn)),
+            *find_domain_overlaps(lead, list_leads(conn)),
+        ]
+        for warning in warnings:
             print(f"warning: {warning}", file=sys.stderr)
     print(f"{lead.display_name}: {', '.join(lead.domains) or 'no domains'}")
     return 0
@@ -1551,6 +1556,7 @@ def cmd_work_set(args: argparse.Namespace, conn: sqlite3.Connection, config: Con
         set_lead_work(
             conn, lead.name, str(args.name), list(dict.fromkeys(refs)) if refs else None, now_ms(), args.about
         )
+    warn_on_taken_issues(conn, config, lead, refs)
     return _print_work(conn, lead)
 
 

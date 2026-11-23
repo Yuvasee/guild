@@ -1,4 +1,5 @@
 import fcntl
+import http.client
 import json
 import os
 import re
@@ -842,19 +843,37 @@ NOT_FOUND = "not found or no access"
 
 
 class LinearApi:
-    def __init__(self, api_key: str) -> None:
+    def __init__(self, api_key: str, timeout_s: float = LINEAR_TIMEOUT_S) -> None:
         self._key = api_key
+        self._timeout_s = timeout_s
 
     def fetch_issues(self, keys: list[str]) -> dict[str, LinearIssue | str]:
-        results: dict[str, LinearIssue | str] = {}
+        return {
+            key: node if isinstance(node, str) else map_node_to_linear_issue(node, key)
+            for key, node in self.fetch_issue_nodes(keys, _ISSUE_FIELDS).items()
+        }
+
+    def fetch_issue_projects(self, keys: list[str]) -> dict[str, str | None]:
+        """Each issue's Linear project name, None for no project or no such issue; any other failure raises."""
+        projects: dict[str, str | None] = {}
+        for key, node in self.fetch_issue_nodes(keys, "project { name }").items():
+            if isinstance(node, str) and node != NOT_FOUND:
+                raise LinearError(node)
+            name = _dig(node, "project", "name")
+            projects[key] = name if isinstance(name, str) and name else None
+        return projects
+
+    def fetch_issue_nodes(self, keys: list[str], fields: str) -> dict[str, object]:
+        """Each key's issue node with the given fields, or why it has none as a string."""
+        results: dict[str, object] = {}
         pending: list[str] = list(keys)
         # One unknown key nulls Linear's whole aliased answer: drop the failing ones and ask again; each round
         # removes at least one key, so this ends.
         while pending:
             aliases = {f"i{n}": key for n, key in enumerate(pending)}
-            fields = " ".join(f"{a}: issue(id: {json.dumps(k)}) {{ {_ISSUE_FIELDS} }}" for a, k in aliases.items())
+            selection = " ".join(f"{a}: issue(id: {json.dumps(k)}) {{ {fields} }}" for a, k in aliases.items())
             try:
-                raw = self._post({"query": f"query {{ {fields} }}"})
+                raw = self._post({"query": f"query {{ {selection} }}"})
             except LinearError as exc:
                 results.update(dict.fromkeys(pending, str(exc)))
                 return results
@@ -874,7 +893,7 @@ class LinearApi:
                 continue
             for alias, key in aliases.items():
                 node = _dig(data, alias)
-                results[key] = map_node_to_linear_issue(node, key) if node is not None else NOT_FOUND
+                results[key] = node if node is not None else NOT_FOUND
             pending = []
         return results
 
@@ -921,14 +940,14 @@ class LinearApi:
             headers={"Authorization": self._key, "Content-Type": "application/json"},
         )
         try:
-            with urllib.request.urlopen(request, timeout=LINEAR_TIMEOUT_S) as response:
+            with urllib.request.urlopen(request, timeout=self._timeout_s) as response:
                 raw: object = json.loads(response.read())
         except urllib.error.HTTPError as exc:
             try:
                 raw = json.loads(exc.read())
-            except ValueError:
+            except (OSError, ValueError, http.client.HTTPException):
                 raise LinearError(f"linear HTTP {exc.code}") from None
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, http.client.HTTPException) as exc:
             # Exception text can echo request headers; keep only the type.
             raise LinearError(f"linear failed: {type(exc).__name__}") from None
         if not isinstance(raw, dict):

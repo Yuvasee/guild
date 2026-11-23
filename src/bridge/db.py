@@ -892,6 +892,23 @@ MIGRATIONS: tuple[str, ...] = (
     ALTER TABLE message_recipients ADD COLUMN filter_passed_at INTEGER;
     ALTER TABLE message_recipients ADD COLUMN filter_held_at INTEGER;
     """,
+    # A lead took an issue of another lead's project: the owner and the assistant were told, once per issue and taker.
+    # Each issue's Linear project as last read, so owner lookups in the review poll need no Linear call.
+    """
+    CREATE TABLE issue_takes (
+        issue TEXT NOT NULL,
+        taker TEXT NOT NULL,
+        owner TEXT NOT NULL,
+        project TEXT NOT NULL,
+        at INTEGER NOT NULL,
+        PRIMARY KEY (issue, taker)
+    );
+    CREATE TABLE issue_projects (
+        issue TEXT PRIMARY KEY,
+        project TEXT,
+        fetched_at INTEGER NOT NULL
+    );
+    """,
 )
 
 HOOK_BUSY_TIMEOUT_MS = 200

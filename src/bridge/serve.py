@@ -99,7 +99,7 @@ from bridge.guard import sync_claims_flag
 from bridge.guildview import TABS_STALE_MS, map_db_to_guild, post_signals_to_leads
 from bridge.health import check_hooks
 from bridge.hooks import spawn_compact_drive
-from bridge.issue_sync import run_issue_sync
+from bridge.issue_sync import LinearError, run_issue_sync
 from bridge.notify import release_urgent_notice, show_notification, take_next_urgent_notice
 from bridge.outage import FailureSpell, OutageNotices
 from bridge.pages import (
@@ -119,6 +119,7 @@ from bridge.pinned import (
     map_slice_to_json,
     map_slice_to_page,
 )
+from bridge.project_owner import PROJECTS_RETRY_MS, refresh_open_pr_projects
 from bridge.refs import map_ref_to_label
 from bridge.registry import (
     RECENT_REF_TURNS,
@@ -283,6 +284,7 @@ class DashboardState:
         self._wake = WakeWatch()
         self._outages = OutageNotices()
         self._poll_spell = FailureSpell()
+        self._projects_retry_at = 0
         self._unpublished_told: dict[str, int] = {}
         self._weekly_failure: str | None = None
         self._github: Callable[[list[str]], str] = run_gh
@@ -844,7 +846,9 @@ class DashboardState:
         while True:
             try:
                 with self._connection() as conn:
-                    sent = poll_review_queue(conn, self.config, now_ms(), self._tree[0], self._scanned_from)
+                    sent = poll_review_queue(
+                        conn, self.config, now_ms(), self._tree[0], self._scanned_from, self._refresh_pr_projects
+                    )
                     try:
                         sent = [*sent, *run_auto_merge(conn, self.config, now_ms())]
                     except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, MessageStateError) as exc:
@@ -888,6 +892,18 @@ class DashboardState:
                 spawn_typed_delivery(message_id, [recipient])
             except OSError as exc:
                 print(f"delivering a review stall notice to {recipient.handle} failed: {exc}", flush=True)
+
+    def _refresh_pr_projects(self, conn: sqlite3.Connection) -> None:
+        """A failure only leaves routing on the cache it has, so it is logged and tried again later, not raised."""
+        if now_ms() < self._projects_retry_at:
+            return
+        try:
+            refresh_open_pr_projects(conn, self.config, now_ms())
+        except Exception as exc:
+            self._projects_retry_at = now_ms() + PROJECTS_RETRY_MS
+            print(f"reading the PRs' issue projects failed, retry in 10 min: {exc}", flush=True)
+            if not isinstance(exc, LinearError):
+                log_error("issue projects", traceback.format_exc())
 
     def _tell_of_bridge_failure(self, text: str) -> bool:
         """The assistant and whoever hears bridge's own failures (auto_merge_failures_to); whether anyone was told."""

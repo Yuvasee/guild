@@ -11,6 +11,7 @@ import pytest
 from conftest import BridgeEnv
 from test_status_watchers import STUBS
 
+from bridge.attention import Project, store_projects
 from bridge.board import BODY_MAX_CHARS, SYSTEM_CONVERSATION
 from bridge.config import Config
 from bridge.db import connect, transaction
@@ -630,6 +631,69 @@ def test_an_issue_goes_to_the_lead_above_the_worker_that_owns_its_closing_pr(tmp
         conn.execute("INSERT INTO tab_parents (agterm_session, parent_session) VALUES ('tab-worker', 'tab-lead')")
     owner = find_issue_lead(conn, CONFIG, "issue:PROJ-1", [REF], [REF.lower()], {})
     assert owner is not None and (owner.handle, owner.surface, owner.via) == ("alex", "s-alex", "lead")
+
+
+def test_an_issue_of_a_handed_over_project_goes_to_its_new_lead_not_the_old_leads_pr(tmp_path: Path) -> None:
+    """The handover shape: the old lead's worker owns the issue's closing PR; the project is now the new lead's."""
+    conn = setup_pr(tmp_path)
+    with transaction(conn):
+        add_session(conn, "old-c", "cleo", session="tab-old")
+        add_lead(conn, "Cleo", "s-cleo")
+        add_session(conn, "w-c", "worker", branch="dev/x", session="tab-worker")
+        conn.execute("INSERT INTO tab_parents (agterm_session, parent_session) VALUES ('tab-worker', 'tab-old')")
+        add_lead(conn, "Alex", "s-alex")
+        conn.execute("UPDATE leads SET domains = '[\"readiness\"]' WHERE name = 'alex'")
+        store_projects(conn, [Project("readiness", ("PROJ-1",))], "aide", 0)
+    assert find_issue_lead(conn, CONFIG, "issue:PROJ-1", [REF], [REF], {}) is None, "its lead is not live: no one"
+    with transaction(conn):
+        add_session(conn, "alex-c", "alex")
+    owner = find_issue_lead(conn, CONFIG, "issue:PROJ-1", [REF], [REF], {})
+    assert owner is not None and owner.handle == "alex"
+    with transaction(conn):
+        conn.execute(
+            "INSERT INTO claims (resource, token, holder_conversation, holder_handle, acquired_at, renewed_at,"
+            " expires_at) VALUES ('issue:PROJ-1', 't', 'w-c', 'worker', 1, 2, 9999999999999)"
+        )
+    owner = find_issue_lead(conn, CONFIG, "issue:PROJ-1", [REF], [REF], {})
+    assert owner is not None and owner.handle == "alex", "the project's lead comes before another lead's claim"
+
+
+def setup_handed_over_pr(tmp_path: Path, title: str = "PROJ-1: fix totals") -> Any:
+    """Cleo's worker writes the PR's branch; its issue's project is now Alex's."""
+    conn = setup_pr(tmp_path, title=title)
+    with transaction(conn):
+        add_session(conn, "old-c", "cleo", session="tab-old")
+        add_lead(conn, "Cleo", "s-cleo")
+        add_session(conn, "w-c", "worker", branch="dev/x", session="tab-worker")
+        conn.execute("INSERT INTO tab_parents (agterm_session, parent_session) VALUES ('tab-worker', 'tab-old')")
+        add_lead(conn, "Alex", "s-alex")
+        add_session(conn, "alex-c", "alex", session="tab-alex")
+        conn.execute("UPDATE leads SET domains = '[\"readiness\"]' WHERE name = 'alex'")
+        store_projects(conn, [Project("readiness", ("PROJ-1",))], "aide", 0)
+    return conn
+
+
+def test_a_pr_of_a_handed_over_project_goes_to_its_new_lead(tmp_path: Path) -> None:
+    conn = setup_handed_over_pr(tmp_path)
+    owner = find_owner(conn, CONFIG, REF, "Org/app", "dev/x")
+    assert owner is not None and (owner.handle, owner.via) == ("alex", "lead")
+    with transaction(conn):
+        conn.execute("UPDATE instances SET ended_at = 9 WHERE conversation_id = 'alex-c'")
+    assert find_owner(conn, CONFIG, REF, "Org/app", "dev/x") is None, "its lead is not live: no one"
+
+
+def test_a_worker_under_the_projects_lead_keeps_its_prs_notices(tmp_path: Path) -> None:
+    conn = setup_handed_over_pr(tmp_path)
+    with transaction(conn):
+        conn.execute("UPDATE tab_parents SET parent_session = 'tab-alex' WHERE agterm_session = 'tab-worker'")
+    owner = find_owner(conn, CONFIG, REF, "Org/app", "dev/x")
+    assert owner is not None and (owner.handle, owner.via) == ("worker", "branch")
+
+
+def test_a_pr_naming_no_owned_issue_keeps_its_session_owner(tmp_path: Path) -> None:
+    conn = setup_handed_over_pr(tmp_path, title="Fix totals")
+    owner = find_owner(conn, CONFIG, REF, "Org/app", "dev/x")
+    assert owner is not None and owner.handle == "worker"
 
 
 def test_an_issue_whose_pr_left_the_queue_is_routed_by_the_branch_github_reported(tmp_path: Path) -> None:

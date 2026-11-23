@@ -26,6 +26,7 @@ from bridge.errors import UsageError
 from bridge.gitinfo import read_git_info
 from bridge.guard import sync_claims_flag
 from bridge.identity import current_party
+from bridge.project_owner import warn_on_claimed_issue
 from bridge.registry import end_dead_instances, format_age
 
 EXIT_HELD = 3
@@ -81,6 +82,8 @@ def cmd_claim(args: argparse.Namespace, conn: sqlite3.Connection, config: Config
     sync_claims_flag(conn)
     for line in map_outcome_to_lines(outcome, at):
         print(line)
+    if not outcome.status.startswith("held") and key.canonical.startswith("issue:"):
+        warn_on_claimed_issue(conn, config, key.canonical)
     return EXIT_HELD if outcome.status.startswith("held") else 0
 
 

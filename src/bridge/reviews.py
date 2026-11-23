@@ -25,6 +25,7 @@ from bridge.board import (
 )
 from bridge.config import Config, read_overlay
 from bridge.db import transaction
+from bridge.domains import find_domain_owner, find_issue_keys
 from bridge.enrich import PrStatus, fetch_prs
 from bridge.feed import REVIEW_QUEUE, resolve_tab
 from bridge.guard import (
@@ -1017,12 +1018,30 @@ def find_lead_of(conn: sqlite3.Connection, surface: str | None) -> tuple[str | N
 def find_owner(
     conn: sqlite3.Connection, config: Config, ref: str, repo: str, head: str, owned_only: bool = False
 ) -> Owner | None:
-    """Who every notice about the PR goes to. The session that owns it: the live one holding its claim, a lead whose
-    declared work names the PR, the live one that committed or pushed to its branch (on it first, else the latest
-    writer), an ended one that did. Only when no session owns it, and not owned_only: a lead whose work or scope names
-    its issue, then an ended session that sat on its branch and named it, the live session that mentioned it last, an
-    ended one. A live worker keeps its PR's notices, since it fixes what they ask; an ended one hands them to the lead
-    that ran it. A locked tab is never an owner, and neither is the assistant, who mentions every PR and owns none."""
+    """Who every notice about the PR goes to. When an issue its title or branch names is in one lead's domains, that
+    lead decides: the session that owns the PR keeps it only when it is that lead or under it, else the lead takes it,
+    or no one while the lead is not live. Without such a lead, the session that owns it."""
+    owner = _find_session_owner(conn, config, ref, repo, head, owned_only)
+    row = conn.execute("SELECT title FROM review_prs WHERE ref = ?", (ref,)).fetchone()
+    keys = find_issue_keys(config, f"{row['title'] if row else ''} {head}")
+    domains = [found for key in sorted(keys) if (found := find_domain_owner(conn, key)) is not None]
+    if len({d.lead.name for d in domains}) != 1:
+        return owner
+    lead = domains[0].lead
+    if owner is not None and find_lead_of(conn, owner.surface)[1] == lead.surface:
+        return owner
+    return map_lead_to_owner(conn, config, lead.surface, lead.display_name)
+
+
+def _find_session_owner(
+    conn: sqlite3.Connection, config: Config, ref: str, repo: str, head: str, owned_only: bool
+) -> Owner | None:
+    """The session that owns the PR: the live one holding its claim, a lead whose declared work names the PR, the live
+    one that committed or pushed to its branch (on it first, else the latest writer), an ended one that did. Only when
+    no session owns it, and not owned_only: a lead whose work or scope names its issue, then an ended session that sat
+    on its branch and named it, the live session that mentioned it last, an ended one. A live worker keeps its PR's
+    notices, since it fixes what they ask; an ended one hands them to the lead that ran it. A locked tab is never an
+    owner, and neither is the assistant, who mentions every PR and owns none."""
 
     def may_own(row: sqlite3.Row) -> bool:
         return row["handle"] != config.assistant_handle and not is_conversation_locked(
@@ -1207,10 +1226,11 @@ def find_issue_lead(
     closing: list[str],
     enrichment: Mapping[str, Mapping[str, object]],
 ) -> Owner | None:
-    """The lead an issue's notices go to, in a PR's owner order: the lead above the live session holding the issue's
-    claim; a lead whose declared work names the issue or one of its linked PRs; the lead above a live session on a
-    branch named after the issue, else above the owner of a closing PR; the lead of an ended session on such a branch;
-    a lead whose scope names the issue. Only a lead can act on an issue, so a worker hands it up. Naming an issue in a
+    """The lead an issue's notices go to: the one lead whose domains hold its project, or no one while it is not live.
+    Without such a lead, in a PR's owner order: the lead above the live session holding the issue's claim; a lead whose
+    declared work names the issue or one of its linked PRs; the lead above a live session on a branch named after the
+    issue, else above the owner of a closing PR; the lead of an ended session on such a branch; a lead whose scope
+    names the issue. Only a lead can act on an issue, so a worker hands it up. Naming an issue in a
     prompt or a message makes no one its owner. None when no live lead is found."""
     key = issue_ref.removeprefix("issue:")
     wanted = {r.lower() for r in (issue_ref, *linked)}
@@ -1225,6 +1245,9 @@ def find_issue_lead(
             conn, config, str(row["conversation_id"])
         )
 
+    domain = find_domain_owner(conn, key)
+    if domain is not None:
+        return map_lead_to_owner(conn, config, domain.lead.surface, domain.lead.display_name)
     claimed = _find_owner_from_claim(conn, issue_ref, may_own)
     if claimed is not None and (owner := lead_above(claimed[0]["surface"])) is not None:
         return owner
@@ -1377,9 +1400,15 @@ def load_known_heads(conn: sqlite3.Connection) -> KnownHeads:
 
 
 def poll_review_queue(
-    conn: sqlite3.Connection, config: Config, now: int, tree: dict[str, Any] | None, scanned_from: int | None
+    conn: sqlite3.Connection,
+    config: Config,
+    now: int,
+    tree: dict[str, Any] | None,
+    scanned_from: int | None,
+    after_store: Callable[[sqlite3.Connection], None] | None = None,
 ) -> list[tuple[int, Recipient]]:
-    """One round of the background job. GitHub is read with no transaction open; returns the wakes to deliver."""
+    """One round of the background job. GitHub is read with no transaction open; returns the wakes to deliver.
+    after_store runs once the round's PRs are stored and before any notice is routed, with no transaction open."""
     try:
         prs = fetch_open_prs(config, load_known_heads(conn))
     except GitHubError as exc:
@@ -1405,6 +1434,8 @@ def poll_review_queue(
             store_open_prs(conn, prs, now)
             mark_closed(conn, gone, now)
             store_dependencies(conn, map_prs_to_dependencies(prs, states, config.backport_bases))
+        if after_store is not None:
+            after_store(conn)
         for pr in list_prs_to_label(conn, config, prs):
             add_owner_label(config, pr.repo, pr.number)
     for ref, repo, number, key in list_backports_to_check(conn, config, now)[:BACKPORT_CHECKS_PER_POLL]:
