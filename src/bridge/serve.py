@@ -100,7 +100,7 @@ from bridge.health import check_hooks
 from bridge.hooks import spawn_compact_drive
 from bridge.issue_sync import run_issue_sync
 from bridge.notify import release_urgent_notice, show_notification, take_next_urgent_notice
-from bridge.outage import OutageNotices
+from bridge.outage import FailureSpell, OutageNotices
 from bridge.pages import (
     Page,
     find_html_file,
@@ -169,6 +169,7 @@ from bridge.reviews import (
     map_db_to_reviews,
     poll_review_queue,
     record_merge_ok,
+    send_to_handle,
 )
 from bridge.rewake_marks import prune_rewake_marks
 from bridge.shadow_filter import EVERY_S as SHADOW_EVERY_S
@@ -279,6 +280,7 @@ class DashboardState:
         self._disk: DiskReading | None = None
         self._wake = WakeWatch()
         self._outages = OutageNotices()
+        self._poll_spell = FailureSpell()
         self._unpublished_told: dict[str, int] = {}
         self._weekly_failure: str | None = None
         self._github: Callable[[list[str]], str] = run_gh
@@ -841,7 +843,36 @@ class DashboardState:
                     self._advance_reviews(conn, sent)
             except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, MessageStateError) as exc:
                 print(f"review queue poll failed: {exc}", flush=True)
+                minutes = self._poll_spell.fail(now_ms())
+                if minutes is not None:
+                    self._poll_spell.told = self._tell_of_bridge_failure(
+                        f"bridge: the review-queue poll has failed for {minutes} min, so new PR comments, review "
+                        f"notices and auto-merges reach no one. Last error: {exc}. "
+                        "bridge says once when it works again."
+                    )
+            else:
+                minutes = self._poll_spell.recover(now_ms())
+                if minutes is not None:
+                    self._tell_of_bridge_failure(f"bridge: the review-queue poll works again after {minutes} min.")
             time.sleep(GITHUB_EVERY_S)
+
+    def _tell_of_bridge_failure(self, text: str) -> bool:
+        """The assistant and whoever hears bridge's own failures (auto_merge_failures_to); whether anyone was told."""
+        wanted = (self.config.assistant_handle, self.config.auto_merge_failures_to)
+        handles = list(dict.fromkeys(h for h in wanted if h))
+        told = False
+        for handle in handles:
+            try:
+                with self._connection() as conn, transaction(conn):
+                    message_id, recipient = send_to_handle(conn, handle, text, now_ms())
+            except (sqlite3.Error, AddressError, MessageStateError) as exc:
+                print(f"telling {handle} of a bridge failure failed: {exc}", flush=True)
+                continue
+            if recipient.pid:
+                write_hint(recipient.pid, HINT_SENT)
+            spawn_typed_delivery(message_id, [recipient])
+            told = True
+        return told
 
     def read_slack_forever(self) -> None:
         team_url: str | None = None

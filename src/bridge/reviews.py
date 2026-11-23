@@ -19,6 +19,7 @@ from bridge.board import (
     Party,
     Recipient,
     convert_item_id_to_question_ref,
+    fit_body,
     resolve_handle,
     send_message,
 )
@@ -964,14 +965,14 @@ def _map_item_to_name(item: WakeItem) -> str:
 
 def tell_owner(conn: sqlite3.Connection, owner: Owner, text: str, now: int) -> tuple[int, Recipient]:
     recipient = resolve_tab(conn, owner.conversation_id, owner.handle)
-    result = send_message(conn, Party(SYSTEM_CONVERSATION, "bridge"), [recipient], "info", text, now)
+    result = send_message(conn, Party(SYSTEM_CONVERSATION, "bridge"), [recipient], "info", fit_body(text), now)
     conn.execute("UPDATE messages SET post_type = ? WHERE id = ?", (REVIEW_QUEUE, result.message_id))
     return result.message_id, recipient
 
 
 def send_to_handle(conn: sqlite3.Connection, handle: str, text: str, now: int) -> tuple[int, Recipient]:
     recipient = resolve_handle(conn, handle)
-    result = send_message(conn, Party(SYSTEM_CONVERSATION, "bridge"), [recipient], "info", text, now)
+    result = send_message(conn, Party(SYSTEM_CONVERSATION, "bridge"), [recipient], "info", fit_body(text), now)
     conn.execute("UPDATE messages SET post_type = ? WHERE id = ?", (REVIEW_QUEUE, result.message_id))
     return result.message_id, recipient
 

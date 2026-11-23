@@ -13,6 +13,7 @@ from bridge.board import (
     MessageStateError,
     Party,
     SendResult,
+    fit_body,
     send_message,
 )
 from bridge.config import Config
@@ -589,7 +590,7 @@ def finish_choice(
         (answer, now, now, chosen.item_id),
     )
     recipient = resolve_tab(conn, str(row["called_conversation"]), str(row["called_by"]))
-    sent = send_message(conn, Party(USER_CONVERSATION, user), [recipient], "info", body, now)
+    sent = send_message(conn, Party(USER_CONVERSATION, user), [recipient], "info", fit_body(body), now)
     conn.execute("UPDATE user_items SET answer_message_id = ? WHERE id = ?", (sent.message_id, chosen.item_id))
     return sent
 

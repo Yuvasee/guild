@@ -27,3 +27,31 @@ class OutageNotices:
     def release(self, cause: str) -> None:
         """A notice that surely did not show is tried again on the next pass."""
         self.open.discard(cause)
+
+
+LOOP_FAILING_TELL_AFTER_MS = 10 * 60_000
+"""A background loop failing this long is no blip: polls run every minute or two, and a lock or a GitHub hiccup clears
+in a few."""
+
+
+@dataclass
+class FailureSpell:
+    """A background loop that keeps failing: told once when it has failed for LOOP_FAILING_TELL_AFTER_MS, and once more
+    when it works again. Without the first notice, every round of it fails quietly in the log."""
+
+    since: int | None = None
+    told: bool = False
+
+    def fail(self, now: int) -> int | None:
+        """Minutes it has failed, when that is to be told now."""
+        if self.since is None:
+            self.since = now
+        if self.told or now - self.since < LOOP_FAILING_TELL_AFTER_MS:
+            return None
+        return (now - self.since) // 60_000
+
+    def recover(self, now: int) -> int | None:
+        """Minutes it failed, when a told spell just ended."""
+        since, told = self.since, self.told
+        self.since, self.told = None, False
+        return (now - since) // 60_000 if told and since is not None else None

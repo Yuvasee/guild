@@ -98,6 +98,15 @@ def resolve_handle(conn: sqlite3.Connection, handle: str) -> Recipient:
     )
 
 
+def fit_body(text: str) -> str:
+    """Cut to the message limit, for bridge's own notices: one too long to send would roll back the whole step that
+    sends it (a review poll, every poll). The cut is logged so the text that outgrew the limit gets fixed."""
+    if len(text) <= BODY_MAX_CHARS:
+        return text
+    print(f"notice cut from {len(text)} to {BODY_MAX_CHARS} chars: {text[:100]!r}", flush=True)
+    return text[: BODY_MAX_CHARS - 1].rstrip() + "\u2026"
+
+
 def send_message(
     conn: sqlite3.Connection,
     sender: Party,
@@ -112,6 +121,7 @@ def send_message(
     if not body.strip():
         raise MessageStateError("empty message")
     if len(body) > BODY_MAX_CHARS:
+        print(f"refused a {len(body)}-char message: {body[:100]!r}", flush=True)
         raise MessageStateError(f"message is {len(body)} chars; keep it under {BODY_MAX_CHARS}")
     if unready := find_unready_citations(conn, body):
         raise MessageStateError(map_unready_citations_to_error(unready))
