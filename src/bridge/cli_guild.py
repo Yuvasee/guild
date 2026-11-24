@@ -49,7 +49,7 @@ from bridge.colleague_comments import (
 )
 from bridge.config import Config, Remote, db_path, load_config, state_dir
 from bridge.context_watch import map_screen_to_model_pct
-from bridge.db import connect, now_ms, transaction
+from bridge.db import now_ms, run_typed_command, transaction
 from bridge.doc_screen import screen_doc_for_warnings
 from bridge.dream import (
     FAILED,
@@ -215,14 +215,15 @@ WORKER_CODEX_RULE = (
 def main(argv: list[str] | None = None) -> int:
     config = load_config()
     args = parse_args(sys.argv[1:] if argv is None else argv, config)
-    conn = connect(db_path())
+    return run_typed_command("guild", args.func.__name__, db_path(), lambda conn: run_command(args, conn, config))
+
+
+def run_command(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
     try:
         return int(args.func(args, conn, config))
     except (UsageError, LeadError, ReviewError, DocError, PriorityError, AskError) as exc:
         print(f"guild: {exc}", file=sys.stderr)
         return 2
-    finally:
-        conn.close()
 
 
 def parse_args(argv: list[str], config: Config | None = None) -> argparse.Namespace:

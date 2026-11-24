@@ -45,7 +45,7 @@ from bridge.compaction import (
 )
 from bridge.config import Config, db_path, load_config, state_dir
 from bridge.context_watch import ContextTab, find_alert_recipients, list_context_tabs
-from bridge.db import connect, now_ms, transaction
+from bridge.db import connect, now_ms, run_typed_command, transaction
 from bridge.deploycheck import check_long_message, check_rewake, check_typing
 from bridge.dream import resolve_dreamers, run_dream, run_night, stop_claude_on_term
 from bridge.errlog import log_error, log_slow
@@ -109,29 +109,32 @@ _DRIVE_FAILED = {
     "failed": "a key bridge typed did not show as expected, so it typed no more; look for a stray character in the box",
     "stuck": "bridge's text did not leave the box after Enter",
 }
-COMPACT_CLAIM_TRIES = 6
-"""Each waits the connection's busy timeout: half a minute in all."""
 
 
 def main(argv: list[str] | None = None) -> int:
     config = load_config()
     args = build_parser(config).parse_args(argv)
-    if args.func is cmd_deliver:
-        # Detached, with nobody to see it fail: a lock that outlasts connect's busy timeout must not end it unlogged.
-        try:
-            conn = retry_when_locked("_deliver: open the database", lambda: connect(db_path()), LOCKED_PATIENT_DELAYS_S)
-        except StillLockedError:
-            queue_retry_without_db(int(args.message_id), str(args.conversation_id))
-            return 1
-    else:
-        conn = connect(db_path())
+    if args.func is not cmd_deliver:
+        return run_typed_command("bridge", args.func.__name__, db_path(), lambda conn: run_command(args, conn, config))
+    # Detached, with nobody to see it fail: a lock that outlasts connect's busy timeout must not end it unlogged.
+    # Its retries count tries of the short wait, holding the tab's typer lock meanwhile.
+    try:
+        conn = retry_when_locked("_deliver: open the database", lambda: connect(db_path()), LOCKED_PATIENT_DELAYS_S)
+    except StillLockedError:
+        queue_retry_without_db(int(args.message_id), str(args.conversation_id))
+        return 1
+    try:
+        return run_command(args, conn, config)
+    finally:
+        conn.close()
+
+
+def run_command(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
     try:
         return int(args.func(args, conn, config))
     except UsageError as exc:
         print(f"bridge: {exc}", file=sys.stderr)
         return 2
-    finally:
-        conn.close()
 
 
 def build_parser(config: Config) -> argparse.ArgumentParser:
@@ -442,15 +445,13 @@ def dashboard_is_up(url: str) -> bool:
 
 
 def claim_compaction(conn: sqlite3.Connection, conversation_id: str) -> bool:
-    """Started by a start whose hook could not write, so the lock may stay held a while yet."""
-    for attempt in range(COMPACT_CLAIM_TRIES):
-        try:
-            with transaction(conn):
-                return take_phase(conn, conversation_id, PHASE_COMPACTING, PHASE_CONTINUE)
-        except sqlite3.OperationalError:
-            if attempt == COMPACT_CLAIM_TRIES - 1:
-                # The conversation's next hook ends the cycle; until then nobody types "continue".
-                log_error("compact-drive", f"continue not claimed for {conversation_id}: database stayed locked")
+    """Started by a start whose hook could not write, so the lock may stay held a while yet: a typed command's wait."""
+    try:
+        with transaction(conn):
+            return take_phase(conn, conversation_id, PHASE_COMPACTING, PHASE_CONTINUE)
+    except sqlite3.OperationalError:
+        # The conversation's next hook ends the cycle; until then nobody types "continue".
+        log_error("compact-drive", f"continue not claimed for {conversation_id}: database stayed locked")
     return False
 
 

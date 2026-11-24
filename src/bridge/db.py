@@ -1,11 +1,12 @@
 import sqlite3
+import sys
 import time
 import traceback
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
 
-from bridge.errlog import log_slow
+from bridge.errlog import log_error, log_slow
 
 MIGRATIONS: tuple[str, ...] = (
     """
@@ -920,6 +921,9 @@ MIGRATIONS: tuple[str, ...] = (
 HOOK_BUSY_TIMEOUT_MS = 200
 HOOK_RETRY_BUSY_TIMEOUT_MS = 1000
 CLI_BUSY_TIMEOUT_MS = 5000
+CLI_LOCK_WAIT_MS = 20_000
+"""A typed command's wait per write. Right after a wake, writers held the lock 1.5-6 s each, about 10 s back to back,
+and SQLite's waiters take no turns: twice that. A command's usual two writes still end within a host worker's 50 s."""
 MIGRATE_BUSY_TIMEOUT_MS = 3000
 """Right after a deploy every process migrates at once; a hook waits this long for the first one, within its 5 s."""
 SLOW_HOLD_MS = 1000
@@ -933,6 +937,31 @@ def connect(path: Path, busy_timeout_ms: int = CLI_BUSY_TIMEOUT_MS) -> sqlite3.C
     conn.execute("PRAGMA synchronous = NORMAL")
     migrate(conn)
     return conn
+
+
+def run_typed_command(prog: str, name: str, path: Path, command: Callable[[sqlite3.Connection], int]) -> int:
+    """A database still locked after CLI_LOCK_WAIT_MS ends the command with one line, not a traceback."""
+    try:
+        conn = connect(path, CLI_LOCK_WAIT_MS)
+        try:
+            return command(conn)
+        finally:
+            conn.close()
+    except sqlite3.OperationalError as exc:
+        if not is_lock_error(exc):
+            raise
+        wait_s = CLI_LOCK_WAIT_MS // 1000
+        log_error(f"{prog} {name}", f"the database stayed locked for {wait_s} s: {exc}")
+        print(f"{prog}: busy, its database stayed locked for {wait_s} s; try again", file=sys.stderr)
+        return 1
+
+
+def is_lock_error(exc: sqlite3.OperationalError) -> bool:
+    # Not by a word in the text: another error's text can name a table such as blocked_notices.
+    code = getattr(exc, "sqlite_errorcode", None)
+    if code is None:
+        return str(exc).startswith(("database is locked", "database table is locked"))
+    return (code & 0xFF) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
 
 
 def migrate(conn: sqlite3.Connection) -> None:

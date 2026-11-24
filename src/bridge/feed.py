@@ -31,7 +31,7 @@ from bridge.board import (
 )
 from bridge.compaction import DEAD_COMPACTABLE, FULL_CONTEXT_SQL, map_screen_to_busy, map_screen_to_draft
 from bridge.config import Config, state_dir
-from bridge.db import now_ms, transaction
+from bridge.db import is_lock_error, now_ms, transaction
 from bridge.errlog import log_error
 from bridge.leads import find_lead_conversations, is_conversation_locked, is_surface_locked, list_leads
 from bridge.pages import find_unready_citations, map_unready_citations_to_error
@@ -594,20 +594,16 @@ def retry_when_locked[T](what: str, call: Callable[[], T], delays: tuple[float, 
         try:
             return call()
         except sqlite3.OperationalError as exc:
-            if not _is_lock_error(exc):
+            if not is_lock_error(exc):
                 raise
             time.sleep(delay)
     try:
         return call()
     except sqlite3.OperationalError as exc:
-        if not _is_lock_error(exc):
+        if not is_lock_error(exc):
             raise
         log_error("deliver", f"{what}: gave up, {exc}")
         raise StillLockedError(what) from exc
-
-
-def _is_lock_error(exc: sqlite3.OperationalError) -> bool:
-    return "locked" in str(exc) or "busy" in str(exc)
 
 
 def _find_typable_row(
