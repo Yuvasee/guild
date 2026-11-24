@@ -32,7 +32,7 @@ _DEPLOY_SUBJECT_RE = re.compile(
 _DEPLOY_SUBJECT_MAX = 80
 _NEGATED_RE = re.compile(r"(?:\bno\s+longer|\bnot|n't|\bnever)\s+(?:\w+\s+)?$", re.I)
 _CLAUSE_END_RE = re.compile(r";|\b(?:related|see|cf|also|follow(?:s|-up)|part\s+of|refs?)\b", re.I)
-_MD_LINK_RE = re.compile(r"\[[^\]\n]*\]\((https?://github\.com/[^)\s]+)\)")
+_MD_LINK_RE = re.compile(r"\[[^\[\]\n]*\]\((https?://github\.com/[^)\s]+)\)")
 _BACK_REF_RE = re.compile(r"\b(?:that|the\s+code|the\s+above)\s+PR\b|\bthe\s+PR\s+above\b", re.I)
 _SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+")
 _HEADING_RE = re.compile(r"^\s*#+\s")

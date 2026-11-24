@@ -411,3 +411,17 @@ def test_related_lines_name_prs_by_number_by_repo_and_by_url() -> None:
         "See #11.\n"
     )
     assert map_markdown_to_related_prs(body, "Org/app", 7) == ("Org/app#8", "Org/app#9", "Org/lib#4")
+
+
+def test_a_body_of_many_unclosed_brackets_is_read_quickly() -> None:
+    import time
+
+    from bridge.review_deps import _MD_LINK_RE  # pyright: ignore[reportPrivateUsage]
+
+    body = "[" * 64_000
+    started = time.monotonic()
+    _MD_LINK_RE.sub(r"\1", body)
+    assert time.monotonic() - started < 0.5
+    assert _MD_LINK_RE.sub(r"\1", "see [[the other PR](https://github.com/o/r/pull/7)") == (
+        "see [https://github.com/o/r/pull/7"
+    )
