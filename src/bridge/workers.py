@@ -14,6 +14,7 @@ from typing import cast
 
 from bridge.claude import read_session_file
 from bridge.config import Config, Remote, state_dir
+from bridge.deploycheck import is_check_tab
 from bridge.drivers import (
     map_command_to_links,
     map_command_to_local_tmux_sessions,
@@ -585,11 +586,12 @@ class LiveWorker:
 
 
 def list_live_workers(conn: sqlite3.Connection, tree: dict[str, object], parent: str) -> list[LiveWorker]:
-    """Every tab nested under the lead's, idle ones included: an idle worker still holds its Claude process."""
+    """Every tab nested under the lead's, idle ones included: an idle worker still holds its Claude process. A deploy
+    check's tab is no worker, though the check opens it under the tab that ran it."""
     workers: list[LiveWorker] = []
     for workspace in cast(list[dict[str, object]], tree.get("workspaces") or []):
         for tab in cast(list[dict[str, object]], workspace.get("sessions") or []):
-            if tab.get("parent") != parent:
+            if tab.get("parent") != parent or is_check_tab(str(tab.get("name"))):
                 continue
             session_id = str(tab.get("id"))
             changed = tab.get("statusChangedAt")

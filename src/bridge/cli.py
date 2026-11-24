@@ -2,6 +2,7 @@ import argparse
 import fcntl
 import json
 import os
+import signal
 import sqlite3
 import sys
 import time
@@ -46,7 +47,7 @@ from bridge.compaction import (
 from bridge.config import Config, db_path, load_config, state_dir
 from bridge.context_watch import ContextTab, find_alert_recipients, list_context_tabs
 from bridge.db import connect, now_ms, run_typed_command, transaction
-from bridge.deploycheck import check_long_message, check_rewake, check_typing
+from bridge.deploycheck import check_long_message, check_rewake, check_typing, close_stale_check_tabs
 from bridge.dream import resolve_dreamers, run_dream, run_night, stop_claude_on_term
 from bridge.errlog import log_error, log_slow
 from bridge.errors import UsageError
@@ -426,6 +427,11 @@ def cmd_restart_service(args: argparse.Namespace, conn: sqlite3.Connection, conf
 
 
 def cmd_deploy_check(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
+    # A killed deploy still runs each check's finally, which closes its tab; only SIGKILL skips it.
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, exit_on_signal)
+    for note in close_stale_check_tabs(config, time.time()):
+        print(f"deploy check: {note}")
     results = [
         ("typing", check_typing(config)),
         ("rewake", check_rewake(config)),
@@ -434,6 +440,13 @@ def cmd_deploy_check(args: argparse.Namespace, conn: sqlite3.Connection, config:
     for name, result in results:
         print(f"deploy check {name} {'passed' if result.ok else 'FAILED'}: {result.detail}")
     return 0 if all(result.ok for _, result in results) else 1
+
+
+def exit_on_signal(signum: int, frame: object) -> None:
+    # A second signal would cut short the closing it asks for.
+    for other in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(other, signal.SIG_IGN)
+    raise SystemExit(128 + signum)
 
 
 def dashboard_is_up(url: str) -> bool:

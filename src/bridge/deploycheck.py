@@ -1,6 +1,7 @@
 import fcntl
 import json
 import os
+import re
 import secrets
 import shlex
 import shutil
@@ -31,6 +32,11 @@ CAT_READY = "bridge-check-ready"
 CAT_COMMAND = f"printf '%s\\n' {CAT_READY}; exec /bin/cat"
 REWAKE_TAB_NAME = "bridge rewake check"
 LONG_TAB_NAME = "bridge long message check"
+# A check tab's name ends in the epoch second it was opened: agterm's tree keeps no creation time.
+CHECK_TAB_RE = re.compile(rf"(?:{CHECK_TAB_NAME}|{REWAKE_TAB_NAME}|{LONG_TAB_NAME}) (\d+)-[0-9a-f]{{6}}")
+# Far past the longest check, its waits stretched by a slow agterm: an older check tab belongs to a check that ended.
+CHECK_TAB_STALE_S = 15 * 60
+CLOSE_TRIES = 3
 LONG_MESSAGE_CHARS = 3_000
 CLAUDE_PID_FILE = "claude.pid"
 READY_WITHIN_S = 45.0
@@ -64,20 +70,21 @@ def check_typing(config: Config) -> CheckResult:
         return CheckResult(False, f"agterm answered `tree` in {tree_s:.1f} s, too slow to type into tabs reliably")
     parent = os.environ.get("AGTERM_SESSION_ID")
     where = ["--parent", parent] if parent else ["--workspace-name", CHECK_TAB_NAME, "--create-workspace"]
-    # A unique name finds the tab again when agterm made it but its reply was lost.
-    name = f"{CHECK_TAB_NAME} {secrets.token_hex(3)}"
-    created = run_agterm(
-        config, ["session", "new", *where, "--no-select", "--name", name, "--command", CAT_COMMAND, "--json"]
-    )
-    session = _map_created_to_id(created) or _find_session_named(config, name)
-    if session is None:
-        return CheckResult(False, "agterm did not create the check tab")
+    name = _name_check_tab(CHECK_TAB_NAME)
+    session: str | None = None
     try:
-        result = _type_and_see(config, session)
+        created = run_agterm(
+            config, ["session", "new", *where, "--no-select", "--name", name, "--command", CAT_COMMAND, "--json"]
+        )
+        session = _map_created_to_id(created) or _find_session_named(config, name)
+        result = (
+            _type_and_see(config, session) if session else CheckResult(False, "agterm did not create the check tab")
+        )
     finally:
-        closed = run_agterm(config, ["session", "close", "--target", session]) is not None
+        with _held_signals():
+            closed = _close_check_tab(config, session, name)
     if not closed:
-        return CheckResult(False, f"{result.detail}; but the check tab {session} did not close: close it by hand")
+        return CheckResult(False, f"{result.detail}; but the check tab {name!r} did not close: close it by hand")
     return result
 
 
@@ -119,25 +126,68 @@ def _run_in_check_claude(
         launcher = _write_check_files(root, work, state, claude)
         parent = os.environ.get("AGTERM_SESSION_ID")
         where = ["--parent", parent] if parent else ["--workspace-name", CHECK_TAB_NAME, "--create-workspace"]
-        name = f"{tab_name} {secrets.token_hex(3)}"
-        created = run_agterm(
-            config,
-            ["session", "new", *where, "--no-select", "--name", name, "--cwd", str(work), "--command", str(launcher),
-             "--json"],
-        )  # fmt: skip
-        session = _map_created_to_id(created) or _find_session_named(config, name)
-        if session is None:
-            return CheckResult(False, f"agterm did not create the {folder} tab")
+        name = _name_check_tab(tab_name)
+        session: str | None = None
         try:
-            result = run(config, session, work, state)
+            created = run_agterm(
+                config,
+                ["session", "new", *where, "--no-select", "--name", name, "--cwd", str(work), "--command",
+                 str(launcher), "--json"],
+            )  # fmt: skip
+            session = _map_created_to_id(created) or _find_session_named(config, name)
+            result = (
+                run(config, session, work, state)
+                if session
+                else CheckResult(False, f"agterm did not create the {folder} tab")
+            )
         finally:
-            closed = run_agterm(config, ["session", "close", "--target", session]) is not None
-            end_check_claude(state / CLAUDE_PID_FILE, settings_path=str(root / "settings.json"))
-            shutil.rmtree(work, ignore_errors=True)
-            shutil.rmtree(state, ignore_errors=True)
+            with _held_signals():
+                closed = _close_check_tab(config, session, name)
+                end_check_claude(state / CLAUDE_PID_FILE, settings_path=str(root / "settings.json"))
+                shutil.rmtree(work, ignore_errors=True)
+                shutil.rmtree(state, ignore_errors=True)
     if not closed:
-        return CheckResult(False, f"{result.detail}; but the check tab {session} did not close: close it by hand")
+        return CheckResult(False, f"{result.detail}; but the check tab {name!r} did not close: close it by hand")
     return result
+
+
+def is_check_tab(name: str) -> bool:
+    return CHECK_TAB_RE.fullmatch(name) is not None
+
+
+def close_stale_check_tabs(config: Config, now: float) -> list[str]:
+    """Check tabs a killed check left open, under any tab; one a running check holds is younger than the cut."""
+    output = run_agterm(config, ["tree", "--json"])
+    notes: list[str] = []
+    for session, name in _list_named(_parse_json(output)):
+        opened = CHECK_TAB_RE.fullmatch(name)
+        if opened is None or now - int(opened.group(1)) < CHECK_TAB_STALE_S:
+            continue
+        closed = _close_check_tab(config, session, name)
+        notes.append(f"{'closed' if closed else 'could not close'} the leftover check tab {name!r} ({session})")
+    return notes
+
+
+def _name_check_tab(prefix: str) -> str:
+    # Unique per run, so a tab whose create reply was lost is found again by name and no older one is taken for it.
+    return f"{prefix} {int(time.time())}-{secrets.token_hex(3)}"
+
+
+def _close_check_tab(config: Config, session: str | None, name: str) -> bool:
+    """True once no tab of that name is left. Under load a close can time out, or the create's reply be lost while
+    agterm still made the tab; each try looks it up by name again."""
+    for _ in range(CLOSE_TRIES):
+        if session is None:
+            tree = _parse_json(run_agterm(config, ["tree", "--json"]))
+            if tree is None:
+                continue
+            session = next((found for found, named in _list_named(tree) if named == name), None)
+            if session is None:
+                return True
+        if run_agterm(config, ["session", "close", "--target", session]) is not None:
+            return True
+        session = None
+    return False
 
 
 def end_check_claude(pid_file: Path, settings_path: str) -> None:
@@ -151,6 +201,16 @@ def end_check_claude(pid_file: Path, settings_path: str) -> None:
         return
     with suppress(OSError):
         os.kill(pid, signal.SIGTERM)
+
+
+@contextmanager
+def _held_signals() -> Generator[None]:
+    """A kill or Ctrl-C that lands while a check cleans up waits until it is done, then ends the run."""
+    before = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGHUP, signal.SIGINT})
+    try:
+        yield
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, before)
 
 
 @contextmanager
@@ -366,29 +426,30 @@ def _map_created_to_id(output: str | None) -> str | None:
 
 def _find_session_named(config: Config, name: str) -> str | None:
     output = run_agterm(config, ["tree", "--json"])
-    if not output:
-        return None
+    return next((session for session, named in _list_named(_parse_json(output)) if named == name), None)
+
+
+def _parse_json(output: str | None) -> object:
     try:
-        raw: object = json.loads(output)
+        return json.loads(output) if output else None
     except ValueError:
         return None
-    return _find_named(raw, name)
 
 
-def _find_named(node: object, name: str) -> str | None:
+def _list_named(node: object) -> list[tuple[str, str]]:
+    """Each (id, name) anywhere in agterm's tree."""
+    found: list[tuple[str, str]] = []
     if isinstance(node, list):
         for item in cast(list[object], node):
-            if (found := _find_named(item, name)) is not None:
-                return found
+            found += _list_named(item)
     elif isinstance(node, dict):
         fields = cast(dict[str, object], node)
-        session = fields.get("id")
-        if fields.get("name") == name and isinstance(session, str):
-            return session
+        session, name = fields.get("id"), fields.get("name")
+        if isinstance(session, str) and isinstance(name, str):
+            found.append((session, name))
         for value in fields.values():
-            if (found := _find_named(value, name)) is not None:
-                return found
-    return None
+            found += _list_named(value)
+    return found
 
 
 def _shows_answer(screen: str, word: str) -> bool:
