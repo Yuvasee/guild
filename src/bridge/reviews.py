@@ -1272,12 +1272,12 @@ def find_issue_lead(
     closing: list[str],
     enrichment: Mapping[str, Mapping[str, object]],
 ) -> Owner | None:
-    """The lead an issue's notices go to: the one lead whose domains hold its project, or no one while it is not live.
-    Without such a lead, in a PR's owner order: the lead above the live session holding the issue's claim; a lead whose
-    declared work names the issue or one of its linked PRs; the lead above a live session on a branch named after the
-    issue, else above the owner of a closing PR; the lead of an ended session on such a branch; a lead whose scope
-    names the issue. Only a lead can act on an issue, so a worker hands it up. Naming an issue in a
-    prompt or a message makes no one its owner. None when no live lead is found."""
+    """The lead an issue's notices go to: the lead above the live session holding the issue's claim; a lead whose
+    declared work names the issue or one of its linked PRs, the one such lead when the issue's project is in a lead's
+    domains; else that domain's lead, or no one while it is not live. Without such a lead, in a PR's owner order: the
+    lead above a live session on a branch named after the issue, else above the owner of a closing PR; the lead of an
+    ended session on such a branch; a lead whose scope names the issue. Only a lead can act on an issue, so a worker
+    hands it up. Naming an issue in a prompt or a message makes no one its owner. None when no live lead is found."""
     key = issue_ref.removeprefix("issue:")
     wanted = {r.lower() for r in (issue_ref, *linked)}
     leads = list_leads(conn)
@@ -1286,20 +1286,24 @@ def find_issue_lead(
         display, lead_surface = find_lead_of_ended(conn, surface, conversation_id)
         return map_lead_to_owner(conn, config, lead_surface, display) if lead_surface else None
 
-    domain = find_domain_owner(conn, key)
-    if domain is not None:
-        return map_lead_to_owner(conn, config, domain.lead.surface, domain.lead.display_name)
     claimed = _find_owner_from_claim(conn, config, issue_ref)
     if claimed is not None and (owner := lead_above(claimed[0]["surface"])) is not None:
         return owner
     by_name = {lead.name: lead for lead in leads}
-    for chunk in conn.execute("SELECT lead, refs FROM lead_work WHERE done_at IS NULL ORDER BY updated_at DESC"):
-        lead = by_name.get(str(chunk["lead"]))
-        if lead is None or not wanted & {str(r).lower() for r in json.loads(str(chunk["refs"]))}:
-            continue
+    named = list(
+        dict.fromkeys(
+            by_name[str(chunk["lead"])]
+            for chunk in conn.execute("SELECT lead, refs FROM lead_work WHERE done_at IS NULL ORDER BY updated_at DESC")
+            if str(chunk["lead"]) in by_name and wanted & {str(r).lower() for r in json.loads(str(chunk["refs"]))}
+        )
+    )
+    domain = find_domain_owner(conn, key)
+    for lead in named if domain is None or len(named) == 1 else []:
         owner = map_lead_to_owner(conn, config, lead.surface, lead.display_name)
         if owner is not None:
             return owner
+    if domain is not None:
+        return map_lead_to_owner(conn, config, domain.lead.surface, domain.lead.display_name)
     on_branch = _list_sessions_on_issue_branch(conn, key)
     for row in on_branch:
         if (

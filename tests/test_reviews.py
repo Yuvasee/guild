@@ -655,7 +655,31 @@ def test_an_issue_of_a_handed_over_project_goes_to_its_new_lead_not_the_old_lead
             " expires_at) VALUES ('issue:PROJ-1', 't', 'w-c', 'worker', 1, 2, 9999999999999)"
         )
     owner = find_issue_lead(conn, CONFIG, "issue:PROJ-1", [REF], [REF], {})
-    assert owner is not None and owner.handle == "alex", "the project's lead comes before another lead's claim"
+    assert owner is not None and owner.handle == "cleo", "a live claim on the issue is its lead's take"
+
+
+def test_one_leads_work_naming_an_issue_takes_it_from_its_projects_lead(tmp_path: Path) -> None:
+    conn = setup_pr(tmp_path)
+    with transaction(conn):
+        add_session(conn, "cleo-c", "cleo")
+        add_lead(conn, "Cleo", "s-cleo")
+        add_session(conn, "alex-c", "alex")
+        add_lead(conn, "Alex", "s-alex")
+        conn.execute("UPDATE leads SET domains = '[\"readiness\"]' WHERE name = 'alex'")
+        store_projects(conn, [Project("readiness", ("PROJ-1",))], "aide", 0)
+        add_work(conn, "cleo", "issue:PROJ-1")
+    owner = find_issue_lead(conn, CONFIG, "issue:PROJ-1", [], [], {})
+    assert owner is not None and owner.handle == "cleo"
+    with transaction(conn):
+        add_work(conn, "alex", "issue:PROJ-1")
+        conn.execute("UPDATE lead_work SET updated_at = CASE lead WHEN 'cleo' THEN 9 ELSE 1 END")
+    owner = find_issue_lead(conn, CONFIG, "issue:PROJ-1", [], [], {})
+    assert owner is not None and owner.handle == "alex", "two leads name it: the project's lead decides"
+    with transaction(conn):
+        conn.execute("UPDATE lead_work SET done_at = 10 WHERE lead = 'alex'")
+        conn.execute("UPDATE instances SET ended_at = 9 WHERE conversation_id = 'cleo-c'")
+    owner = find_issue_lead(conn, CONFIG, "issue:PROJ-1", [], [], {})
+    assert owner is not None and owner.handle == "alex", "the declaring lead not live: the project's lead"
 
 
 def setup_handed_over_pr(tmp_path: Path, title: str = "PROJ-1: fix totals") -> Any:
