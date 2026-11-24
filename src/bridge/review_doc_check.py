@@ -789,13 +789,284 @@ def find_first_reader_problems(verified: str) -> list[str]:
     ]
 
 
+_BEFORE_LABEL_RE = re.compile(
+    r"^\W*before(?:\s*/\s*after|\s+(?:and|vs\.?|&)\s+after|\s+this\s+(?:PR|change))?\b"
+    r"(?:\W*$|\s*[:(\u2013\u2014]|\s+-\s)",
+    re.I,
+)
+_COMMIT_RE = re.compile(r"`[0-9a-f]{7,40}`")
+_DIAGRAM_SPLIT_RE = re.compile(r"[\[\](){}\"|\n;]|-->|---|==>|\bsubgraph\b")
+_WHOLE_TAGS = frozenset({"table", "figure", "svg"})
+_HEADING_TAGS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6"})
+_BRANCH_RE = re.compile(
+    r"\bbranch\s+(?:`[^`]+`|['\"\u2018\u201c][^'\"\u2019\u201d\s]+|\w+(?:[/_.-]\w+)+|\w*\d[\w./-]*)|`[^`\s]+`\s+branch\b",
+    re.I,
+)
+_HYPOTHETICAL_RE = re.compile(r"\bhypothetical", re.I)
+
+
+_GLOSSARY_HEADING_RE = re.compile(r"^[\W\d]*(?:words used|(?:key )?terms|glossary|definitions)\b", re.I)
+_TERM_PAIR_RE = re.compile(
+    r"^(?!(?:scenario|who|handling|today|before|after)\b)[^\s:=]+(?:\s+[^\s:=]+){0,3}?\s*(?::\s|\s[\u2013\u2014-]\s|\s=\s)\S",
+    re.I,
+)
+"""A 'Term: meaning.' sentence; the labels of a risk's parts and of a story step are not terms."""
+MIN_GLOSSARY_PAIRS = 3
+_LIST_TAGS = frozenset({"ul", "ol", "dl"})
+_BR = "\x00"
+
+
+@dataclass
+class _Block:
+    text: list[str] = field(default_factory=list[str])
+    before: str = ""
+    """Where its first Before is, as the refusal names it; empty when it shows none."""
+
+
+class _BlockReader(HTMLParser):
+    """The doc as blocks in reading order, the same blocks the plainness check reads (paragraphs, list items,
+    headings, summaries), except that a table, a figure, an inline svg and a Mermaid source are one block each with
+    everything inside them: a caption, an image's alt text and a diagram's labels belong to their figure. Inside a
+    figure, each paragraph and heading is still read as its own line."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.blocks: list[_Block] = []
+        self.glossaries: list[str] = []
+        self._section = ""
+        self._hidden = 0
+        self._whole: list[tuple[str, bool]] = []
+        """Open tables, figures and diagrams, each with whether it is a diagram."""
+        self._block: _Block | None = None
+        self._line: list[str] = []
+        self._line_tag = ""
+        """The tag that opened the line, when it is outside lists and tables: only a paragraph is read as prose."""
+        self._lists = 0
+        self._heading: list[str] | None = None
+        self._terms: tuple[str, int, bool] | None = None
+        """Inside a section titled like a glossary: its heading, the term pairs in its paragraphs, whether one
+        paragraph was already refused on its own."""
+        self._bold: list[str] | None = None
+        self._rows: list[list[int]] = []
+        """Per open table: [rows seen, cells seen in the current row]."""
+        self._cell: list[str] | None = None
+        self._header_cell = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in _HIDDEN_TAGS:
+            self._hidden += 1
+            return
+        if self._hidden:
+            return
+        classes = (dict(attrs).get("class") or "").split()
+        mermaid = any(name == "mermaid" or name.endswith("-mermaid") for name in classes)
+        if tag in _WHOLE_TAGS or mermaid:
+            if not self._whole:
+                self._start_block()
+            self._whole.append((tag, tag == "svg" or mermaid))
+        elif _is_block(tag):
+            if not self._whole:
+                self._start_block()
+            self._end_line(tag)
+        if tag not in _INLINE_TAGS:
+            self._add(" ")
+        self._lists += tag in _LIST_TAGS
+        if tag in _HEADING_TAGS:
+            self._end_terms()
+            self._heading = []
+        elif tag in ("b", "strong"):
+            self._bold = []
+        elif tag == "br":
+            self._line.append(_BR)
+        elif tag == "code":
+            self._add("`")
+        elif tag == "img":
+            alt = dict(attrs).get("alt") or ""
+            self._add(f" {alt} ")
+            self._check_diagram(alt)
+        elif tag == "table":
+            self._rows.append([0, 0])
+        elif tag == "tr" and self._rows:
+            self._end_cell()
+            self._rows[-1] = [self._rows[-1][0] + 1, 0]
+        elif tag in ("th", "td") and self._rows:
+            self._end_cell()
+            self._rows[-1][1] += 1
+            self._header_cell = tag == "th" or self._rows[-1][0] <= 1 or self._rows[-1][1] == 1
+            self._cell = []
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in _HIDDEN_TAGS:
+            self._hidden = max(0, self._hidden - 1)
+            return
+        if self._hidden:
+            return
+        if tag not in _INLINE_TAGS:
+            self._add(" ")
+        if tag in _HEADING_TAGS and self._heading is not None:
+            text = " ".join("".join(self._heading).split())
+            if tag == "h2":
+                self._section = text
+            if _BEFORE_LABEL_RE.match(text):
+                self._mark(f"the heading '{text}'")
+            if _GLOSSARY_HEADING_RE.match(text):
+                self._terms = (text, 0, False)
+            self._heading = None
+        elif tag in ("b", "strong") and self._bold is not None:
+            if _BEFORE_LABEL_RE.match(" ".join("".join(self._bold).split())):
+                self._mark(self._where("a line"))
+            self._bold = None
+        elif tag == "code":
+            self._add("`")
+        elif tag in ("th", "td", "tr"):
+            self._end_cell()
+        if _is_block(tag) or tag in _WHOLE_TAGS:
+            self._end_line("")
+        if tag in _LIST_TAGS:
+            self._lists = max(0, self._lists - 1)
+        if any(opened == tag for opened, _ in self._whole):
+            while self._whole and self._whole.pop()[0] != tag:
+                pass
+            if tag == "table" and self._rows:
+                self._end_cell()
+                self._rows.pop()
+            if not self._whole:
+                self._end_block()
+        elif _is_block(tag) and not self._whole:
+            self._end_block()
+
+    def handle_data(self, data: str) -> None:
+        if self._hidden:
+            return
+        self._add(data)
+        for part in (self._line, self._heading, self._bold, self._cell):
+            if part is not None:
+                part.append(data)
+        if any(diagram for _, diagram in self._whole):
+            self._check_diagram(data)
+
+    def close(self) -> None:
+        super().close()
+        self._end_cell()
+        self._end_line("")
+        self._end_block()
+        self._end_terms()
+
+    def _add(self, data: str) -> None:
+        if self._block is None:
+            self._block = _Block()
+        self._block.text.append(data)
+
+    def _mark(self, where: str) -> None:
+        if self._block is None:
+            self._block = _Block()
+        self._block.before = self._block.before or where
+
+    def _where(self, what: str) -> str:
+        return f"{what} under '{self._section}'" if self._section else f"{what} before the first h2"
+
+    def _check_diagram(self, text: str) -> None:
+        if any(_BEFORE_LABEL_RE.match(piece.strip()) for piece in _DIAGRAM_SPLIT_RE.split(text)):
+            self._mark(self._where("a diagram or image"))
+
+    def _end_cell(self) -> None:
+        if (
+            self._cell is not None
+            and self._header_cell
+            and _BEFORE_LABEL_RE.match(" ".join("".join(self._cell).split()))
+        ):
+            self._mark(self._where("a table"))
+        self._cell = None
+
+    def _end_line(self, next_tag: str) -> None:
+        """A line is the text from one block tag to the next: a paragraph, a list item, a caption."""
+        lines = [" ".join(line.split()) for line in "".join(self._line).split(_BR)]
+        text = " ".join(line for line in lines if line)
+        if any(_BEFORE_LABEL_RE.match(line) for line in lines):
+            self._mark(self._where("a line"))
+        if self._line_tag == "p":
+            pairs = sum(
+                bool(_TERM_PAIR_RE.match(sentence)) for line in lines for sentence in split_into_sentences(line)
+            )
+            alone = pairs >= MIN_GLOSSARY_PAIRS
+            if alone:
+                self.glossaries.append(
+                    f'{self._where("a paragraph")} ("{_shorten(text, 6)}") is a term list written as prose, with '
+                    f"{pairs} 'term: meaning' pairs; make it a list (<ul> or <dl>) or a two-column table"
+                )
+            if self._terms is not None:
+                heading, count, refused = self._terms
+                self._terms = (heading, count + pairs, refused or alone)
+        self._line = []
+        self._line_tag = "" if self._lists or self._whole else next_tag
+
+    def _end_terms(self) -> None:
+        if self._terms is not None:
+            heading, pairs, refused = self._terms
+            if pairs >= MIN_GLOSSARY_PAIRS and not refused:
+                self.glossaries.append(
+                    f"'{heading}' defines {pairs} terms in paragraphs; make it a list (<ul> or <dl>) or a two-column "
+                    "table"
+                )
+        self._terms = None
+
+    def _start_block(self) -> None:
+        self._end_block()
+        self._block = _Block()
+
+    def _end_block(self) -> None:
+        if self._block is None:
+            return
+        if " ".join("".join(self._block.text).split()):
+            self.blocks.append(self._block)
+        self._block = None
+
+
+def _is_block(tag: str) -> bool:
+    return bool(_BLOCK_TAG_RE.fullmatch(tag)) or tag in _HEADING_TAGS
+
+
+def read_blocks(page: str) -> _BlockReader:
+    reader = _BlockReader()
+    try:
+        reader.feed(page)
+        reader.close()
+    except (AssertionError, ValueError):
+        pass
+    return reader
+
+
+def find_baseline_problems(reader: _BlockReader, base: str) -> list[str]:
+    """Every Before says what it is: the base branch today, a named branch, or a hypothetical. A design alternative
+    shown as Before reads as today's code. Its block, or the block just before or after it (the paragraph that
+    introduces a table, a figure's caption under it), names the baseline."""
+    names = "|".join(re.escape(name) for name in dict.fromkeys((base, "main")) if name)
+    after_name = r"(?![\w/-]|\.\w)"
+    today = re.compile(
+        rf"(?<![\w/-])`?(?:{names})`? today\b|\bon `?(?:origin/)?(?:{names}){after_name}|\(`?(?:{names})`?\)", re.I
+    )
+    problems: list[str] = []
+    blocks = reader.blocks
+    for index, block in enumerate(blocks):
+        if not block.before:
+            continue
+        near = " ".join(" ".join("".join(part.text).split()) for part in blocks[max(0, index - 1) : index + 2])
+        if any(pattern.search(near) for pattern in (today, _BRANCH_RE, _COMMIT_RE, _HYPOTHETICAL_RE)):
+            continue
+        problems.append(
+            f"{block.before} shows a Before without saying what it is; say it there or in the paragraph or caption "
+            f"next to it: '{base or 'main'} today', 'branch <name>' (the name in code), or 'hypothetical'"
+        )
+    return list(dict.fromkeys(problems))
+
+
 def map_row_to_path(text: str) -> str:
     """A row may point at lines (path:12-40); the file is what it names."""
     return _LINE_SUFFIX_RE.sub("", text).rstrip("/")
 
 
 def find_doc_problems(
-    page: bytes, owner_reviewed: bool, owner: str, files: frozenset[str] | None, limits: PlainLimits
+    page: bytes, owner_reviewed: bool, owner: str, files: frozenset[str] | None, limits: PlainLimits, base: str
 ) -> list[str]:
     """What breaks the spec's order, plainness and Where to look rules, one plain line each. `files` holds every file
     and directory of the commit the doc describes; None when that commit cannot be read, so paths are not looked up."""
@@ -822,6 +1093,9 @@ def find_doc_problems(
     problems.extend(find_story_problems(headings, top.story_steps))
     problems.extend(find_first_reader_problems(verified))
     problems.extend(find_field_table_problems(text))
+    blocks = read_blocks(text)
+    problems.extend(find_baseline_problems(blocks, base))
+    problems.extend(blocks.glossaries)
     since = [index for index, text in enumerate(headings) if _CHANGES_SINCE_RE.search(text)]
     if since and not owner_reviewed:
         problems.append(

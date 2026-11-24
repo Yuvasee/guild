@@ -63,7 +63,7 @@ LIMITS = PlainLimits(
 
 
 def problems(page: bytes, reviewed: bool = False, files: frozenset[str] | None = None) -> list[str]:
-    return find_doc_problems(page, reviewed, "Sam", files, LIMITS)
+    return find_doc_problems(page, reviewed, "Sam", files, LIMITS, "main")
 
 
 FILES = frozenset({"src", "src/app", "src/app/run.py", "src/app/store.py", "tests", "tests/test_run.py"})
@@ -287,7 +287,9 @@ def test_the_limits_come_from_config() -> None:
     page = make_top(bullets(8, 8, 8), "<p>" + words(12) + "</p>")
     assert problems(page) == []
     strict = PlainLimits(bullets=2, bullet_words=7, sentence_words=10, visible_words=150)
-    assert [line.split(";")[0].split(",")[0] for line in find_doc_problems(page, False, "Sam", None, strict)] == [
+    assert [
+        line.split(";")[0].split(",")[0] for line in find_doc_problems(page, False, "Sam", None, strict, "main")
+    ] == [
         "In short has 3 bullets",
         "an In short bullet has 8 words",
         "an In short bullet has 8 words",
@@ -490,3 +492,95 @@ def test_the_type_is_read_from_the_start_of_its_line_and_a_folded_fields_is_fold
     )
     hidden_heading = "<details><summary>More</summary><h2>Fields</h2></details><p>" + "word " * 1000 + "</p>"
     assert problems(make_doc(where=hidden_heading + WHERE))[0].startswith("it shows 1"), "a folded h2 exempts nothing"
+
+
+TABLE = (
+    "<table><tr><th></th><th>Before</th><th>After</th></tr><tr><td>Retries</td><td>none</td><td>three</td></tr></table>"
+)
+SVG = "<svg><text>Before</text><text>After</text></svg>"
+
+
+def baseline(changes: str, base: str = "main") -> list[str]:
+    page = make_top("<p>Fine.</p>", changes)
+    return find_doc_problems(page, False, "Sam", None, LIMITS, base)
+
+
+def test_a_before_with_no_baseline_near_it_is_refused() -> None:
+    assert baseline(f"<p>The retry loop.</p>{TABLE}<p>Three tries now.</p>") == [
+        "a table under 'What changes and why' shows a Before without saying what it is; say it there or in the "
+        "paragraph or caption next to it: 'main today', 'branch <name>' (the name in code), or "
+        "'hypothetical'"
+    ]
+    assert len(baseline(f"<figure>{SVG}<figcaption>Retries.</figcaption></figure>")) == 1, "an svg label"
+    mermaid = '<pre class="mermaid">flowchart LR\n  A["Before: one try"] --> B["After: three"]</pre>'
+    assert len(baseline(mermaid)) == 1, "a Mermaid label"
+    assert len(baseline('<img src="a.png" alt="Before: one try">')) == 1, "an image's alt text"
+    assert len(baseline("<h3>Before and after</h3><p>One try, then three.</p>")) == 1, "a heading"
+    assert len(baseline("<p><b>Before:</b> one try.</p>")) == 1, "a bold label"
+    assert len(baseline("<ul><li>Before: one try.</li></ul>")) == 1, "a labelled line"
+    assert len(baseline(f"<p>Today on main.</p><p>Gap.</p>{TABLE}")) == 1, "two blocks away is not near"
+    assert len(baseline("<p>Before: it fails on main.py.</p>")) == 1, "a file named main is no baseline"
+    assert len(baseline("<p>Retry count.<br>Before: one try.<br>After: three.</p>")) == 1, "a line after a break"
+    assert len(baseline("<p>Before: this branch - it retries once.</p>")) == 1, "a dash is no branch name"
+    assert len(baseline("<figure><h3>Before</h3><p>One try.</p></figure>")) == 1, "a heading inside a figure"
+    assert len(baseline("<figure><p>Retries.</p><p>Before: one try.</p></figure>")) == 1, "a line inside a figure"
+    wrapper = '<div class="mermaid-wrapper"><p>Main today.</p><p>Gap.</p><p>Before: one try.</p></div>'
+    assert len(baseline(wrapper)) == 1, "only the class mermaid is a diagram"
+
+
+def test_a_before_that_names_main_today_a_branch_or_a_hypothetical_passes() -> None:
+    assert baseline(f"<p>Before is main today.</p>{TABLE}") == []
+    assert baseline(TABLE.replace("<th>Before</th>", "<th>Before (on main)</th>")) == []
+    assert baseline(f"{TABLE}<p>Before is branch <code>feature/retry</code>, not merged.</p>") == []
+    assert baseline("<p>Before: branch feature.retry has one try.</p>") == []
+    assert baseline(f"<figure>{SVG}<figcaption>Before: the <code>retry-v2</code> branch.</figcaption></figure>") == []
+    assert baseline(f"{TABLE}<p>Before is hypothetical: the design we did not take.</p>") == []
+    assert baseline(f"<p>Before is release-2 today.</p>{TABLE}", base="release-2") == []
+    assert len(baseline(f"<p>Before is release-2 today.</p>{TABLE}")) == 1, "only the PR's base names today"
+    assert baseline("<p>Before (main): one try.</p>") == []
+    assert baseline("<p>Before: main\n today.</p>") == [], "as a browser shows the words"
+    assert baseline("<table><tr><th>Before</th><td>main today</td></tr></table>") == []
+    assert baseline(f"<figure>{SVG}<figcaption>main today</figcaption></figure>") == []
+    assert baseline("<p>Before and after: it fails on <code>origin/main</code> and passes here.</p>") == []
+    assert baseline("<p>Before: <code>31e1f06e8</code>. After: <code>16b443814</code>.</p>") == []
+
+
+def test_a_doc_without_a_before_passes() -> None:
+    prose = (
+        "<p>Before registering, run the tests.</p><p><b>Before you merge</b>, read it.</p>"
+        "<p>Before/after timings of four shapes.</p><p>It lands <b>before this PR merges</b>.</p>"
+    )
+    assert baseline(prose + "<svg><text>retry before timeout</text></svg>") == []
+
+
+def glossary(changes: str) -> list[str]:
+    return [line for line in baseline(changes) if "term" in line]
+
+
+def test_a_term_list_written_as_prose_is_refused() -> None:
+    prose = "<p>Run: one pass of the scan. Window: the hour it covers. Cursor: where the last run stopped.</p>"
+    assert glossary(prose) == [
+        "a paragraph under 'What changes and why' (\"Run: one pass of the scan. …\") is a term list written as "
+        "prose, with 3 'term: meaning' pairs; make it a list (<ul> or <dl>) or a two-column table"
+    ]
+    lines = "<p>Run \u2014 one pass.<br>Window \u2014 the hour.<br>Cursor = where it stopped</p>"
+    assert len(glossary(lines)) == 1, "pairs on lines of their own"
+    assert len(glossary("<p>Run:\none pass. Window:\nthe hour. Cursor:\nwhere it stopped.</p>")) == 1
+    section = "<h3>Words used here</h3><p>Run: one pass.</p><p>Window: the hour.</p><p>Cursor: where it stopped.</p>"
+    assert glossary(section) == [
+        "'Words used here' defines 3 terms in paragraphs; make it a list (<ul> or <dl>) or a two-column table"
+    ]
+
+
+def test_a_term_list_as_a_list_or_a_table_and_a_paragraph_with_one_colon_pass() -> None:
+    terms = [("Run", "one pass."), ("Window", "the hour."), ("Cursor", "where it stopped.")]
+    dl = "<h3>Terms</h3><dl>" + "".join(f"<dt>{term}</dt><dd>{meaning}</dd>" for term, meaning in terms) + "</dl>"
+    ul = "<ul>" + "".join(f"<li>{term}: {meaning}</li>" for term, meaning in terms) + "</ul>"
+    table = "<table>" + "".join(f"<tr><td>{term}</td><td>{meaning}</td></tr>" for term, meaning in terms) + "</table>"
+    paragraphs = (
+        "<h3>Terms</h3><ul>" + "".join(f"<li><p>{term}: {meaning}</p></li>" for term, meaning in terms) + "</ul>"
+    )
+    assert glossary(dl) == glossary(ul) == glossary(table) == glossary(paragraphs) == []
+    assert glossary("<p>The scan has one job: it reads each run. It stops at 12:30. It writes the cursor.</p>") == []
+    risk = "<p>Scenario: a scan fails. Who: no one yet. Handling: accepted; the next run retries.</p>"
+    assert glossary(risk) == [], "a risk's parts, as Costs and risks asks for them"

@@ -989,7 +989,7 @@ def register_doc(conn: sqlite3.Connection, config: Config, ref: str, source: Pat
         config.doc_sentence_max_words,
         config.doc_visible_max_words,
     )
-    problems = find_doc_problems(page, has_owner_reviewed(row), config.owner_name, files, limits)
+    problems = find_doc_problems(page, has_owner_reviewed(row), config.owner_name, files, limits, str(row["base"]))
     if problems:
         listed = "".join(f"\n- {problem}" for problem in problems)
         raise DocError(f"{ref}: the doc was not registered, as {REVIEW_DOC_SPEC} asks:{listed}")
