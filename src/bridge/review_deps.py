@@ -30,7 +30,7 @@ _DEPLOY_SUBJECT_RE = re.compile(
     re.I,
 )
 _DEPLOY_SUBJECT_MAX = 80
-_NEGATED_RE = re.compile(r"(?:\bno\s+longer|\bnot|n't|\bnever)\s+(?:\w+\s+)?$", re.I)
+NEGATED_RE = re.compile(r"(?:\bno\s+longer|\bnot|n't|\bnever)\s+(?:\w+\s+)?$", re.I)
 _CLAUSE_END_RE = re.compile(r";|\b(?:related|see|cf|also|follow(?:s|-up)|part\s+of|refs?)\b", re.I)
 _MD_LINK_RE = re.compile(r"\[[^\[\]\n]*\]\((https?://github\.com/[^)\s]+)\)")
 _BACK_REF_RE = re.compile(r"\b(?:that|the\s+code|the\s+above)\s+PR\b|\bthe\s+PR\s+above\b", re.I)
@@ -96,7 +96,7 @@ def map_markdown_to_dependencies(body: str, repo: str, number: int) -> tuple[tup
                 if m := _CLAUSE_END_RE.search(clause, trigger.end() - start):
                     clause = clause[: m.start()]
                 # 'No longer depends on #12, which lands after #13': the negation reaches the next ';'.
-                if trigger["state"] and _NEGATED_RE.search(sentence[: trigger.start()]):
+                if trigger["state"] and NEGATED_RE.search(sentence[: trigger.start()]):
                     negated_until = (
                         semicolon if (semicolon := sentence.find(";", trigger.end())) >= 0 else len(sentence)
                     )
@@ -252,7 +252,7 @@ def map_markdown_to_goes_with(body: str, repo: str, number: int) -> tuple[tuple[
                 subjects = [_find_subject(part, triggers, i) for i in range(len(triggers))]
                 for i, trigger in enumerate(triggers):
                     since = triggers[i - 1].end() if i else 0
-                    if _NEGATED_RE.search(part[max(since, trigger.start() - _NEGATION_REACH) : trigger.start()]):
+                    if NEGATED_RE.search(part[max(since, trigger.start() - _NEGATION_REACH) : trigger.start()]):
                         continue
                     after = part[trigger.end() : subjects[i + 1][0] if i + 1 < len(triggers) else len(part)]
                     clause = after[: m.start()] if (m := _PAIR_CLAUSE_END_RE.search(after)) else after

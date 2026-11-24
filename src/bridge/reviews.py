@@ -8,7 +8,7 @@ import urllib.parse
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from bridge.agent_prefix import CLAUDE_PREFIX
 from bridge.backport import BackportVerdict, check_backport, is_backport_base
@@ -52,9 +52,10 @@ from bridge.guard import (
     map_siblings_to_wait,
     sync_claims_flag,
 )
-from bridge.leads import find_lead_on_surface, is_conversation_locked, list_leads
+from bridge.leads import find_lead_of, is_conversation_locked, list_leads
 from bridge.refs import map_prefixes_to_key_re, map_ref_to_label
 from bridge.registry import record_tab_parent
+from bridge.restricted import map_row_to_files
 from bridge.review_deps import map_dependencies_to_quotes, map_sentence_to_quote, map_states_to_blockers
 from bridge.review_github import (
     UNKNOWN_DIFF,
@@ -90,7 +91,6 @@ from bridge.review_worktree import (
 )
 
 GITHUB_EVERY_S = 90
-PARENT_WALK_MAX = 5
 WAKES_PER_HOUR_MAX = 3
 HOUR_MS = 3_600_000
 CLOCK_SKEW_MS = 60_000
@@ -1039,27 +1039,6 @@ def record_tab_parents(conn: sqlite3.Connection, tree: dict[str, Any] | None) ->
         for tab in tabs:
             if tab.get("parent"):
                 record_tab_parent(conn, str(tab.get("id")), str(tab["parent"]))
-
-
-def find_lead_of(conn: sqlite3.Connection, surface: str | None) -> tuple[str | None, str | None]:
-    """(display name, surface) of the lead above a tab, itself included."""
-    for _ in range(PARENT_WALK_MAX):
-        if surface is None:
-            return None, None
-        lead = find_lead_on_surface(conn, surface)
-        if lead is not None:
-            return lead.display_name, lead.surface
-        row = conn.execute(
-            """
-            SELECT parent.surface FROM surfaces s
-            JOIN tab_parents t ON t.agterm_session = s.agterm_session
-            JOIN surfaces parent ON parent.agterm_session = t.parent_session
-            WHERE s.surface = ?
-            """,
-            (surface,),
-        ).fetchone()
-        surface = row[0] if row else None
-    return None, None
 
 
 def find_owner(
@@ -2640,14 +2619,6 @@ def map_row_to_review(
         "worktree_detail": row["wt_detail"],
         "worktree_stale": bool(row["wt_path"]) and row["wt_oid"] != row["head_oid"],
     }
-
-
-def map_row_to_files(row: sqlite3.Row) -> list[str]:
-    try:
-        files: object = json.loads(str(row["files"] or "[]"))
-    except ValueError:
-        return []
-    return [str(f) for f in cast(list[object], files)] if isinstance(files, list) else []
 
 
 def map_row_to_restricted_marks(config: Config, row: sqlite3.Row) -> list[str]:

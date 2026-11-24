@@ -10,11 +10,11 @@ from urllib.parse import unquote
 
 from bridge.agent_prefix import CLAUDE_PREFIX, LINEAR_ISSUE_TOOLS, TITLE_RULE, is_prefixed, strip_agent_prefix
 from bridge.colleague_comments import SUBSTANTIVE, list_unhandled_colleague_comments
-from bridge.config import Config, RestrictedPath
+from bridge.config import Config
 from bridge.gitinfo import RepoFacts, read_repo_facts
 from bridge.guard import SHELL_KEYWORDS, SHELLS, RepoReader, segment_command
 from bridge.refs import names_issue, needs_issue
-from bridge.reviews import find_lead_of, map_row_to_files
+from bridge.restricted import find_restricted_block, find_session_surface, list_touched, map_row_to_files
 
 _HEREDOC_SUBSTITUTION_RE = re.compile(r"^\$\(\s*cat\s+<<-?\s*(['\"]?)(\w+)\1[^\n]*\n(.*?)\n\s*\2\s*\)$", re.DOTALL)
 _GIT_GLOBAL_VALUE_OPTIONS = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace"})
@@ -22,10 +22,6 @@ _GH_GLOBAL_VALUE_OPTIONS = frozenset({"-R", "--repo", "--hostname"})
 _PR_URL_RE = re.compile(r"github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)")
 _GH_FILL = frozenset({"--fill", "-f", "--fill-first", "--fill-verbose"})
 _BODY_FILE_MAX_BYTES = 1_000_000
-WHY_LINES_MAX = 5
-_OK_LINE_RE = re.compile(r"^\s*OK:\s*#(\d{1,15})\s*$", re.MULTILINE)
-_OK_WORD_RE = re.compile(r"\bOK\b", re.IGNORECASE)
-_SECTION_END_RE = re.compile(r"^\s*(#{1,6}\s|\*\*.*\*\*\s*$|<details|---|[^\n:]{1,80}:\s*why\s*:?\s*$)", re.IGNORECASE)
 _GIT_DIFF_BUDGET_S = 2.5
 
 
@@ -533,8 +529,12 @@ def _check_pr_restricted(
         if listed is None:
             return None
         files, branch = listed, head or branch
-    touched = [r for r in config.restricted_paths if any(r.covers(f) for f in files)]
-    return _check_why_and_ok(conn, config, touched, body.text, branch, conversation_id) if touched else None
+    touched = list_touched(config, files)
+    if not touched:
+        return None
+    surface = find_session_surface(conn, conversation_id)
+    block = find_restricted_block(conn, config, touched, body.text, branch, surface)
+    return f"bridge: {block}" if block else None
 
 
 def _list_changed_files(directory: str, base: str, head: str | None, deadline: float) -> list[str] | None:
@@ -555,100 +555,6 @@ def _list_changed_files(directory: str, base: str, head: str | None, deadline: f
         if done.returncode == 0:
             return [name for name in done.stdout.split("\0") if name]
     return None
-
-
-def _check_why_and_ok(
-    conn: sqlite3.Connection,
-    config: Config,
-    touched: list[RestrictedPath],
-    body: str,
-    branch: str | None,
-    conversation_id: str | None,
-) -> str | None:
-    assistant = config.assistant_handle
-    for restricted in touched:
-        why = _read_why(body, restricted.label)
-        if why is None:
-            missing = f"its body has no section '{restricted.label}: why'"
-        elif not why:
-            missing = f"its section '{restricted.label}: why' is empty"
-        elif len(why) > WHY_LINES_MAX:
-            missing = f"its section '{restricted.label}: why' has {len(why)} lines, more than {WHY_LINES_MAX}"
-        elif not _has_assistant_ok(conn, assistant, body, branch, conversation_id):
-            missing = f"its body has no 'OK: #N', N {assistant}'s bridge message saying OK to you or naming this branch"
-        else:
-            continue
-        return (
-            f"bridge: this PR changes {restricted.path} ({restricted.label}, {restricted.owner}'s team) and {missing}. "
-            f"Ask {assistant} for an OK with a why of at most {WHY_LINES_MAX} lines (what breaks, why it cannot be "
-            f"done outside {restricted.label}), then put it under '{restricted.label}: why' and 'OK: #N' in the body."
-        )
-    return None
-
-
-def _read_why(body: str, label: str) -> list[str] | None:
-    """The non-empty lines under the '<label>: why' heading, up to the next heading, bold line, fold or rule; None
-    when the body has no such heading."""
-    heading = re.compile(rf"^\s*(?:#+\s*)?(?:\*\*)?{re.escape(label)}:\s*why\s*:?\s*(?:\*\*)?\s*$", re.IGNORECASE)
-    lines = body.splitlines()
-    for index, line in enumerate(lines):
-        if not heading.match(line):
-            continue
-        section: list[str] = []
-        for following in lines[index + 1 :]:
-            if _SECTION_END_RE.match(following):
-                break
-            if following.strip() and not _OK_LINE_RE.match(following):
-                section.append(following)
-        return section
-    return None
-
-
-def _has_assistant_ok(
-    conn: sqlite3.Connection, assistant: str, body: str, branch: str | None, conversation_id: str | None
-) -> bool:
-    """An 'OK: #N' line whose message the assistant sent, not cancelled, saying OK, and either naming the PR's branch
-    or sent to the session that runs the command or to its lead."""
-    authors: set[str] | None = None
-    for number in _OK_LINE_RE.findall(body):
-        row = conn.execute(
-            "SELECT from_handle, body FROM messages WHERE id = ? AND cancelled_at IS NULL", (int(number),)
-        ).fetchone()
-        if row is None or str(row["from_handle"]).casefold() != assistant.casefold():
-            continue
-        text = str(row["body"])
-        if not _OK_WORD_RE.search(text):
-            continue
-        if branch and re.search(rf"(?<![\w/.-]){re.escape(branch)}(?![\w/.-])", text):
-            return True
-        if authors is None:
-            authors = _find_author_handles(conn, conversation_id)
-        recipients = {
-            str(r[0]).casefold()
-            for r in conn.execute("SELECT handle FROM message_recipients WHERE message_id = ?", (int(number),))
-        }
-        if recipients & authors:
-            return True
-    return False
-
-
-def _find_author_handles(conn: sqlite3.Connection, conversation_id: str | None) -> set[str]:
-    """The handles of the session's tab and of the lead above it."""
-    if not conversation_id:
-        return set()
-    row = conn.execute(
-        "SELECT surface FROM instances WHERE conversation_id = ? AND surface IS NOT NULL "
-        "ORDER BY proc_start_ms DESC LIMIT 1",
-        (conversation_id,),
-    ).fetchone()
-    if row is None:
-        return set()
-    surfaces = {str(row[0])}
-    if (lead_surface := find_lead_of(conn, str(row[0]))[1]) is not None:
-        surfaces.add(lead_surface)
-    marks = ",".join("?" * len(surfaces))
-    found = conn.execute(f"SELECT handle FROM surfaces WHERE surface IN ({marks}) AND handle IS NOT NULL", [*surfaces])
-    return {str(r[0]).casefold() for r in found}
 
 
 def find_colleague_reply_refusal(

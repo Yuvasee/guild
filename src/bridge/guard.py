@@ -17,6 +17,7 @@ from bridge.db import transaction
 from bridge.gitinfo import RepoFacts, read_repo_facts
 from bridge.procinfo import process_start_ms
 from bridge.registry import PROC_START_TOLERANCE_MS
+from bridge.restricted import find_pr_restricted_block, list_touched, map_row_to_files
 from bridge.review_deps import PRECONDITION_PREFIX, map_markdown_to_preconditions
 from bridge.review_github import GitHubError, LiveMergeFacts, fetch_merge_facts, fetch_pr_body
 
@@ -1253,6 +1254,8 @@ def find_merge_blocks(
                 colleague_block=map_row_to_colleague_block(row, (threads, comments)),
             )
         waits = list_merge_waits(facts)
+        if restricted := find_live_restricted_block(conn, config, row, deadline):
+            waits = (*waits, restricted)
         backport: str | None = None
         # A backport whose diff equals merged PRs carries their approval, never the owner's word on merging it.
         if NOT_APPROVED in waits and is_backport_base(config.backport_bases, str(row["base"])):
@@ -1275,6 +1278,26 @@ def find_merge_blocks(
                 )
             )
     return refusals
+
+
+def find_live_restricted_block(
+    conn: sqlite3.Connection, config: Config, row: sqlite3.Row, deadline: float
+) -> str | None:
+    """A PR changing another team's code merges only with its why and the assistant's OK in its body, read now: the
+    queue does not keep bodies. However it was opened, a host worker's included."""
+    if not list_touched(config, map_row_to_files(row)):
+        return None
+    try:
+        left = deadline - time.monotonic()
+        if left < MERGE_FACTS_MIN_S:
+            raise GitHubError("out of time before reading GitHub")
+        body = fetch_pr_body(str(row["repo"]), int(row["number"]), min(left, BODY_READ_TIMEOUT_S))
+    except GitHubError as exc:
+        return (
+            f"it changes another team's code and its body, which must carry a why and an OK, could not be read ({exc})"
+        )
+    block = find_pr_restricted_block(conn, config, row, body)
+    return block.rstrip(".") if block else None
 
 
 def find_live_dependency_wait(conn: sqlite3.Connection, row: sqlite3.Row, deadline: float) -> str | None:

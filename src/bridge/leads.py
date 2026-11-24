@@ -37,6 +37,7 @@ LABEL_MAX_CHARS = 40
 WORK_NAME_MAX_CHARS = 80
 WORK_ABOUT_MAX_CHARS = 200
 DOMAIN_MAX_CHARS = 64
+PARENT_WALK_MAX = 5
 
 INTERNAL_WORDS = ("worker", "lead", "Guild", "bridge")
 CLAUDE_RULE = (
@@ -296,6 +297,27 @@ def list_lead_work(conn: sqlite3.Connection, lead: str) -> list[LeadWork]:
             (lead,),
         )
     ]
+
+
+def find_lead_of(conn: sqlite3.Connection, surface: str | None) -> tuple[str | None, str | None]:
+    """(display name, surface) of the lead above a tab, itself included."""
+    for _ in range(PARENT_WALK_MAX):
+        if surface is None:
+            return None, None
+        lead = find_lead_on_surface(conn, surface)
+        if lead is not None:
+            return lead.display_name, lead.surface
+        row = conn.execute(
+            """
+            SELECT parent.surface FROM surfaces s
+            JOIN tab_parents t ON t.agterm_session = s.agterm_session
+            JOIN surfaces parent ON parent.agterm_session = t.parent_session
+            WHERE s.surface = ?
+            """,
+            (surface,),
+        ).fetchone()
+        surface = row[0] if row else None
+    return None, None
 
 
 def find_lead_on_surface(conn: sqlite3.Connection, surface: str | None) -> Lead | None:

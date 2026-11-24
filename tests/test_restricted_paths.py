@@ -3,15 +3,23 @@ import sqlite3
 import subprocess
 from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 import pytest
+from test_auto_merge import CLEAN, LIVE
+from test_auto_merge import ON as AUTO_ON
+from test_auto_merge import run as auto_run
+from test_auto_merge import setup as auto_setup
 from test_reviews import CONFIG as REVIEW_CONFIG
-from test_reviews import add_session, make_pr
+from test_reviews import REF, add_session, make_pr
 
 from bridge.config import RestrictedPath, map_toml_to_config
 from bridge.db import connect, transaction
 from bridge.gitinfo import RepoFacts
+from bridge.guard import Target, find_merge_blocks
 from bridge.hooks import handle_pre_tool_use
+from bridge.restricted import is_ok_message
+from bridge.review_github import GitHubError
 from bridge.reviews import map_db_to_reviews, store_open_prs
 from bridge.title_guard import find_restricted_path_refusal
 
@@ -44,7 +52,9 @@ def checkout(tmp_path: Path) -> Path:
     return repo
 
 
-def refusal(conn: sqlite3.Connection, command: str, directory: Path, conversation: str | None = "c-w") -> str | None:
+def refusal(
+    conn: sqlite3.Connection, command: str, directory: Path, conversation: str | None = "c-worker"
+) -> str | None:
     facts = RepoFacts(str(directory), "dev/x", {"origin": "Org/app"})
     return find_restricted_path_refusal(conn, CONFIG, command, str(directory), conversation, lambda _d: facts)
 
@@ -55,7 +65,7 @@ def body_file(tmp_path: Path, text: str) -> str:
     return str(path)
 
 
-def send(conn: sqlite3.Connection, sender: str, body: str, to: str) -> int:
+def send(conn: sqlite3.Connection, sender: str, body: str, to: str, conversation: str | None = None) -> int:
     with transaction(conn):
         cursor = conn.execute(
             "INSERT INTO messages (created_at, from_conversation, from_handle, kind, body) "
@@ -65,7 +75,7 @@ def send(conn: sqlite3.Connection, sender: str, body: str, to: str) -> int:
         message_id = int(cursor.lastrowid or 0)
         conn.execute(
             "INSERT INTO message_recipients (message_id, conversation_id, handle) VALUES (?, ?, ?)",
-            (message_id, f"c-{to}", to),
+            (message_id, conversation or f"c-{to}", to),
         )
     return message_id
 
@@ -124,7 +134,7 @@ def test_a_why_with_the_assistants_ok_passes(tmp_path: Path, checkout: Path) -> 
         is None
     )
     with transaction(conn):
-        add_session(conn, "c-w", "worker")
+        add_session(conn, "c-worker", "worker")
         add_session(conn, "c-eli", "eli")
         conn.execute(
             "INSERT INTO leads (name, display_name, scope, linear_refs, tint, surface, created_at) "
@@ -210,3 +220,80 @@ def test_bad_files_in_the_queue_read_as_none(tmp_path: Path) -> None:
         assert refusal(conn, "gh pr edit 7 --body x", tmp_path) is None, stored
     config = map_toml_to_config({"restricted_paths": [{"path": "./services//pricing/", "label": "P", "owner": "M"}]})
     assert config.restricted_paths[0].path == "services/pricing/"
+
+
+@pytest.mark.parametrize(
+    ("text", "ok"),
+    [
+        ("OK", True),
+        ("ok, go ahead with dev/x", True),
+        ("OK for dev/x: the rounding has to change there", True),
+        ("not OK", False),
+        ("This isn't OK yet", False),
+        ("Not yet. OK once the tests pass", False),
+        ("No, ask the pricing team. OK?", False),
+        ("hold this one; OK otherwise", False),
+        ("Looks fine", False),
+    ],
+)
+def test_only_an_ok_no_word_turns_around_counts(text: str, ok: bool) -> None:
+    assert is_ok_message(text) is ok
+
+
+def test_a_negated_ok_does_not_open_the_pr(tmp_path: Path, checkout: Path) -> None:
+    conn = connect(tmp_path / "t.db")
+    not_ok = send(conn, "aide", "dev/x is not OK", "worker")
+    command = f"gh pr create -t Round -F {body_file(tmp_path, WHY + f'OK: #{not_ok}')}"
+    assert refusal(conn, command, checkout) is not None
+
+
+MERGE_FACTS = (False, True, "SUCCESS", "CLEAN", 0, "a1", (), ())
+
+
+def merge_waits(conn: sqlite3.Connection, body: str | Exception) -> tuple[str, ...]:
+    fetch = mock.Mock(side_effect=body) if isinstance(body, Exception) else mock.Mock(return_value=body)
+    with (
+        mock.patch("bridge.guard.fetch_merge_facts", return_value=MERGE_FACTS),
+        mock.patch("bridge.guard.fetch_pr_body", fetch),
+    ):
+        refusals = find_merge_blocks(conn, CONFIG, [Target(REF, "gh pr merge")], 1000)
+    return tuple(w for r in refusals for w in r.waits if "another team's code" in w or "Pricing service" in w)
+
+
+def test_the_merge_guard_refuses_a_restricted_pr_until_its_body_has_why_and_ok(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "t.db")
+    with transaction(conn):
+        store_open_prs(conn, [make_pr(files=("services/pricing/round.py",), approved_by=("mira",))], 500)
+        conn.execute("INSERT OR REPLACE INTO review_poll (id, ok_at) VALUES (1, 1000)")
+        add_session(conn, "c-worker", "worker", branch="dev/x")
+    [no_why] = merge_waits(conn, "Rounds once")
+    assert "has no section 'Pricing service: why'" in no_why and not no_why.endswith(".")
+    to_worker = send(conn, "aide", "OK", "worker")
+    assert merge_waits(conn, WHY + f"OK: #{to_worker}") == (), "sent to the PR's owner, a host worker or not"
+    not_ok = send(conn, "aide", "not OK", "worker")
+    assert len(merge_waits(conn, WHY + f"OK: #{not_ok}")) == 1
+    [unread] = merge_waits(conn, GitHubError("gh failed: timeout"))
+    assert "could not be read (gh failed: timeout)" in unread
+    with transaction(conn):
+        conn.execute("UPDATE review_prs SET files = ?", (json.dumps(["app/x.py"]),))
+    with mock.patch("bridge.guard.fetch_pr_body") as fetch:
+        assert merge_waits(conn, "x") == ()
+    fetch.assert_not_called()
+
+
+def test_auto_merge_holds_a_restricted_pr_until_its_body_has_why_and_ok(tmp_path: Path) -> None:
+    on = replace(AUTO_ON, restricted_paths=(PRICING,))
+    conn = auto_setup(tmp_path, make_pr(**CLEAN, files=("services/pricing/round.py",)))
+    assert auto_run(conn, config=on, live=replace(LIVE, body="Rounds once")).merges == []
+    ok = send(conn, "aide", "OK for dev/x", "lead-x")
+    assert len(auto_run(conn, config=on, live=replace(LIVE, body=WHY + f"OK: #{ok}")).merges) == 1
+
+
+def test_an_ok_follows_the_conversation_it_went_to_not_a_handle_passed_on(tmp_path: Path, checkout: Path) -> None:
+    conn = connect(tmp_path / "t.db")
+    with transaction(conn):
+        add_session(conn, "c-worker", "worker")
+        add_session(conn, "c-before", "nora", surface="s-elsewhere")
+    to_old_holder = send(conn, "aide", "OK", "worker", conversation="c-before")
+    command = f"gh pr create -t Round -F {body_file(tmp_path, WHY + f'OK: #{to_old_holder}')}"
+    assert refusal(conn, command, checkout) is not None

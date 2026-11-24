@@ -25,6 +25,7 @@ from bridge.guard import (
     map_siblings_to_wait,
     map_wait_to_reason,
 )
+from bridge.restricted import find_pr_restricted_block
 from bridge.review_deps import (
     map_dependencies_to_quotes,
     map_markdown_to_dependencies,
@@ -118,6 +119,8 @@ def find_live_block_alone(conn: sqlite3.Connection, config: Config, row: sqlite3
         return map_refusal_to_reason(refusal, config)
     if PERSIST_SANDBOX in live.body:
         return SANDBOX_BLOCK
+    if restricted := find_pr_restricted_block(conn, config, row, live.body):
+        return restricted
     blockers = find_live_dependency_blockers(conn, config, row, live)
     return blockers[0] if blockers else None
 
