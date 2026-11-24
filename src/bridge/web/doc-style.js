@@ -166,15 +166,45 @@
   function wideTables() {
     [].forEach.call(document.querySelectorAll("table"), function (t) {
       var box = t.parentElement;
-      if (!box || t.closest("[data-ds-skip],#bridge-doc-nav") || box.classList.contains("ds-scroll")) return;
+      if (!box || t.closest("[data-ds-skip],#bridge-doc-nav")) return;
       var cs = getComputedStyle(box), room = box.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
-      if (/auto|scroll/.test(cs.overflowX) || t.offsetWidth <= room + 1) return;
-      var wrap = document.createElement("div");
-      wrap.className = "ds-scroll";
-      box.insertBefore(wrap, t);
-      wrap.appendChild(t);
+      if (!box.classList.contains("ds-scroll") && !/auto|scroll/.test(cs.overflowX)) {
+        if (t.offsetWidth <= room + 1) return;
+        var wrap = document.createElement("div");
+        wrap.className = "ds-scroll";
+        box.insertBefore(wrap, t);
+        wrap.appendChild(t);
+        box = wrap;
+      }
+      widen(box, t);
     });
   }
+  // A table wider than the text column takes all the width to the window's edge and spreads its columns over it, and
+  // scrolls only past that: a doc's narrow column otherwise left a wide empty margin beside a scrolling table.
+  function widen(box, t) {
+    if (box.hasAttribute("data-ds-widened")) {
+      box.removeAttribute("data-ds-widened");
+      box.style.width = box.style.maxWidth = box.style.boxSizing = t.style.width = "";
+    }
+    var need = t.scrollWidth, have = box.clientWidth;
+    if (need <= have + 1 || getComputedStyle(box).direction === "rtl") return;
+    var left = box.getBoundingClientRect().left + window.scrollX;
+    var edge = document.documentElement.clientWidth - GUTTER;
+    // Never past an ancestor that clips or scrolls: the table would be cut off or scroll twice.
+    for (var a = box.parentElement; a && a !== document.body && a !== root; a = a.parentElement) {
+      if (getComputedStyle(a).overflowX !== "visible") {
+        edge = Math.min(edge, a.getBoundingClientRect().left + window.scrollX + a.clientWidth);
+      }
+    }
+    var room = edge - left;
+    if (room <= box.offsetWidth + 1) return;
+    box.setAttribute("data-ds-widened", "");
+    box.style.maxWidth = "none";
+    box.style.boxSizing = "border-box";
+    box.style.width = Math.round(room) + "px";
+    t.style.width = "100%";
+  }
+  var GUTTER = 24;
 
   var PATH = /^(?:[\w.@~-]+\/)+(?:[\w@-][\w.@-]*\.\w{1,5}(?::\d+(?:[-–]\d+)?)?)?$|^[\w.-]+\.(?:py|ts|tsx|js|jsx|mjs|json|ya?ml|toml|md|html|css|sh|sql|txt|cfg|ini|lock|tf|go|rs)(?::\d+(?:[-–]\d+)?)?$|^:\d+(?:[-–]\d+)?$/;
   var IDENT = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*(?:\(\.{0,3}\))?$/;
@@ -360,6 +390,8 @@
   // Stylesheets that arrived after the first pass get the chosen theme too.
   window.addEventListener("load", function () { applyTheme(chosen); theme(); stickyTop(); });
   window.addEventListener("resize", function () { stickyTop(); wideTables(); });
+  // A table in a closed fold has no width until the fold opens.
+  window.addEventListener("toggle", function () { wideTables(); }, true);
   window.addEventListener("storage", function (e) {
     if (e.key === THEME_KEY) switchTheme(knownTheme(e.newValue));
   });
