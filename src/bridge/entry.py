@@ -29,6 +29,21 @@ def load_main(module: str, wait_s: float = IMPORT_WAIT_S) -> Callable[[], int] |
         time.sleep(IMPORT_RETRY_S)
 
 
+def import_modules(modules: tuple[str, ...], wait_s: float = IMPORT_WAIT_S) -> None:
+    """load_main's wait, for modules a running process loads late; raises ImportError once the wait is over."""
+    deadline = time.monotonic() + wait_s
+    for module in modules:
+        while True:
+            try:
+                importlib.import_module(module)
+                break
+            except ImportError:
+                if time.monotonic() >= deadline:
+                    raise
+            importlib.invalidate_caches()
+            time.sleep(IMPORT_RETRY_S)
+
+
 def hook_main() -> int:
     """A hook fails open, as it always has: exit 0 with nothing written."""
     main = load_main("bridge.hooks")

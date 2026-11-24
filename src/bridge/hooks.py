@@ -46,6 +46,7 @@ from bridge.compaction import (
 )
 from bridge.config import Config, db_path, load_config
 from bridge.db import HOOK_BUSY_TIMEOUT_MS, HOOK_RETRY_BUSY_TIMEOUT_MS, connect, transaction
+from bridge.entry import import_modules
 from bridge.errlog import log_error, log_slow
 from bridge.feed import release_dead_typing_claims, spawn_typed_delivery
 from bridge.gitinfo import GitInfo, read_git_info
@@ -119,6 +120,16 @@ from bridge.start_context import (
 )
 from bridge.turncut import take_turn_cut
 
+# Loaded late to keep other hooks fast, but with load_main's wait: a guard check must not pass because a reinstall
+# hid a module for a moment.
+GUARD_LATE_MODULES = (
+    "bridge.title_guard",
+    "bridge.restricted",
+    "bridge.review_deps",
+    "bridge.review_github",
+    "bridge.backport",
+)
+
 HOOK_EVENTS = (
     "SessionStart", "UserPromptSubmit", "Stop", "SessionEnd", "PostToolUse", "PostToolUseFailure", "Notification",
     "PreToolUse", "StopFailure",
@@ -185,6 +196,7 @@ def run_hook(event: str) -> int:
         conn = connect(db_path(), HOOK_BUSY_TIMEOUT_MS)
         try:
             if event == "PreToolUse":
+                import_modules(GUARD_LATE_MODULES)
                 result = HookResult(None, handle_pre_tool_use(conn, payload, config), "ok")
             elif event == "SessionStart":
                 try:

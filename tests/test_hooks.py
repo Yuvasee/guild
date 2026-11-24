@@ -465,3 +465,31 @@ def test_a_taken_start_marker_never_replaces_a_newer_one_and_a_dead_takers_comes
     assert has_pending_start("conv-m"), "a start whose taker was killed before commit is still pending"
     again = take_pending_start("conv-m")
     assert again is not None and again.pending.source == "resume"
+
+
+def test_a_guard_module_hidden_for_a_moment_by_a_reinstall_is_waited_for_not_passed(tmp_path: Path) -> None:
+    code = """
+import io, json, sys
+from unittest.mock import Mock, patch
+import bridge.hooks as hooks
+from bridge.config import Config
+
+class MissingOnce:
+    attempts = 0
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "bridge.title_guard":
+            self.attempts += 1
+            if self.attempts == 1:
+                raise ModuleNotFoundError("hidden by a reinstall", name=fullname)
+        return None
+
+sys.meta_path.insert(0, MissingOnce())
+payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "pkill python"}})
+with patch.object(hooks, "load_config", return_value=Config()), patch.object(hooks, "connect", return_value=Mock()), \\
+        patch.object(hooks, "db_path", return_value=":memory:"), patch.object(sys, "stdin", io.StringIO(payload)), \\
+        patch.object(sys, "stdout", io.StringIO()) as out:
+    hooks.run_hook("PreToolUse")
+print(json.loads(out.getvalue())["hookSpecificOutput"]["permissionDecision"], file=sys.stderr)
+"""
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    assert done.stderr.strip().splitlines()[-1] == "deny"
