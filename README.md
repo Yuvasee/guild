@@ -194,7 +194,7 @@ you one question at a time with a recommendation, and keeps the project priority
 streams the crew back to you: what each team decided, finished or got stuck on, and what it checked itself versus
 what it took on a team lead's word.
 
-A pending question never blocks your chat with Right Hand: questions wait on the page under **Needs you**, and when
+A pending question never blocks your chat with Right Hand: questions wait on the page under **Questions**, and when
 you answer one in chat instead, Right Hand relays it and the question closes.
 </details>
 
@@ -226,16 +226,21 @@ write all of it on the page as **Team chat**.
 </details>
 
 <details>
-<summary><b>Needs you</b>: the only queue you must read</summary>
+<summary><b>Questions and Answers</b>: the only queue you must read, and the results you asked for</summary>
 
 **Why:** your attention is the scarcest thing in the crew. It goes to decisions only you can make, in the order that
 matters, and a pending decision never stops your conversation: you keep talking while questions queue up.
 
 **How:** when a team lead can't go on without you, it posts a question with what, why now and what each answer costs,
-plus answer buttons. The page shows these under **Needs you**. Click an answer, or answer Right Hand in chat and it
+plus answer buttons. The page shows these under **Questions**. Click an answer, or answer Right Hand in chat and it
 relays your words; either way the answer is typed straight into the asking tab and the question closes. The page
 numbers the top three across questions and PRs: urgent questions, other questions oldest first, then PRs by project
 priority. An urgent question also raises a macOS notification.
+
+Beside them, **Answers** keeps what came back for you, so it does not scroll away in a chat: results, check results
+and artifacts (`bridge post done|insight`), newest first, a dot until you open one. OK takes one off (it stays in
+history); Reply sends your words to whoever posted it. A verified ask you were waiting on, or one you asked as a
+question, lands there by itself; the rest come as one summary per batch of verifications.
 </details>
 
 <details>
@@ -501,6 +506,7 @@ Full usage and flags: [docs/commands.md](docs/commands.md), or `<command> --help
 | [`guild ask wait`](docs/commands.md#guild-ask-wait) | it cannot move: its reminders pause until its next start, note, done, verify or reopen, or until --until passes |
 | [`guild ask done`](docs/commands.md#guild-ask-done) | claim it done; another session verifies |
 | [`guild ask verify`](docs/commands.md#guild-ask-verify) | done_claimed → verified, with evidence of what the owner would see |
+| [`guild ask summary`](docs/commands.md#guild-ask-summary) | one Answers post listing the asks you verified that the owner was not told of yet; one per batch |
 | [`guild ask close`](docs/commands.md#guild-ask-close) | verified → closed (the assistant only, relaying the owner) |
 | [`guild ask drop`](docs/commands.md#guild-ask-drop) | close an ask not yet claimed as obsolete, with why (its owner session or the assistant) |
 | [`guild ask reopen`](docs/commands.md#guild-ask-reopen) | back to open: the result is not what the owner asked for |

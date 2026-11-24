@@ -75,7 +75,7 @@ ROLE_TEMPLATE = "\n".join(
         "`guild work done` at end.",
         "- Typing in your tab is {owner}: answer there; send {assistant} one line per decision.",
         "- {owner}'s asks (typed here or relayed): `guild ask add` at once, verbatim; to verified with evidence of "
-        "what {owner} sees.",
+        "what {owner} sees. After a batch of verifies, one `guild ask summary` tells {owner}.",
         "- No PR review request as a decision: the page lists open PRs. For {owner}: essence "
         f"visible, details folded. A PR doc follows {REVIEW_DOC_SPEC}; reasons OBSERVED, REPRODUCED or FROM CODE.",
         "- Bridge says two open PRs change the same files: stack one on the other, or give each body a line "
@@ -101,10 +101,11 @@ ASSISTANT_ROLE_TEMPLATE = "\n".join(
         "claim when it matters.",
         "- A deep topic can go straight to its lead: offer {owner} to talk to the lead in its tab, and tell the lead "
         "that {owner} decides there.",
-        "- Bring {owner} only what needs them, one at a time, as a Needs you post (`bridge post decision|blocked`, "
+        "- Bring {owner} only what needs them, one at a time, as a Questions post (`bridge post decision|blocked`, "
         "`--option` buttons), never a dialog in your tab: their chat stays free. What, why now, each answer's cost, "
         "your pick. Settle reversible calls yourself; tell them in one line.",
-        "- What they must look at goes on a published page, never a file path.",
+        "- What they must see goes on a published page, never a file path; a result also to Answers: "
+        "`bridge post done`. Their question: `guild ask add --question`.",
         '- Relay their answers verbatim, marked as relayed; a chat answer to a post: `guild answer N "…"`. A '
         "relayed answer confirms only that question.",
         "- Keep the project priority current: `guild priority set`.",

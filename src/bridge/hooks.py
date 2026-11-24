@@ -72,6 +72,7 @@ from bridge.inject import Packed, Part, add_part, cap_context, pack_parts, save_
 from bridge.leads import (
     forget_assistant_role,
     forget_lead_role,
+    is_assistant_surface,
     is_conversation_locked,
     is_surface_locked,
     take_assistant_role,
@@ -144,6 +145,7 @@ _NON_TERMINAL_END_REASONS = frozenset({"clear", "resume", "compact"})
 _HOOK_RUNS_KEPT = 5000
 _MAIL_MIN_ROOM = 300
 TASK_NOTIFICATION = "<task-notification>"
+_RESULT_LINK_RE = re.compile(r"https?://\S|(?<![\w/])/p/[a-z0-9]")
 _HARNESS_PROMPT_PREFIXES = (
     TASK_NOTIFICATION, "<system-reminder>", "<local-command", "<command-name>", "[bridge]",
 )  # fmt: skip
@@ -1031,6 +1033,9 @@ def handle_hook(
             if fresh and observed.current:
                 record_activity(conn, instance_id, "active", event_ns)
             if fresh:
+                conn.execute(
+                    "UPDATE conversations SET owner_prompt_at = ? WHERE conversation_id = ?", (at_ms, conversation_id)
+                )
                 add_refs(conn, conversation_id, refs, "prompt", at_ms)
                 add_branch_refs(conn, conversation_id, git.branch if git else None, config, at_ms)
                 nudge = take_focus_nudge(conn, conversation_id, at_ms) if observed.current else None
@@ -1055,6 +1060,10 @@ def handle_hook(
             if conversation_id and text:
                 record_reply(conn, conversation_id, text, at_ms)
                 add_refs(conn, conversation_id, refs, "reply", at_ms)
+            if conversation_id and observed.current and not in_subagent:
+                reminder = take_answers_reminder(conn, config, conversation_id, surface, text or "")
+                if reminder:
+                    save_later_parts(conn, conversation_id, [*take_later_parts(conn, conversation_id), Part(reminder)])
         elif event == "StopFailure" and conversation_id and observed.current and not in_subagent:
             # No Stop follows: without this the tab stays "active", so no probe may tell its grey suggestion apart.
             record_activity(conn, instance_id, "idle", event_ns)
@@ -1273,6 +1282,32 @@ def handle_failed_start(
     pin = not nested and source in _PIN_SOURCES and bool(env.get("AGTERM_SESSION_ID"))
     output = convert_context_to_hook_output("SessionStart", cap_context(text)) if text else ""
     return HookResult(instance_id, output, "fallback", conversation_id if pin else None)
+
+
+def take_answers_reminder(
+    conn: sqlite3.Connection, config: Config, conversation_id: str, surface: str | None, reply: str
+) -> str | None:
+    """The assistant's turn that answered the owner's own prompt with a link and posted nothing to the feed gets one
+    line at its next prompt or tool call. Every turn's end clears the prompt's mark, so it is said once."""
+    row = conn.execute(
+        "SELECT owner_prompt_at FROM conversations WHERE conversation_id = ?", (conversation_id,)
+    ).fetchone()
+    if row is None or row["owner_prompt_at"] is None:
+        return None
+    asked_at = int(row["owner_prompt_at"])
+    conn.execute("UPDATE conversations SET owner_prompt_at = NULL WHERE conversation_id = ?", (conversation_id,))
+    if not _RESULT_LINK_RE.search(reply) or not is_assistant_surface(conn, config, surface):
+        return None
+    posted = conn.execute(
+        "SELECT 1 FROM user_items WHERE from_conversation = ? AND created_at >= ? LIMIT 1", (conversation_id, asked_at)
+    ).fetchone()
+    if posted:
+        return None
+    return (
+        f"[bridge] Your reply to {config.owner_name} carried a link and this turn posted nothing to the feed: if it is "
+        "a result they will want again, `bridge post done '<title>' --body - --link URL [--ask N] [--pin]` puts it "
+        "in their Answers. Not a refusal; skip it when it is not a result."
+    )
 
 
 def is_harness_prompt(text: str) -> bool:

@@ -82,9 +82,11 @@ from bridge.feed import (
     UndeliveredTab,
     dismiss_undelivered_answer,
     find_stuck_deliveries,
+    mark_answer_opened,
     post_from_user_to_room,
     prune_typer_locks,
     release_dead_typing_claims,
+    reply_on_answer,
     reply_on_card,
     resolve_tab,
     send_from_user,
@@ -1099,6 +1101,19 @@ class DashboardState:
         self._deliver(result, result.recipients)
         return True, "asked" if asked else "sent"
 
+    def reply_on_answer(self, item_id: int, text: str) -> tuple[bool, str]:
+        try:
+            with self._connection() as conn, transaction(conn):
+                result = reply_on_answer(conn, item_id, text, self.config.user_alias or "user", now_ms())
+        except MessageStateError as exc:
+            return False, str(exc)
+        self._deliver(result, result.recipients)
+        return True, "sent"
+
+    def open_answer(self, item_id: int) -> bool:
+        with self._connection() as conn, transaction(conn):
+            return mark_answer_opened(conn, item_id, now_ms())
+
     def choose_colleague_reply(self, item_id: int, choice: str, text: str) -> tuple[bool, str]:
         """GitHub is written only here, on the owner's click, and with no transaction open."""
         user = self.config.user_alias or "user"
@@ -1545,6 +1560,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             ok, detail = self.state.answer_item(int(match.group(1)), str(data["answer"]), data.get("ask") is True)
             self._json(200 if ok else 409, {"ok": ok, "detail": detail})
+        elif match := re.fullmatch(r"/api/items/(\d{1,12})/reply", self.path):
+            data = self._read_json()
+            if data is None or not isinstance(data.get("text"), str):
+                self._json(400, {"ok": False, "detail": "expected {text: string}"})
+                return
+            ok, detail = self.state.reply_on_answer(int(match.group(1)), str(data["text"]))
+            self._json(200 if ok else 409, {"ok": ok, "detail": detail})
+        elif match := re.fullmatch(r"/api/items/(\d{1,12})/open", self.path):
+            ok = self.state.open_answer(int(match.group(1)))
+            self._json(200, {"ok": ok})
         elif match := re.fullmatch(r"/api/colleague-replies/(\d{1,12})", self.path):
             data = self._read_json()
             choice, text = (data or {}).get("choice"), (data or {}).get("text", "")

@@ -282,6 +282,15 @@ def add_pin(
     return get_pin(conn, int(cursor.lastrowid or 0))
 
 
+def pin_link_once(conn: sqlite3.Connection, title: str, url: str, source: str, pinned_by: str, now: int) -> Pin | None:
+    """A link already pinned, or held by a registered page, keeps that one pin: None then."""
+    if conn.execute("SELECT 1 FROM pages WHERE artifact_url = ? AND archived_at IS NULL", (url,)).fetchone():
+        return None
+    if conn.execute("SELECT 1 FROM pins WHERE kind = 'link' AND body = ? AND archived_at IS NULL", (url,)).fetchone():
+        return None
+    return add_pin(conn, title[:TITLE_MAX_CHARS], "link", url, source, pinned_by, now)
+
+
 def record_artifact_publish(conn: sqlite3.Connection, url: str, title: str, by: str, at: int) -> Pin | None:
     """A republish moves the existing pin of that URL, never adds a second; None when a registered page holds the URL,
     since /pinned shows it as that page, moved to the publish time. PinError when the title looks like a secret."""

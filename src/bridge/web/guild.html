@@ -79,7 +79,12 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 #sections a.current { background: var(--row); color: var(--ink); font-weight: 600; }
 /* Under the bar after a jump; renderSectionNav counts a section current once its top is within 24px under the bar. */
 .section { margin-bottom: 44px; scroll-margin-top: 52px; }
-#needs, #chat { max-width: 90ch; margin-left: auto; margin-right: auto; }
+#chat { max-width: 90ch; margin-left: auto; margin-right: auto; }
+/* Questions and Answers side by side; one alone takes the row, and a narrow screen stacks them, questions first. */
+#top-pair { display: flex; gap: 0 36px; align-items: flex-start; max-width: 190ch; margin: 0 auto; }
+#top-pair > .section { flex: 1 1 0; min-width: 0; }
+#top-pair:has(> .section[hidden]) > .section { max-width: 90ch; margin-left: auto; margin-right: auto; }
+@media (max-width: 960px) { #top-pair { flex-direction: column; } #top-pair > .section { width: 100%; } }
 .section > header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; margin-bottom: 12px; }
 h2 { font-size: 19px; font-weight: 650; letter-spacing: .005em; margin: 0; color: var(--ink); }
 .note { font-size: 12px; color: var(--faint); }
@@ -104,7 +109,7 @@ header .end { margin-left: auto; }
 .dot.tinted.rest { border: 1.5px solid var(--tint); }
 .dot.tinted.unknown { border: 1.5px dashed var(--tint); }
 
-/* Needs you cards: no lines anywhere; blocks differ by background, every corner is rounded. */
+/* Question cards: no lines anywhere; blocks differ by background, every corner is rounded. */
 .card { background: var(--you-wash); border-radius: 16px; padding: 16px 18px; margin-bottom: 12px; }
 .card.stuck { background: color-mix(in srgb, var(--stuck) 9%, transparent); }
 .card.delivering { background: var(--row); }
@@ -152,6 +157,13 @@ header .end { margin-left: auto; }
 .card .actions button:hover { background: var(--you); color: var(--raise); }
 .card .actions button.dismiss { background: none; color: var(--soft); }
 .card .actions button.dismiss:hover { background: none; color: var(--ink); }
+/* Answers: news, so a quiet background; a blue dot until the owner opens one. Bodies fold after about six lines. */
+.card.answer { background: var(--row); cursor: default; }
+.card.answer .title { font-size: 15px; }
+.card.answer .unread-dot { display: inline-block; width: 8px; height: 8px; margin-right: 8px; border-radius: 50%; background: var(--you); vertical-align: 2px; }
+.card.answer .source { font-size: 12.5px; color: var(--soft); margin-top: 4px; overflow-wrap: anywhere; }
+.card.answer .md.folded { max-height: calc(1.5em * 6); overflow: hidden; -webkit-mask-image: linear-gradient(to bottom, #000 70%, transparent); mask-image: linear-gradient(to bottom, #000 70%, transparent); }
+.card.answer .more { margin-top: 4px; font-size: 12px; color: var(--you); }
 .card textarea { display: block; width: 100%; min-height: 9em; margin-top: 4px; font: inherit; color: inherit; background: var(--raise); border: 0; border-radius: 10px; padding: 8px 12px; resize: vertical; }
 .card .part.bad .label, .card .part.bad .text { color: var(--stuck); }
 .card .actions button.armed { background: var(--you); color: var(--raise); }
@@ -159,7 +171,7 @@ header .end { margin-left: auto; }
 .card :focus-visible { outline: 2px solid var(--you); outline-offset: 2px; }
 @media (max-width: 480px) { .card .facts { grid-template-columns: 1fr; gap: 2px; } .card .facts dd { margin-bottom: 6px; } }
 
-/* Asks: quiet rows under what needs you; red only when one has waited past its limit. */
+/* Asks: quiet rows under the questions; red only when one has waited past its limit. */
 .ask { border-radius: 10px; padding: 5px 12px; margin-bottom: 4px; background: var(--row); cursor: pointer; }
 .ask .words { font-weight: 500; white-space: pre-wrap; overflow-wrap: anywhere; }
 .ask .meta { font-size: 12px; color: var(--soft); margin-top: 2px; }
@@ -420,7 +432,10 @@ details td.what { color: var(--faint); font-weight: 400; }
     A section: <section id=X class=section hidden><header><h2>…</h2></header><div class=body></div></section>,
     filled by a render function added to RENDERERS. showSection() unhides it.
   -->
-  <section id="needs" class="section" hidden><header><h2>Needs you</h2></header><div class="body"></div></section>
+  <div id="top-pair">
+    <section id="needs" class="section" hidden><header><h2>Questions</h2></header><div class="body"></div></section>
+    <section id="answers" class="section" hidden><header><h2>Answers</h2><span class="note">results, checks and artifacts for you, newest first; OK takes one off</span><span class="note end" id="answers-more"></span></header><div class="body"></div></section>
+  </div>
   <section id="queue" class="section" data-tab="PRs" hidden><header><h2>PRs</h2><span class="note" id="priority"></span><span class="note end" id="queue-fresh"></span></header><div class="body"></div></section>
   <section id="colleagues" class="section" data-tab="Comments" hidden><header><h2>Colleague comments</h2><span class="note">on our PRs, only what waits for a reply, a draft or your choice</span></header><div class="body"></div></section>
   <section id="leads" class="section" data-tab="Leads"><header>
@@ -456,7 +471,7 @@ const drafts = new Map();
 const lastRendered = new Map();
 let replyTo = null;
 let chatLead = null;
-let state = { now: 0, needs: [], leads: [], room: [], claims: [], colleague_comments: [], asks: { attention: [], more: 0, verified: [] } };
+let state = { now: 0, needs: [], answers: [], leads: [], room: [], claims: [], colleague_comments: [], asks: { attention: [], more: 0, verified: [] } };
 let lastUpdate = 0;
 let offline = false;
 let mismatch = false;
@@ -544,8 +559,8 @@ function dot(item, tiny) {
 }
 
 // Agent text, never HTML: every piece goes in as text, so markup in it shows as typed. Bold, `code`, lists, links,
-// and PR and Q# references as chips.
-const MD_INLINE = /(`[^`\n]+`)|\*\*([^*\n]+)\*\*|\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<>"')\]]+[^\s<>"')\].,;:!?])|\b(Q#\d+)\b|(\b(?:[\w.-]+\/)?[A-Za-z][\w.-]*#\d+\b|(?<![\w#&])#\d{2,6}\b)/g;
+// and PR, Q# and A# references as chips; "ask #12" names an ask, not a PR, so it stays text.
+const MD_INLINE = /(`[^`\n]+`)|\*\*([^*\n]+)\*\*|\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<>"')\]]+[^\s<>"')\].,;:!?])|\b([QA]#\d+)\b|(\b(?:[\w.-]+\/)?[A-Za-z][\w.-]*#\d+\b|(?<![\w#&])(?<!\b[Aa]sks? )#\d{2,6}\b)/g;
 
 // Inside an answer button a link would answer the question when opened, so links there stay text.
 // The review docs' evidence and risk words, as the same coloured pills: a card reads like the doc it comes from.
@@ -873,6 +888,116 @@ function renderNeeds() {
   wanted.forEach((node, i) => {
     if (box.children[i] !== node) box.insertBefore(node, box.children[i] || null);
     updateCardMark(node, state.needs[i]);
+  });
+}
+
+const answersOpen = new Set();
+
+function openAnswer(answer, card) {
+  if (!answer.unread) return;
+  answer.unread = false;
+  card.classList.remove("unread");
+  const dot = card.querySelector(".unread-dot");
+  if (dot) dot.remove();
+  post("/api/items/" + answer.id + "/open");
+}
+
+function renderAnswerCard(answer) {
+  const card = el("div", "card answer" + (answer.unread ? " unread" : ""));
+  const title = el("div", "title");
+  if (answer.unread) {
+    const dot = el("span", "unread-dot");
+    dot.title = "new: not opened yet";
+    title.append(dot);
+  }
+  title.append(answer.text);
+  card.append(title);
+  if (answer.ask) {
+    const source = el("div", "source");
+    source.append("Answers ask #" + answer.ask.id + (answer.ask.words ? ": " : ""));
+    if (answer.ask.words) source.append(...renderInline(answer.ask.words.length > 200 ? answer.ask.words.slice(0, 199) + "…" : answer.ask.words, true));
+    card.append(source);
+  }
+  if (answer.body) {
+    const body = renderMarkdown(answer.body);
+    card.append(body);
+    if (!answersOpen.has(answer.id)) {
+      body.classList.add("folded");
+      const more = el("button", "more", "Show all");
+      more.hidden = true;
+      more.onclick = () => {
+        answersOpen.add(answer.id);
+        body.classList.remove("folded");
+        more.remove();
+      };
+      card.append(more);
+      // Fits in six lines: no fold, so its last line is not faded.
+      requestAnimationFrame(() => {
+        if (body.scrollHeight > body.clientHeight + 2) more.hidden = false;
+        else { body.classList.remove("folded"); more.remove(); }
+      });
+    }
+  }
+  const actions = el("div", "actions");
+  const ok = el("button", "", "OK");
+  ok.title = "Take it off Answers; it stays in history";
+  ok.onclick = async () => {
+    await post("/api/items/" + answer.id + "/resolve");
+    refresh();
+  };
+  actions.append(ok);
+  if (answer.can_reply) {
+    const key = "answer:" + answer.id;
+    const input = el("input");
+    input.placeholder = "Reply to " + answer.from;
+    input.value = drafts.get(key) || "";
+    input.oninput = () => drafts.set(key, input.value);
+    const send = async () => {
+      const text = input.value.trim();
+      if (!text) return;
+      const done = await post("/api/items/" + answer.id + "/reply", { text });
+      if (done.ok) {
+        if (input.value.trim() === text) { input.value = ""; drafts.delete(key); }
+        setStatus("Sent to " + answer.from + "; " + answer.ref + " stays until you press OK");
+      } else setStatus(done.detail || "not sent");
+      refresh();
+    };
+    input.onkeydown = (event) => { if (event.key === "Enter") send(); };
+    const reply = el("button", "dismiss", "Reply");
+    reply.onclick = send;
+    actions.append(input, reply);
+  }
+  const foot = el("div", "foot");
+  const when = el("span", "", age(state.now - answer.at) + " ago");
+  when.title = "posted " + fullTime(answer.at);
+  foot.append(el("span", "chip", answer.ref), el("span", "", "from " + answer.from), el("span", "", answer.kind), when);
+  for (const link of answer.links) foot.append(linkTo(link.url, link.label, "chip"));
+  card.append(actions, foot);
+  card.addEventListener("click", () => openAnswer(answer, card));
+  card.addEventListener("focusin", () => openAnswer(answer, card));
+  return card;
+}
+
+function renderAnswers() {
+  // As with questions: an unchanged card keeps its node, so a reply being typed keeps focus.
+  const box = showSection("answers", state.answers.length);
+  const more = state.answers_more || 0;
+  document.getElementById("answers-more").textContent = more ? plural(more, "older answer") + " wait below these; OK some to see them" : "";
+  const keep = new Map([...box.children].map((node) => [node.dataset.key, node]));
+  const wanted = state.answers.map((answer) => {
+    // Opening one only drops its dot, so the read state is left out of the key.
+    const key = JSON.stringify({ ...answer, unread: undefined });
+    let node = keep.get(key);
+    if (!node) {
+      node = renderAnswerCard(answer);
+      node.dataset.key = key;
+    }
+    return node;
+  });
+  for (const node of [...box.children]) if (!wanted.includes(node)) node.remove();
+  wanted.forEach((node, i) => {
+    if (box.children[i] !== node) box.insertBefore(node, box.children[i] || null);
+    if (!state.answers[i].unread) node.querySelector(".unread-dot")?.remove();
   });
 }
 
@@ -1411,7 +1536,7 @@ function renderVerdict() {
   fresh.className = tree ? "bad" : "";
   setFavicon(needs ? getColor("--you") : stuck.length ? getColor("--stuck") : "#9a9a94");
   const brand = document.getElementById("brand");
-  brand.title = [needs ? needs + " need" + (needs === 1 ? "s" : "") + " you" : "", stuck.length ? "stuck: " + stuck.join(", ") : ""]
+  brand.title = [needs ? plural(needs, "question") + " for you" : "", stuck.length ? "stuck: " + stuck.join(", ") : ""]
     .filter(Boolean)
     .join("; ");
   document.title = (needs ? "(" + needs + ") " : "") + (stuck.length ? "stuck · " : "") + "Guild";
@@ -1583,7 +1708,7 @@ function sortQueueGroup(prs, sort) {
 }
 
 const QUEUE_HEAD_WHY = {
-  place: "the number shows where it stands in what needs you, across questions and PRs",
+  place: "the number shows where it stands in what waits for you, across questions and PRs",
   lines: "lines changed: additions plus deletions, without lockfiles and generated files",
   ci: "GitHub checks on the newest commit: green, red, or running",
   review: "your comments and review on GitHub",
@@ -2424,7 +2549,7 @@ document.addEventListener("keydown", (event) => {
 
 // Tabs come from the sections themselves, so the bar follows the page's own order and list.
 function renderSectionTabs() {
-  const tabs = [...document.querySelectorAll("main > section.section")].map((section) => {
+  const tabs = [...document.querySelectorAll("main section.section")].map((section) => {
     const tab = el("a", null, section.dataset.tab || section.querySelector("h2").textContent);
     tab.href = "#" + section.id;
     return tab;
@@ -2528,7 +2653,7 @@ function renderColleagueComments() {
   box.replaceChildren(...nodes);
 }
 
-const RENDERERS = [renderNeeds, renderAsks, renderQueue, renderColleagueComments, renderLeads, renderRoom, renderResources, renderWatchers, renderLinks, renderLaptop, renderVerdict, renderSectionNav];
+const RENDERERS = [renderNeeds, renderAnswers, renderAsks, renderQueue, renderColleagueComments, renderLeads, renderRoom, renderResources, renderWatchers, renderLinks, renderLaptop, renderVerdict, renderSectionNav];
 
 async function refresh() {
   try {

@@ -300,6 +300,11 @@ def convert_item_id_to_question_ref(item_id: int) -> str:
     return f"Q#{item_id}"
 
 
+def convert_item_id_to_answer_ref(item_id: int) -> str:
+    """How the owner names a done or insight post, which is news, not a question."""
+    return f"A#{item_id}"
+
+
 def add_user_item(conn: sqlite3.Connection, sender: Party, severity: str, text: str, at_ms: int) -> int:
     if len(text) > USER_ITEM_MAX_CHARS:
         raise MessageStateError(f"keep it to one line under {USER_ITEM_MAX_CHARS} chars (got {len(text)})")

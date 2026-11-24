@@ -17,17 +17,21 @@ from bridge.asks import (
     convert_wait_to_text,
     drop_ask,
     get_ask,
+    is_answer_due,
     list_ask_events,
     list_asks,
     map_owner_name_to_wait_on,
     map_wait_on_arg_to_stored,
     note_ask,
+    post_verified_ask,
+    post_verified_batch,
     reopen_ask,
     start_ask,
     tell_assistant_of_drop,
     verify_ask,
     wait_ask,
 )
+from bridge.board import Party, convert_item_id_to_answer_ref
 from bridge.config import Config
 from bridge.db import now_ms, transaction
 from bridge.feed import spawn_typed_delivery
@@ -45,6 +49,9 @@ def add_ask_commands(sub: "argparse._SubParsersAction[argparse.ArgumentParser]",
     p.add_argument("--words", help="the owner's words verbatim; default: stdin")
     p.add_argument("--from", dest="from_id", type=int, metavar="N", help="quote message N's body as the words")
     p.add_argument("--ref", action="append", default=[], help="a PR, issue or page URL; repeat")
+    p.add_argument(
+        "--question", action="store_true", help="the owner asked it as a question: once verified, it goes to Answers"
+    )
     p.set_defaults(func=cmd_ask_add)
     p = ask_sub.add_parser("list", help="asks not closed, oldest first")
     p.add_argument("--owner")
@@ -93,6 +100,11 @@ def add_ask_commands(sub: "argparse._SubParsersAction[argparse.ArgumentParser]",
     p.add_argument("--evidence", required=True, help="what the owner would see, and where")
     p.add_argument("--how", required=True, help="a URL, a screenshot path, or a command and its output")
     p.set_defaults(func=cmd_ask_verify)
+    p = ask_sub.add_parser(
+        "summary",
+        help="one Answers post listing the asks you verified that the owner was not told of yet; one per batch",
+    )
+    p.set_defaults(func=cmd_ask_summary)
     p = ask_sub.add_parser("close", help="verified → closed (the assistant only, relaying the owner)")
     p.add_argument("id", type=int)
     p.add_argument("--dropped", metavar="WHY", help="close an unfinished ask the owner let go, and why")
@@ -129,7 +141,7 @@ def cmd_ask_add(args: argparse.Namespace, conn: sqlite3.Connection, config: Conf
         if not str(ref).startswith(("https://", "http://")):
             raise AskError(f"a ref is a URL: {ref!r}")
     with transaction(conn):
-        ask = add_ask(conn, owner, me.handle, words, source, [str(r) for r in args.ref], now_ms())
+        ask = add_ask(conn, owner, me.handle, words, source, [str(r) for r in args.ref], now_ms(), bool(args.question))
     print(f"#{ask.id} open, owner {ask.owner}")
     return 0
 
@@ -203,9 +215,28 @@ def cmd_ask_done(args: argparse.Namespace, conn: sqlite3.Connection, config: Con
 
 def cmd_ask_verify(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
     actor = current_actor(conn, config)
+    at = now_ms()
     with transaction(conn):
-        ask = verify_ask(conn, int(args.id), actor, str(args.evidence), str(args.how), now_ms())
-    print(f"#{ask.id} verified by {actor.handle}")
+        ask = verify_ask(conn, int(args.id), actor, str(args.evidence), str(args.how), at)
+        posted = None
+        if is_answer_due(conn, ask):
+            posted = post_verified_ask(conn, ask, Party(actor.conversation_id, actor.handle), at)
+    if posted is not None:
+        told = f"; {config.owner_name} waits for it: posted to Answers as {convert_item_id_to_answer_ref(posted)}"
+    elif ask.told_at is not None:
+        told = f"; {config.owner_name} already has its result in Answers"
+    else:
+        told = "; it goes into your next `guild ask summary`"
+    print(f"#{ask.id} verified by {actor.handle}{told}")
+    return 0
+
+
+def cmd_ask_summary(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
+    actor = current_actor(conn, config)
+    with transaction(conn):
+        item_id, listed, left = post_verified_batch(conn, Party(actor.conversation_id, actor.handle), now_ms())
+    more = f"; {left} more wait for the next summary" if left else ""
+    print(f"{convert_item_id_to_answer_ref(item_id)} lists {listed} verified ask{'' if listed == 1 else 's'}{more}")
     return 0
 
 

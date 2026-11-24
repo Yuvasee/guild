@@ -23,6 +23,7 @@ from bridge.board import (
     Recipient,
     SendResult,
     add_user_item,
+    convert_item_id_to_answer_ref,
     convert_item_id_to_question_ref,
     convert_text_to_preview,
     fit_body,
@@ -53,6 +54,8 @@ from bridge.tabinput import (
 FEED_KINDS = {"blocked": "blocker", "decision": "action", "done": "info", "insight": "info"}
 OPEN_KINDS = frozenset({"blocked", "decision"})
 """Kinds that wait for the user's answer; the others are news."""
+ANSWER_KINDS = frozenset({"done", "insight"})
+"""News for the owner: the dashboard's Answers column."""
 OPTIONS_MAX = 6
 OPTION_MAX_CHARS = 60
 LINKS_MAX = 8
@@ -165,6 +168,7 @@ def add_post(
     options: list[str],
     at_ms: int,
     urgent: bool = False,
+    ask_id: int | None = None,
 ) -> int:
     if kind not in FEED_KINDS:
         raise MessageStateError(f"kind must be one of {', '.join(FEED_KINDS)}")
@@ -192,11 +196,15 @@ def add_post(
         raise MessageStateError(f"up to {OPTIONS_MAX} options, each 1 to {OPTION_MAX_CHARS} chars")
     if len(links) > LINKS_MAX:
         raise MessageStateError(f"up to {LINKS_MAX} links")
+    if ask_id is not None and kind not in ANSWER_KINDS:
+        raise MessageStateError("only a done or insight post answers an ask")
+    if ask_id is not None and conn.execute("SELECT 1 FROM asks WHERE id = ?", (ask_id,)).fetchone() is None:
+        raise MessageStateError(f"no ask #{ask_id}")
     cursor = conn.execute(
         """
         INSERT INTO user_items (created_at, from_conversation, from_handle, severity, text, source, kind, body, links,
-                                options, urgent)
-        VALUES (?, ?, ?, ?, ?, 'agent', ?, ?, ?, ?, ?)
+                                options, urgent, ask_id)
+        VALUES (?, ?, ?, ?, ?, 'agent', ?, ?, ?, ?, ?, ?)
         """,
         (
             at_ms,
@@ -209,6 +217,7 @@ def add_post(
             json.dumps([{"label": link.label, "url": link.url} for link in links]) if links else None,
             json.dumps([o.strip() for o in options]) if options else None,
             int(urgent),
+            ask_id,
         ),
     )
     return int(cursor.lastrowid or 0)
@@ -261,6 +270,35 @@ def reply_on_card(
     sent = send_message(conn, Party(USER_CONVERSATION, user), [recipient], "info", body, at_ms)
     conn.execute("UPDATE messages SET board = 1 WHERE id = ?", (sent.message_id,))
     return sent, True
+
+
+def reply_on_answer(conn: sqlite3.Connection, item_id: int, text: str, user: str, at_ms: int) -> SendResult:
+    """The owner's words on a done or insight post reach its author as theirs; the post stays until the owner's OK."""
+    text = _check_answer(text)
+    row = conn.execute(
+        "SELECT kind, text, from_conversation, from_handle FROM user_items WHERE id = ? AND source = 'agent'",
+        (item_id,),
+    ).fetchone()
+    ref = convert_item_id_to_answer_ref(item_id)
+    if row is None or row["kind"] not in ANSWER_KINDS:
+        raise MessageStateError(f"no done or insight post {ref}")
+    if row["from_conversation"] in (None, SYSTEM_CONVERSATION):
+        raise MessageStateError(f"{ref} is bridge's own; no session reads a reply to it")
+    recipient = resolve_tab(conn, str(row["from_conversation"]), str(row["from_handle"]))
+    body = f'Reply to your {row["kind"]} post {ref} "{row["text"]}": {text}'
+    sent = send_message(conn, Party(USER_CONVERSATION, user), [recipient], "info", body, at_ms)
+    conn.execute("UPDATE messages SET board = 1 WHERE id = ?", (sent.message_id,))
+    mark_answer_opened(conn, item_id, at_ms)
+    return sent
+
+
+def mark_answer_opened(conn: sqlite3.Connection, item_id: int, at_ms: int) -> bool:
+    marks = ",".join("?" * len(ANSWER_KINDS))
+    cursor = conn.execute(
+        f"UPDATE user_items SET opened_at = ? WHERE id = ? AND opened_at IS NULL AND kind IN ({marks})",
+        (at_ms, item_id, *sorted(ANSWER_KINDS)),
+    )
+    return cursor.rowcount > 0
 
 
 def _check_answer(answer: str) -> str:

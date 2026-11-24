@@ -13,6 +13,7 @@ from bridge.board import (
     AddressError,
     Party,
     Recipient,
+    convert_item_id_to_answer_ref,
     convert_item_id_to_question_ref,
     resolve_handle,
     send_message,
@@ -23,7 +24,15 @@ from bridge.compaction import read_context_death
 from bridge.config import Config
 from bridge.enrich import load_enrichment
 from bridge.errlog import log_error
-from bridge.feed import DELIVERY_MARKS, OPEN_KINDS, PICK_LABEL, RELAYED_ANSWER, USER_CONVERSATION, resolve_tab
+from bridge.feed import (
+    ANSWER_KINDS,
+    DELIVERY_MARKS,
+    OPEN_KINDS,
+    PICK_LABEL,
+    RELAYED_ANSWER,
+    USER_CONVERSATION,
+    resolve_tab,
+)
 from bridge.host_workers import HOST_KIND_PREFIX
 from bridge.leads import TINTS, Lead, find_lead_on_surface, is_conversation_locked, list_lead_work, list_leads
 from bridge.refs import map_ref_to_label
@@ -38,6 +47,7 @@ from bridge.workers import WORKER_CAP
 ROOM_POSTS = 80
 CLAIM_LINES_FOR_MS = 24 * 3_600_000
 STALE_QUESTION_MS = 3 * 24 * 3_600_000
+ANSWERS_MAX = 100
 WORKER_GONE_AFTER_MS = 2 * 3_600_000
 TABS_STALE_MS = 45_000
 ACTIVITY_STALE_MS = 45_000
@@ -189,6 +199,7 @@ def map_db_to_guild(
     needs.extend(_load_undelivered_to_needs(conn, config))
     needs.extend(_load_assistant_undelivered_to_needs(conn, config))
     needs.extend(find_owner_needs(config.watchers, now))
+    answers = _load_answers(conn, config)
     return {
         "now": now,
         "tabs_at": tree_at,
@@ -196,6 +207,8 @@ def map_db_to_guild(
         "user": config.user_alias or "user",
         "review_bot": config.review_bot_name,
         "needs": needs,
+        "answers": answers[:ANSWERS_MAX],
+        "answers_more": max(0, len(answers) - ANSWERS_MAX),
         "leads": leads,
         "room": _load_room(conn, config, now, url_of, active, authors, worker_tasks),
         "colleague_comments": map_db_to_colleague_feed(conn, config, now),
@@ -749,6 +762,41 @@ def _map_open_posts_to_needs(conn: sqlite3.Connection, config: Config, now: int)
             }
         )
     return needs
+
+
+def _load_answers(conn: sqlite3.Connection, config: Config) -> list[dict[str, object]]:
+    """Done and insight posts the owner has not OK'd yet, newest first, however old; past ANSWERS_MAX, the page
+    says how many more wait."""
+    marks = ",".join("?" * len(ANSWER_KINDS))
+    answers: list[dict[str, object]] = []
+    for row in conn.execute(
+        f"""
+        SELECT u.id, u.created_at, u.from_conversation, u.from_handle, u.kind, u.text, u.body, u.links, u.opened_at,
+               u.ask_id, a.words AS ask_words
+        FROM user_items u LEFT JOIN asks a ON a.id = u.ask_id
+        WHERE u.source = 'agent' AND u.kind IN ({marks}) AND u.resolved_at IS NULL
+        ORDER BY u.created_at DESC, u.id DESC
+        """,
+        sorted(ANSWER_KINDS),
+    ):
+        if is_conversation_locked(conn, config, str(row["from_conversation"])):
+            continue
+        answers.append(
+            {
+                "id": row["id"],
+                "ref": convert_item_id_to_answer_ref(int(row["id"])),
+                "at": row["created_at"],
+                "kind": row["kind"],
+                "from": row["from_handle"],
+                "text": row["text"],
+                "body": row["body"] or "",
+                "links": json.loads(row["links"]) if row["links"] else [],
+                "unread": row["opened_at"] is None,
+                "ask": {"id": row["ask_id"], "words": row["ask_words"]} if row["ask_id"] is not None else None,
+                "can_reply": row["from_conversation"] not in (None, SYSTEM_CONVERSATION),
+            }
+        )
+    return answers
 
 
 def _load_undelivered_to_needs(conn: sqlite3.Connection, config: Config) -> list[dict[str, object]]:

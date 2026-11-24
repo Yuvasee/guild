@@ -8,6 +8,7 @@ from typing import Literal, cast
 from bridge.board import (
     BODY_MAX_CHARS,
     SYSTEM_CONVERSATION,
+    USER_ITEM_MAX_CHARS,
     AddressError,
     MessageStateError,
     Party,
@@ -16,7 +17,7 @@ from bridge.board import (
     send_message,
 )
 from bridge.config import Config
-from bridge.feed import TO_ASSISTANT
+from bridge.feed import LINKS_MAX, TO_ASSISTANT, add_post, map_arg_to_link
 from bridge.leads import is_surface_locked
 from bridge.pages import find_unready_citations
 
@@ -89,6 +90,10 @@ class Ask:
     wait_by: str | None
     wait_at: int | None
     wait_until: int | None
+    question: bool = False
+    """The owner asked it as a question: its verified result is posted to Answers at once."""
+    told_at: int | None = None
+    """When its verified result reached the owner's Answers, alone or in a batch summary."""
 
 
 @dataclass(frozen=True)
@@ -128,6 +133,8 @@ def map_row_to_ask(row: sqlite3.Row) -> Ask:
         wait_by=row["wait_by"],
         wait_at=row["wait_at"],
         wait_until=row["wait_until"],
+        question=bool(row["question"]),
+        told_at=row["told_at"],
     )
 
 
@@ -151,7 +158,14 @@ def list_asks(conn: sqlite3.Connection, owner: str | None = None, include_closed
 
 
 def add_ask(
-    conn: sqlite3.Connection, owner: str, recorded_by: str, words: str, source: str, refs: list[str], at_ms: int
+    conn: sqlite3.Connection,
+    owner: str,
+    recorded_by: str,
+    words: str,
+    source: str,
+    refs: list[str],
+    at_ms: int,
+    question: bool = False,
 ) -> Ask:
     words = words.strip()
     if not words:
@@ -162,10 +176,10 @@ def add_ask(
         raise AskError(f"at most {REFS_MAX} refs")
     cursor = conn.execute(
         """
-        INSERT INTO asks (owner, recorded_by, words, source, refs, state, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, 'open', ?, ?)
+        INSERT INTO asks (owner, recorded_by, words, source, refs, state, created_at, updated_at, question)
+        VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?)
         """,
-        (owner, recorded_by, words, source, json.dumps(list(dict.fromkeys(refs))), at_ms, at_ms),
+        (owner, recorded_by, words, source, json.dumps(list(dict.fromkeys(refs))), at_ms, at_ms, int(question)),
     )
     ask_id = int(cursor.lastrowid or 0)
     _log(conn, ask_id, at_ms, recorded_by, "open", None)
@@ -247,6 +261,78 @@ def verify_ask(conn: sqlite3.Connection, ask_id: int, by: Actor, evidence: str, 
     return get_ask(conn, ask_id)
 
 
+WAITED_ON_OWNER_NOTE = "waiting on owner:"
+BATCH_WORDS_CHARS = 90
+BATCH_LINK_MAX_CHARS = 300
+VERIFIED_TITLE = "Verified: "
+
+
+def is_answer_due(conn: sqlite3.Connection, ask: Ask) -> bool:
+    """Not told yet, and the owner's question or an ask that once waited on the owner: a claim or verify clears the
+    wait, its history keeps it."""
+    if ask.told_at is not None:
+        return False
+    if ask.question:
+        return True
+    row = conn.execute(
+        "SELECT 1 FROM ask_events WHERE ask_id = ? AND note LIKE ? LIMIT 1", (ask.id, WAITED_ON_OWNER_NOTE + "%")
+    ).fetchone()
+    return row is not None
+
+
+def post_verified_ask(conn: sqlite3.Connection, ask: Ask, by: Party, at_ms: int) -> int | None:
+    """The result of an ask the owner waits for, as one Answers post by its verifier. None when the post is refused
+    (e.g. it cites a page not built yet): the ask then waits for its verifier's batch summary."""
+    body = f"{ask.evidence or ''}\n\nHow: {ask.evidence_how or ''}"
+    try:
+        links = [map_arg_to_link(ref) for ref in ask.refs[:LINKS_MAX]]
+        title = VERIFIED_TITLE + _cut(ask.words, USER_ITEM_MAX_CHARS - len(VERIFIED_TITLE))
+        item_id = add_post(conn, by, "done", title, body, links, [], at_ms, ask_id=ask.id)
+    except MessageStateError:
+        return None
+    mark_ask_told(conn, ask.id, at_ms)
+    return item_id
+
+
+def mark_ask_told(conn: sqlite3.Connection, ask_id: int, at_ms: int) -> None:
+    conn.execute("UPDATE asks SET told_at = coalesce(told_at, ?) WHERE id = ?", (at_ms, ask_id))
+
+
+def post_verified_batch(conn: sqlite3.Connection, by: Party, at_ms: int) -> tuple[int, int, int]:
+    """One Answers post listing the asks `by` verified that the owner was not told of yet, oldest first, as many as
+    fit; the rest wait for the next batch. Returns the post's number, how many it lists and how many wait."""
+    rows = conn.execute(
+        """
+        SELECT * FROM asks WHERE evidence_by = ? AND verified_at IS NOT NULL AND told_at IS NULL
+        ORDER BY verified_at, id
+        """,
+        (by.handle,),
+    ).fetchall()
+    if not rows:
+        raise AskError("no ask you verified is waiting for a batch summary")
+    lines: list[str] = []
+    listed: list[int] = []
+    for ask in map(map_row_to_ask, rows):
+        link = next((ref for ref in ask.refs if ref.startswith(("https://", "http://"))), None)
+        line = f"- ask #{ask.id}: {_cut(ask.words, BATCH_WORDS_CHARS)}"
+        # An overlong link would crowd out every line, and a summary that lists nothing never ends the batch.
+        if link and len(link) <= BATCH_LINK_MAX_CHARS:
+            line += f" {link}"
+        if len("\n".join([*lines, line])) > BODY_MAX_CHARS:
+            break
+        lines.append(line)
+        listed.append(ask.id)
+    count = len(listed)
+    title = f"{count} ask{'' if count == 1 else 's'} verified"
+    try:
+        item_id = add_post(conn, by, "done", title, "\n".join(lines), [], [], at_ms)
+    except MessageStateError as exc:
+        raise AskError(str(exc)) from exc
+    for ask_id in listed:
+        mark_ask_told(conn, ask_id, at_ms)
+    return item_id, count, len(rows) - count
+
+
 def close_ask(
     conn: sqlite3.Connection,
     ask_id: int,
@@ -323,7 +409,7 @@ def reopen_ask(conn: sqlite3.Connection, ask_id: int, by: str, why: str, at_ms: 
         f"""
         UPDATE asks SET state = 'open', reopen_why = ?, reopened_at = ?, updated_at = ?, {_RESET_NAGS},
             claim = NULL, claim_by = NULL, claim_conversation = NULL, claim_role = NULL, done_at = NULL,
-            evidence = NULL, evidence_how = NULL, evidence_by = NULL, verified_at = NULL,
+            evidence = NULL, evidence_how = NULL, evidence_by = NULL, verified_at = NULL, told_at = NULL,
             closed_how = NULL, closed_at = NULL, {_CLEAR_WAIT}
         WHERE id = ?
         """,

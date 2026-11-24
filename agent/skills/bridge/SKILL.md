@@ -83,11 +83,15 @@ bridge post decision "Ship the export worker behind a flag, or wait for the load
   answered with a result. One post per task, with the outcome and links, not the steps.
 - `insight`: something the user or other sessions must know and would not find out otherwise (a
   root cause, a trap in shared infra, a wrong assumption in the plan). Not progress notes.
+- `done` and `insight` posts show in the page's Answers column, newest first, until the user presses OK; a
+  Reply there reaches you as the user's own words ("Reply to your done post A#N …"; the page names these posts A#N) and the post stays.
+  `--ask N` names the ask it answers (shown on the card; the ask then counts as told), `--pin` also pins the
+  first `--link` to the Pinned page (an artifact); OK never unpins.
 - A question becomes a card: `--what` and `--why` as its facts, each `--option` a row with the `--cost` given right
   after it, `--pick N` marks the answer you recommend (1 = the first option) with `--pick-why` in one line, links as
   chips. They are written into the body as labelled lines (What:, Why now:, "<answer> cost:", My pick:), so every
   other reader sees plain text. `--body` adds free text above them. Text renders as safe Markdown: **bold**,
-  `code`, lists, links; PR and Q#N references become chips.
+  `code`, lists, links; PR, Q#N and A#N references become chips.
 - Title: one line under 140 chars that stands on its own. Details in `--body` (`-` reads stdin),
   links with `--link label=https://…`. No chatter: if the user would not act on it or want to know
   it tomorrow, do not post it.
@@ -211,17 +215,21 @@ Every ask the owner gives, typed into your tab or relayed by the assistant, goes
 own words, and stays there until it is verified, so an ask outlives the session that recorded it.
 
 ```bash
-guild ask add <lead or assistant> --words '<their words, verbatim>' [--ref URL]   # or --from N (quotes message N), or stdin
+guild ask add <lead or assistant> --words '<their words, verbatim>' [--ref URL] [--question]   # or --from N, or stdin
 guild ask start N                                    # open → in_progress
 guild ask note N 'what changed'                      # news, done_claimed too; counts as an update
 guild ask wait N --on owner|approval|release|verifier 'who, for what'   # cannot move: no reminders until it does
 guild ask wait N --until YYYY-MM-DD[THH:MM] 'why'  # its owner pauses it (local time); --on <owner's name> is --on owner
 guild ask done N --claim 'what was done, where it lives'
 guild ask verify N --evidence 'what the owner sees, and where' --how 'URL, screenshot path, or command and its output'
+guild ask summary                                    # one Answers post: the asks you verified, not told yet
 guild ask reopen N --why 'what is still wrong'
 guild ask list [--owner X] [--all] [--json]; guild ask show N    # show has the history
 ```
 
+- The owner's question goes in with `--question`. On verify, such an ask, or one that ever waited on the owner, goes
+  to the owner's Answers at once as a post by its verifier; every other one waits for that verifier's
+  `guild ask summary`, one post per batch of verifies.
 - Verified means the user-visible result was seen: what the owner would see, where (the page, the PR, the
   channel), as it is now, and how it was checked so another session could repeat it. "Deployed" or "tests pass" is
   not that.

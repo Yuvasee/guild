@@ -196,7 +196,7 @@ a post in the user's feed: blocked, decision, done or insight; `post resolve N` 
 
 ```text
 usage: bridge post [-h] [--body BODY] [--link LINK] [--option OPTION] [--what WHAT] [--why WHY]
-                   [--cost COST] [--pick PICK] [--pick-why PICK_WHY] [--urgent]
+                   [--cost COST] [--pick PICK] [--pick-why PICK_WHY] [--urgent] [--ask N] [--pin]
                    {blocked,decision,done,insight,resolve} title
 
 positional arguments:
@@ -216,6 +216,8 @@ options:
   --pick-why PICK_WHY   one line: why that answer
   --urgent              blocked/decision only, when prod or users are hurting, money is leaking,
                         or a deadline is today
+  --ask N               done/insight: the ask it answers
+  --pin                 done/insight: also pin the first --link (an artifact) to the Pinned page
 ```
 
 ### bridge tell-user
@@ -1133,7 +1135,7 @@ options:
 record an ask in the owner's own words
 
 ```text
-usage: guild ask add [-h] [--words WORDS] [--from N] [--ref REF] owner
+usage: guild ask add [-h] [--words WORDS] [--from N] [--ref REF] [--question] owner
 
 positional arguments:
   owner          the lead that answers for it, or the assistant's handle
@@ -1143,6 +1145,7 @@ options:
   --words WORDS  the owner's words verbatim; default: stdin
   --from N       quote message N's body as the words
   --ref REF      a PR, issue or page URL; repeat
+  --question     the owner asked it as a question: once verified, it goes to Answers
 ```
 
 ### guild ask list
@@ -1252,6 +1255,17 @@ options:
   -h, --help           show this help message and exit
   --evidence EVIDENCE  what the owner would see, and where
   --how HOW            a URL, a screenshot path, or a command and its output
+```
+
+### guild ask summary
+
+one Answers post listing the asks you verified that the owner was not told of yet; one per batch
+
+```text
+usage: guild ask summary [-h]
+
+options:
+  -h, --help  show this help message and exit
 ```
 
 ### guild ask close

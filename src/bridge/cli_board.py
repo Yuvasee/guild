@@ -5,6 +5,7 @@ import sys
 from collections.abc import Sequence
 from datetime import datetime
 
+from bridge.asks import mark_ask_told
 from bridge.board import (
     DEFAULT_RESPOND_WITHIN_S,
     HINT_SENT,
@@ -14,6 +15,7 @@ from bridge.board import (
     MessageStateError,
     Party,
     Recipient,
+    convert_item_id_to_answer_ref,
     flag_overdue,
     list_board,
     list_inbox,
@@ -27,6 +29,7 @@ from bridge.config import Config
 from bridge.db import now_ms, transaction
 from bridge.errors import UsageError
 from bridge.feed import (
+    ANSWER_KINDS,
     FEED_KINDS,
     LEAD_TO_WORKER,
     OPEN_KINDS,
@@ -45,6 +48,7 @@ from bridge.feed import (
 )
 from bridge.identity import current_party
 from bridge.leads import find_lead_conversations, is_conversation_locked, is_lead_tab
+from bridge.pins import pin_link_once
 from bridge.registry import reconcile
 from bridge.watcher import (
     find_assistant_recipients,
@@ -106,6 +110,10 @@ def add_board_commands(sub: "argparse._SubParsersAction[argparse.ArgumentParser]
         "--urgent",
         action="store_true",
         help="blocked/decision only, when prod or users are hurting, money is leaking, or a deadline is today",
+    )
+    p.add_argument("--ask", type=lambda s: int(s.lstrip("#")), metavar="N", help="done/insight: the ask it answers")
+    p.add_argument(
+        "--pin", action="store_true", help="done/insight: also pin the first --link (an artifact) to the Pinned page"
     )
     p.set_defaults(func=cmd_post)
 
@@ -280,6 +288,10 @@ def cmd_post(args: argparse.Namespace, conn: sqlite3.Connection, config: Config)
     structured = bool(args.what or args.why or args.cost or args.pick is not None or args.pick_why)
     if structured and args.kind not in OPEN_KINDS:
         raise UsageError("--what, --why, --cost and --pick are for blocked and decision posts")
+    if (args.ask is not None or args.pin) and args.kind not in ANSWER_KINDS:
+        raise UsageError("--ask and --pin are for done and insight posts")
+    if args.pin and not args.link:
+        raise UsageError("--pin pins the first --link; give one")
     if (
         args.kind in OPEN_KINDS
         and not (args.body or args.what or args.why)
@@ -304,15 +316,24 @@ def cmd_post(args: argparse.Namespace, conn: sqlite3.Connection, config: Config)
                 body, args.what, args.why, list(args.option), list(args.cost), args.pick, args.pick_why
             )
         links = [map_arg_to_link(str(link)) for link in args.link]
+        at = now_ms()
+        pinned = None
         with transaction(conn):
             item_id = add_post(
-                conn, me, str(args.kind), str(args.title), body, links, list(args.option), now_ms(), bool(args.urgent)
-            )
+                conn, me, str(args.kind), str(args.title), body, links, list(args.option), at, bool(args.urgent),
+                args.ask,
+            )  # fmt: skip
+            if args.ask is not None:
+                mark_ask_told(conn, int(args.ask), at)
+            if args.pin:
+                source = f"ask #{args.ask}" if args.ask is not None else convert_item_id_to_answer_ref(item_id)
+                pinned = pin_link_once(conn, str(args.title), links[0].url, source, me.handle, at)
     except MessageStateError as exc:
         raise UsageError(str(exc)) from exc
     waits = " until the user answers; the answer comes back to this session" if args.kind in OPEN_KINDS else ""
     urgent = ", urgent" if args.urgent else ""
-    print(f"post #{item_id} ({args.kind}{urgent}) is in the user's feed{waits}")
+    pin = (f"; pinned as #{pinned.id}" if pinned else "; its link was already pinned") if args.pin else ""
+    print(f"post #{item_id} ({args.kind}{urgent}) is in the user's feed{waits}{pin}")
     return 0
 
 

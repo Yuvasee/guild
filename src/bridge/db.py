@@ -916,6 +916,20 @@ MIGRATIONS: tuple[str, ...] = (
     ALTER TABLE review_prs RENAME COLUMN named_prs TO sibling_quotes;
     UPDATE review_prs SET sibling_quotes = '{}';
     """,
+    # Answers: a result post names the ask it answers and when the owner opened it. An ask verified before this was
+    # never posted, and counts as told so the first batch summary does not list all of them; a result posted more than
+    # three days before was never shown either, and counts as OK'd so Answers does not open on a backlog.
+    """
+    ALTER TABLE user_items ADD COLUMN ask_id INTEGER;
+    ALTER TABLE user_items ADD COLUMN opened_at INTEGER;
+    ALTER TABLE asks ADD COLUMN question INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE asks ADD COLUMN told_at INTEGER;
+    UPDATE asks SET told_at = verified_at WHERE verified_at IS NOT NULL;
+    ALTER TABLE conversations ADD COLUMN owner_prompt_at INTEGER;
+    UPDATE user_items SET resolved_at = created_at
+        WHERE kind IN ('done', 'insight') AND resolved_at IS NULL
+          AND created_at < (CAST(strftime('%s', 'now') AS INTEGER) - 3 * 86400) * 1000;
+    """,
 )
 
 HOOK_BUSY_TIMEOUT_MS = 200
