@@ -59,14 +59,17 @@ class Watch:
     find: Callable[[sqlite3.Connection, Config, int], list[Waiting]]
     """Everything in this state now, however short its wait: whatever is missing has moved on."""
     headline: Callable[[Config, Waiting, int, int], str]
-    reason: Callable[[sqlite3.Connection, Config, Waiting, int], tuple[str, str]]
-    """Why it waits, and what unblocks it."""
+    reason: Callable[[sqlite3.Connection, Config, Waiting, int, int | None], tuple[str, str]]
+    """Why it waits, and what unblocks it; given when the transcript scan last finished, as tell_of_stalls is."""
 
 
-def tell_of_stalls(conn: sqlite3.Connection, config: Config, now: int) -> list[tuple[int, Recipient]]:
+def tell_of_stalls(
+    conn: sqlite3.Connection, config: Config, now: int, scan_finished_at: int | None = None
+) -> list[tuple[int, Recipient]]:
     """Once per PR and state past its limit, the assistant and whoever hears bridge's own failures each hear why it
     waits and what unblocks it. One not reachable is tried again next round. A state that moves on is forgotten, so
-    its return is told again."""
+    its return is told again. scan_finished_at: when serve's transcript scan last finished, 0 for none since serve
+    started, None when not known."""
     told: list[tuple[int, Recipient]] = []
     handles = list(dict.fromkeys(h for h in (config.assistant_handle, config.auto_merge_failures_to) if h))
     for watch in WATCHES:
@@ -85,7 +88,7 @@ def tell_of_stalls(conn: sqlite3.Connection, config: Config, now: int) -> list[t
             ]
             if not due:
                 continue
-            why, unblock = watch.reason(conn, config, w, now)
+            why, unblock = watch.reason(conn, config, w, now, scan_finished_at)
             text = map_words_to_sendable(
                 conn,
                 f"{w.pr['url']} ({_cut(str(w.pr['title']), TITLE_MAX_CHARS)}): "
@@ -173,7 +176,9 @@ def _headline_post(config: Config, w: Waiting, since: int, now: int) -> str:
     )
 
 
-def _reason_post(conn: sqlite3.Connection, config: Config, w: Waiting, now: int) -> tuple[str, str]:
+def _reason_post(
+    conn: sqlite3.Connection, config: Config, w: Waiting, now: int, scan_finished_at: int | None
+) -> tuple[str, str]:
     return map_stalled_post_to_reason(conn, config, w.pr)
 
 
@@ -197,7 +202,9 @@ def _headline_comments(config: Config, w: Waiting, since: int, now: int) -> str:
     return f"a comment has waited {_format_wait(now - since)} to reach anyone"
 
 
-def _reason_comments(conn: sqlite3.Connection, config: Config, w: Waiting, now: int) -> tuple[str, str]:
+def _reason_comments(
+    conn: sqlite3.Connection, config: Config, w: Waiting, now: int, scan_finished_at: int | None
+) -> tuple[str, str]:
     pr = w.pr
     whys: list[str] = []
     unblocks: list[str] = []
@@ -209,9 +216,16 @@ def _reason_comments(conn: sqlite3.Connection, config: Config, w: Waiting, now: 
             if github
             else ""
         )
+        scan = (
+            ""
+            if scan_finished_at is None
+            else "; no transcript scan has finished since serve started"
+            if scan_finished_at == 0
+            else f"; the transcript scan last finished at {_format_at(config, scan_finished_at)}"
+        )
         whys.append(
             f"{unclassified} comment(s) have no verdict, so no one was told; no round has classified it: that needs a "
-            f"transcript scan begun after it, then a round that commits{also}"
+            f"transcript scan begun after it, then a round that commits{scan}{also}"
         )
         unblocks.append(
             "fix the error that bridge's serve.log shows under 'review queue poll failed' or 'transcript scan failed'"
@@ -247,7 +261,9 @@ def _headline_ready(config: Config, w: Waiting, since: int, now: int) -> str:
     return f"bridge's merge rule has found it ready to merge for {_format_wait(now - since)}, and it is still open"
 
 
-def _reason_ready(conn: sqlite3.Connection, config: Config, w: Waiting, now: int) -> tuple[str, str]:
+def _reason_ready(
+    conn: sqlite3.Connection, config: Config, w: Waiting, now: int, scan_finished_at: int | None
+) -> tuple[str, str]:
     pr = w.pr
     failed = f"; the automatic merge failed: {pr['auto_merge_error']}" if pr["auto_merge_error"] else ""
     if pr["merge_told_at"] is not None:
@@ -282,7 +298,9 @@ def _headline_doc(config: Config, w: Waiting, since: int, now: int) -> str:
     )
 
 
-def _reason_doc(conn: sqlite3.Connection, config: Config, w: Waiting, now: int) -> tuple[str, str]:
+def _reason_doc(
+    conn: sqlite3.Connection, config: Config, w: Waiting, now: int, scan_finished_at: int | None
+) -> tuple[str, str]:
     pr = w.pr
     owner = find_owner(conn, config, str(pr["ref"]), str(pr["repo"]), str(pr["head"]))
     who = f"its owner now is {owner.handle}" if owner is not None else "bridge now finds no session that owns it"
@@ -306,7 +324,9 @@ def _headline_owner(config: Config, w: Waiting, since: int, now: int) -> str:
     return f"its owner has been only a guess for {_format_wait(now - since)}"
 
 
-def _reason_owner(conn: sqlite3.Connection, config: Config, w: Waiting, now: int) -> tuple[str, str]:
+def _reason_owner(
+    conn: sqlite3.Connection, config: Config, w: Waiting, now: int, scan_finished_at: int | None
+) -> tuple[str, str]:
     pr = w.pr
     owner = find_owner(conn, config, str(pr["ref"]), str(pr["repo"]), str(pr["head"]))
     why = (

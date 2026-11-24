@@ -293,3 +293,22 @@ def test_a_failed_review_round_still_runs_the_guard(tmp_path: Path, monkeypatch:
     ):
         state.poll_reviews_forever()
     assert delivered.call_count == 2
+
+
+def test_a_comment_without_a_verdict_names_when_the_transcript_scan_last_finished(tmp_path: Path) -> None:
+    """A scan that hangs leaves every later comment without a verdict while the poll itself works."""
+    conn = guarded(tmp_path)
+    store(conn, comment("p1", at=1000))
+    due = 1000 + SETTLE_MS + COMMENT_STALL_AFTER_MS
+    with transaction(conn):
+        told = tell_of_stalls(conn, GUARDED, due, scan_finished_at=600_000)
+    assert told
+    assert "the transcript scan last finished at 01-01 00:10" in last_body(conn)
+
+
+def test_no_transcript_scan_since_serve_started_is_named_as_such(tmp_path: Path) -> None:
+    conn = guarded(tmp_path)
+    store(conn, comment("p1", at=1000))
+    with transaction(conn):
+        assert tell_of_stalls(conn, GUARDED, 1000 + SETTLE_MS + COMMENT_STALL_AFTER_MS, scan_finished_at=0)
+    assert "no transcript scan has finished since serve started" in last_body(conn)

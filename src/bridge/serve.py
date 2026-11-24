@@ -16,7 +16,7 @@ from dataclasses import asdict, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, TextIO, cast
 
 from bridge.activity import SessionActivity, read_session_activity
 from bridge.asks import (
@@ -72,7 +72,7 @@ from bridge.doc_nav import THEMES, convert_page_to_themed, convert_served_page_t
 from bridge.dream import ALL, map_dreamers_to_page, resolve_dreamers
 from bridge.drivers import Link, load_drivers, scan_transcripts
 from bridge.enrich import collect_watched_refs, enrich_due, load_enrichment, provider_freshness
-from bridge.errlog import log_error
+from bridge.errlog import StampedLines, log_error
 from bridge.errors import UsageError
 from bridge.feed import (
     AGTERM_SILENT,
@@ -103,7 +103,7 @@ from bridge.health import check_hooks
 from bridge.hooks import spawn_compact_drive
 from bridge.issue_sync import LinearError, run_issue_sync
 from bridge.notify import release_urgent_notice, show_notification, take_next_urgent_notice
-from bridge.outage import FailureSpell, OutageNotices
+from bridge.outage import FailureSpell, LoopStalls, OutageNotices
 from bridge.pages import (
     Page,
     find_html_file,
@@ -242,32 +242,34 @@ _HTML = "text/html; charset=utf-8"
 
 def serve(config: Config, port: int) -> None:
     sys.setswitchinterval(GIL_SWITCH_INTERVAL_S)
+    sys.stdout = cast(TextIO, StampedLines(sys.stdout))
+    sys.stderr = cast(TextIO, StampedLines(sys.stderr))
     state = DashboardState(config)
     handler = type("BridgeHandler", (DashboardHandler,), {"state": state})
-    threading.Thread(target=state.maintain_forever, daemon=True).start()
-    threading.Thread(target=state.enrich_forever, daemon=True).start()
-    threading.Thread(target=state.post_signals_forever, daemon=True).start()
-    threading.Thread(target=state.watch_blocked_tabs_forever, daemon=True).start()
-    threading.Thread(target=state.watch_context_forever, daemon=True).start()
-    threading.Thread(target=state.read_tree_forever, daemon=True).start()
-    threading.Thread(target=state.read_activity_forever, daemon=True).start()
-    threading.Thread(target=state.scan_transcripts_forever, daemon=True).start()
-    threading.Thread(target=state.notify_urgent_forever, daemon=True).start()
-    threading.Thread(target=state.nag_asks_forever, daemon=True).start()
-    threading.Thread(target=state.start_queued_workers_forever, daemon=True).start()
-    threading.Thread(target=state.signal_capacity_forever, daemon=True).start()
-    threading.Thread(target=state.check_disk_forever, daemon=True).start()
+    state.start_loop(state.maintain_forever)
+    state.start_loop(state.enrich_forever)
+    state.start_loop(state.post_signals_forever)
+    state.start_loop(state.watch_blocked_tabs_forever)
+    state.start_loop(state.watch_context_forever)
+    state.start_loop(state.read_tree_forever)
+    state.start_loop(state.read_activity_forever)
+    state.start_loop(state.scan_transcripts_forever)
+    state.start_loop(state.notify_urgent_forever)
+    state.start_loop(state.nag_asks_forever)
+    state.start_loop(state.start_queued_workers_forever)
+    state.start_loop(state.signal_capacity_forever)
+    state.start_loop(state.check_disk_forever)
     if config.review_org and config.review_author:
-        threading.Thread(target=state.poll_reviews_forever, daemon=True).start()
+        state.start_loop(state.poll_reviews_forever)
         if config.review_channel_id:
-            threading.Thread(target=state.read_slack_forever, daemon=True).start()
+            state.start_loop(state.read_slack_forever)
         if config.review_worktrees_dir:
-            threading.Thread(target=state.prepare_worktrees_forever, daemon=True).start()
-    threading.Thread(target=state.sync_issues_forever, daemon=True).start()
+            state.start_loop(state.prepare_worktrees_forever)
+    state.start_loop(state.sync_issues_forever)
     if config.remotes:
-        threading.Thread(target=state.collect_remotes_forever, daemon=True).start()
+        state.start_loop(state.collect_remotes_forever)
     if config.shadow_filter:
-        threading.Thread(target=state.shadow_filter_forever, daemon=True).start()
+        state.start_loop(state.shadow_filter_forever)
     if config.worker_host:
         start_worker_api(config)
     server = ThreadingHTTPServer(("127.0.0.1", port), handler)
@@ -286,6 +288,41 @@ GITHUB_FAILING = (
     "GitHub answers the review poll again after {minutes} min.",
 )
 
+LOOP_STALL_AFTER_MIN = {
+    # Three missed rounds, and never under 10 min: a round can wait out a few 5 s lock or agterm timeouts in a row.
+    "maintain_forever": 10,
+    "post_signals_forever": 10,
+    "watch_blocked_tabs_forever": 10,
+    "read_tree_forever": 10,
+    "read_activity_forever": 10,
+    "notify_urgent_forever": 10,
+    "nag_asks_forever": 10,
+    "start_queued_workers_forever": 10,
+    "read_slack_forever": 10,
+    "prepare_worktrees_forever": 10,
+    # Every 30 s, a round of seconds; PR comments wait on it, and a waiting comment is told at 10 min as well.
+    "scan_transcripts_forever": 10,
+    # Every 90 s, a screen read per tab, and agterm is slow under load.
+    "watch_context_forever": 15,
+    "shadow_filter_forever": 15,
+    "signal_capacity_forever": 20,
+    # Every 90 s; its GitHub reads stop at 5 min a round (ROUND_LIMIT_S).
+    "poll_reviews_forever": 15,
+    # A round reads GitHub, Linear or a host per item, so one round itself can take minutes.
+    "enrich_forever": 30,
+    "collect_remotes_forever": 30,
+    "sync_issues_forever": 45,
+    "check_disk_forever": 180,
+}
+"""Minutes a loop may go without finishing a round before its stall is told, by its cadence (*_EVERY_S)."""
+LOOP_STALLED = (
+    "bridge: serve's loop {loop} has not finished a round for {minutes} min (last: {last}), so what it does waits. "
+    "serve.log has its stack as it was then. bridge says once when it finishes again."
+)
+LOOP_LOOK_EVERY_MS = 60_000
+"""Loops rest every few seconds; a notice nobody could take is tried again at this pace, not at each rest."""
+LOOP_BACK = "bridge: serve's loop {loop} finishes rounds again, after {minutes} min without one."
+
 
 class DashboardState:
     def __init__(self, config: Config) -> None:
@@ -299,6 +336,11 @@ class DashboardState:
         self._wake = WakeWatch()
         self._outages = OutageNotices()
         self._poll_spell = FailureSpell()
+        self._loops = LoopStalls(now_ms())
+        self._loops_lock = threading.Lock()
+        self._loops_logged: dict[str, int | None] = {}
+        """Each stalled loop whose stack is in serve.log, by the last round it had finished: a new stall logs anew."""
+        self._loops_looked_at = 0
         self._github_spell = FailureSpell()
         self._projects_retry_at = 0
         self._unpublished_told: dict[str, int] = {}
@@ -404,6 +446,56 @@ class DashboardState:
             guild["asks"] = asks
             return map_page_to_ranked_page(guild, reviews, load_projects(conn))
 
+    def start_loop(self, loop: Callable[[], None]) -> None:
+        self._loops.limits[loop.__name__] = LOOP_STALL_AFTER_MIN[loop.__name__] * 60_000
+        threading.Thread(target=loop, daemon=True).start()
+
+    def _rest(self, loop: str, seconds: float, finished: bool = True) -> None:
+        """The end of a round: it counts as finished, every watched loop is looked at, then the loop sleeps."""
+        now = now_ms()
+        if finished:
+            self._loops.finished[loop] = now
+        try:
+            self._tell_of_stalled_loops(now)
+        except Exception:
+            # The loop resting here must go on whatever this look hits.
+            log_error("loop stall watch", traceback.format_exc())
+        time.sleep(seconds)
+
+    def _scan_finished_at(self) -> int:
+        """0: none since serve started."""
+        return self._loops.finished.get("scan_transcripts_forever", 0)
+
+    def _tell_of_stalled_loops(self, now: int) -> None:
+        """Told to whoever hears bridge's failures; one not told is tried at the next rest of any loop."""
+        if not self._loops_lock.acquire(blocking=False):
+            return
+        try:
+            # A wall clock set back would otherwise hold every look until it caught up.
+            if 0 <= now - self._loops_looked_at < LOOP_LOOK_EVERY_MS:
+                return
+            self._loops_looked_at = now
+            stalled, back = self._loops.take(now, self._wake.counted_from())
+            to = (self.config.auto_merge_failures_to or self.config.assistant_handle,)
+            for loop, last in stalled:
+                minutes = (now - (self._loops.started_at if last is None else last)) // 60_000
+                at = "none since serve started" if last is None else _format_utc(last)
+                text = LOOP_STALLED.format(loop=loop, minutes=minutes, last=at)
+                if loop not in self._loops_logged or self._loops_logged[loop] != last:
+                    self._loops_logged[loop] = last
+                    print(
+                        f"{text}\n{_format_loop_stack(loop)}\n", end="", flush=True
+                    )  # One write: no other stdout line lands inside the stack.
+                if self._tell_of_failure(text, to):
+                    self._loops.mark_told(loop, last)
+            for loop, minutes in back:
+                text = LOOP_BACK.format(loop=loop, minutes=minutes)
+                print(text, flush=True)
+                if self._tell_of_failure(text, to):
+                    self._loops.mark_back(loop)
+        finally:
+            self._loops_lock.release()
+
     def read_tree_forever(self) -> None:
         """A page poll must not wait on agterm; when it stops answering the last tree stays, with its age."""
         while True:
@@ -414,7 +506,7 @@ class DashboardState:
                     self._tree = (tree, now_ms())
             except OSError as exc:
                 print(f"agterm tree failed: {exc}", flush=True)
-            time.sleep(TREE_EVERY_S)
+            self._rest("read_tree_forever", TREE_EVERY_S)
 
     def read_activity_forever(self) -> None:
         """The page keeps the last reading with its age, and past that says unknown instead of trusting it."""
@@ -426,7 +518,7 @@ class DashboardState:
                     self._activity = (activity, now_ms())
             except (sqlite3.Error, OSError) as exc:
                 print(f"session activity failed: {exc}", flush=True)
-            time.sleep(ACTIVITY_EVERY_S)
+            self._rest("read_activity_forever", ACTIVITY_EVERY_S)
 
     def post_to_room(self, text: str, reply_to: int | None) -> tuple[bool, str]:
         try:
@@ -456,7 +548,7 @@ class DashboardState:
                 print(f"signal posts failed: {exc}", flush=True)
                 log_error("signal posts", traceback.format_exc())
             self.send_weekly_task_once(now_ms())
-            time.sleep(SIGNALS_EVERY_S)
+            self._rest("post_signals_forever", SIGNALS_EVERY_S)
 
     def send_weekly_task_once(self, now: int) -> None:
         """On its day with nobody running `guild day`; signal_posts keeps it to one send per week. A failure is told
@@ -498,7 +590,7 @@ class DashboardState:
                         spawn_typed_delivery(message_id, [recipient])
             except (sqlite3.Error, OSError, TypeError, ValueError, KeyError) as exc:
                 print(f"blocked tab watch failed: {exc}", flush=True)
-            time.sleep(WATCH_EVERY_S)
+            self._rest("watch_blocked_tabs_forever", WATCH_EVERY_S)
 
     def watch_context_forever(self) -> None:
         """Slower than the blocked watch: a screen read per tab, and agterm is slow under load."""
@@ -508,7 +600,7 @@ class DashboardState:
             except Exception:
                 # Any failure: an escaped exception would end the watch until restart.
                 log_error("context watch", traceback.format_exc())
-            time.sleep(CONTEXT_EVERY_S)
+            self._rest("watch_context_forever", CONTEXT_EVERY_S)
 
     def watch_context_once(self) -> None:
         tree, tree_at = self._tree
@@ -550,7 +642,7 @@ class DashboardState:
                                 release_urgent_notice(conn, notice.item_id)
             except sqlite3.Error as exc:
                 print(f"urgent notification failed: {exc}", flush=True)
-            time.sleep(NOTIFY_EVERY_S)
+            self._rest("notify_urgent_forever", NOTIFY_EVERY_S)
 
     def shadow_filter_forever(self) -> None:
         """Its own thread: a slow or failing model call holds up nothing else. Live, it also starts the delivery of
@@ -581,7 +673,7 @@ class DashboardState:
                 after = None
                 print(f"shadow filter failed: {exc}", flush=True)
                 log_error("shadow filter", traceback.format_exc())
-            time.sleep(LIVE_FILTER_EVERY_S if live else SHADOW_EVERY_S)
+            self._rest("shadow_filter_forever", LIVE_FILTER_EVERY_S if live else SHADOW_EVERY_S)
 
     def start_queued_workers_forever(self) -> None:
         """Workers queued by the laptop cap start, oldest first, as slots free; the lead that asked is told."""
@@ -590,7 +682,7 @@ class DashboardState:
                 self.start_queued_workers_once()
             except Exception:
                 log_error("start queued workers", traceback.format_exc())
-            time.sleep(QUEUE_EVERY_S)
+            self._rest("start_queued_workers_forever", QUEUE_EVERY_S)
 
     def start_queued_workers_once(self) -> None:
         for path in list_queued_launches():
@@ -660,7 +752,7 @@ class DashboardState:
                 self.nag_asks_once(now_ms())
             except sqlite3.Error as exc:
                 print(f"asks nag failed: {exc}", flush=True)
-            time.sleep(ASKS_EVERY_S)
+            self._rest("nag_asks_forever", ASKS_EVERY_S)
 
     def nag_asks_once(self, now: int) -> None:
         with self._connection() as conn, transaction(conn):
@@ -680,7 +772,7 @@ class DashboardState:
                 # An escaped exception would end capacity signals until restart.
                 print(f"capacity signals failed: {exc}", flush=True)
                 log_error("capacity signals", traceback.format_exc())
-            time.sleep(CAPACITY_EVERY_S)
+            self._rest("signal_capacity_forever", CAPACITY_EVERY_S)
 
     def signal_capacity_once(self, now: int) -> None:
         tree = read_tree(self.config)
@@ -705,7 +797,7 @@ class DashboardState:
                 # An escaped exception would end disk checks until restart.
                 print(f"disk check failed: {exc}", flush=True)
                 log_error("disk check", traceback.format_exc())
-            time.sleep(DISK_EVERY_S)
+            self._rest("check_disk_forever", DISK_EVERY_S)
 
     def check_disk_once(self, now: int) -> None:
         reading = read_disk(now)
@@ -730,7 +822,7 @@ class DashboardState:
                         write_hint(recipient.pid, HINT_SENT)
             except Exception:
                 log_error("issue sync", traceback.format_exc())
-            time.sleep(ISSUE_SYNC_EVERY_S)
+            self._rest("sync_issues_forever", ISSUE_SYNC_EVERY_S)
 
     def close_ask_by_owner(self, ask_id: int) -> tuple[bool, str]:
         try:
@@ -800,7 +892,7 @@ class DashboardState:
                 prune_rewake_marks()
             except sqlite3.Error as exc:
                 print(f"maintenance failed: {exc}", flush=True)
-            time.sleep(MAINTAIN_EVERY_S)
+            self._rest("maintain_forever", MAINTAIN_EVERY_S)
 
     def _alert_watchers(self, conn: sqlite3.Connection) -> None:
         try:
@@ -848,7 +940,7 @@ class DashboardState:
                     enrich_due(conn, self.config, now_ms())
             except (sqlite3.Error, OSError, ValueError) as exc:
                 print(f"enrichment failed: {exc}", flush=True)
-            time.sleep(ENRICH_EVERY_S)
+            self._rest("enrich_forever", ENRICH_EVERY_S)
 
     def collect_remotes_forever(self) -> None:
         """One collection per host at a time; ssh runs outside any database transaction."""
@@ -860,7 +952,7 @@ class DashboardState:
                         store_remote(conn, remote, result, self.config, now_ms())
                 except sqlite3.Error as exc:
                     print(f"remote {remote.name} store failed: {exc}", flush=True)
-            time.sleep(REMOTE_EVERY_S)
+            self._rest("collect_remotes_forever", REMOTE_EVERY_S)
 
     def poll_reviews_forever(self) -> None:
         """With every page closed too: the queue stays current and the owner's comments reach their owners. A GitHub
@@ -889,7 +981,7 @@ class DashboardState:
             else:
                 self._follow_spell(self._poll_spell, None, POLL_FAILING)
             self._follow_github_spell()
-            time.sleep(GITHUB_EVERY_S)
+            self._rest("poll_reviews_forever", GITHUB_EVERY_S)
 
     def _follow_github_spell(self) -> None:
         """After every round, failed or not: its GitHub read is committed before the steps that may raise."""
@@ -918,7 +1010,7 @@ class DashboardState:
         """A failed round never reached the guard in _advance_reviews, or rolled it back with it."""
         try:
             with self._connection() as conn, transaction(conn):
-                told = tell_of_stalls(conn, self.config, now_ms())
+                told = tell_of_stalls(conn, self.config, now_ms(), self._scan_finished_at())
         except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, MessageStateError) as exc:
             print(f"review stall guard failed: {exc}", flush=True)
             return
@@ -942,9 +1034,10 @@ class DashboardState:
             if not isinstance(exc, LinearError):
                 log_error("issue projects", traceback.format_exc())
 
-    def _tell_of_failure(self, text: str) -> bool:
-        """The assistant and whoever hears bridge's failures (auto_merge_failures_to); whether anyone was told."""
-        wanted = (self.config.assistant_handle, self.config.auto_merge_failures_to)
+    def _tell_of_failure(self, text: str, to: tuple[str, ...] = ()) -> bool:
+        """to, or else the assistant and whoever hears bridge's failures (auto_merge_failures_to); whether anyone was
+        told."""
+        wanted = to or (self.config.assistant_handle, self.config.auto_merge_failures_to)
         handles = list(dict.fromkeys(h for h in wanted if h))
         told = False
         for handle in handles:
@@ -971,7 +1064,7 @@ class DashboardState:
                     team_url = read_slack_once(conn, self.config, team_url, now_ms())
             except (sqlite3.Error, OSError, ValueError) as exc:
                 print(f"review channel read failed: {type(exc).__name__}", flush=True)
-            time.sleep(TOKEN_EVERY_S)
+            self._rest("read_slack_forever", TOKEN_EVERY_S)
 
     def _advance_reviews(self, conn: sqlite3.Connection, sent: list[tuple[int, Recipient]]) -> None:
         claim = now_ms()
@@ -984,7 +1077,7 @@ class DashboardState:
             told = [*told, *ask_for_usage_sections(conn, self.config, now_ms())]
             told = [*told, *ask_for_doc_updates(conn, self.config, now_ms())]
             told = [*told, *tell_assistant_of_stale_docs(conn, self.config, now_ms())]
-            told = [*told, *tell_of_stalls(conn, self.config, now_ms())]
+            told = [*told, *tell_of_stalls(conn, self.config, now_ms(), self._scan_finished_at())]
             told = [*told, *ask_to_clean_up(conn, self.config, now_ms())]
             told = [*told, *ask_to_mark_drafts_ready(conn, self.config, now_ms())]
             told = [*told, *ask_to_resolve_conflicts(conn, self.config, now_ms())]
@@ -1008,7 +1101,7 @@ class DashboardState:
                     spawn_worktree_job()
             except (sqlite3.Error, OSError, ValueError) as exc:
                 print(f"review worktree failed: {exc}", flush=True)
-            time.sleep(WORKTREE_EVERY_S)
+            self._rest("prepare_worktrees_forever", WORKTREE_EVERY_S)
 
     def read_review_doc(self, repo: str, number: int) -> bytes | None:
         with self._connection() as conn:
@@ -1072,15 +1165,21 @@ class DashboardState:
         return True, recipient.handle
 
     def scan_transcripts_forever(self) -> None:
+        """Only a scan that ends counts as a finished round: PR comments wait on one."""
         while True:
+            finished = False
             try:
                 with self._connection() as conn:
                     started = now_ms()
                     scan_transcripts(conn, self.config.remotes, started)
                     self._scanned_from = started
-            except (sqlite3.Error, OSError) as exc:
+                finished = True
+            except Exception as exc:
+                # Any failure: an escaped exception would end the scan, and every comment's verdict, until restart.
                 print(f"transcript scan failed: {exc}", flush=True)
-            time.sleep(SCAN_EVERY_S)
+                if not isinstance(exc, (sqlite3.Error, OSError)):
+                    log_error("transcript scan", traceback.format_exc())
+            self._rest("scan_transcripts_forever", SCAN_EVERY_S, finished)
 
     def set_item_resolved(self, item_id: int, resolved: bool) -> bool:
         with self._connection() as conn, transaction(conn):
@@ -1213,6 +1312,19 @@ class _Closing:
 
     def __exit__(self, *_: object) -> None:
         self.conn.close()
+
+
+def _format_loop_stack(loop: str) -> str:
+    """Where the loop's thread is now: what a restart would erase. A thread is named 'Thread-N (<its target>)'."""
+    frames = sys._current_frames()  # pyright: ignore[reportPrivateUsage]
+    for thread in threading.enumerate():
+        if thread.name.endswith(f"({loop})") and thread.ident in frames:
+            return f"{thread.name} is at:\n" + "".join(traceback.format_stack(frames[thread.ident])).rstrip()
+    return f"no thread runs {loop}: it ended"
+
+
+def _format_utc(at: int) -> str:
+    return time.strftime("%m-%d %H:%M UTC", time.gmtime(at / 1000))
 
 
 def map_db_to_snapshot(conn: sqlite3.Connection, config: Config, now: int) -> dict[str, object]:

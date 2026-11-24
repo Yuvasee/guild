@@ -57,3 +57,47 @@ class FailureSpell:
 
     def reset(self) -> None:
         self.since, self.told = None, False
+
+
+@dataclass
+class LoopStalls:
+    """serve's background loops by when each last finished a round: one past its limit is told once, and once more
+    when it finishes a round again. Every loop looks at all of them as it rests, so a hung one is seen by the others.
+    limits: each watched loop's limit in ms; only loops that run belong in it."""
+
+    started_at: int
+    limits: dict[str, int] = field(default_factory=lambda: dict[str, int]())
+    finished: dict[str, int] = field(default_factory=lambda: dict[str, int]())
+    told: dict[str, int] = field(default_factory=lambda: dict[str, int]())
+    """Each loop told as stalled, with the round it had last finished then (started_at if none)."""
+    back_at: dict[str, int] = field(default_factory=lambda: dict[str, int]())
+    """Each told loop's first finished round after its stall, kept until its recovery is told."""
+
+    def take(self, now: int, awake_since: int = 0) -> tuple[list[tuple[str, int | None]], list[tuple[str, int]]]:
+        """(loop, its last finished round or None) newly past its limit, and (loop, minutes it went without one) for
+        each told loop that has finished a round since. awake_since: the Mac's last wake, as a sleeping Mac runs no
+        loop; mark_told and mark_back once each is said."""
+        stalled: list[tuple[str, int | None]] = []
+        back: list[tuple[str, int]] = []
+        # A copy: serve may still be starting loops while the first ones rest.
+        for name, limit in list(self.limits.items()):
+            last = self.finished.get(name)
+            stuck = now - max(self.started_at if last is None else last, awake_since) > limit
+            if name in self.told and last is not None and last > self.told[name] and stuck:
+                # Back and stuck again before its recovery was told: the new stall is what matters now.
+                self.mark_back(name)
+            if name in self.told:
+                if last is not None and last > self.told[name]:
+                    first = self.back_at.setdefault(name, last)
+                    back.append((name, (first - self.told[name]) // 60_000))
+            elif stuck:
+                stalled.append((name, last))
+        return stalled, back
+
+    def mark_told(self, name: str, last: int | None) -> None:
+        """last: as take gave it; the loop may have finished a round since, which is then its recovery."""
+        self.told[name] = self.started_at if last is None else last
+
+    def mark_back(self, name: str) -> None:
+        self.told.pop(name, None)
+        self.back_at.pop(name, None)
