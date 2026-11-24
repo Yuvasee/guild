@@ -1,6 +1,7 @@
 import sqlite3
 from collections.abc import Generator
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,7 @@ from bridge.issue_sync import (
     Move,
     PrEvidence,
     Skip,
+    StateChange,
     TeamState,
     decide_move,
     log_path,
@@ -262,6 +264,9 @@ class FakeLinear:
         self.ready_reads: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
         self.projects: dict[str, str | None] = {}
         self.project_reads: list[list[str]] = []
+        self.history: dict[str, StateChange | None] | LinearError = {}
+        """Each issue's last state change; a missing one has none."""
+        self.history_reads: list[list[str]] = []
 
     def fetch_comments(self, issue_ids: list[str]) -> dict[str, IssueComments]:
         self.comment_reads.append(issue_ids)
@@ -282,6 +287,12 @@ class FakeLinear:
     def fetch_issue_projects(self, keys: list[str]) -> dict[str, str | None]:
         self.project_reads.append(keys)
         return {k: self.projects.get(k) for k in keys}
+
+    def fetch_last_state_changes(self, keys: list[str]) -> dict[str, StateChange | None]:
+        self.history_reads.append(keys)
+        if isinstance(self.history, LinearError):
+            raise self.history
+        return {k: self.history.get(k) for k in keys}
 
     def move(self, issue_id: str, state_id: str) -> str:
         if self.fail_moves:
@@ -682,8 +693,20 @@ def test_a_told_entry_it_cannot_read_stays_silent(conn: sqlite3.Connection) -> N
     assert sweep(conn, questions_linear(comment("c1", "09:00", "1 open question -> Grooming.")), NOW)[1:] == []
 
 
-READY = replace(CONFIG, grooming_states=("grooming",), ready_states=("todo", "technical design"))
+READY = replace(
+    CONFIG, grooming_states=("grooming",), ready_states=("todo", "technical design"), grooming_bot="Groomer"
+)
 READY_WHY = "ready after grooming; Shop is Alex's project"
+HOUR_MS = 3_600_000
+
+
+def handoff(to: str = "Todo", hours_ago: float = 1, by: str = "groomer", from_: str = "Grooming") -> StateChange:
+    return StateChange(NOW - int(hours_ago * HOUR_MS), from_, to, frozenset({by}))
+
+
+def handoff_why(to: str = "Todo", project: str = "Shop") -> str:
+    at = datetime.fromtimestamp((NOW - HOUR_MS) / 1000, UTC).strftime("%Y-%m-%d %H:%M UTC")
+    return f"ready after grooming: Groomer moved it Grooming → {to} at {at}; {project} is Alex's project"
 
 
 @pytest.mark.parametrize("name", ["Todo", "Technical Design"])
@@ -733,18 +756,25 @@ def test_a_sweep_starts_the_ready_issues_of_a_leads_project_and_tells_the_lead_o
     }
     linear = FakeLinear(issues)
     linear.ready = {"PROJ-5": "Shop", "PROJ-6": "Garden", "PROJ-7": "Shop", "PROJ-8": None}
+    linear.history = {k: handoff() for k in issues if k != "PROJ-7"}
+    linear.history["PROJ-7"] = handoff("Technical Design")
     report = run_issue_sync(conn, READY, NOW, dry_run=False, fetch_prs=lambda _c, _n: [], linear=linear)
     assert linear.ready_reads == [(("todo", "technical design"), ("PROJ", "OPS", "WEB"))]
+    assert linear.history_reads == [["PROJ-5", "PROJ-7"]], "history is read only for a lead's ready issues"
     assert linear.moves == [("id-PROJ-5", "s-In Progress")], "PROJ-6 and PROJ-8 are in no lead's project"
     assert [(s.key, "assigned to Kai Doe" in s.reason) for s in report.skips] == [("PROJ-7", True)]
-    assert f"PROJ-5 Todo -> In Progress | {READY_WHY}" in log_path().read_text()
+    assert f"PROJ-5 Todo -> In Progress | {handoff_why()}" in log_path().read_text()
     bodies = [str(r[0]) for r in conn.execute("SELECT body FROM messages")]
-    assert len(bodies) == 1 and f"- PROJ-5: Todo → In Progress ({READY_WHY})" in bodies[0]
+    assert len(bodies) == 1 and f"- PROJ-5: Todo → In Progress ({handoff_why()})" in bodies[0]
     assert bodies[0].startswith(issue_sync.READY_MOVES_HEAD + "\n")
     linear = FakeLinear({**issues, "PROJ-5": issue("Todo", "PROJ-5")})
     linear.ready = {"PROJ-5": "Shop"}
+    linear.history = {"PROJ-5": handoff()}
     again = run_issue_sync(conn, READY, NOW, dry_run=False, fetch_prs=lambda _c, _n: [], linear=linear)
-    assert not linear.moves and "set back by hand" in again.skips[0].reason
+    assert not linear.moves and "set back by hand" in again.skips[0].reason, "even where history still shows the bot"
+    linear.history = {"PROJ-5": handoff(by="theo", from_="In Progress")}
+    third = run_issue_sync(conn, READY, NOW, dry_run=False, fetch_prs=lambda _c, _n: [], linear=linear)
+    assert not linear.moves and not third.moves and not third.skips
     assert conn.execute("SELECT count(*) FROM messages").fetchone()[0] == 1
 
 
@@ -795,8 +825,9 @@ def test_a_project_two_leads_hold_starts_nothing(conn: sqlite3.Connection) -> No
         )
     linear = FakeLinear({"PROJ-5": issue("Todo", "PROJ-5")})
     linear.ready = {"PROJ-5": "Shop"}
+    linear.history = {"PROJ-5": handoff()}
     report = run_issue_sync(conn, READY, NOW, dry_run=False, fetch_prs=lambda _c, _n: [], linear=linear)
-    assert not linear.moves and not report.moves and not report.skips
+    assert not linear.moves and not report.moves and not report.skips and linear.history_reads == []
 
 
 def test_a_priority_projects_whole_list_places_a_ready_issue_not_the_ready_part_of_it(conn: sqlite3.Connection) -> None:
@@ -812,9 +843,10 @@ def test_a_priority_projects_whole_list_places_a_ready_issue_not_the_ready_part_
     linear = FakeLinear({"PROJ-3": issue("Todo", "PROJ-3"), "PROJ-9": issue("Todo", "PROJ-9")})
     linear.ready = {"PROJ-3": "Garden", "PROJ-9": "Garden"}
     linear.projects = {"PROJ-1": "Shop", "PROJ-2": "Shop", "PROJ-3": "Garden"}
+    linear.history = {"PROJ-3": handoff(), "PROJ-9": handoff()}
     report = run_issue_sync(conn, READY, NOW, dry_run=False, fetch_prs=lambda _c, _n: [], linear=linear)
     assert linear.moves == [("id-PROJ-3", "s-In Progress")], "PROJ-3 is listed in Alex's project; PROJ-9 is not Alex's"
-    assert [m.evidence for m in report.applied] == ["ready after grooming; shop-work is Alex's project"]
+    assert [m.evidence for m in report.applied] == [handoff_why(project="shop-work")]
     assert linear.project_reads == [["PROJ-1", "PROJ-2"]], "only the listed issues not known yet"
 
 
@@ -822,7 +854,119 @@ def test_a_dry_run_with_ready_states_moves_logs_and_tells_nothing(conn: sqlite3.
     give_alex_the_shop(conn)
     linear = FakeLinear({"PROJ-5": issue("Todo", "PROJ-5")}, fail_moves=True)
     linear.ready = {"PROJ-5": "Shop"}
+    linear.history = {"PROJ-5": handoff()}
     report = run_issue_sync(conn, READY, NOW, dry_run=True, fetch_prs=lambda _c, _n: [], linear=linear)
     assert [(m.key, m.to_state.name) for m in report.moves] == [("PROJ-5", "In Progress")]
     assert not report.errors and not log_path().exists() and not issue_sync.applied_path().exists()
     assert conn.execute("SELECT count(*) FROM messages").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    ("change", "why"),
+    [
+        (handoff(by="theo"), "a person put it in Todo"),
+        (handoff(hours_ago=48.5), "the hand-off is older than two days"),
+        (None, "no state change in its history"),
+        (handoff(from_="Backlog"), "the bot moved it, but not out of grooming"),
+        (handoff(to="In Progress"), "its last change is not into a ready state"),
+        (handoff(hours_ago=-1), "a hand-off dated ahead of this clock proves no time"),
+    ],
+)
+def test_only_the_grooming_bots_recent_hand_off_starts_a_ready_issue(
+    conn: sqlite3.Connection, change: StateChange | None, why: str
+) -> None:
+    give_alex_the_shop(conn)
+    linear = FakeLinear({"PROJ-5": issue("Todo", "PROJ-5")})
+    linear.ready = {"PROJ-5": "Shop"}
+    linear.history = {"PROJ-5": change}
+    report = run_issue_sync(conn, READY, NOW, dry_run=False, fetch_prs=lambda _c, _n: [], linear=linear)
+    assert linear.history_reads == [["PROJ-5"]]
+    assert not linear.moves and not report.moves and not report.errors, why
+
+
+def test_the_hand_off_window_is_set_in_days(conn: sqlite3.Connection) -> None:
+    assert map_toml_to_config({}).ready_handoff_days == 2
+    with pytest.raises(ValueError, match="ready_handoff_days must be at least 1"):
+        map_toml_to_config({"ready_handoff_days": 0})
+    give_alex_the_shop(conn)
+    linear = FakeLinear({"PROJ-5": issue("Todo", "PROJ-5")})
+    linear.ready = {"PROJ-5": "Shop"}
+    linear.history = {"PROJ-5": handoff(hours_ago=60)}
+    week = replace(READY, ready_handoff_days=7)
+    assert [
+        m.key for m in run_issue_sync(conn, week, NOW, dry_run=True, linear=linear, fetch_prs=lambda _c, _n: []).moves
+    ] == ["PROJ-5"]
+
+
+def test_without_a_grooming_bot_no_hand_off_can_be_seen_and_nothing_starts(conn: sqlite3.Connection) -> None:
+    give_alex_the_shop(conn)
+    linear = FakeLinear({"PROJ-5": issue("Todo", "PROJ-5")})
+    linear.ready = {"PROJ-5": "Shop"}
+    linear.history = {"PROJ-5": handoff()}
+    report = run_issue_sync(
+        conn, replace(READY, grooming_bot=""), NOW, dry_run=False, fetch_prs=lambda _c, _n: [], linear=linear
+    )
+    assert not linear.moves and not report.moves
+    assert linear.ready_reads == [] and linear.project_reads == [] and linear.history_reads == []
+
+
+def test_a_person_moving_the_issue_on_after_the_hand_off_but_before_the_move_wins(conn: sqlite3.Connection) -> None:
+    give_alex_the_shop(conn)
+    linear = FakeLinear({"PROJ-5": issue("Todo", "PROJ-5")}, later={"PROJ-5": issue("Technical Design", "PROJ-5")})
+    linear.ready = {"PROJ-5": "Shop"}
+    linear.history = {"PROJ-5": handoff()}
+    report = run_issue_sync(conn, READY, NOW, dry_run=False, fetch_prs=lambda _c, _n: [], linear=linear)
+    assert [m.key for m in report.moves] == ["PROJ-5"] and not linear.moves and not report.applied
+
+
+def test_a_failed_history_read_starts_nothing_and_leaves_the_rest_of_the_sweep(conn: sqlite3.Connection) -> None:
+    give_alex_the_shop(conn)
+    linear = FakeLinear({"PROJ-1": issue("Backlog", "PROJ-1"), "PROJ-5": issue("Todo", "PROJ-5")})
+    linear.ready = {"PROJ-5": "Shop"}
+    linear.history = LinearError("linear HTTP 500")
+    report = run_issue_sync(conn, READY, NOW, dry_run=False, fetch_prs=lambda _c, _n: sweep_prs(), linear=linear)
+    assert linear.moves == [("id-PROJ-1", "s-In Review")]
+    assert [e.key for e in report.errors] == ["ready states"]
+    assert "reading the history of ready issues failed: linear HTTP 500" in log_path().read_text()
+
+
+def test_linears_history_gives_the_newest_state_change(monkeypatch: pytest.MonkeyPatch) -> None:
+    nodes: dict[str, object] = {
+        "PROJ-5": {"history": {"nodes": [
+            {"createdAt": "2026-11-24T12:12:35.433Z", "fromState": None, "toState": None, "actor": {"name": "x"}},
+            {"createdAt": "2026-11-24T12:10:00Z", "fromState": {"name": "Grooming"}, "toState": {"name": "Todo"},
+             "actor": {"name": "Groomer Bot", "displayName": "groomer"}, "botActor": None},
+            {"createdAt": "2026-11-20T09:00:00Z", "fromState": {"name": "Backlog"}, "toState": {"name": "Grooming"},
+             "actor": {"name": "Theo"}},
+        ]}},
+        "PROJ-6": {"history": {"nodes": []}},
+        "PROJ-7": issue_sync.NOT_FOUND,
+        "PROJ-8": {"history": {"nodes": [
+            {"createdAt": "not a time", "fromState": {"name": "Todo"}, "toState": {"name": "Backlog"}},
+            {"createdAt": "2026-11-24T12:10:00Z", "fromState": {"name": "Grooming"}, "toState": {"name": "Todo"},
+             "actor": {"name": "groomer"}},
+        ]}},
+        "PROJ-9": {"history": {"nodes": [
+            {"createdAt": "2026-11-24T12:12:00Z", "fromState": {"name": "Todo"}, "toState": None},
+            {"createdAt": "2026-11-24T12:10:00Z", "fromState": {"name": "Grooming"}, "toState": {"name": "Todo"},
+             "actor": {"name": "groomer"}},
+        ]}},
+    }  # fmt: skip
+
+    def answer(_self: object, keys: list[str], fields: str) -> dict[str, object]:
+        assert "history(first: 50)" in fields and "toState { name }" in fields
+        return {k: nodes[k] for k in keys}
+
+    monkeypatch.setattr(issue_sync.LinearApi, "fetch_issue_nodes", answer)
+    found = issue_sync.LinearApi("key").fetch_last_state_changes(["PROJ-5", "PROJ-6", "PROJ-7", "PROJ-8", "PROJ-9"])
+    at = int(datetime(2026, 11, 24, 12, 10, tzinfo=UTC).timestamp() * 1000)
+    assert found == {
+        "PROJ-5": StateChange(at, "Grooming", "Todo", frozenset({"groomer bot", "groomer"})),
+        "PROJ-6": None,
+        "PROJ-7": None,
+        "PROJ-8": None,
+        "PROJ-9": None,
+    }, "a state change it cannot read hides the older hand-off behind it"
+    nodes["PROJ-7"] = "linear error: INTERNAL: boom"
+    with pytest.raises(LinearError, match="boom"):
+        issue_sync.LinearApi("key").fetch_last_state_changes(["PROJ-7"])

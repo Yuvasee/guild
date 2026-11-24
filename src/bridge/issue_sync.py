@@ -33,6 +33,8 @@ PR_WINDOW_DAYS = 30
 PR_PAGE_SIZE = 50
 PR_PAGES_MAX = 10
 READY_PAGE_SIZE = 100
+HISTORY_READ = 50
+"""Newest entries of an issue's history read for its last state change; none among them reads as no hand-off."""
 READY_PAGES_MAX = 10
 EVIDENCE_SHOWN = 3
 QUESTION_COMMENTS_READ = 5
@@ -93,6 +95,10 @@ query($teams: [String!], $states: [WorkflowStateFilter!], $after: String) {{
   }}
 }}
 """
+_STATE_CHANGE_FIELDS = (
+    f"history(first: {HISTORY_READ}) {{ nodes {{ createdAt fromState {{ name }} toState {{ name }} "
+    "actor { name displayName } botActor { name } } }"
+)
 _COMMENT_FIELDS = "id createdAt body user { name displayName } botActor { name }"
 _MOVE_MUTATION = (
     "mutation($id: String!, $stateId: String!) { issueUpdate(id: $id, input: { stateId: $stateId }) "
@@ -184,6 +190,15 @@ class Skip:
 
 
 @dataclass(frozen=True)
+class StateChange:
+    at_ms: int
+    from_state: str
+    to_state: str
+    actors: frozenset[str]
+    """Every name the one who made it goes by, lowercase."""
+
+
+@dataclass(frozen=True)
 class Comment:
     id: str
     created_at: str
@@ -222,6 +237,8 @@ class Linear(Protocol):
     def fetch_keys_in_states(self, states: tuple[str, ...], teams: tuple[str, ...]) -> dict[str, str | None]: ...
 
     def fetch_issue_projects(self, keys: list[str]) -> dict[str, str | None]: ...
+
+    def fetch_last_state_changes(self, keys: list[str]) -> dict[str, StateChange | None]: ...
 
 
 FetchPrs = Callable[[Config, int], list[GitHubPr]]
@@ -427,7 +444,7 @@ def run_issue_sync(
             moved_before.get(key),
             config.grooming_states,
             config.ready_states,
-            ready.get(key),
+            find_ready_reason(ready, issue),
         )
         if isinstance(decision, Move):
             report.moves.append(decision)
@@ -451,10 +468,11 @@ def run_issue_sync(
 
 def find_ready_issues(
     conn: sqlite3.Connection, config: Config, linear: Linear, now: int, report: SyncReport, dry_run: bool
-) -> dict[str, str]:
-    """The issues in a ready state of a project one lead owns, the same owner a notice on it goes to, each with why
-    it may start. Their projects go to the cache that owner lookup reads."""
-    if not config.ready_states:
+) -> dict[str, tuple[str, str]]:
+    """The issues the grooming bot just handed off into a ready state of a project one lead owns, the same owner a
+    notice on it goes to: each with that state, lowercase, and why it may start. Their projects go to the cache that
+    owner lookup reads."""
+    if not (config.ready_states and config.grooming_bot):
         return {}
     try:
         projects = linear.fetch_keys_in_states(config.ready_states, config.issue_prefixes)
@@ -471,12 +489,46 @@ def find_ready_issues(
         report.errors.append(Skip("ready states", f"reading the projects of priority issues failed: {exc}"))
         _log_failure(dry_run, f"issue sync: reading the projects of priority issues failed: {exc}")
         return {}
-    ready: dict[str, str] = {}
-    for key in projects:
-        owner = find_domain_owner(conn, key)
-        if owner is not None:
-            ready[key] = f"ready after grooming; {owner.project} is {owner.lead.display_name}'s project"
+    owners = {key: owner for key in projects if (owner := find_domain_owner(conn, key)) is not None}
+    if not owners:
+        return {}
+    keys = sorted(owners)
+    changes: dict[str, StateChange | None] = {}
+    try:
+        for start in range(0, len(keys), LINEAR_BATCH):
+            changes.update(linear.fetch_last_state_changes(keys[start : start + LINEAR_BATCH]))
+    except LinearError as exc:
+        report.errors.append(Skip("ready states", f"reading the issues' history failed: {exc}"))
+        _log_failure(dry_run, f"issue sync: reading the history of ready issues failed: {exc}")
+        return {}
+    ready: dict[str, tuple[str, str]] = {}
+    for key, owner in owners.items():
+        change = changes.get(key)
+        if change is not None and is_grooming_handoff(change, config, now):
+            at = datetime.fromtimestamp(change.at_ms / 1000, UTC).strftime("%Y-%m-%d %H:%M UTC")
+            ready[key] = (
+                change.to_state.lower(),
+                f"ready after grooming: {config.grooming_bot} moved it {change.from_state} → {change.to_state} "
+                f"at {at}; {owner.project} is {owner.lead.display_name}'s project",
+            )
     return ready
+
+
+def find_ready_reason(ready: dict[str, tuple[str, str]], issue: LinearIssue) -> str | None:
+    """Only while the issue is still in the state the bot handed it off into: a later move by a person ends it."""
+    handed_off = ready.get(issue.key)
+    return handed_off[1] if handed_off and handed_off[0] == issue.state.name.lower() else None
+
+
+def is_grooming_handoff(change: StateChange, config: Config, now: int) -> bool:
+    """The grooming bot's own move out of grooming into a ready state, recent: an issue groomed long ago, or put in a
+    ready state by a person, is backlog, not a hand-off."""
+    return (
+        config.grooming_bot.lower() in change.actors
+        and change.from_state.lower() in config.grooming_states
+        and change.to_state.lower() in config.ready_states
+        and 0 <= now - change.at_ms <= config.ready_handoff_days * 86_400_000
+    )
 
 
 GROOMING_HEAD = (
@@ -721,7 +773,7 @@ def _apply_moves(
     config: Config,
     linear: Linear,
     evidence: dict[str, Evidence],
-    ready: dict[str, str],
+    ready: dict[str, tuple[str, str]],
     moved_before: dict[str, str],
     report: SyncReport,
     now: int,
@@ -739,7 +791,7 @@ def _apply_moves(
             moved_before.get(planned.key),
             config.grooming_states,
             config.ready_states,
-            ready.get(planned.key),
+            find_ready_reason(ready, fresh),
         )
         if not isinstance(move, Move) or move.to_state.id != planned.to_state.id:
             continue
@@ -1002,6 +1054,26 @@ class LinearApi:
             after = str(_dig(data, "issues", "pageInfo", "endCursor"))
         raise LinearError(f"more than {READY_PAGES_MAX * READY_PAGE_SIZE} issues in the ready states")
 
+    def fetch_last_state_changes(self, keys: list[str]) -> dict[str, StateChange | None]:
+        """Each issue's newest state change; None when its newest history holds none, one it cannot read, or the issue
+        is not found."""
+        found: dict[str, StateChange | None] = {}
+        for key, node in self.fetch_issue_nodes(keys, _STATE_CHANGE_FIELDS).items():
+            if isinstance(node, str) and node != NOT_FOUND:
+                raise LinearError(node)
+            entries = _dig(node, "history", "nodes")
+            try:
+                changes = [
+                    map_node_to_state_change(e)
+                    for e in cast(list[object], entries if isinstance(entries, list) else [])
+                ]
+            except ValueError:
+                # An unread change may be the newest: an older hand-off behind it must not count.
+                found[key] = None
+                continue
+            found[key] = max((c for c in changes if c is not None), key=lambda c: c.at_ms, default=None)
+        return found
+
     def move(self, issue_id: str, state_id: str) -> str:
         raw = self._post({"query": _MOVE_MUTATION, "variables": {"id": issue_id, "stateId": state_id}})
         update = _dig(raw, "data", "issueUpdate")
@@ -1094,6 +1166,23 @@ def map_node_to_linear_issue(node: Any, key: str) -> LinearIssue | str:
         )
     except (KeyError, TypeError):
         return "unexpected issue answer from Linear"
+
+
+def map_node_to_state_change(node: object) -> StateChange | None:
+    """None for an entry that changed no state; ValueError for a state change it cannot read."""
+    if _dig(node, "toState") is None and _dig(node, "fromState") is None:
+        return None
+    to_state, at = _dig(node, "toState", "name"), _dig(node, "createdAt")
+    if not isinstance(to_state, str) or not isinstance(at, str):
+        raise ValueError("a state change without its state or time")
+    at_ms = int(datetime.fromisoformat(at.replace("Z", "+00:00")).timestamp() * 1000)
+    names = [_dig(node, "actor", "name"), _dig(node, "actor", "displayName"), _dig(node, "botActor", "name")]
+    return StateChange(
+        at_ms=at_ms,
+        from_state=str(_dig(node, "fromState", "name") or ""),
+        to_state=to_state,
+        actors=frozenset(str(n).lower() for n in names if n),
+    )
 
 
 def map_node_to_comment(node: Any) -> Comment:

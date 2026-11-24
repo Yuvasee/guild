@@ -36,8 +36,10 @@ PR linked to it has merged.
   and the work on it say it has moved. It runs only with `review_org`, `review_author` and `issue_prefixes` set, and
   needs a key that may write. `grooming_states` names the states it never moves an issue out of; the lead is told once
   instead. `ready_states` names the states the grooming bot leaves an issue in once its grooming is done: such an
-  issue of a project one lead owns (its domains) goes to In Progress with no work on it yet, unless it is assigned to
-  someone else or was set back by hand after an earlier move, and that lead is told once. With `grooming_bot` and
+  issue of a project one lead owns (its domains) goes to In Progress with no work on it yet when its last state change
+  is the `grooming_bot`'s move into it out of a grooming state, made in the last `ready_handoff_days` (2 by default),
+  unless it is assigned to someone else or was set back by hand after an earlier move, and that lead is told once. An
+  issue that waits in a ready state from older grooming, or that a person put there, stays. With `grooming_bot` and
   `grooming_questions_re` set, it also reads the newest comments of each issue it holds in grooming: when the newest
   word is that bot's comment asking questions, the issue's lead (no lead: the assistant) is told once, and once more
   if the comment is still unanswered two hours later.
@@ -178,6 +180,7 @@ agent_prefix_from_ms = 1700000000000      # when agents began prefixing GitHub p
 host_worker_disabled_plugins = ["example@plugins"]  # plugins host workers run without, besides the defaults
 grooming_states = ["Grooming"]            # tracker states issue sync never moves an issue out of
 ready_states = ["Todo"]                   # where grooming leaves a finished issue; a lead's project's go to In Progress
+ready_handoff_days = 2                    # how recent the grooming bot's hand-off must be to start the issue
 grooming_bot = "groomer"                  # the tracker user that asks grooming questions in comments
 grooming_questions_re = '^(\d+) open questions?'  # start of its asking comment; group 1 counts them
 review_generated_files = ["api-client.ts"]  # left out of a PR's line count, besides lockfiles
