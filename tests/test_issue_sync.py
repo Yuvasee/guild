@@ -257,6 +257,11 @@ class FakeLinear:
         self.moves: list[tuple[str, str]] = []
         self.comments: dict[str, IssueComments] = {}
         self.comment_reads: list[list[str]] = []
+        self.ready: dict[str, str | None] | LinearError = {}
+        """Each issue in a ready state and its project, or the error reading them raises."""
+        self.ready_reads: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
+        self.projects: dict[str, str | None] = {}
+        self.project_reads: list[list[str]] = []
 
     def fetch_comments(self, issue_ids: list[str]) -> dict[str, IssueComments]:
         self.comment_reads.append(issue_ids)
@@ -267,6 +272,16 @@ class FakeLinear:
         if self.later is not None:
             self.issues = self.later
         return found
+
+    def fetch_keys_in_states(self, states: tuple[str, ...], teams: tuple[str, ...]) -> dict[str, str | None]:
+        self.ready_reads.append((states, teams))
+        if isinstance(self.ready, LinearError):
+            raise self.ready
+        return self.ready
+
+    def fetch_issue_projects(self, keys: list[str]) -> dict[str, str | None]:
+        self.project_reads.append(keys)
+        return {k: self.projects.get(k) for k in keys}
 
     def move(self, issue_id: str, state_id: str) -> str:
         if self.fail_moves:
@@ -325,6 +340,7 @@ def test_a_sweep_moves_logs_and_tells_the_owning_lead_once(conn: sqlite3.Connect
     assert "PROJ-2 Todo -> In Progress" in log
     bodies = [str(r[0]) for r in conn.execute("SELECT body FROM messages")]
     assert len(bodies) == 1 and "PROJ-1: Backlog → In Review" in bodies[0] and "PROJ-2: Todo → In Progress" in bodies[0]
+    assert bodies[0].startswith(issue_sync.MOVES_HEAD + "\n"), "a move on work reads as before"
     again = run_issue_sync(
         conn,
         CONFIG,
@@ -664,3 +680,149 @@ def test_a_told_entry_it_cannot_read_stays_silent(conn: sqlite3.Connection) -> N
         "c2": {"told_at": 0, "reminded": 1},
     }
     assert sweep(conn, questions_linear(comment("c1", "09:00", "1 open question -> Grooming.")), NOW)[1:] == []
+
+
+READY = replace(CONFIG, grooming_states=("grooming",), ready_states=("todo", "technical design"))
+READY_WHY = "ready after grooming; Shop is Alex's project"
+
+
+@pytest.mark.parametrize("name", ["Todo", "Technical Design"])
+def test_an_issue_ready_after_grooming_in_a_leads_project_starts_with_no_work(name: str) -> None:
+    moved = decide_move(issue(name), Evidence(), None, READY.grooming_states, READY.ready_states, READY_WHY)
+    assert isinstance(moved, Move) and moved.to_state.name == "In Progress" and moved.evidence == READY_WHY
+    assert moved.ready
+
+
+def test_work_on_a_ready_issue_moves_it_as_work_does() -> None:
+    evidence = Evidence(prs=[pr_evidence("OPEN")])
+    moved = decide_move(issue("Todo"), evidence, None, READY.grooming_states, READY.ready_states, READY_WHY)
+    assert isinstance(moved, Move) and moved.to_state.name == "In Review" and not moved.ready
+
+
+def test_a_ready_move_keeps_every_rule_of_a_move_on_work() -> None:
+    def decide(found: LinearIssue, moved_before: str | None = None, why: str | None = READY_WHY) -> object:
+        return decide_move(found, Evidence(), moved_before, READY.grooming_states, READY.ready_states, why)
+
+    assert decide(issue("Grooming")) is None, "only the grooming bot moves an issue out of Grooming"
+    both = decide_move(issue("Todo"), Evidence(), None, ("todo",), ("todo",), READY_WHY)
+    assert both is None, "a state that is both grooming and ready stays put"
+    assert decide(issue("Backlog")) is None and decide(issue("In Review")) is None
+    assert decide(issue("Todo"), why=None) is None, "no lead owns its project"
+    theirs = decide(replace(issue("Todo"), assignee="Kai Doe"))
+    assert isinstance(theirs, Skip) and "assigned to Kai Doe" in theirs.reason
+    set_back = decide(issue("Todo"), moved_before="In Progress")
+    assert isinstance(set_back, Skip) and "set back by hand" in set_back.reason
+    assert target_of(decide_move(issue("Todo"), Evidence(), None, (), (), READY_WHY)) is None, "no ready states"
+
+
+def give_alex_the_shop(conn: sqlite3.Connection) -> None:
+    with transaction(conn):
+        conn.execute("DELETE FROM lead_work")
+        conn.execute("UPDATE instances SET branch = 'main'")
+        conn.execute("UPDATE leads SET domains = '[\"shop\"]' WHERE name = 'alex'")
+
+
+def test_a_sweep_starts_the_ready_issues_of_a_leads_project_and_tells_the_lead_once(conn: sqlite3.Connection) -> None:
+    give_alex_the_shop(conn)
+    kai = {"assignee": "Kai Doe", "assignee_is_me": False}
+    issues: dict[str, LinearIssue | str] = {
+        "PROJ-5": issue("Todo", "PROJ-5"),
+        "PROJ-6": issue("Todo", "PROJ-6"),
+        "PROJ-7": replace(issue("Technical Design", "PROJ-7"), **kai),
+        "PROJ-8": issue("Technical Design", "PROJ-8"),
+    }
+    linear = FakeLinear(issues)
+    linear.ready = {"PROJ-5": "Shop", "PROJ-6": "Garden", "PROJ-7": "Shop", "PROJ-8": None}
+    report = run_issue_sync(conn, READY, NOW, dry_run=False, fetch_prs=lambda _c, _n: [], linear=linear)
+    assert linear.ready_reads == [(("todo", "technical design"), ("PROJ", "OPS", "WEB"))]
+    assert linear.moves == [("id-PROJ-5", "s-In Progress")], "PROJ-6 and PROJ-8 are in no lead's project"
+    assert [(s.key, "assigned to Kai Doe" in s.reason) for s in report.skips] == [("PROJ-7", True)]
+    assert f"PROJ-5 Todo -> In Progress | {READY_WHY}" in log_path().read_text()
+    bodies = [str(r[0]) for r in conn.execute("SELECT body FROM messages")]
+    assert len(bodies) == 1 and f"- PROJ-5: Todo → In Progress ({READY_WHY})" in bodies[0]
+    assert bodies[0].startswith(issue_sync.READY_MOVES_HEAD + "\n")
+    linear = FakeLinear({**issues, "PROJ-5": issue("Todo", "PROJ-5")})
+    linear.ready = {"PROJ-5": "Shop"}
+    again = run_issue_sync(conn, READY, NOW, dry_run=False, fetch_prs=lambda _c, _n: [], linear=linear)
+    assert not linear.moves and "set back by hand" in again.skips[0].reason
+    assert conn.execute("SELECT count(*) FROM messages").fetchone()[0] == 1
+
+
+def test_without_ready_states_nothing_changes(conn: sqlite3.Connection) -> None:
+    give_alex_the_shop(conn)
+    linear = FakeLinear({"PROJ-5": issue("Todo", "PROJ-5")})
+    linear.ready = {"PROJ-5": "Shop"}
+    report = run_issue_sync(conn, CONFIG, NOW, dry_run=False, fetch_prs=lambda _c, _n: [], linear=linear)
+    assert linear.ready_reads == [] and not linear.moves and not report.moves and not report.skips
+    assert map_toml_to_config({}).ready_states == ()
+    assert map_toml_to_config({"ready_states": ["Todo"]}).ready_states == ("todo",)
+
+
+def test_a_failed_read_of_the_ready_states_leaves_the_rest_of_the_sweep(conn: sqlite3.Connection) -> None:
+    linear = FakeLinear({"PROJ-1": issue("Backlog", "PROJ-1")})
+    linear.ready = LinearError("linear HTTP 500")
+    report = run_issue_sync(conn, READY, NOW, dry_run=False, fetch_prs=lambda _c, _n: sweep_prs(), linear=linear)
+    assert linear.moves == [("id-PROJ-1", "s-In Review")]
+    assert [e.key for e in report.errors] == ["ready states"]
+    assert "reading the issues in ready states failed: linear HTTP 500" in log_path().read_text()
+
+
+def test_linear_is_asked_for_the_ready_states_page_by_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    pages = [
+        {"issues": {"nodes": [{"identifier": "PROJ-5", "project": {"name": "Shop"}}],
+                    "pageInfo": {"hasNextPage": True, "endCursor": "c1"}}},
+        {"issues": {"nodes": [{"identifier": "PROJ-6", "project": None}], "pageInfo": {"hasNextPage": False}}},
+    ]  # fmt: skip
+    asked: list[dict[str, object]] = []
+
+    def answer(_self: object, _query: str, variables: dict[str, object]) -> object:
+        asked.append(variables)
+        return pages[len(asked) - 1]
+
+    monkeypatch.setattr(issue_sync.LinearApi, "query", answer)
+    found = issue_sync.LinearApi("key").fetch_keys_in_states(("todo",), ("PROJ",))
+    assert found == {"PROJ-5": "Shop", "PROJ-6": None}
+    assert [a["after"] for a in asked] == [None, "c1"]
+    assert asked[0]["states"] == [{"name": {"eqIgnoreCase": "todo"}}] and asked[0]["teams"] == ["PROJ"]
+
+
+def test_a_project_two_leads_hold_starts_nothing(conn: sqlite3.Connection) -> None:
+    give_alex_the_shop(conn)
+    with transaction(conn):
+        conn.execute(
+            "INSERT INTO leads (name, display_name, scope, linear_refs, tint, surface, created_at, domains) "
+            "VALUES ('bea', 'Bea', 's', '[]', 'green', 's-bea', 0, '[\"Shop\"]')"
+        )
+    linear = FakeLinear({"PROJ-5": issue("Todo", "PROJ-5")})
+    linear.ready = {"PROJ-5": "Shop"}
+    report = run_issue_sync(conn, READY, NOW, dry_run=False, fetch_prs=lambda _c, _n: [], linear=linear)
+    assert not linear.moves and not report.moves and not report.skips
+
+
+def test_a_priority_projects_whole_list_places_a_ready_issue_not_the_ready_part_of_it(conn: sqlite3.Connection) -> None:
+    """Alex's priority project lists two Shop issues and one Garden issue: its Linear project is Shop, so another
+    Garden issue is not Alex's, however few of the listed issues are ready."""
+    give_alex_the_shop(conn)
+    with transaction(conn):
+        conn.execute("UPDATE leads SET domains = '[\"shop-work\"]' WHERE name = 'alex'")
+        conn.execute(
+            "INSERT INTO project_priority (position, name, issue_keys, set_at, set_by) "
+            "VALUES (1, 'shop-work', '[\"PROJ-1\", \"PROJ-2\", \"PROJ-3\"]', 0, 'owner')"
+        )
+    linear = FakeLinear({"PROJ-3": issue("Todo", "PROJ-3"), "PROJ-9": issue("Todo", "PROJ-9")})
+    linear.ready = {"PROJ-3": "Garden", "PROJ-9": "Garden"}
+    linear.projects = {"PROJ-1": "Shop", "PROJ-2": "Shop", "PROJ-3": "Garden"}
+    report = run_issue_sync(conn, READY, NOW, dry_run=False, fetch_prs=lambda _c, _n: [], linear=linear)
+    assert linear.moves == [("id-PROJ-3", "s-In Progress")], "PROJ-3 is listed in Alex's project; PROJ-9 is not Alex's"
+    assert [m.evidence for m in report.applied] == ["ready after grooming; shop-work is Alex's project"]
+    assert linear.project_reads == [["PROJ-1", "PROJ-2"]], "only the listed issues not known yet"
+
+
+def test_a_dry_run_with_ready_states_moves_logs_and_tells_nothing(conn: sqlite3.Connection) -> None:
+    give_alex_the_shop(conn)
+    linear = FakeLinear({"PROJ-5": issue("Todo", "PROJ-5")}, fail_moves=True)
+    linear.ready = {"PROJ-5": "Shop"}
+    report = run_issue_sync(conn, READY, NOW, dry_run=True, fetch_prs=lambda _c, _n: [], linear=linear)
+    assert [(m.key, m.to_state.name) for m in report.moves] == [("PROJ-5", "In Progress")]
+    assert not report.errors and not log_path().exists() and not issue_sync.applied_path().exists()
+    assert conn.execute("SELECT count(*) FROM messages").fetchone()[0] == 0

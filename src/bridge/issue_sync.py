@@ -18,6 +18,7 @@ from bridge.asks import send_bodies_from_bridge, split_text_to_bodies
 from bridge.board import BODY_MAX_CHARS, SYSTEM_CONVERSATION, MessageStateError, Party, Recipient, send_message
 from bridge.config import Config, read_overlay, state_dir
 from bridge.db import transaction
+from bridge.domains import find_domain_owner, refresh_issue_projects, store_issue_projects
 from bridge.enrich import read_linear_key
 from bridge.errlog import log_error
 from bridge.feed import resolve_tab
@@ -31,6 +32,8 @@ LINEAR_BATCH = 40
 PR_WINDOW_DAYS = 30
 PR_PAGE_SIZE = 50
 PR_PAGES_MAX = 10
+READY_PAGE_SIZE = 100
+READY_PAGES_MAX = 10
 EVIDENCE_SHOWN = 3
 QUESTION_COMMENTS_READ = 5
 """Enough to see past the bot's own follow-ups: a split assessment, a note that it moved the issue back."""
@@ -79,6 +82,17 @@ query($q: String!, $after: String) {{
 _ISSUE_FIELDS = (
     "id state { id name type } assignee { name isMe } team { key states(first: 100) { nodes { id name type } } }"
 )
+_READY_QUERY = f"""
+query($teams: [String!], $states: [WorkflowStateFilter!], $after: String) {{
+  issues(
+    first: {READY_PAGE_SIZE}, after: $after,
+    filter: {{ team: {{ key: {{ in: $teams }} }}, state: {{ or: $states }} }}
+  ) {{
+    pageInfo {{ hasNextPage endCursor }}
+    nodes {{ identifier project {{ name }} }}
+  }}
+}}
+"""
 _COMMENT_FIELDS = "id createdAt body user { name displayName } botActor { name }"
 _MOVE_MUTATION = (
     "mutation($id: String!, $stateId: String!) { issueUpdate(id: $id, input: { stateId: $stateId }) "
@@ -158,6 +172,8 @@ class Move:
     evidence: str
     pr_refs: tuple[str, ...]
     closing_refs: tuple[str, ...]
+    ready: bool = False
+    """Grooming left it ready in a lead's project; no work on it yet."""
 
 
 @dataclass(frozen=True)
@@ -202,6 +218,10 @@ class Linear(Protocol):
     def move(self, issue_id: str, state_id: str) -> str: ...
 
     def fetch_comments(self, issue_ids: list[str]) -> dict[str, IssueComments]: ...
+
+    def fetch_keys_in_states(self, states: tuple[str, ...], teams: tuple[str, ...]) -> dict[str, str | None]: ...
+
+    def fetch_issue_projects(self, keys: list[str]) -> dict[str, str | None]: ...
 
 
 FetchPrs = Callable[[Config, int], list[GitHubPr]]
@@ -303,12 +323,22 @@ def find_team_state(issue: LinearIssue, name: str) -> TeamState | None:
 
 
 def decide_move(
-    issue: LinearIssue, evidence: Evidence, moved_before: str | None = None, grooming_states: tuple[str, ...] = ()
+    issue: LinearIssue,
+    evidence: Evidence,
+    moved_before: str | None = None,
+    grooming_states: tuple[str, ...] = (),
+    ready_states: tuple[str, ...] = (),
+    ready_reason: str | None = None,
 ) -> Move | Skip | None:
-    """Forward only; never out of Done, Canceled or Duplicate; nothing but the state."""
+    """Forward only; never out of Done, Canceled or Duplicate; nothing but the state. ready_reason: the issue's project
+    is a lead's, so once grooming leaves it in a ready state it starts with no work on it yet."""
     if is_terminal(issue.state):
         return None
     target = map_evidence_to_target(evidence)
+    state = issue.state.name.lower()
+    ready = target is None and bool(ready_reason) and state in ready_states and state not in grooming_states
+    if ready:
+        target = IN_PROGRESS, [str(ready_reason)]
     if target is None:
         return None
     wanted, shown = target
@@ -340,6 +370,7 @@ def decide_move(
         evidence=_join_evidence(shown),
         pr_refs=tuple(p.ref for p in evidence.prs),
         closing_refs=tuple(p.ref for p in evidence.prs if p.closes),
+        ready=ready,
     )
 
 
@@ -377,7 +408,8 @@ def run_issue_sync(
                 _log_failure(dry_run, f"issue sync: {problem}")
             return report
         linear = LinearApi(key)
-    keys = sorted(evidence)
+    ready = find_ready_issues(conn, config, linear, now, report, dry_run)
+    keys = sorted({*evidence, *ready})
     issues: dict[str, LinearIssue | str] = {}
     for start in range(0, len(keys), LINEAR_BATCH):
         issues.update(linear.fetch_issues(keys[start : start + LINEAR_BATCH]))
@@ -389,7 +421,14 @@ def run_issue_sync(
                 report.errors.append(Skip(key, issue))
                 _log_failure(dry_run, f"issue sync: {key} skipped: {issue}")
             continue
-        decision = decide_move(issue, evidence[key], moved_before.get(key), config.grooming_states)
+        decision = decide_move(
+            issue,
+            evidence.get(key, Evidence()),
+            moved_before.get(key),
+            config.grooming_states,
+            config.ready_states,
+            ready.get(key),
+        )
         if isinstance(decision, Move):
             report.moves.append(decision)
         elif isinstance(decision, Skip):
@@ -403,11 +442,41 @@ def run_issue_sync(
             report.note = "another issue sync is running; nothing moved"
             report.moves = []
             return report
-        _apply_moves(conn, config, linear, evidence, moved_before, report, now)
+        _apply_moves(conn, config, linear, evidence, ready, moved_before, report, now)
         report.sent += tell_leads_of_grooming(conn, config, report.skips, evidence, now)
         sent, report.questions = tell_of_questions(conn, config, notices, now)
         report.sent += sent
     return report
+
+
+def find_ready_issues(
+    conn: sqlite3.Connection, config: Config, linear: Linear, now: int, report: SyncReport, dry_run: bool
+) -> dict[str, str]:
+    """The issues in a ready state of a project one lead owns, the same owner a notice on it goes to, each with why
+    it may start. Their projects go to the cache that owner lookup reads."""
+    if not config.ready_states:
+        return {}
+    try:
+        projects = linear.fetch_keys_in_states(config.ready_states, config.issue_prefixes)
+    except LinearError as exc:
+        report.errors.append(Skip("ready states", f"reading the issues in them failed: {exc}"))
+        _log_failure(dry_run, f"issue sync: reading the issues in ready states failed: {exc}")
+        return {}
+    store_issue_projects(conn, projects, now)
+    try:
+        # A priority project's Linear project is the majority of its listed issues': each must be known, not only the
+        # ready ones.
+        refresh_issue_projects(conn, list(projects), now, linear.fetch_issue_projects)
+    except LinearError as exc:
+        report.errors.append(Skip("ready states", f"reading the projects of priority issues failed: {exc}"))
+        _log_failure(dry_run, f"issue sync: reading the projects of priority issues failed: {exc}")
+        return {}
+    ready: dict[str, str] = {}
+    for key in projects:
+        owner = find_domain_owner(conn, key)
+        if owner is not None:
+            ready[key] = f"ready after grooming; {owner.project} is {owner.lead.display_name}'s project"
+    return ready
 
 
 GROOMING_HEAD = (
@@ -652,6 +721,7 @@ def _apply_moves(
     config: Config,
     linear: Linear,
     evidence: dict[str, Evidence],
+    ready: dict[str, str],
     moved_before: dict[str, str],
     report: SyncReport,
     now: int,
@@ -663,7 +733,14 @@ def _apply_moves(
             report.errors.append(Skip(planned.key, f"reading it again failed: {fresh}"))
             _log_failure(False, f"issue sync: {planned.key} skipped: reading it again failed: {fresh}")
             continue
-        move = decide_move(fresh, evidence[planned.key], moved_before.get(planned.key), config.grooming_states)
+        move = decide_move(
+            fresh,
+            evidence.get(planned.key, Evidence()),
+            moved_before.get(planned.key),
+            config.grooming_states,
+            config.ready_states,
+            ready.get(planned.key),
+        )
         if not isinstance(move, Move) or move.to_state.id != planned.to_state.id:
             continue
         try:
@@ -679,6 +756,13 @@ def _apply_moves(
         write_applied(moved_before)
         with transaction(conn):
             report.sent = tell_leads_of_moves(conn, config, report.applied, evidence, now)
+
+
+MOVES_HEAD = "Issue sync moved your issues in Linear to match the real work (FYI, nothing to do unless it is wrong):"
+READY_MOVES_HEAD = (
+    "Issue sync moved your issues in Linear to match the real work, or to In Progress once grooming left them ready: "
+    "yours to work on now (FYI, nothing to do unless it is wrong):"
+)
 
 
 @contextmanager
@@ -702,17 +786,18 @@ def tell_leads_of_moves(
     conn: sqlite3.Connection, config: Config, moves: list[Move], evidence: dict[str, Evidence], now: int
 ) -> list[tuple[int, Recipient]]:
     """One message per lead per sweep; an issue with no live lead is told to no one."""
-    by_lead: dict[str, tuple[str, list[str]]] = {}
+    by_lead: dict[str, tuple[str, list[str], bool]] = {}
     for move in moves:
         heads = map_prs_to_heads(evidence.get(move.key, Evidence()).prs)
         owner = find_issue_lead(conn, config, f"issue:{move.key}", list(move.pr_refs), list(move.closing_refs), heads)
         if owner is None:
             continue
         line = f"- {move.key}: {move.from_state} → {move.to_state.name} ({move.evidence})"
-        by_lead.setdefault(owner.handle, (owner.conversation_id, []))[1].append(line)
+        _, lines, ready = by_lead.get(owner.handle, (owner.conversation_id, [], False))
+        by_lead[owner.handle] = (owner.conversation_id, [*lines, line], ready or move.ready)
     sent: list[tuple[int, Recipient]] = []
-    for handle, (conversation_id, lines) in by_lead.items():
-        head = "Issue sync moved your issues in Linear to match the real work (FYI, nothing to do unless it is wrong):"
+    for handle, (conversation_id, lines, ready) in by_lead.items():
+        head = READY_MOVES_HEAD if ready else MOVES_HEAD
         text = _fit("\n".join([head, *lines]))
         recipient = resolve_tab(conn, conversation_id, handle)
         try:
@@ -896,6 +981,26 @@ class LinearApi:
                 results[key] = node if node is not None else NOT_FOUND
             pending = []
         return results
+
+    def fetch_keys_in_states(self, states: tuple[str, ...], teams: tuple[str, ...]) -> dict[str, str | None]:
+        """Each issue of the teams in one of the states, with its project name (None: no project); raises rather
+        than return part of them."""
+        found: dict[str, str | None] = {}
+        after: str | None = None
+        wanted = [{"name": {"eqIgnoreCase": s}} for s in states]
+        for _ in range(READY_PAGES_MAX):
+            data = self.query(_READY_QUERY, {"teams": list(teams), "states": wanted, "after": after})
+            nodes = _dig(data, "issues", "nodes")
+            if not isinstance(nodes, list):
+                raise LinearError("unexpected issues answer from Linear")
+            for node in cast(list[object], nodes):
+                key, project = _dig(node, "identifier"), _dig(node, "project", "name")
+                if isinstance(key, str):
+                    found[key] = project if isinstance(project, str) and project else None
+            if _dig(data, "issues", "pageInfo", "hasNextPage") is not True:
+                return found
+            after = str(_dig(data, "issues", "pageInfo", "endCursor"))
+        raise LinearError(f"more than {READY_PAGES_MAX * READY_PAGE_SIZE} issues in the ready states")
 
     def move(self, issue_id: str, state_id: str) -> str:
         raw = self._post({"query": _MOVE_MUTATION, "variables": {"id": issue_id, "stateId": state_id}})

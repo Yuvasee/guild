@@ -79,13 +79,17 @@ def refresh_issue_projects(conn: sqlite3.Connection, keys: list[str], now: int, 
     if not due:
         return []
     found = fetch(due)
+    store_issue_projects(conn, {k: found.get(k) for k in due}, now)
+    return due
+
+
+def store_issue_projects(conn: sqlite3.Connection, projects: dict[str, str | None], now: int) -> None:
     with transaction(conn):
         conn.executemany(
             "INSERT INTO issue_projects (issue, project, fetched_at) VALUES (?, ?, ?) ON CONFLICT (issue) DO UPDATE "
             "SET project = excluded.project, fetched_at = excluded.fetched_at",
-            [(k, found.get(k), now) for k in due],
+            [(k, v, now) for k, v in projects.items()],
         )
-    return due
 
 
 def find_issue_keys(config: Config, text: str) -> set[str]:

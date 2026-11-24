@@ -152,6 +152,9 @@ class Config:
     """GitHub label bridge puts on a queue PR once the owner pressed Publish, and refuses to agents; empty is off."""
     grooming_states: tuple[str, ...] = ()
     """Tracker states issue sync never moves an issue out of, lowercase; their leads are told once instead."""
+    ready_states: tuple[str, ...] = ()
+    """Tracker states the grooming bot leaves an issue in once grooming is done, lowercase: issue sync moves such an
+    issue of a lead's project to In Progress with no work on it yet. A state also in grooming_states stays put."""
     grooming_bot: str = ""
     """The tracker user whose comments ask an issue's grooming questions; empty leaves its comments unread."""
     grooming_questions_re: str = ""
@@ -352,6 +355,7 @@ def map_toml_to_config(raw: dict[str, object]) -> Config:
         review_channel_name=_str(raw, "review_channel_name", defaults.review_channel_name),
         review_owner_label=_str(raw, "review_owner_label", defaults.review_owner_label).strip(),
         grooming_states=tuple(s.lower() for s in _str_list(raw, "grooming_states", defaults.grooming_states)),
+        ready_states=tuple(s.lower() for s in _str_list(raw, "ready_states", defaults.ready_states)),
         grooming_bot=_str(raw, "grooming_bot", defaults.grooming_bot).strip(),
         grooming_questions_re=_questions_regex(raw, "grooming_questions_re", defaults.grooming_questions_re),
         pages_dir=_str(raw, "pages_dir", defaults.pages_dir),

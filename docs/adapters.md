@@ -34,10 +34,13 @@ PR linked to it has merged.
   GraphQL API, from the dashboard service, in batches. Without the key file, issue columns stay empty.
 - **Issue sync** (`bridge issue-sync`, also run by the dashboard service) moves a Linear issue forward when its PRs
   and the work on it say it has moved. It runs only with `review_org`, `review_author` and `issue_prefixes` set, and
-  needs a key that may write. `grooming_states` names the states it never moves an issue out of; the lead
-  is told once instead. With `grooming_bot` and `grooming_questions_re` set, it also reads the newest comments of each
-  issue it holds in grooming: when the newest word is that bot's comment asking questions, the issue's lead (no lead:
-  the assistant) is told once, and once more if the comment is still unanswered two hours later.
+  needs a key that may write. `grooming_states` names the states it never moves an issue out of; the lead is told once
+  instead. `ready_states` names the states the grooming bot leaves an issue in once its grooming is done: such an
+  issue of a project one lead owns (its domains) goes to In Progress with no work on it yet, unless it is assigned to
+  someone else or was set back by hand after an earlier move, and that lead is told once. With `grooming_bot` and
+  `grooming_questions_re` set, it also reads the newest comments of each issue it holds in grooming: when the newest
+  word is that bot's comment asking questions, the issue's lead (no lead: the assistant) is told once, and once more
+  if the comment is still unanswered two hours later.
 
 ### Another tracker
 
@@ -168,6 +171,7 @@ review_ignored_posts = ["1700000000.000100"]  # Slack ts of review-channel posts
 agent_prefix_from_ms = 1700000000000      # when agents began prefixing GitHub posts; older unprefixed ones stay unclear
 host_worker_disabled_plugins = ["example@plugins"]  # plugins host workers run without, besides the defaults
 grooming_states = ["Grooming"]            # tracker states issue sync never moves an issue out of
+ready_states = ["Todo"]                   # where grooming leaves a finished issue; a lead's project's go to In Progress
 grooming_bot = "groomer"                  # the tracker user that asks grooming questions in comments
 grooming_questions_re = '^(\d+) open questions?'  # start of its asking comment; group 1 counts them
 review_generated_files = ["api-client.ts"]  # left out of a PR's line count, besides lockfiles
