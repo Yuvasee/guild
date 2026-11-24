@@ -1043,19 +1043,45 @@ def record_tab_parents(conn: sqlite3.Connection, tree: dict[str, Any] | None) ->
 def find_owner(
     conn: sqlite3.Connection, config: Config, ref: str, repo: str, head: str, owned_only: bool = False
 ) -> Owner | None:
-    """Who every notice about the PR goes to. When an issue its title or branch names is in one lead's domains, that
-    lead decides: the session that owns the PR keeps it only when it is that lead or under it, else the lead takes it,
-    or no one while the lead is not live. Without such a lead, the session that owns it."""
+    """Who every notice about the PR goes to. When an issue its title or branch names is in one lead's domains, a lead
+    decides: the live one that declared the PR or its issue its own, else that domain's. The session that owns the PR
+    keeps it only when it is that lead or under it, or holds the PR's claim; else the lead takes it, or no one while
+    the domain's lead is not live. Without such a domain, the session that owns it."""
     owner = _find_session_owner(conn, config, ref, repo, head, owned_only)
+    if owner is not None and owner.via == "claim":
+        return owner
     row = conn.execute("SELECT title FROM review_prs WHERE ref = ?", (ref,)).fetchone()
     keys = find_issue_keys(config, f"{row['title'] if row else ''} {head}")
     domains = [found for key in sorted(keys) if (found := find_domain_owner(conn, key)) is not None]
     if len({d.lead.name for d in domains}) != 1:
         return owner
-    lead = domains[0].lead
-    if owner is not None and find_lead_of(conn, owner.surface)[1] == lead.surface:
+    declared = _find_declared_lead(conn, config, ref, head, keys)
+    domain = domains[0].lead
+    if owner is not None and find_lead_of(conn, owner.surface)[1] == (declared or domain).surface:
         return owner
-    return map_lead_to_owner(conn, config, lead.surface, lead.display_name)
+    return declared or map_lead_to_owner(conn, config, domain.surface, domain.display_name)
+
+
+def _find_declared_lead(conn: sqlite3.Connection, config: Config, ref: str, head: str, keys: set[str]) -> Owner | None:
+    """The live lead that said the PR is its own: whose work names the PR, else the lead above a live session holding
+    the claim of an issue it names, else the one lead whose work names such an issue. A lead's scope is not such a
+    word: it is a wider area, as a domain is."""
+    declared = _find_lead_from_work(conn, config, ref, head, by_issue=False)
+    if declared is not None:
+        return declared
+    issues = {f"issue:{key}" for key in keys}
+    for issue in sorted(issues):
+        claimed = _find_owner_from_claim(conn, config, issue)
+        display, surface = find_lead_of(conn, claimed[0]["surface"]) if claimed else (None, None)
+        if surface is not None and (lead := map_lead_to_owner(conn, config, surface, display)) is not None:
+            return lead
+    named = {
+        str(chunk["lead"])
+        for chunk in conn.execute("SELECT lead, refs FROM lead_work WHERE done_at IS NULL")
+        if issues & {str(r) for r in json.loads(str(chunk["refs"]))}
+    }
+    found = [lead for lead in list_leads(conn) if lead.name in named]
+    return map_lead_to_owner(conn, config, found[0].surface, found[0].display_name) if len(found) == 1 else None
 
 
 def _find_session_owner(
@@ -1068,16 +1094,11 @@ def _find_session_owner(
     notices, since it fixes what they ask; an ended one hands them to the lead that ran it. A locked tab is never an
     owner, and neither is the assistant, who mentions every PR and owns none."""
 
-    def may_own(row: sqlite3.Row) -> bool:
-        return row["handle"] != config.assistant_handle and not is_conversation_locked(
-            conn, config, str(row["conversation_id"])
-        )
-
     def from_session(row: sqlite3.Row, via: str) -> Owner:
         display = find_lead_of(conn, row["surface"])[0]
         return Owner(str(row["handle"]), str(row["conversation_id"]), row["surface"], display, via)
 
-    claimed = _find_owner_from_claim(conn, ref, may_own)
+    claimed = _find_owner_from_claim(conn, config, ref)
     if claimed is not None:
         return from_session(*claimed)
     declared = _find_lead_from_work(conn, config, ref, head, by_issue=False)
@@ -1097,7 +1118,7 @@ def _find_session_owner(
             """,
             (head,),
         )
-        if _is_writer_in_repo(config, row["repo"], repo) and may_own(row)
+        if _is_writer_in_repo(config, row["repo"], repo) and _may_own(conn, config, row)
     ]
     # A writer whose own checkout is on the branch is on it now; a same-named branch of another repo is not.
     on_it = [r for r in writers if r["branch"] == head and _is_writer_in_repo(config, r["own_repo"], repo)]
@@ -1122,7 +1143,7 @@ def _find_session_owner(
         """,
         (ref,),
     ):
-        if may_own(row):
+        if _may_own(conn, config, row):
             return from_session(row, "ref")
     for row in conn.execute(
         """
@@ -1265,15 +1286,10 @@ def find_issue_lead(
         display, lead_surface = find_lead_of_ended(conn, surface, conversation_id)
         return map_lead_to_owner(conn, config, lead_surface, display) if lead_surface else None
 
-    def may_own(row: sqlite3.Row) -> bool:
-        return row["handle"] != config.assistant_handle and not is_conversation_locked(
-            conn, config, str(row["conversation_id"])
-        )
-
     domain = find_domain_owner(conn, key)
     if domain is not None:
         return map_lead_to_owner(conn, config, domain.lead.surface, domain.lead.display_name)
-    claimed = _find_owner_from_claim(conn, issue_ref, may_own)
+    claimed = _find_owner_from_claim(conn, config, issue_ref)
     if claimed is not None and (owner := lead_above(claimed[0]["surface"])) is not None:
         return owner
     by_name = {lead.name: lead for lead in leads}
@@ -1286,7 +1302,11 @@ def find_issue_lead(
             return owner
     on_branch = _list_sessions_on_issue_branch(conn, key)
     for row in on_branch:
-        if row["ended_at"] is None and may_own(row) and (owner := lead_above(row["surface"])) is not None:
+        if (
+            row["ended_at"] is None
+            and _may_own(conn, config, row)
+            and (owner := lead_above(row["surface"])) is not None
+        ):
             return owner
     for ref in closing:
         head = str((enrichment.get(ref) or {}).get("head") or "")
@@ -1322,9 +1342,13 @@ def _list_sessions_on_issue_branch(conn: sqlite3.Connection, key: str) -> list[s
     return [r for r in rows if pattern.search(str(r["branch"]).lower())]
 
 
-def _find_owner_from_claim(
-    conn: sqlite3.Connection, ref: str, may_own: Callable[[sqlite3.Row], bool]
-) -> tuple[sqlite3.Row, str] | None:
+def _may_own(conn: sqlite3.Connection, config: Config, row: sqlite3.Row) -> bool:
+    return row["handle"] != config.assistant_handle and not is_conversation_locked(
+        conn, config, str(row["conversation_id"])
+    )
+
+
+def _find_owner_from_claim(conn: sqlite3.Connection, config: Config, ref: str) -> tuple[sqlite3.Row, str] | None:
     """A live session holding the PR's claim is working on it right now, whatever the branch name says."""
     for row in conn.execute(
         """
@@ -1336,7 +1360,7 @@ def _find_owner_from_claim(
         """,
         (ref,),
     ):
-        if may_own(row):
+        if _may_own(conn, config, row):
             return row, "claim"
     return None
 

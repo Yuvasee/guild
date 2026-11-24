@@ -690,6 +690,48 @@ def test_a_worker_under_the_projects_lead_keeps_its_prs_notices(tmp_path: Path) 
     assert owner is not None and (owner.handle, owner.via) == ("worker", "branch")
 
 
+def test_a_lead_that_declared_the_pr_its_own_gets_its_notices_over_the_projects_lead(tmp_path: Path) -> None:
+    """Cleo's work names the PR; its issue's project is in Alex's domains. A comment wake goes to Cleo."""
+    conn = setup_handed_over_pr(tmp_path)
+    with transaction(conn):
+        conn.execute("UPDATE instances SET ended_at = 9 WHERE conversation_id = 'w-c'")
+        add_work(conn, "cleo", REF)
+    owner = find_owner(conn, CONFIG, REF, "Org/app", "dev/x")
+    assert owner is not None and (owner.handle, owner.via) == ("cleo", "lead")
+    store(conn, comment())
+    assert [r.handle for _, r in wake(conn)] == ["cleo"]
+    with transaction(conn):
+        conn.execute("UPDATE lead_work SET done_at = 10")
+    owner = find_owner(conn, CONFIG, REF, "Org/app", "dev/x")
+    assert owner is not None and owner.handle == "alex", "the work done: the project's lead again"
+
+
+def test_a_lead_that_declared_the_prs_issue_its_own_keeps_its_workers_pr(tmp_path: Path) -> None:
+    conn = setup_handed_over_pr(tmp_path)
+    with transaction(conn):
+        add_work(conn, "cleo", "issue:PROJ-1")
+    owner = find_owner(conn, CONFIG, REF, "Org/app", "dev/x")
+    assert owner is not None and (owner.handle, owner.via) == ("worker", "branch")
+    with transaction(conn):
+        add_work(conn, "alex", "issue:PROJ-1")
+    owner = find_owner(conn, CONFIG, REF, "Org/app", "dev/x")
+    assert owner is not None and owner.handle == "alex", "two leads name the issue: the project's lead decides"
+
+
+def test_a_claim_on_the_pr_or_its_issue_keeps_the_pr_from_the_projects_lead(tmp_path: Path) -> None:
+    conn = setup_handed_over_pr(tmp_path)
+    for resource in ("issue:PROJ-1", REF):
+        with transaction(conn):
+            conn.execute("DELETE FROM claims")
+            conn.execute(
+                "INSERT INTO claims (resource, token, holder_conversation, holder_handle, acquired_at, renewed_at,"
+                " expires_at) VALUES (?, 't', 'w-c', 'worker', 1, 2, 9999999999999)",
+                (resource,),
+            )
+        owner = find_owner(conn, CONFIG, REF, "Org/app", "dev/x")
+        assert owner is not None and owner.handle == "worker", resource
+
+
 def test_a_pr_naming_no_owned_issue_keeps_its_session_owner(tmp_path: Path) -> None:
     conn = setup_handed_over_pr(tmp_path, title="Fix totals")
     owner = find_owner(conn, CONFIG, REF, "Org/app", "dev/x")
