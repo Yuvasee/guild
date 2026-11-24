@@ -1055,7 +1055,7 @@ def find_owner(
     domains = [found for key in sorted(keys) if (found := find_domain_owner(conn, key)) is not None]
     if len({d.lead.name for d in domains}) != 1:
         return owner
-    declared = _find_declared_lead(conn, config, ref, head, keys)
+    declared = _find_declared_lead(conn, config, ref, head, set() if owned_only else keys)
     domain = domains[0].lead
     if owner is not None and find_lead_of(conn, owner.surface)[1] == (declared or domain).surface:
         return owner
@@ -1064,7 +1064,7 @@ def find_owner(
 
 def _find_declared_lead(conn: sqlite3.Connection, config: Config, ref: str, head: str, keys: set[str]) -> Owner | None:
     """The live lead that said the PR is its own: whose work names the PR, else the lead above a live session holding
-    the claim of an issue it names, else the one lead whose work names such an issue. A lead's scope is not such a
+    the claim of an issue in keys, else the one lead whose work names such an issue. A lead's scope is not such a
     word: it is a wider area, as a domain is."""
     declared = _find_lead_from_work(conn, config, ref, head, by_issue=False)
     if declared is not None:
@@ -1273,11 +1273,12 @@ def find_issue_lead(
     enrichment: Mapping[str, Mapping[str, object]],
 ) -> Owner | None:
     """The lead an issue's notices go to: the lead above the live session holding the issue's claim; a lead whose
-    declared work names the issue or one of its linked PRs, the one such lead when the issue's project is in a lead's
-    domains; else that domain's lead, or no one while it is not live. Without such a lead, in a PR's owner order: the
-    lead above a live session on a branch named after the issue, else above the owner of a closing PR; the lead of an
-    ended session on such a branch; a lead whose scope names the issue. Only a lead can act on an issue, so a worker
-    hands it up. Naming an issue in a prompt or a message makes no one its owner. None when no live lead is found."""
+    declared work names the issue or one of its linked PRs, or when the issue's project is in a lead's domains the one
+    lead whose work names the issue itself; else that domain's lead, or no one while it is not live. Without such a
+    lead, in a PR's owner order: the lead above a live session on a branch named after the issue, else above the owner
+    of a closing PR; the lead of an ended session on such a branch; a lead whose scope names the issue. Only a lead can
+    act on an issue, so a worker hands it up. Naming an issue in a prompt or a message makes no one its owner. None
+    when no live lead is found."""
     key = issue_ref.removeprefix("issue:")
     wanted = {r.lower() for r in (issue_ref, *linked)}
     leads = list_leads(conn)
@@ -1290,14 +1291,16 @@ def find_issue_lead(
     if claimed is not None and (owner := lead_above(claimed[0]["surface"])) is not None:
         return owner
     by_name = {lead.name: lead for lead in leads}
+    domain = find_domain_owner(conn, key)
+    # Over a domain only the issue itself counts: taking it is what tells the domain's lead, and a PR list can miss one.
+    declares = wanted if domain is None else {issue_ref.lower()}
     named = list(
         dict.fromkeys(
             by_name[str(chunk["lead"])]
             for chunk in conn.execute("SELECT lead, refs FROM lead_work WHERE done_at IS NULL ORDER BY updated_at DESC")
-            if str(chunk["lead"]) in by_name and wanted & {str(r).lower() for r in json.loads(str(chunk["refs"]))}
+            if str(chunk["lead"]) in by_name and declares & {str(r).lower() for r in json.loads(str(chunk["refs"]))}
         )
     )
-    domain = find_domain_owner(conn, key)
     for lead in named if domain is None or len(named) == 1 else []:
         owner = map_lead_to_owner(conn, config, lead.surface, lead.display_name)
         if owner is not None:

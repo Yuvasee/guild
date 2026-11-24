@@ -671,6 +671,11 @@ def test_one_leads_work_naming_an_issue_takes_it_from_its_projects_lead(tmp_path
     owner = find_issue_lead(conn, CONFIG, "issue:PROJ-1", [], [], {})
     assert owner is not None and owner.handle == "cleo"
     with transaction(conn):
+        conn.execute("UPDATE lead_work SET refs = ? WHERE lead = 'cleo'", (json.dumps([REF]),))
+    owner = find_issue_lead(conn, CONFIG, "issue:PROJ-1", [REF], [], {})
+    assert owner is not None and owner.handle == "alex", "work naming only a linked PR takes no issue from its project"
+    with transaction(conn):
+        conn.execute("UPDATE lead_work SET refs = '[\"issue:PROJ-1\"]' WHERE lead = 'cleo'")
         add_work(conn, "alex", "issue:PROJ-1")
         conn.execute("UPDATE lead_work SET updated_at = CASE lead WHEN 'cleo' THEN 9 ELSE 1 END")
     owner = find_issue_lead(conn, CONFIG, "issue:PROJ-1", [], [], {})
@@ -740,6 +745,17 @@ def test_a_lead_that_declared_the_prs_issue_its_own_keeps_its_workers_pr(tmp_pat
         add_work(conn, "alex", "issue:PROJ-1")
     owner = find_owner(conn, CONFIG, REF, "Org/app", "dev/x")
     assert owner is not None and owner.handle == "alex", "two leads name the issue: the project's lead decides"
+
+
+def test_a_lead_that_declared_only_the_prs_issue_owns_no_pr_when_only_an_owner_counts(tmp_path: Path) -> None:
+    """A closing PR's owner routes another issue only when the PR is owned; an issue's declaration is a guess."""
+    conn = setup_handed_over_pr(tmp_path)
+    with transaction(conn):
+        conn.execute("UPDATE instances SET ended_at = 9 WHERE conversation_id IN ('w-c', 'alex-c')")
+        add_work(conn, "cleo", "issue:PROJ-1")
+    assert find_owner(conn, CONFIG, REF, "Org/app", "dev/x", owned_only=True) is None
+    owner = find_owner(conn, CONFIG, REF, "Org/app", "dev/x")
+    assert owner is not None and owner.handle == "cleo"
 
 
 def test_a_claim_on_the_pr_or_its_issue_keeps_the_pr_from_the_projects_lead(tmp_path: Path) -> None:
