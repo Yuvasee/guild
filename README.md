@@ -299,7 +299,9 @@ Each run is capped at $5.
 merge, published, drafts. Your comments on GitHub are typed into the tab that owns the PR. A team lead merges its own PR
 when GitHub approves it, CI is green and none of your threads is open; bridge refuses the merge otherwise. Large PRs
 (100+ lines) come with a review document before they reach you, naming each review that ran; `required_reviews`
-lists the ones it must name.
+lists the ones it must name. Each `[[restricted_paths]]` (`path`, `label`, `owner`) is another team's code: a PR
+changing it is refused at `gh pr create` or a body edit until its body has a `<label>: why` section of at most 5 lines
+and `OK: #N`, N the assistant's bridge message saying OK, and the page marks it `<label>: needs <owner>'s team`.
 </details>
 
 ## Adapters

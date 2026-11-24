@@ -2083,6 +2083,11 @@ function renderQueueTableRow(pr) {
     mark.title = "Its branch, title and body name no issue key; its CI needs one";
     name.append(mark);
   }
+  for (const restricted of pr.restricted || []) {
+    const mark = el("span", "mark", restricted);
+    mark.title = "It changes another team's code; its body carries a why and the assistant's OK";
+    name.append(mark);
+  }
   if (pr.review_wait) {
     const mark = el("span", "mark", pr.review_wait);
     mark.title = "No place in your review order until this clears";

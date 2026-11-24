@@ -8,7 +8,7 @@ import urllib.parse
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from bridge.agent_prefix import CLAUDE_PREFIX
 from bridge.backport import BackportVerdict, check_backport, is_backport_base
@@ -2555,6 +2555,7 @@ def map_row_to_review(
         "first_seen_at": row["first_seen_at"],
         "issue_keys": _load_issue_keys_of_pr(conn, config, row, owner),
         "issue_missing": bool(row["issue_missing"]),
+        "restricted": map_row_to_restricted_marks(config, row),
         "open_threads": int(row["open_threads"] or 0),
         "his_open_threads": int(row["his_open_threads"] or 0),
         "his_last_at": his_last_at,
@@ -2639,6 +2640,22 @@ def map_row_to_review(
         "worktree_detail": row["wt_detail"],
         "worktree_stale": bool(row["wt_path"]) and row["wt_oid"] != row["head_oid"],
     }
+
+
+def map_row_to_files(row: sqlite3.Row) -> list[str]:
+    try:
+        files: object = json.loads(str(row["files"] or "[]"))
+    except ValueError:
+        return []
+    return [str(f) for f in cast(list[object], files)] if isinstance(files, list) else []
+
+
+def map_row_to_restricted_marks(config: Config, row: sqlite3.Row) -> list[str]:
+    """'<label>: needs <owner>'s team' for each restricted path the PR changes, so the owner sees it in the queue."""
+    if not config.restricted_paths:
+        return []
+    files = map_row_to_files(row)
+    return [f"{r.label}: needs {r.owner}'s team" for r in config.restricted_paths if any(r.covers(f) for f in files)]
 
 
 def map_row_to_backport_check(row: sqlite3.Row) -> dict[str, object] | None:

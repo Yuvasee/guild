@@ -3,7 +3,7 @@ import re
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -40,6 +40,18 @@ class PageLink:
     name: str
     url: str
     """http or https only; the page opens it in a new tab."""
+
+
+@dataclass(frozen=True)
+class RestrictedPath:
+    path: str
+    """A repo-relative file or directory another team owns, e.g. services/pricing/."""
+    label: str
+    owner: str
+
+    def covers(self, file: str) -> bool:
+        prefix = self.path.strip("/")
+        return file == prefix or file.startswith(prefix + "/")
 
 
 @dataclass(frozen=True)
@@ -135,6 +147,8 @@ class Config:
     watcher_escalate_after_min: int = 60
     """A watcher still not ok this long after it left ok is named to the assistant, once."""
     links: tuple[PageLink, ...] = ()
+    restricted_paths: tuple[RestrictedPath, ...] = ()
+    """Another team's code: a PR changing it needs a short why and the assistant's OK in its body."""
     work_timezone: str = ""
     """IANA zone of the team's working hours (09-19) for daytime-only nudges; empty is this machine's zone."""
     work_days: tuple[int, ...] = (0, 1, 2, 3, 4)
@@ -356,6 +370,7 @@ def map_toml_to_config(raw: dict[str, object]) -> Config:
         watcher_alert_to=_str(raw, "watcher_alert_to", defaults.watcher_alert_to).strip(),
         watcher_escalate_after_min=_positive(raw, "watcher_escalate_after_min", defaults.watcher_escalate_after_min),
         links=tuple(map_table_to_link(t) for t in _tables(raw, "links")),
+        restricted_paths=tuple(map_table_to_restricted_path(t) for t in _tables(raw, "restricted_paths")),
         work_timezone=_zone(raw, "work_timezone", defaults.work_timezone),
         work_days=_weekdays(raw, "work_days", defaults.work_days),
         weekly_task_day=_weekday_or_none(raw, "weekly_task_day"),
@@ -557,6 +572,15 @@ def map_table_to_watcher(table: dict[str, object]) -> Watcher:
     if not path or "\0" in path or "\n" in path:
         raise ValueError("each [[watchers]] needs a path")
     return Watcher(path=path, name=_str(table, "name", ""))
+
+
+def map_table_to_restricted_path(table: dict[str, object]) -> RestrictedPath:
+    path, label, owner = (_str(table, key, "").strip() for key in ("path", "label", "owner"))
+    # Git names files as services/pricing/x.py: never ./services or services//pricing.
+    normal = PurePosixPath(path).as_posix().strip("/")
+    if normal in ("", ".") or not label or not owner or path.startswith("/") or ".." in normal.split("/"):
+        raise ValueError("each [[restricted_paths]] needs a repo-relative path, a label and an owner")
+    return RestrictedPath(path=normal + "/" if path.endswith("/") else normal, label=label, owner=owner)
 
 
 def map_table_to_link(table: dict[str, object]) -> PageLink:
