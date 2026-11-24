@@ -8,9 +8,10 @@ from test_reviews import add_session, setup_pr
 from test_stall_guard import FAILURES, GUARDED
 
 from bridge.db import connect, transaction
-from bridge.outage import LOOP_FAILING_TELL_AFTER_MS
+from bridge.outage import LOOP_FAILING_TELL_AFTER_MS, FailureSpell
 from bridge.reviews import record_poll_error
 from bridge.serve import DashboardState
+from bridge.wake import WakeWatch
 
 MIN = 60_000
 GITHUB_DOWN = "gh failed: HTTP 502: Server Error"
@@ -20,24 +21,30 @@ class Stop(Exception):
     pass
 
 
-def run_rounds(tmp_path: Path, rounds: list[str]) -> list[str]:
+def run_rounds(tmp_path: Path, rounds: list[str], sleeps: dict[int, int] | None = None) -> list[str]:
     """Each round at the next minute: 'github' fails its GitHub read as poll_review_queue does, 'bridge' raises in
-    bridge, 'ok' reads GitHub, 'ok-bridge' reads GitHub and then raises in bridge. Returns the bodies told to the
-    assistant."""
+    bridge, 'ok' reads GitHub, 'ok-bridge' reads GitHub and then raises in bridge. sleeps: the Mac slept this many
+    minutes before the round of that index, which moves the wall clock and not the monotonic one. Returns the bodies
+    told to the assistant."""
     conn = setup_pr(tmp_path)
     with transaction(conn):
         add_session(conn, "aide-c", GUARDED.assistant_handle)
         add_session(conn, "ops-c", FAILURES)
     conn.close()
-    clock = iter(range(0, len(rounds) * MIN * 4, MIN))
+    slept = sleeps or {}
+    starts = [(i + sum(m for at, m in slept.items() if at <= i)) * MIN for i in range(len(rounds))]
+    clock = iter(starts)
     now = {"ms": 0}
+    awake_ms = {"ms": 0}
     outcomes = iter(rounds)
 
     def tick() -> int:
         return now["ms"]
 
     def poll(conn: sqlite3.Connection, *_: Any) -> list[object]:
+        before = now["ms"]
         now["ms"] = next(clock)
+        awake_ms["ms"] += min(now["ms"] - before, MIN)
         outcome = next(outcomes)
         if outcome == "bridge":
             raise sqlite3.OperationalError("database is locked")
@@ -59,7 +66,9 @@ def run_rounds(tmp_path: Path, rounds: list[str]) -> list[str]:
         mock.patch("bridge.serve.time.sleep", side_effect=[*[None] * (len(rounds) - 1), Stop()]),
         pytest.raises(Stop),
     ):
-        DashboardState(GUARDED).poll_reviews_forever()
+        state = DashboardState(GUARDED)
+        state._wake = WakeWatch(wall=lambda: now["ms"] / 1000, monotonic=lambda: awake_ms["ms"] / 1000)  # pyright: ignore[reportPrivateUsage]
+        state.poll_reviews_forever()
     conn = connect(tmp_path / "t.db")
     return [
         str(r[0])
@@ -110,3 +119,28 @@ def test_a_good_github_read_in_a_round_bridge_then_failed_ends_the_github_spell(
     monkeypatch.setenv("BRIDGE_STATE_DIR", str(tmp_path))
     told = run_rounds(tmp_path, ["github"] * 6 + ["ok-bridge"] + ["github"] * 6)
     assert not any(body.startswith("GitHub") for body in told), told
+
+
+def test_a_mac_asleep_through_failed_reads_tells_no_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A closed lid: a read fails as the network goes, the dark wakes every ~15 min fail, and so does the first read
+    after waking, before the network is back."""
+    monkeypatch.setenv("BRIDGE_STATE_DIR", str(tmp_path))
+    rounds = ["ok", "github", "github", "github", "github", "github", "ok"]
+    assert run_rounds(tmp_path, rounds, sleeps={2: 15, 3: 15, 4: 15, 5: 15}) == []
+
+
+def test_github_failing_ten_awake_minutes_after_a_sleep_is_told_counted_from_the_wake(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BRIDGE_STATE_DIR", str(tmp_path))
+    failing = LOOP_FAILING_TELL_AFTER_MS // MIN
+    told = run_rounds(tmp_path, ["ok", *["github"] * (failing + 4)], sleeps={3: 60})
+    assert len(told) == 1, told
+    assert told[0].startswith(f"GitHub is failing: the review poll has not read it for {failing} min")
+
+
+def test_a_wall_clock_set_back_does_not_put_off_the_notice() -> None:
+    spell = FailureSpell()
+    spell.fail(100 * MIN)
+    assert spell.fail(70 * MIN) is None
+    assert spell.fail(80 * MIN) == LOOP_FAILING_TELL_AFTER_MS // MIN, "counted from the clock's new now, not 100 min"

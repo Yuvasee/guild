@@ -904,7 +904,7 @@ class DashboardState:
         minutes and error."""
         failing, back = notices
         if error is not None:
-            minutes = spell.fail(now_ms())
+            minutes = spell.fail(now_ms(), self._wake.counted_from())
             if minutes is not None:
                 spell.told = self._tell_of_failure(failing.format(minutes=minutes, error=error))
             return

@@ -42,10 +42,11 @@ class FailureSpell:
     since: int | None = None
     told: bool = False
 
-    def fail(self, now: int) -> int | None:
-        """Minutes it has failed, when that is to be told now."""
-        if self.since is None:
-            self.since = now
+    def fail(self, now: int, awake_since: int = 0) -> int | None:
+        """Minutes it has failed, when that is to be told now. awake_since: the Mac's last wake; an untold spell starts
+        over there, since a sleeping Mac reaches nothing and a waking one has no network for a while."""
+        if self.since is None or not self.told:
+            self.since = min(max(now if self.since is None else self.since, awake_since), now)
         if self.told or now - self.since < LOOP_FAILING_TELL_AFTER_MS:
             return None
         return (now - self.since) // 60_000

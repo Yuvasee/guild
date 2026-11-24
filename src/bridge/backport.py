@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from bridge.errlog import log_error
-from bridge.review_github import GitHubError, run_gh
+from bridge.review_github import GitHubError, RoundOver, run_gh
 
 if TYPE_CHECKING:
     from concurrent.futures import Future
@@ -129,6 +129,8 @@ def check_backport(repo: str, number: int, bases: tuple[str, ...], deadline: flo
     names, together. None when its base is not a backport branch. Fails closed: anything unread keeps the rule."""
     try:
         return _check_backport(repo, number, bases, deadline)
+    except RoundOver:
+        raise
     except (GitHubError, BackportError) as exc:
         return BackportVerdict(False, f"the backport check failed: {exc}")
     except Exception:

@@ -13,6 +13,7 @@ from bridge.agent_prefix import strip_agent_prefix
 from bridge.config import Config
 from bridge.db import transaction
 from bridge.registry import RECENT_REF_TURNS, current_ref_sql
+from bridge.review_github import run_gh_process
 
 PR_FRESH_MS = 120_000
 ISSUE_FRESH_MS = 300_000
@@ -201,9 +202,7 @@ def fetch_prs(refs: list[str]) -> Results:
         parts.append(f"r{r}: repository({repo_args}) {{ {' '.join(fields)} }}")
     query = f"query {{ {' '.join(parts)} }} fragment pr on PullRequest {{ {_PR_FIELDS} }}"
     try:
-        completed = subprocess.run(
-            ["gh", "api", "graphql", "-f", f"query={query}"], capture_output=True, text=True, timeout=30, check=False
-        )
+        completed = run_gh_process(["api", "graphql", "-f", f"query={query}"], 30)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return dict.fromkeys(aliases.values(), f"gh failed: {type(exc).__name__}")
     if not completed.stdout.strip().startswith("{"):

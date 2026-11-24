@@ -2,7 +2,9 @@ import contextlib
 import fnmatch
 import json
 import subprocess
-from collections.abc import Sequence
+import time
+from collections.abc import Generator, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import PurePosixPath
@@ -235,11 +237,63 @@ def map_iso_to_ms(value: object) -> int | None:
         return None
 
 
-def run_gh(args: list[str], timeout_s: float = _GH_TIMEOUT_S) -> str:
+class RoundOver(Exception):
+    """The bounded round ran out of time. Not a GitHubError, so the loops that skip one PR's failed read stop too."""
+
+
+@dataclass
+class GhRound:
+    deadline: float
+    """time.monotonic() past which no gh call starts."""
+    calls: int = 0
+    failed: int = 0
+    """Calls that exited non-zero, timed out or could not start."""
+
+
+_gh_round: ContextVar[GhRound | None] = ContextVar("gh_round", default=None)
+
+
+@contextlib.contextmanager
+def bound_gh_round(seconds: float) -> Generator[GhRound]:
+    """Every gh call in this thread inside it is counted, cut at the deadline, and refused with RoundOver past it."""
+    gh_round = GhRound(time.monotonic() + seconds)
+    token = _gh_round.set(gh_round)
+    try:
+        yield gh_round
+    finally:
+        _gh_round.reset(token)
+
+
+def run_gh_process(args: list[str], timeout_s: float) -> "subprocess.CompletedProcess[str]":
+    gh_round = _gh_round.get()
+    left = timeout_s if gh_round is None else gh_round.deadline - time.monotonic()
+    if gh_round is not None:
+        if left <= 0:
+            raise RoundOver
+        gh_round.calls += 1
     try:
         done = subprocess.run(
-            ["gh", *args], capture_output=True, encoding="utf-8", errors="replace", timeout=timeout_s, check=False
-        )
+            ["gh", *args],
+            capture_output=True, encoding="utf-8", errors="replace", timeout=min(timeout_s, left), check=False,
+        )  # fmt: skip
+    except subprocess.TimeoutExpired:
+        if gh_round is not None:
+            gh_round.failed += 1
+            if left < timeout_s:
+                raise RoundOver from None
+        raise
+    except OSError:
+        if gh_round is not None:
+            gh_round.failed += 1
+        raise
+    if gh_round is not None and done.returncode != 0:
+        gh_round.failed += 1
+    return done
+
+
+def run_gh(args: list[str], timeout_s: float = _GH_TIMEOUT_S) -> str:
+    try:
+        done = run_gh_process(args, timeout_s)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise GitHubError(f"gh failed: {type(exc).__name__}") from exc
     if done.returncode != 0:
@@ -392,10 +446,7 @@ def fetch_pr_states(refs: list[str]) -> dict[str, str | None]:
         parts.append(f"r{r}: repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) {{ {' '.join(fields)} }}")
     try:
         # A number that is neither fails its own field only, and gh then exits 1 with the rest of the answer.
-        done = subprocess.run(
-            ["gh", "api", "graphql", "-f", f"query=query {{ {' '.join(parts)} }}"],
-            capture_output=True, encoding="utf-8", errors="replace", timeout=_GH_TIMEOUT_S, check=False,
-        )  # fmt: skip
+        done = run_gh_process(["api", "graphql", "-f", f"query=query {{ {' '.join(parts)} }}"], _GH_TIMEOUT_S)
         answer: Any = json.loads(done.stdout)
         data: Any = answer.get("data") or {}
         errors: list[Any] = answer.get("errors") or []

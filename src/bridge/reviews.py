@@ -27,6 +27,7 @@ from bridge.config import Config, read_overlay
 from bridge.db import transaction
 from bridge.domains import find_domain_owner, find_issue_keys
 from bridge.enrich import PrStatus, fetch_prs
+from bridge.errlog import log_slow
 from bridge.feed import REVIEW_QUEUE, resolve_tab
 from bridge.guard import (
     BLOCKED_ON_GITHUB,
@@ -64,8 +65,10 @@ from bridge.review_github import (
     KnownHeads,
     OpenPr,
     ReviewThreads,
+    RoundOver,
     Said,
     add_label,
+    bound_gh_round,
     fetch_ci_blocked_by,
     fetch_comments,
     fetch_doc_diff,
@@ -113,6 +116,11 @@ PUBLISHED = "published"
 DRAFTS = "drafts"
 BACKPORTS = "backports"
 _GROUP_ORDER = (WAITING_FOR_YOU, READY, BACKPORTS, PUBLISHED, DRAFTS)
+ROUND_LIMIT_S = GITHUB_STALE_S
+"""Past it the round's PR list is older than auto-merge accepts, so more reads in it serve nothing the next round's
+would not."""
+SLOW_ROUND_S = 120
+"""Rounds start GITHUB_EVERY_S apart after the last one ends; one this long more than doubles how old the queue gets."""
 BACKPORT_CHECK_BUDGET_S = 20.0
 BACKPORT_CHECKS_PER_POLL = 2
 """Checks run serially before comments and wakes, so a round waits at most this many budgets for them."""
@@ -1448,13 +1456,55 @@ def poll_review_queue(
 ) -> list[tuple[int, Recipient]]:
     """One round of the background job. GitHub is read with no transaction open; returns the wakes to deliver.
     after_store runs once the round's PRs are stored and before any notice is routed, with no transaction open."""
+    started = time.monotonic()
+    bot_rounds: dict[str, int] = {}
+    with bound_gh_round(ROUND_LIMIT_S) as gh_round:
+        try:
+            read_github(conn, config, now, after_store, bot_rounds)
+        except RoundOver:
+            # What was read is stored; what was not is still due, so the next round reads it.
+            error = (
+                f"the review poll round ran past {ROUND_LIMIT_S // 60} min and stopped after {gh_round.calls} gh calls "
+                f"({gh_round.failed} failed); the next round starts over"
+            )
+            print(error, flush=True)
+            with transaction(conn):
+                record_poll_error(conn, error, now)
+    with transaction(conn):
+        record_tab_parents(conn, tree)
+        if scanned_from is not None:
+            classify_pending_comments(conn, config, scanned_from)
+            prune_marks(conn, now)
+        store_merge_blocks(conn)
+        wakes = [
+            *take_comment_wakes(conn, config, now),
+            *tell_ready_to_merge(conn, config, now),
+            *tell_review_waits(conn, config, now),
+            *tell_bot_waits(conn, config, now),
+            *tell_issue_missing(conn, config, now),
+            *tell_overlaps(conn, config, now),
+            *tell_bot_round_cap(conn, config, bot_rounds, now),
+        ]
+    took = time.monotonic() - started
+    if took >= SLOW_ROUND_S:
+        log_slow("review poll", f"round took {took:.0f} s: {gh_round.calls} gh calls, {gh_round.failed} failed")
+    return wakes
+
+
+def read_github(
+    conn: sqlite3.Connection,
+    config: Config,
+    now: int,
+    after_store: Callable[[sqlite3.Connection], None] | None,
+    bot_rounds: dict[str, int],
+) -> None:
+    """bot_rounds is filled once the open PRs are read, so a round stopped later still has them."""
     try:
         prs = fetch_open_prs(config, load_known_heads(conn))
     except GitHubError as exc:
         with transaction(conn):
             record_poll_error(conn, str(exc), now)
         prs = None
-    bot_rounds: dict[str, int] = {}
     if prs is not None:
         excluded = {r.casefold() for r in config.review_excluded_repos}
         prs = [pr for pr in prs if pr.repo.casefold() not in excluded]
@@ -1468,7 +1518,7 @@ def poll_review_queue(
             if isinstance(status, PrStatus) and status.state != "OPEN"
         ]
         states = read_dependency_states(prs)
-        bot_rounds = {pr.ref: pr.bot_rounds for pr in prs}
+        bot_rounds.update({pr.ref: pr.bot_rounds for pr in prs})
         with transaction(conn):
             store_open_prs(conn, prs, now)
             mark_closed(conn, gone, now)
@@ -1481,7 +1531,7 @@ def poll_review_queue(
         verdict = check_backport(repo, number, config.backport_bases, time.monotonic() + BACKPORT_CHECK_BUDGET_S)
         with transaction(conn):
             store_backport_check(conn, ref, key, verdict, now)
-    for ref, repo, number, updated_at in list_refs_with_new_activity(conn):
+    for ref, repo, number, updated_at in shuffle(list_refs_with_new_activity(conn)):
         try:
             comments = fetch_comments(repo, number)
         except GitHubError as exc:
@@ -1489,7 +1539,7 @@ def poll_review_queue(
             continue
         with transaction(conn):
             store_comments(conn, config, ref, updated_at, comments)
-    for ref, repo, number, key in list_refs_with_new_threads(conn):
+    for ref, repo, number, key in shuffle(list_refs_with_new_threads(conn)):
         try:
             threads = fetch_review_threads(config, repo, number)
         except GitHubError as exc:
@@ -1497,7 +1547,7 @@ def poll_review_queue(
             continue
         with transaction(conn):
             store_review_threads(conn, ref, key, threads)
-    for ref, repo, head in list_ci_blocks_to_check(conn):
+    for ref, repo, head in shuffle(list_ci_blocks_to_check(conn)):
         try:
             blocked_by = fetch_ci_blocked_by(repo, head)
         except ChecksRunning:
@@ -1509,7 +1559,7 @@ def poll_review_queue(
             continue
         with transaction(conn):
             store_ci_blocked_by(conn, ref, head, blocked_by)
-    for ref, repo, doc_commit, head in list_docs_to_compare(conn):
+    for ref, repo, doc_commit, head in shuffle(list_docs_to_compare(conn)):
         try:
             diff = fetch_doc_diff(repo, doc_commit, head, int(ref.rpartition("#")[2]))
         except GitHubError as exc:
@@ -1518,21 +1568,11 @@ def poll_review_queue(
             diff = UNKNOWN_DIFF
         with transaction(conn):
             store_doc_diff(conn, ref, map_doc_to_diff_key(doc_commit, head), diff)
-    with transaction(conn):
-        record_tab_parents(conn, tree)
-        if scanned_from is not None:
-            classify_pending_comments(conn, config, scanned_from)
-            prune_marks(conn, now)
-        store_merge_blocks(conn)
-        return [
-            *take_comment_wakes(conn, config, now),
-            *tell_ready_to_merge(conn, config, now),
-            *tell_review_waits(conn, config, now),
-            *tell_bot_waits(conn, config, now),
-            *tell_issue_missing(conn, config, now),
-            *tell_overlaps(conn, config, now),
-            *tell_bot_round_cap(conn, config, bot_rounds, now),
-        ]
+
+
+def shuffle[T](items: list[T]) -> list[T]:
+    """A round stopped at ROUND_LIMIT_S reaches other PRs next time, so a few whose reads always hang hold back none."""
+    return random.sample(items, len(items))
 
 
 def list_prs_to_label(conn: sqlite3.Connection, config: Config, prs: list[OpenPr]) -> list[OpenPr]:
