@@ -240,10 +240,12 @@ def test_a_signal_that_fails_to_post_is_logged_and_the_next_one_still_goes(
     monkeypatch.setenv("BRIDGE_STATE_DIR", str(bridge_env.state_dir))
     team = Team(bridge_env, spawn_process)
     team.enroll()
-    too_long: dict[str, object] = {"key": "ci:1", "kind": "CI red", "text": "x" * 3000, "url": "", "surface": "PANE-A"}
+    unsendable: dict[str, object] = {
+        "key": "ci:1", "kind": "CI red", "text": "see /p/never-built", "url": "", "surface": "PANE-A",
+    }  # fmt: skip
     fine: dict[str, object] = {"key": "ci:2", "kind": "CI red", "text": "web#8", "url": "", "surface": "PANE-A"}
     with bridge_env.connect() as conn, transaction(conn):
-        posted = post_signals_to_leads(conn, Config(), [too_long, fine], 1000)
+        posted = post_signals_to_leads(conn, Config(), [unsendable, fine], 1000)
     with bridge_env.connect() as conn:
         rows = conn.execute("SELECT body FROM messages").fetchall()
         keys = [r[0] for r in conn.execute("SELECT key FROM signal_posts")]
