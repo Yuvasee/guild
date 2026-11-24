@@ -30,9 +30,9 @@ class DomainOwner:
 
 def find_domain_owner(conn: sqlite3.Connection, key: str) -> DomainOwner | None:
     """The one lead whose domains hold the issue's project, from the database only: a priority project listing the
-    issue, else the issue's cached Linear project, held by a domain of that name or by a priority project most of whose
-    listed issues are in it. None when no lead or more than one does. A Linear project ref as a domain is not matched:
-    Linear's API gives a project no such ref."""
+    issue, else the issue's cached Linear project, held by a domain of that name or, when no lead names it, by a
+    priority project most of whose listed issues are in it. None when no lead or more than one does. A Linear project
+    ref as a domain is not matched: Linear's API gives a project no such ref."""
     key = key.upper()
     leads = [lead for lead in list_leads(conn) if lead.domains]
     if not leads:
@@ -48,11 +48,15 @@ def find_domain_owner(conn: sqlite3.Connection, key: str) -> DomainOwner | None:
     if project is None:
         return None
 
+    # A domain named after the project is that project's owner; a priority list only stands in for a project no lead
+    # names, since several leads' lists can draw most of their issues from one shared project.
+    named = [lead for lead in leads if any(map_name_to_slug(d) == map_name_to_slug(project) for d in lead.domains)]
+    if named:
+        return DomainOwner(named[0], project) if len(named) == 1 else None
+
     def holds(domain: str) -> bool:
         sample = priority.get(map_name_to_slug(domain))
-        if sample is None:
-            return map_name_to_slug(domain) == map_name_to_slug(project)
-        return _find_most_common([cached.get(k) for k in sample]) == project
+        return sample is not None and _find_most_common([cached.get(k) for k in sample]) == project
 
     holders = [lead for lead in leads if any(holds(d) for d in lead.domains)]
     return DomainOwner(holders[0], project) if len(holders) == 1 else None

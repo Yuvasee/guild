@@ -371,3 +371,22 @@ def test_a_truncated_linear_error_answer_is_a_linear_error(monkeypatch: pytest.M
 
     monkeypatch.setattr(urllib.request, "urlopen", urlopen)
     assert LinearApi("key").fetch_issue_nodes(["ACME-7"], "id") == {"ACME-7": "linear HTTP 502"}
+
+
+def test_a_domain_named_as_the_project_wins_over_a_priority_list_drawn_from_it(conn: sqlite3.Connection) -> None:
+    # Cleo's onboarding list draws its issues from Search; Bert names Search as his domain, so Search is his.
+    add_lead(conn, "cleo", ["onboarding"])
+    store_projects(
+        conn,
+        [Project("billing", ("ACME-1", "ACME-2")), Project("search", ("ACME-9",)), Project("onboarding", ("ACME-20",))],
+        "aide",
+        0,
+    )
+    linear = FakeLinear({**LINEAR, "ACME-21": "Search"})
+    refresh_issue_projects(conn, ["ACME-21"], 1_000, linear.fetch_issue_projects)
+
+    found = find_domain_owner(conn, "ACME-21")
+
+    assert found is not None and (found.lead.name, found.project) == ("bert", "Search")
+    listed = find_domain_owner(conn, "ACME-20")
+    assert listed is not None and listed.lead.name == "cleo", "an issue a lead's list names stays that lead's"
