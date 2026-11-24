@@ -234,3 +234,62 @@ def test_a_dirty_checkout_is_not_deployed(deploy: Deploy) -> None:
     assert result.returncode == 1
     assert "stopped at 'check the checkout'" in result.stderr
     assert not (deploy.root / "current").exists()
+
+
+def test_a_deploy_that_would_drop_the_live_commit_stops_unless_told_to_replace_it(deploy: Deploy) -> None:
+    deploy.commit("live but never pushed")
+    assert deploy.run().returncode == 0
+    live = deploy.link("current")
+    subprocess.run(["git", "reset", "-q", "--hard", "HEAD~1"], cwd=deploy.checkout, check=True)
+    deploy.commit("rebased on a main without it")
+
+    result = deploy.run()
+
+    assert result.returncode == 1
+    sha = live.parent.name.partition("-")[2]
+    assert f"stopped at 'keep the live commit' (exit 1): the live release is {sha}, which" in result.stderr
+    assert "--replace-live" in result.stderr
+    assert deploy.link("current") == live
+    assert [*(deploy.root / "releases").iterdir()] == [live.parent], "nothing installed"
+
+    replaced = deploy.run("--replace-live")
+
+    assert replaced.returncode == 0, replaced.stderr
+    assert deploy.link("current") != live and deploy.link("previous") == live
+
+
+def test_a_commit_the_pre_push_hook_refuses_stops_the_deploy_before_anything_is_installed(
+    deploy: Deploy, bridge_env: BridgeEnv
+) -> None:
+    subprocess.run(["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=deploy.checkout, check=True)
+    hooks = deploy.checkout / ".git/hooks"
+    # Refuses as the leak gate does: a word in a commit message the push would send past origin/main.
+    (hooks / "pre-push").write_text(
+        "#!/bin/sh\nwhile read -r _ local _ remote; do\n"
+        '  messages=$(git log --format=%B "$local" "^$remote") || exit 3\n'
+        "  case $messages in *private-word*) echo refused; exit 1;; esac\n"
+        "done\nexit 0\n"
+    )
+    (hooks / "pre-push").chmod(0o755)
+    assert deploy.run().returncode == 0, "origin/main..HEAD holds no refused word"
+    live = deploy.link("current")
+    deploy.commit("names a private-word")
+
+    result = deploy.run()
+
+    assert result.returncode == 1
+    assert "stopped at 'pre-push hook' (exit 1): the push would be refused: see" in result.stderr
+    assert deploy.link("current") == live
+    assert [*(deploy.root / "releases").iterdir()] == [live.parent], "nothing installed"
+    assert [p.read_text() for p in (bridge_env.state_dir / "deploys").glob("*-pre-push.txt")].count("refused\n") == 1
+
+
+def test_a_deploy_after_rolling_back_to_uvs_own_venv_has_no_live_commit_to_keep(deploy: Deploy) -> None:
+    assert deploy.run().returncode == 0
+    assert deploy.run("rollback").returncode == 0
+    assert deploy.link("current") == deploy.home / ".local/share/uv/tools/bridge"
+
+    result = deploy.run()
+
+    assert result.returncode == 0, result.stderr
+    assert deploy.link("current").parent.parent == deploy.root / "releases"

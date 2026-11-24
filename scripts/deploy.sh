@@ -4,8 +4,9 @@
 # reach it through one symlink, ~/.local/share/bridge/current, swapped by rename. A running process keeps its release:
 # its interpreter and site-packages are named by the release's own path, never by `current`.
 #
-#   scripts/deploy.sh            deploy HEAD (a clean tree only), stopping at the first failed step
-#   scripts/deploy.sh rollback   point `current` back at the release before it, re-install its hooks, restart serve
+#   scripts/deploy.sh                 deploy HEAD (a clean tree only), stopping at the first failed step
+#   scripts/deploy.sh --replace-live  the same, also when HEAD does not contain the live release's commit
+#   scripts/deploy.sh rollback        point `current` back at the release before it, re-install its hooks, restart serve
 set -Eeuo pipefail
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
@@ -69,7 +70,9 @@ if [ "${1:-}" = rollback ]; then
   echo "deploy: rolled back to $to (was $from); scripts/deploy.sh rollback again returns to it"
   exit 0
 fi
-[ $# -eq 0 ] || fail 2 "usage: scripts/deploy.sh [rollback]"
+replace_live=
+[ "${1:-}" != --replace-live ] || { replace_live=1; shift; }
+[ $# -eq 0 ] || fail 2 "usage: scripts/deploy.sh [--replace-live | rollback]"
 
 step="check the checkout"
 dirty=$(git -C "$repo" status --porcelain)
@@ -79,6 +82,29 @@ release=$releases/$(date -u +%Y%m%dT%H%M%SZ)-$sha
 venv=$release/bridge
 logs=$state/deploys
 mkdir -p "$logs" "$state/backups" "$releases"
+
+# A release is named <stamp>-<sha12>; uv's own venv, live before the first deploy or after rolling back to it, has no
+# commit to keep.
+step="keep the live commit"
+live=$(readlink "$current" 2>/dev/null) || live=
+if [ -z "$replace_live" ] && [ "${live#"$releases"/}" != "$live" ]; then
+  live=$(basename "$(dirname "$live")")
+  live=${live#*-}
+  git -C "$repo" merge-base --is-ancestor "$live" HEAD 2>/dev/null \
+    || fail 1 "the live release is $live, which $sha does not contain (unpushed, or from another clone): rebase onto it or push it first; scripts/deploy.sh --replace-live drops it, scripts/deploy.sh rollback goes back one release"
+fi
+
+# What the push would refuse must not go live first: the clone's pre-push hook, if any, over origin/main..HEAD.
+step="pre-push hook"
+base=$(git -C "$repo" rev-parse -q --verify origin/main) || base=0000000000000000000000000000000000000000
+url=$(git -C "$repo" remote get-url --push origin 2>/dev/null) || url=
+# Run by path, not `git hook run`, whose --to-stdin needs git 2.40; --git-path follows core.hooksPath.
+(
+  cd "$repo"
+  hook=$(git rev-parse --git-path hooks/pre-push)
+  [ ! -x "$hook" ] || "$hook" origin "$url" <<<"HEAD $(git rev-parse HEAD) refs/heads/main $base"
+) >"$logs/$sha-pre-push.txt" 2>&1 || fail $? "the push would be refused: see $logs/$sha-pre-push.txt"
+
 step="pyright"
 (cd "$repo" && $typecheck) >"$logs/$sha-pyright.txt" 2>&1 || fail $? "type errors: see $logs/$sha-pyright.txt"
 step="find the installed bridge"
