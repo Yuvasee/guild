@@ -1,19 +1,23 @@
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from conftest import BridgeEnv, SpawnProcess
 
-from bridge import gbridge, host_side
+from bridge import gbridge, host_side, host_workers
 from bridge.config import Config, Remote, load_config, map_toml_to_config
 from bridge.db import connect
 from bridge.hooks import HookCaller, handle_hook
@@ -28,6 +32,7 @@ from bridge.host_workers import (
     hash_token,
     make_worker_name,
     map_cwd_to_host_path,
+    map_remote_to_ssh,
     map_worker_to_exact_target,
     read_host_rule_files,
     read_local_model_flags,
@@ -111,6 +116,89 @@ def test_attach_tunnels_to_the_worker_api_only() -> None:
     assert "attach-session -t '=g-task-ab12'" in command[-1]
     assert "-f /dev/null" in command[-1]
     assert "printf %s 23456 > /home/dev/.local/state/gbridge/g-task-ab12/port" in command[-1]
+
+
+@pytest.fixture
+def short_state_dir(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """A socket path must fit in 104 bytes: pytest's own temp dirs on macOS do not leave room."""
+    directory = Path(tempfile.mkdtemp(prefix="b-", dir="/tmp"))
+    monkeypatch.setenv("BRIDGE_STATE_DIR", str(directory))
+    yield directory
+    shutil.rmtree(directory)
+
+
+def _option(command: list[str], name: str) -> str | None:
+    values = [command[i + 1].partition("=")[2] for i, word in enumerate(command[:-1]) if word == "-o"]
+    names = [command[i + 1].partition("=")[0] for i, word in enumerate(command[:-1]) if word == "-o"]
+    return values[names.index(name)] if name in names else None
+
+
+def test_short_calls_share_one_master_per_host_and_tabs_keep_their_own_connection(short_state_dir: Path) -> None:
+    short = map_remote_to_ssh(Remote(name="devbox", ssh="devbox-alt"), "true")
+    attach = build_attach_command(_record(), 23456, 8766)
+    other_host = map_remote_to_ssh(Remote(name="box-b", ssh="box-b"), "true")
+
+    path = _option(short, "ControlPath")
+    assert path is not None and path.startswith(f'"{short_state_dir}/ssh/')
+    assert _option(short, "ControlMaster") == "auto"
+    assert _option(short, "ControlPersist") == "300"
+    assert _option(short, "ClearAllForwardings") == "yes"
+    assert oct((short_state_dir / "ssh").stat().st_mode & 0o777) == "0o700"
+    assert _option(attach, "ControlPath") == "none"
+    assert _option(other_host, "ControlPath") != path
+
+
+@pytest.mark.parametrize("state", ["/tmp/" + "d" * 70, "/tmp/" + "ж" * 35, "/tmp/100%", "/tmp/${HOME}"])
+def test_a_socket_path_ssh_cannot_hold_means_no_sharing(monkeypatch: pytest.MonkeyPatch, state: str) -> None:
+    monkeypatch.setenv("BRIDGE_STATE_DIR", state)
+
+    assert _option(map_remote_to_ssh(Remote(name="devbox", ssh="devbox-alt"), "true"), "ControlPath") == "none"
+
+
+def test_a_socket_folder_that_cannot_be_made_means_no_sharing(short_state_dir: Path) -> None:
+    (short_state_dir / "ssh").write_text("")
+
+    command = map_remote_to_ssh(Remote(name="devbox", ssh="devbox-alt"), "true")
+
+    assert _option(command, "ControlPath") == "none"
+    assert _option(command, "ClearAllForwardings") == "yes"
+
+
+def test_tab_reattaches_until_the_session_is_gone_and_asks_outside_its_process_group(
+    monkeypatch: pytest.MonkeyPatch, short_state_dir: Path
+) -> None:
+    calls: list[tuple[str, bool]] = []
+    has_session = iter([(255, "Connection closed"), (1, "can't find session: =g-task-ab12")])
+
+    def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        kind = "attach" if "-t" in command[:2] else "has-session"
+        calls.append((kind, bool(kwargs.get("start_new_session"))))
+        code, stderr = next(has_session) if kind == "has-session" else (255, "")
+        return subprocess.CompletedProcess(command, code, "", stderr)
+
+    def nothing(*_: object) -> None:
+        return None
+
+    def read_record(worker: str) -> HostWorker:
+        return _record(worker=worker)
+
+    def pinned(*_: object) -> SimpleNamespace:
+        return SimpleNamespace(ok=True)
+
+    def removed(*_: object) -> dict[str, bool]:
+        return {"ok": True}
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(host_workers, "read_record", read_record)
+    for name in ("write_record", "register_tab_instance", "delete_record"):
+        monkeypatch.setattr(host_workers, name, nothing)
+    monkeypatch.setattr(host_workers, "pin_restore_command", pinned)
+    monkeypatch.setattr(host_workers, "run_on_host", removed)
+    monkeypatch.setattr(host_workers.time, "sleep", nothing)
+
+    assert host_workers.run_tab_loop("g-task-ab12", 8766, "agtermctl") == 0
+    once = [("attach", False), ("has-session", True)]
+    assert calls == once + once
 
 
 def test_cleanup_command_runs_whole_on_the_host() -> None:

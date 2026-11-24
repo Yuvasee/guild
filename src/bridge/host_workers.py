@@ -27,6 +27,7 @@ from bridge.errors import UsageError
 from bridge.gitinfo import GitInfo
 from bridge.procinfo import process_start_ms
 from bridge.registry import PROC_START_TOLERANCE_MS, Observation, Surface, observe_instance, record_activity
+from bridge.remote import build_shared_connection_options
 from bridge.restore import pin_restore_command
 
 HOST_KIND_PREFIX = "host:"
@@ -360,7 +361,15 @@ def run_on_host(remote: Remote, payload: dict[str, Any], timeout_s: int = SETUP_
     program = program.replace('\nif __name__ == "__main__":\n    main()\n', "\n")
     command = map_remote_to_ssh(remote, "python3 -I -S -")
     try:
-        done = subprocess.run(command, input=program, capture_output=True, text=True, timeout=timeout_s, check=False)
+        done = subprocess.run(
+            command,
+            input=program,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            check=False,
+            start_new_session=True,
+        )
     except subprocess.TimeoutExpired:
         return {"ok": False, "unknown": True, "error": f"ssh to {remote.name} timed out after {timeout_s}s"}
     except OSError as exc:
@@ -382,7 +391,7 @@ def map_remote_to_ssh(remote: Remote, remote_command: str) -> list[str]:
         "ssh",
         "-o", "BatchMode=yes",
         "-o", f"ConnectTimeout={SSH_CONNECT_TIMEOUT_S}",
-        "-o", "ControlPath=none",
+        *build_shared_connection_options(remote.ssh),
         "-o", "ForwardAgent=no",
         "-o", "ServerAliveInterval=10",
         "-o", "ServerAliveCountMax=3",
@@ -416,6 +425,8 @@ def build_attach_command(record: HostWorker, port: int, api_port: int) -> list[s
     return [
         "ssh", "-t",
         "-o", f"ConnectTimeout={SSH_CONNECT_TIMEOUT_S}",
+        # Not through the shared master: past sshd's MaxSessions (10 by default) a tab's session is refused, and
+        # ssh's fallback connection then fails on the forward the master already took for it.
         "-o", "ControlPath=none",
         "-o", "ForwardAgent=no",
         "-o", "ServerAliveInterval=10",
@@ -433,7 +444,14 @@ def read_session_state(record: HostWorker) -> str:
     remote = Remote(name=record.host, ssh=record.ssh)
     command = map_remote_to_ssh(remote, f"{TMUX} has-session -t {map_worker_to_exact_target(record.worker)}")
     try:
-        done = subprocess.run(command, capture_output=True, text=True, timeout=SSH_CONNECT_TIMEOUT_S + 15, check=False)
+        done = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=SSH_CONNECT_TIMEOUT_S + 15,
+            check=False,
+            start_new_session=True,
+        )
     except (OSError, subprocess.TimeoutExpired):
         return "unknown"
     if done.returncode == 0:
@@ -481,6 +499,7 @@ def run_tab_loop(worker: str, api_port: int, agtermctl: str) -> int:
     if not pinned.ok:
         print(f"bridge: agterm will not reopen this tab after a restart: {pinned.detail}")
     env = {**os.environ, "TERM": "xterm-256color"}
+    remote = Remote(name=record.host, ssh=record.ssh)
     failures = 0
     while True:
         _flush_typed_input()
@@ -490,7 +509,7 @@ def run_tab_loop(worker: str, api_port: int, agtermctl: str) -> int:
         state = read_session_state(record)
         if state == "gone":
             print(f"\r\nbridge: {worker} has ended on {record.host}; this tab closes.")
-            removed = run_on_host(Remote(name=record.host, ssh=record.ssh), {"op": "remove", "worker": worker})
+            removed = run_on_host(remote, {"op": "remove", "worker": worker})
             if removed.get("kept"):
                 print(f"bridge: on {record.host}, {removed['kept']}")
             if removed.get("ok"):

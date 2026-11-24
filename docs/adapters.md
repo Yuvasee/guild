@@ -232,3 +232,7 @@ aliases = ["devbox-alt"]  # other names that reach the same machine
 
 Bridge lists the tmux sessions on each remote over ssh, shows the agents running there next to local ones, and knows
 which local session drives which remote one. Without `[[remotes]]` nothing connects anywhere.
+
+Bridge's short ssh calls to a host share one connection: its own master, under `~/.local/state/bridge/ssh`, whatever
+your `~/.ssh/config` sets for multiplexing, closed 5 minutes after the last call. Each host worker tab keeps a
+connection of its own, since sshd refuses sessions past `MaxSessions` (10 by default) on one connection.

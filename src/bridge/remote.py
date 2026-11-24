@@ -1,4 +1,6 @@
+import hashlib
 import json
+import os
 import re
 import shlex
 import sqlite3
@@ -7,7 +9,7 @@ from dataclasses import dataclass
 from importlib.resources import files
 from typing import cast
 
-from bridge.config import Config, Remote
+from bridge.config import Config, Remote, state_dir
 from bridge.db import transaction
 from bridge.refs import extract_refs
 
@@ -17,6 +19,9 @@ REMOTE_STALE_AFTER_MS = 300_000
 MISSES_BEFORE_DROP = 2
 _HOST_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 _GITHUB_RE = re.compile(r"github\.com[:/]([\w.-]+)/([\w.-]+?)(?:\.git)?/?$")
+SHARED_CONNECTION_PERSIST_S = 300
+# sun_path on macOS, less the NUL and the 17-character suffix ssh adds while it creates the socket.
+_SOCKET_PATH_MAX = 104 - 1 - 17
 
 
 @dataclass(frozen=True)
@@ -28,13 +33,21 @@ class Collected:
 
 
 def collect(remote: Remote) -> Collected:
-    """Runs the read-only probe over ssh with a hard wall-clock limit and without touching shared ssh masters."""
+    """Runs the read-only probe over ssh with a hard wall-clock limit."""
     if not _HOST_RE.fullmatch(remote.name):
         return Collected(False, f"invalid remote name {remote.name!r}", [], None)
     probe = files("bridge").joinpath("remote_probe.py").read_text()
     command = _map_remote_to_ssh(remote, "python3 -I -S -")
     try:
-        done = subprocess.run(command, input=probe, capture_output=True, text=True, timeout=SSH_TIMEOUT_S, check=False)
+        done = subprocess.run(
+            command,
+            input=probe,
+            capture_output=True,
+            text=True,
+            timeout=SSH_TIMEOUT_S,
+            check=False,
+            start_new_session=True,
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return Collected(False, f"ssh {type(exc).__name__}", [], None)
     if done.returncode != 0:
@@ -60,7 +73,14 @@ def read_tmux_sessions(remote: Remote | None) -> set[str] | None:
     listing = ["tmux", "list-sessions", "-F", "#{session_name}\t#{session_id}"]
     command = _map_remote_to_ssh(remote, shlex.join(listing)) if remote else listing
     try:
-        done = subprocess.run(command, capture_output=True, text=True, timeout=TMUX_LIST_TIMEOUT_S, check=False)
+        done = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=TMUX_LIST_TIMEOUT_S,
+            check=False,
+            start_new_session=bool(remote),
+        )
     except FileNotFoundError:
         return set() if remote is None else None
     except (OSError, subprocess.TimeoutExpired):
@@ -72,12 +92,33 @@ def read_tmux_sessions(remote: Remote | None) -> set[str] | None:
     return set() if done.returncode == 1 and no_server else None
 
 
+def build_shared_connection_options(ssh: str) -> list[str]:
+    """Bridge's own master per host, not the user's: a master keeps the options of the call that started it. Its
+    proxy stays in the process group of the ssh that started it, and dies with a tab: callers use start_new_session."""
+    # A forward from ~/.ssh/config would stay with the master and refuse the same forward to a tab's own connection.
+    unshared = ["-o", "ClearAllForwardings=yes", "-o", "ControlPath=none"]
+    path = state_dir() / "ssh" / hashlib.sha256(ssh.encode()).hexdigest()[:16]
+    # ssh expands % and ${} in a ControlPath, and the quotes that keep a space cannot hold a quote.
+    if len(os.fsencode(path)) > _SOCKET_PATH_MAX or any(c in str(path) for c in '%$"'):
+        return unshared
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError:
+        return unshared
+    return [
+        "-o", "ClearAllForwardings=yes",
+        "-o", "ControlMaster=auto",
+        "-o", f'ControlPath="{path}"',
+        "-o", f"ControlPersist={SHARED_CONNECTION_PERSIST_S}",
+    ]  # fmt: skip
+
+
 def _map_remote_to_ssh(remote: Remote, remote_command: str) -> list[str]:
     return [
         "ssh",
         "-o", "BatchMode=yes",
         "-o", "ConnectTimeout=10",
-        "-o", "ControlPath=none",
+        *build_shared_connection_options(remote.ssh),
         "-o", "ForwardAgent=no",
         "-o", "ServerAliveInterval=10",
         "-o", "ServerAliveCountMax=2",
