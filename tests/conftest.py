@@ -224,9 +224,15 @@ def bridge_env(tmp_path: Path) -> BridgeEnv:
     config.write_text(
         f'issue_prefixes = ["ABC"]\nagtermctl = "{stub}"\nissue_url = "https://tracker.example/issue/{{key}}"\n'
     )
+    # A Mac worker starts only in a folder Claude Code trusts: the tests' folders are, in a config of their own.
+    claude_home = tmp_path / "claude-home"
+    claude_home.mkdir()
+    trusted = {"hasTrustDialogAccepted": True}
+    (claude_home / ".claude.json").write_text(json.dumps({"projects": {os.path.realpath(tmp_path): trusted}}))
     env = {k: v for k, v in os.environ.items() if not k.startswith(("AGTERM_", "CLAUDE"))}
     env.update(
         PATH=f"{stub_bin}{os.pathsep}{env.get('PATH', '')}",
+        CLAUDE_CONFIG_DIR=str(claude_home),
         BRIDGE_STATE_DIR=str(state_dir),
         BRIDGE_CONFIG=str(config),
         BRIDGE_CLAUDE_SESSIONS_DIR=str(sessions_dir),

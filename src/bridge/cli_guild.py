@@ -64,6 +64,7 @@ from bridge.dream import (
 )
 from bridge.errors import UsageError
 from bridge.feed import answer_post, spawn_typed_delivery
+from bridge.folder_trust import ensure_worker_folder_trusted
 from bridge.host_workers import (
     HOST_KIND_PREFIX,
     HostWorker,
@@ -803,6 +804,8 @@ def cmd_worker(args: argparse.Namespace, conn: sqlite3.Connection, config: Confi
         if down is None:
             return _start_host_worker(conn, config, me.handle, parent, name, prompt, cwd)
         print(f"starting {name!r} on this Mac: {down}")
+    if marked := ensure_worker_folder_trusted(cwd, config.worker_trust_roots):
+        print(marked)
     brief = state_dir() / "worker-briefs" / f"{uuid.uuid4().hex}.md"
     brief.parent.mkdir(parents=True, exist_ok=True)
     brief.write_text(build_worker_brief(conn, config, prompt, f"bridge send {me.handle}"))

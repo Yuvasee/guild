@@ -138,6 +138,8 @@ A tab enrolled with `guild lead add` is a named team lead. Its role, scope and n
 
   At most 5 workers run under one lead, resting ones included: a sixth is refused with each
   live one's age and last state, so close one first.
+  A worker on this Mac starts only in a folder Claude Code trusts: under the config's `worker_trust_roots` bridge
+  marks a new one trusted; elsewhere the refusal says how to trust it.
 
   It opens the nested tab with the leads' permission mode, the claude.ai connectors (Linear among them), no project
   `.mcp.json` servers (rejected by name, so no approval dialog), no Claude in Chrome and no Playwright. It tells the

@@ -132,6 +132,11 @@ the file reads so: for what only the owner's hands can fix, such as a login.
 `worker_host_watcher = "<watcher name>"` names the watcher of `worker_host`'s Claude: while it reads failed,
 `guild worker` starts the worker on this Mac and says why. Stale or missing, the worker goes to the host as usual.
 
+A worker on this Mac starts only in a folder Claude Code already trusts, since Claude would otherwise wait at its
+"Is this a project you trust?" dialog. Set `worker_trust_roots = ["~/projects"]` and a folder under one of them that is
+not trusted yet is marked trusted at launch, as answering the dialog would; anywhere else `guild worker` refuses it
+and says how to trust it. Empty, the default, marks nothing.
+
 ## Team rules: defaults you can change
 
 Some rules are a way of working rather than a mechanism. They ship as defaults, written into the lead role and the

@@ -1299,7 +1299,7 @@ def test_guild_worker_stores_the_parent_link_before_any_reconcile(
     env = dict(bridge_env.env, CLAUDE_PID=str(team.a), AGTERM_SESSION_ID="TAB-A")
 
     done = subprocess.run(
-        [str(VENV_BIN / "guild"), "worker", "Task", "--prompt", "Fix the export retry"],
+        [str(VENV_BIN / "guild"), "worker", "Task", "--cwd", str(bridge_env.root), "--prompt", "Fix the export retry"],
         env=env, capture_output=True, text=True, timeout=30, check=False,
     )  # fmt: skip
 

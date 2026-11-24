@@ -102,6 +102,9 @@ class Config:
     """Local checkout (~ allowed) to the same checkout's absolute path on worker_host."""
     worker_host_watcher: str = ""
     """The [[watchers]] name that watches worker_host's Claude; while it reads failed, workers start on this Mac."""
+    worker_trust_roots: tuple[str, ...] = ()
+    """The owner's folders (~ allowed): a Mac worker's folder under one that Claude Code has not trusted yet is marked
+    trusted at launch; elsewhere guild worker refuses it, since Claude would wait at its trust dialog."""
     review_post_dry_run: bool = True
     """Writes the Slack post to a log instead of sending it."""
     review_channel_id: str = ""
@@ -319,6 +322,7 @@ def map_toml_to_config(raw: dict[str, object]) -> Config:
         worker_host=_str(raw, "worker_host", defaults.worker_host),
         worker_path_map=MappingProxyType(map_table_to_worker_path_map(_str_table(raw, "worker_path_map"))),
         worker_host_watcher=_str(raw, "worker_host_watcher", defaults.worker_host_watcher),
+        worker_trust_roots=_str_list(raw, "worker_trust_roots", defaults.worker_trust_roots),
         review_post_dry_run=_bool(raw, "review_post_dry_run", defaults.review_post_dry_run),
         review_ignored_posts=_str_list(raw, "review_ignored_posts", defaults.review_ignored_posts),
         agent_prefix_from_ms=_int(raw, "agent_prefix_from_ms", defaults.agent_prefix_from_ms),

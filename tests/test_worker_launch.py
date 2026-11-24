@@ -177,7 +177,7 @@ def test_a_sixth_worker_under_one_lead_is_refused_and_the_five_are_named_oldest_
     env = dict(bridge_env.env, CLAUDE_PID=str(team.a), AGTERM_SESSION_ID="TAB-A")
 
     done = subprocess.run(
-        [str(VENV_BIN / "guild"), "worker", "Task 6", "--prompt", "Fix the thing"],
+        [str(VENV_BIN / "guild"), "worker", "Task 6", "--cwd", str(bridge_env.root), "--prompt", "Fix the thing"],
         env=env, capture_output=True, text=True, timeout=30, check=False,
     )  # fmt: skip
 
@@ -192,7 +192,7 @@ def test_a_sixth_worker_under_one_lead_is_refused_and_the_five_are_named_oldest_
     sessions.append({"id": "TAB-W", "name": "Task 6", "status": "active"})
     bridge_env.stub_tree.write_text(json.dumps(raw))
     done = subprocess.run(
-        [str(VENV_BIN / "guild"), "worker", "Task 6", "--prompt", "Fix the thing"],
+        [str(VENV_BIN / "guild"), "worker", "Task 6", "--cwd", str(bridge_env.root), "--prompt", "Fix the thing"],
         env=env, capture_output=True, text=True, timeout=30, check=False,
     )  # fmt: skip
     assert "workers already run" not in done.stderr
