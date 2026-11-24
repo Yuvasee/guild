@@ -221,7 +221,7 @@ class Config:
         return any(n and any(mark in n for mark in HIDDEN_NAME_MARKS) for n in names)
 
     def pr_repo_for(self, repo: str | None) -> str | None:
-        """Where bare #12 refs point when a session's cwd is a repo that has no PRs of its own."""
+        """Where a "PR #12" points when a session's cwd is a repo that has no PRs of its own."""
         return self.pr_repo_aliases.get(repo, repo) if repo else None
 
 

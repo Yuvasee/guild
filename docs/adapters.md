@@ -74,8 +74,8 @@ What is GitHub-specific:
 
 - **PR state on the page** (`enrich.py`, `fetch_prs`): one `gh api graphql` query for title, state, checks, review
   decision, mergeability and head branch of every PR sessions mention.
-- **PR refs** (`refs.py`): `github.com/owner/repo/pull/N` URLs, `owner/repo#N`, and bare `#N` in a repo whose
-  `origin` is on GitHub.
+- **PR refs** (`refs.py`): `github.com/owner/repo/pull/N` URLs, `owner/repo#N`, and `PR #N` in a repo whose
+  `origin` is on GitHub; a lone `#N` is not a PR, as bridge messages and asks are numbered the same way.
 - **Claims on PRs** (`claims.py`): `pr:owner/repo#N` and its head branch are one resource, resolved with
   `gh pr view` / `gh pr list`.
 - **The push and merge guard** (`guard.py`): reads `git push`, `gh pr merge`, `gh pr close` and `gh api …/merge`

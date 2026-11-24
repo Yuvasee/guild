@@ -12,7 +12,7 @@ from bridge.restore import build_restore_command
 def test_extract_refs_from_prose_with_configured_prefixes() -> None:
     text = (
         "Fix abc-12 and ABC-345; see https://github.com/acme/web/pull/31 and acme/api#77. "
-        "PR #35 is green, #12 too. UTF-8 and SHA-25 are not issues; color &#12; is not a PR."
+        "PR #35 is green, pr 12 too. UTF-8 and SHA-25 are not issues; color &#12; is not a PR."
     )
     refs = extract_refs(text, issue_prefixes=("ABC",), default_repo="acme/web")
     assert refs == [
@@ -33,6 +33,15 @@ def test_extract_refs_generic_issue_pattern_skips_common_acronyms() -> None:
 def test_github_issue_urls_and_single_digit_prs() -> None:
     refs = extract_refs("https://github.com/acme/web/issues/12 and PR #5", issue_prefixes=(), default_repo="acme/web")
     assert refs == ["gh-issue:acme/web#12", "pr:acme/web#5"]
+
+
+def test_lone_hash_numbers_are_not_prs() -> None:
+    text = "Answered #42 and ask #17 (#63); see tool#88 and the docs #9."
+    assert extract_refs(text, issue_prefixes=(), default_repo="acme/web") == []
+    assert extract_refs("Pushed PR #42; PR 43 next.", issue_prefixes=(), default_repo="acme/web") == [
+        "pr:acme/web#42",
+        "pr:acme/web#43",
+    ]
 
 
 def test_bare_numbers_need_a_repo() -> None:

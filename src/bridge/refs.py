@@ -9,7 +9,9 @@ MAX_REFS_PER_TEXT = 20
 _PR_URL_RE = re.compile(r"github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)")
 _GH_ISSUE_URL_RE = re.compile(r"github\.com/([\w.-]+)/([\w.-]+)/issues/(\d+)")
 _REPO_NUM_RE = re.compile(r"(?<![\w/.-])([\w.-]+)/([\w.-]+)#(\d+)\b")
-_BARE_NUM_RE = re.compile(r"(?:\bPR\s*#?(\d{1,6})|(?<![\w&/#])#(\d{2,6}))\b", re.IGNORECASE)
+# A lone #N is not read as a PR: bridge messages, asks and pins are numbered #N too, and other repos' PRs are
+# written short; each one became a GitHub lookup every round.
+_PR_NUM_RE = re.compile(r"\bPR\s*#?(\d{1,6})\b", re.IGNORECASE)
 _GENERIC_ISSUE_RE = re.compile(r"\b([A-Z][A-Z0-9]{1,9})-(\d{1,6})\b")
 _NOT_ISSUE_PREFIXES = frozenset(
     {"UTF", "SHA", "ISO", "HTTP", "RFC", "CVE", "GPT", "TLS", "SSL", "AES", "RSA", "P", "X", "COVID", "MD5"}
@@ -31,8 +33,8 @@ def extract_refs(
     for owner, repo, number in _REPO_NUM_RE.findall(scanned):
         found[f"pr:{owner}/{repo}#{number}"] = None
     if default_repo:
-        for explicit, bare in _BARE_NUM_RE.findall(scanned):
-            found[f"pr:{default_repo}#{explicit or bare}"] = None
+        for number in _PR_NUM_RE.findall(scanned):
+            found[f"pr:{default_repo}#{number}"] = None
     for issue in extract_issue_keys(scanned, issue_prefixes):
         found[f"issue:{issue}"] = None
     return list(found)[:MAX_REFS_PER_TEXT]
