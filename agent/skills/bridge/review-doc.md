@@ -230,9 +230,9 @@ fallback for reading the file outside the viewer applies only without it.
 - **Term:** every internal name (service, function, table, flag, agent type, finding code, metric) is a term, marked
   at its first use in each `h2` section, not every use. Click opens a popover with the meaning; there is no "Names
   used below" section and no glossary.
-  `<span class="term" data-def="One plain sentence: what it is, and where it lives in the code.">LLM Service</span>`. `data-def` is plain text (no
+  `<span class="term" data-def="One plain sentence: what it is, and where it lives in the code.">Billing Service</span>`. `data-def` is plain text (no
   markup, `&quot;` for a quote), one sentence a newcomer understands. A code name goes inside:
-  `<span class="term" data-def="…"><code>llm_service</code></span>`.
+  `<span class="term" data-def="…"><code>billing_service</code></span>`.
 - **Mark:** provenance and handling labels, small and quiet, after the claim or at the end of a summary line, never in
   a heading, and no legend anywhere. `<span class="mark observed">observed</span>`. Classes: `observed`, `reproduced`,
   `from-code` (provenance), and `decided` (a decision taken and kept), `accepted`, `fixed-here`, `deferred`,
