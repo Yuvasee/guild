@@ -232,6 +232,7 @@ Sam = "U0123456789"
 name = "devbox"
 ssh = "devbox"            # a host from ~/.ssh/config
 aliases = ["devbox-alt"]  # other names that reach the same machine
+share_tabs = true         # host worker tabs share one connection; needs sshd MaxSessions above the tabs open there
 ```
 
 Bridge lists the tmux sessions on each remote over ssh, shows the agents running there next to local ones, and knows
@@ -239,4 +240,5 @@ which local session drives which remote one. Without `[[remotes]]` nothing conne
 
 Bridge's short ssh calls to a host share one connection: its own master, under `~/.local/state/bridge/ssh`, whatever
 your `~/.ssh/config` sets for multiplexing, closed 5 minutes after the last call. Each host worker tab keeps a
-connection of its own, since sshd refuses sessions past `MaxSessions` (10 by default) on one connection.
+connection of its own, since sshd refuses sessions past `MaxSessions` (10 by default) on one connection, unless
+`share_tabs` is set for that host: then tabs use the same connection, and when it drops every tab there reattaches.

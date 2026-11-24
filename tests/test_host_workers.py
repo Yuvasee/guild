@@ -133,7 +133,9 @@ def _option(command: list[str], name: str) -> str | None:
     return values[names.index(name)] if name in names else None
 
 
-def test_short_calls_share_one_master_per_host_and_tabs_keep_their_own_connection(short_state_dir: Path) -> None:
+def test_short_calls_share_one_master_per_host_and_tabs_by_default_keep_their_own_connection(
+    short_state_dir: Path,
+) -> None:
     short = map_remote_to_ssh(Remote(name="devbox", ssh="devbox-alt"), "true")
     attach = build_attach_command(_record(), 23456, 8766)
     other_host = map_remote_to_ssh(Remote(name="box-b", ssh="box-b"), "true")
@@ -146,6 +148,16 @@ def test_short_calls_share_one_master_per_host_and_tabs_keep_their_own_connectio
     assert oct((short_state_dir / "ssh").stat().st_mode & 0o777) == "0o700"
     assert _option(attach, "ControlPath") == "none"
     assert _option(other_host, "ControlPath") != path
+
+
+def test_tabs_share_only_on_a_remote_that_says_so() -> None:
+    remotes = map_toml_to_config(
+        {"remotes": [{"name": "devbox", "ssh": "devbox-alt"}, {"name": "box-b", "ssh": "box-b", "share_tabs": True}]}
+    ).remotes
+
+    assert [r.share_tabs for r in remotes] == [False, True]
+    with pytest.raises(ValueError, match="share_tabs"):
+        map_toml_to_config({"remotes": [{"name": "devbox", "ssh": "devbox-alt", "share_tabs": "yes"}]})
 
 
 @pytest.mark.parametrize("state", ["/tmp/" + "d" * 70, "/tmp/" + "ж" * 35, "/tmp/100%", "/tmp/${HOME}"])
@@ -164,16 +176,27 @@ def test_a_socket_folder_that_cannot_be_made_means_no_sharing(short_state_dir: P
     assert _option(command, "ClearAllForwardings") == "yes"
 
 
-def test_tab_reattaches_until_the_session_is_gone_and_asks_outside_its_process_group(
-    monkeypatch: pytest.MonkeyPatch, short_state_dir: Path
+@pytest.mark.parametrize("share", [False, True])
+def test_tab_reattaches_until_the_session_is_gone_and_keeps_its_port_unless_ssh_failed(
+    monkeypatch: pytest.MonkeyPatch, short_state_dir: Path, share: bool
 ) -> None:
+    config = short_state_dir / "config.toml"
+    config.write_text(f'[[remotes]]\nname = "devbox"\nssh = "devbox-alt"\nshare_tabs = {str(share).lower()}\n')
+    monkeypatch.setenv("BRIDGE_CONFIG", str(config))
     calls: list[tuple[str, bool]] = []
-    has_session = iter([(255, "Connection closed"), (1, "can't find session: =g-task-ab12")])
+    attaches: list[list[str]] = []
+    attach_codes = iter([0, 255, 0])
+    has_session = iter([(255, "Connection closed"), (255, ""), (1, "can't find session: =g-task-ab12")])
+    ports = iter(range(30001, 30010))
 
     def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        kind = "attach" if "-t" in command[:2] else "has-session"
+        kind = "attach" if "-t" in command[:2] else "has-session" if "has-session" in command[-1] else command[-1]
         calls.append((kind, bool(kwargs.get("start_new_session"))))
-        code, stderr = next(has_session) if kind == "has-session" else (255, "")
+        if kind == "attach":
+            attaches.append(command)
+        code, stderr = (
+            next(has_session) if kind == "has-session" else (next(attach_codes), "") if kind == "attach" else (0, "")
+        )
         return subprocess.CompletedProcess(command, code, "", stderr)
 
     def nothing(*_: object) -> None:
@@ -188,6 +211,9 @@ def test_tab_reattaches_until_the_session_is_gone_and_asks_outside_its_process_g
     def removed(*_: object) -> dict[str, bool]:
         return {"ok": True}
 
+    def next_port(*_: int) -> int:
+        return next(ports)
+
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setattr(host_workers, "read_record", read_record)
     for name in ("write_record", "register_tab_instance", "delete_record"):
@@ -195,10 +221,17 @@ def test_tab_reattaches_until_the_session_is_gone_and_asks_outside_its_process_g
     monkeypatch.setattr(host_workers, "pin_restore_command", pinned)
     monkeypatch.setattr(host_workers, "run_on_host", removed)
     monkeypatch.setattr(host_workers.time, "sleep", nothing)
+    monkeypatch.setattr(host_workers.random, "randint", next_port)
 
     assert host_workers.run_tab_loop("g-task-ab12", 8766, "agtermctl") == 0
-    once = [("attach", False), ("has-session", True)]
-    assert calls == once + once
+    once = [("true", True)] * share + [("attach", False), ("has-session", True)]
+    assert calls == once * 3
+    forwards = [command[command.index("-R") + 1].split(":")[1] for command in attaches]
+    assert forwards == ["30001", "30001", "30002"]
+    short_path = _option(map_remote_to_ssh(Remote(name="devbox", ssh="devbox-alt"), "true"), "ControlPath")
+    for command in attaches:
+        assert _option(command, "ControlPath") == (short_path if share else "none")
+        assert _option(command, "ControlMaster") == ("no" if share else None)
 
 
 def test_cleanup_command_runs_whole_on_the_host() -> None:

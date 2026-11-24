@@ -92,23 +92,30 @@ def read_tmux_sessions(remote: Remote | None) -> set[str] | None:
     return set() if done.returncode == 1 and no_server else None
 
 
+def make_shared_control_path(ssh: str) -> str | None:
+    """Quoted for ssh; None when ssh could not use it."""
+    path = state_dir() / "ssh" / hashlib.sha256(ssh.encode()).hexdigest()[:16]
+    # ssh expands % and ${} in a ControlPath, and the quotes that keep a space cannot hold a quote.
+    if len(os.fsencode(path)) > _SOCKET_PATH_MAX or any(c in str(path) for c in '%$"'):
+        return None
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError:
+        return None
+    return f'"{path}"'
+
+
 def build_shared_connection_options(ssh: str) -> list[str]:
     """Bridge's own master per host, not the user's: a master keeps the options of the call that started it. Its
     proxy stays in the process group of the ssh that started it, and dies with a tab: callers use start_new_session."""
     # A forward from ~/.ssh/config would stay with the master and refuse the same forward to a tab's own connection.
-    unshared = ["-o", "ClearAllForwardings=yes", "-o", "ControlPath=none"]
-    path = state_dir() / "ssh" / hashlib.sha256(ssh.encode()).hexdigest()[:16]
-    # ssh expands % and ${} in a ControlPath, and the quotes that keep a space cannot hold a quote.
-    if len(os.fsencode(path)) > _SOCKET_PATH_MAX or any(c in str(path) for c in '%$"'):
-        return unshared
-    try:
-        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    except OSError:
-        return unshared
+    path = make_shared_control_path(ssh)
+    if path is None:
+        return ["-o", "ClearAllForwardings=yes", "-o", "ControlPath=none"]
     return [
         "-o", "ClearAllForwardings=yes",
         "-o", "ControlMaster=auto",
-        "-o", f'ControlPath="{path}"',
+        "-o", f"ControlPath={path}",
         "-o", f"ControlPersist={SHARED_CONNECTION_PERSIST_S}",
     ]  # fmt: skip
 

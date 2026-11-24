@@ -21,13 +21,13 @@ from importlib.resources import files
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
-from bridge.config import Config, Remote, db_path, read_overlay, state_dir
+from bridge.config import Config, Remote, db_path, load_config, read_overlay, state_dir
 from bridge.db import connect, transaction
 from bridge.errors import UsageError
 from bridge.gitinfo import GitInfo
 from bridge.procinfo import process_start_ms
 from bridge.registry import PROC_START_TOLERANCE_MS, Observation, Surface, observe_instance, record_activity
-from bridge.remote import build_shared_connection_options
+from bridge.remote import build_shared_connection_options, make_shared_control_path
 from bridge.restore import pin_restore_command
 
 HOST_KIND_PREFIX = "host:"
@@ -412,7 +412,7 @@ def build_tab_command(worker: str) -> str:
     return "zsh -lc " + shlex.quote(" ".join(["exec", "env", *env, loop]) if env else f"exec {loop}")
 
 
-def build_attach_command(record: HostWorker, port: int, api_port: int) -> list[str]:
+def build_attach_command(record: HostWorker, port: int, api_port: int, shared: bool = False) -> list[str]:
     """The tunnel goes to the worker API only: the dashboard's own port takes actions from anything on localhost."""
     port_file = (
         shlex.quote(record.remote_dir + "/port")
@@ -422,12 +422,15 @@ def build_attach_command(record: HostWorker, port: int, api_port: int) -> list[s
     remote = (
         f"printf %s {port} > {port_file} && exec {TMUX} attach-session -t {map_worker_to_exact_target(record.worker)}"
     )
+    path = make_shared_control_path(record.ssh) if shared else None
+    # Past sshd's MaxSessions (10 by default) a tab's session through the master is refused, and ssh's fallback
+    # connection then fails on the forward the master already took for it: shared only where the host allows more.
+    # Never the master itself: open_shared_connection starts that outside the tab.
+    connection = ["-o", "ControlMaster=no", "-o", f"ControlPath={path}"] if path else ["-o", "ControlPath=none"]
     return [
         "ssh", "-t",
         "-o", f"ConnectTimeout={SSH_CONNECT_TIMEOUT_S}",
-        # Not through the shared master: past sshd's MaxSessions (10 by default) a tab's session is refused, and
-        # ssh's fallback connection then fails on the forward the master already took for it.
-        "-o", "ControlPath=none",
+        *connection,
         "-o", "ForwardAgent=no",
         "-o", "ServerAliveInterval=10",
         "-o", "ServerAliveCountMax=3",
@@ -437,6 +440,30 @@ def build_attach_command(record: HostWorker, port: int, api_port: int) -> list[s
         record.ssh,
         remote,
     ]  # fmt: skip
+
+
+def open_shared_connection(remote: Remote) -> None:
+    """In a session of its own, so the master it may start outlives this tab. A failure is left to the attach,
+    which then connects on its own."""
+    with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+        subprocess.run(
+            map_remote_to_ssh(remote, "true"),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=SSH_CONNECT_TIMEOUT_S + 15,
+            check=False,
+            start_new_session=True,
+        )
+
+
+def read_tabs_share(host: str) -> bool:
+    """Read at every attach: turning it off takes effect at the next reattach, without reopening tabs."""
+    try:
+        config = load_config()
+    except (OSError, ValueError):
+        return False
+    return any(r.share_tabs for r in config.remotes if r.name == host)
 
 
 def read_session_state(record: HostWorker) -> str:
@@ -501,11 +528,18 @@ def run_tab_loop(worker: str, api_port: int, agtermctl: str) -> int:
     env = {**os.environ, "TERM": "xterm-256color"}
     remote = Remote(name=record.host, ssh=record.ssh)
     failures = 0
+    port = random.randint(*TUNNEL_PORTS)
     while True:
         _flush_typed_input()
-        port = random.randint(*TUNNEL_PORTS)
         started = time.monotonic()
-        code = subprocess.run(build_attach_command(record, port, api_port), env=env, check=False).returncode
+        shared = read_tabs_share(record.host)
+        if shared:
+            open_shared_connection(remote)
+        code = subprocess.run(build_attach_command(record, port, api_port, shared), env=env, check=False).returncode
+        if code == 255:
+            # Its forward may be refused next time. Kept otherwise: a master keeps a client's forward after it exits,
+            # so a new port on each reattach would leave one more listener on the host each time.
+            port = random.randint(*TUNNEL_PORTS)
         state = read_session_state(record)
         if state == "gone":
             print(f"\r\nbridge: {worker} has ended on {record.host}; this tab closes.")

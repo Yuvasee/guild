@@ -19,6 +19,9 @@ class Remote:
     ssh: str
     aliases: tuple[str, ...] = ()
     """Other ssh host names that reach the same machine (e.g. a second ssh alias), for spotting who drives it."""
+    share_tabs: bool = False
+    """Host worker tabs attach through bridge's shared connection to the host: only for an sshd whose MaxSessions
+    exceeds the tabs open there at once, since a session past it is refused and that tab cannot attach."""
 
     def host_names(self) -> tuple[str, ...]:
         return tuple(dict.fromkeys((self.ssh, self.name, *self.aliases)))
@@ -524,7 +527,12 @@ def map_table_to_remote(table: dict[str, object]) -> Remote:
     aliases = cast(list[object], raw_aliases) if isinstance(raw_aliases, list) else None
     if aliases is None or not all(isinstance(a, str) for a in aliases):
         raise ValueError("remotes.aliases must be a list of strings")
-    return Remote(name=_str(table, "name", ""), ssh=_str(table, "ssh", ""), aliases=tuple(str(a) for a in aliases))
+    return Remote(
+        name=_str(table, "name", ""),
+        ssh=_str(table, "ssh", ""),
+        aliases=tuple(str(a) for a in aliases),
+        share_tabs=_bool(table, "share_tabs", False),
+    )
 
 
 def map_table_to_watcher(table: dict[str, object]) -> Watcher:
