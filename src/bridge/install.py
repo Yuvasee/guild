@@ -41,7 +41,11 @@ _PIPE_GLOBS = (
     "*pre-commit*", "*pytest*", "*ruff*", "*mypy*", "*pyright*", "*git*commit*", "*npm*", "*pnpm*", "*yarn*",
     "*go*test*", "*cargo*", "*jest*", "*vitest*", "*eslint*", "*tsc*", "*tox*", "*nox*", "*make*",
 )  # fmt: skip
-_PYTHON_GLOBS = (*_LABEL_GLOBS, *_PR_ISSUE_GLOBS, *_PR_ANSWER_GLOBS, *_KILL_GLOBS, *_CLUSTER_GLOBS, *_PIPE_GLOBS)
+_HEAVY_GLOBS = ("*uv*sync*", "*docker*build*")
+"""Heavy jobs the pipe globs miss; only the Mac's gate has them, since a host's own load is not the Mac's."""
+_PYTHON_GLOBS = (
+    *_LABEL_GLOBS, *_PR_ISSUE_GLOBS, *_PR_ANSWER_GLOBS, *_KILL_GLOBS, *_CLUSTER_GLOBS, *_PIPE_GLOBS, *_HEAVY_GLOBS,
+)  # fmt: skip
 
 type JsonObject = dict[str, object]
 
@@ -126,7 +130,7 @@ def list_guard_globs() -> list[str]:
     """The shell guard's gate: a command matching none of these cannot push, merge, set a robot-prefixed title, change
     a label, open or edit a PR, comment on one, kill processes by name, or reach a Kubernetes cluster."""
     # The host's gate matches a literal pipe, so a checker run without one is not sent to the Mac.
-    plain = [glob for glob in _PYTHON_GLOBS if glob not in _PIPE_GLOBS]
+    plain = [glob for glob in _PYTHON_GLOBS if glob not in _PIPE_GLOBS and glob not in _HEAVY_GLOBS]
     return [
         *(convert_trigger_to_glob(t) for t in DEFAULT_TRIGGERS),
         f"*{ROBOT}*",

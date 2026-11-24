@@ -108,6 +108,9 @@ class Config:
     worker_trust_roots: tuple[str, ...] = ()
     """The owner's folders (~ allowed): a Mac worker's folder under one that Claude Code has not trusted yet is marked
     trusted at launch; elsewhere guild worker refuses it, since Claude would wait at its trust dialog."""
+    heavy_job_load_per_core: float = 3.0
+    """Load average per core over which a heavy check started on this Mac (a full test run, a build) gets a note to
+    run it on worker_host; 0 turns the note off."""
     review_post_dry_run: bool = True
     """Writes the Slack post to a log instead of sending it."""
     review_channel_id: str = ""
@@ -329,6 +332,7 @@ def map_toml_to_config(raw: dict[str, object]) -> Config:
         worker_path_map=MappingProxyType(map_table_to_worker_path_map(_str_table(raw, "worker_path_map"))),
         worker_host_watcher=_str(raw, "worker_host_watcher", defaults.worker_host_watcher),
         worker_trust_roots=_str_list(raw, "worker_trust_roots", defaults.worker_trust_roots),
+        heavy_job_load_per_core=_non_negative(raw, "heavy_job_load_per_core", defaults.heavy_job_load_per_core),
         review_post_dry_run=_bool(raw, "review_post_dry_run", defaults.review_post_dry_run),
         review_ignored_posts=_str_list(raw, "review_ignored_posts", defaults.review_ignored_posts),
         agent_prefix_from_ms=_int(raw, "agent_prefix_from_ms", defaults.agent_prefix_from_ms),
@@ -417,6 +421,13 @@ def _positive(raw: dict[str, object], key: str, default: int) -> int:
     if value < 1:
         raise ValueError(f"{key} must be at least 1")
     return value
+
+
+def _non_negative(raw: dict[str, object], key: str, default: float) -> float:
+    value = raw.get(key, default)
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
+        raise ValueError(f"{key} must be a number of at least 0")
+    return float(value)
 
 
 def _fraction(raw: dict[str, object], key: str, default: float) -> float:

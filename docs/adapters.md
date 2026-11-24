@@ -140,6 +140,12 @@ A worker on this Mac starts only in a folder Claude Code already trusts, since C
 not trusted yet is marked trusted at launch, as answering the dialog would; anywhere else `guild worker` refuses it
 and says how to trust it. Empty, the default, marks nothing.
 
+When this Mac's load average is over `heavy_job_load_per_core` (default 3) times its core count, an agent's shell
+command that runs a whole-project check or build here (pytest with no test file, node id or -k; pyright, mypy or tsc on
+the project; npm, pnpm or yarn test or build; uv sync; docker build; make with no target or test/build; cargo or go
+test) gets a note before it runs: the load, and the one line to run it on `worker_host` instead, detached. It is never
+refused. Each note is a line in slow.log, `load note: <handle> <job> at load <n>`. 0 turns the note off.
+
 ## Team rules: defaults you can change
 
 Some rules are a way of working rather than a mechanism. They ship as defaults, written into the lead role and the

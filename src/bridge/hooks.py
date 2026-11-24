@@ -46,7 +46,7 @@ from bridge.compaction import (
 )
 from bridge.config import Config, db_path, load_config
 from bridge.db import HOOK_BUSY_TIMEOUT_MS, HOOK_RETRY_BUSY_TIMEOUT_MS, connect, transaction
-from bridge.errlog import log_error
+from bridge.errlog import log_error, log_slow
 from bridge.feed import release_dead_typing_claims, spawn_typed_delivery
 from bridge.gitinfo import GitInfo, read_git_info
 from bridge.guard import (
@@ -549,12 +549,7 @@ _RUNNER_VALUE_OPTIONS = frozenset({
 
 
 def _map_tokens_to_checker(words: list[str]) -> str | None:
-    while words[:2] in (["uv", "run"], ["poetry", "run"]) or words[:1] in (["npx"], ["uvx"]):
-        words = words[2:] if words[0] in ("uv", "poetry") else words[1:]
-        while words and words[0].startswith("-"):
-            words = words[2:] if words[0] in _RUNNER_VALUE_OPTIONS else words[1:]
-    if words[:2] in (["python", "-m"], ["python3", "-m"]):
-        words = words[2:]
+    words = _strip_runner(words)
     program = os.path.basename(words[0]) if words else ""
     if program in _CHECKERS:
         return program
@@ -575,8 +570,145 @@ def handle_pre_tool_use(
     command = cast(dict[str, object], raw_input).get("command") if isinstance(raw_input, dict) else None
     if decision or payload.get("tool_name") != "Bash" or not isinstance(command, str):
         return decision
-    note = find_hidden_exit_code_note(command)
-    return _note(note) if note else ""
+    notes = [find_hidden_exit_code_note(command)]
+    if host_checkout is None and config.heavy_job_load_per_core and (job := find_heavy_job(command)):
+        notes.append(find_load_note(conn, config, job, _str(payload, "session_id")))
+    text = "\n".join(n for n in notes if n)
+    return _note(text) if text else ""
+
+
+_TEST_PATH_RE = re.compile(r"(?:\.py|::.*)$")
+_SOURCE_RE = re.compile(r"\.(?:py|pyi|[cm]?[jt]sx?)$")
+_INFO_FLAGS = frozenset({"--version", "-V", "--help", "-h"})
+_MAKE_VALUE_OPTIONS = frozenset({"-C", "-f", "-I", "-o", "-W", "--directory", "--file", "--makefile"})
+_PYTEST_VALUE_OPTIONS = frozenset({
+    "-p", "-c", "-m", "-n", "-o", "--ignore", "--ignore-glob", "--deselect", "--rootdir", "--confcutdir", "--maxfail",
+    "--durations", "--tb", "--cov", "--junitxml", "--basetemp",
+})  # fmt: skip
+_CARGO_VALUE_OPTIONS = frozenset({
+    "-p", "--package", "-j", "--jobs", "-F", "--features", "--target", "--manifest-path", "--profile", "--exclude",
+})  # fmt: skip
+
+
+def find_heavy_job(command: str) -> str | None:
+    """A check or build over the whole project, run on this Mac: a single test file, node id or -k filter is not one,
+    nor a command handed to ssh, whose host runs it."""
+    for tokens, _ in segment_command(command):
+        words = _strip_runner(_drop_timeout(_drop_redirections(_drop_command_prefix(tokens))))
+        if not words or _INFO_FLAGS.intersection(words):
+            continue
+        program, args = os.path.basename(words[0]), words[1:]
+        if program == "pytest":
+            positional = _list_positional(args, _PYTEST_VALUE_OPTIONS)
+            if not any(_TEST_PATH_RE.search(a) for a in positional) and not any(a.startswith("-k") for a in args):
+                return "pytest"
+        elif program in ("pyright", "mypy", "tsc"):
+            if not any(_SOURCE_RE.search(a) for a in args if not a.startswith("-")):
+                return program
+        elif program in ("npm", "pnpm", "yarn") and args:
+            task = args[1] if args[0] == "run" and len(args) > 1 else args[0]
+            passed = args[args.index("--") + 1 :] if "--" in args else []
+            if task.split(":")[0] in ("test", "build") and not _list_positional(passed, frozenset()):
+                return f"{program} {task}"
+        elif program == "uv" and args[:1] == ["sync"]:
+            return "uv sync"
+        elif program == "docker" and "build" in args[:2]:
+            return "docker build"
+        elif program == "make":
+            targets = _list_make_targets(args)
+            if not targets or {"test", "build"} & set(targets):
+                return " ".join(["make", *targets])
+        elif program == "cargo" and args[:1] == ["test"] and not _list_positional(args[1:], _CARGO_VALUE_OPTIONS):
+            return "cargo test"
+        elif (
+            program == "go"
+            and args[:1] == ["test"]
+            and not any(a.split("=")[0] == "-run" or a.endswith(".go") for a in args)
+        ):
+            return "go test"
+    return None
+
+
+def _strip_runner(words: list[str]) -> list[str]:
+    while words[:2] in (["uv", "run"], ["poetry", "run"]) or words[:1] in (["npx"], ["uvx"]):
+        words = words[2:] if words[0] in ("uv", "poetry") else words[1:]
+        while words and words[0].startswith("-"):
+            words = words[2:] if words[0] in _RUNNER_VALUE_OPTIONS else words[1:]
+    if words[:2] in (["python", "-m"], ["python3", "-m"]):
+        words = words[2:]
+    return words
+
+
+def _drop_timeout(words: list[str]) -> list[str]:
+    if words[:1] != ["timeout"]:
+        return words
+    words = words[1:]
+    while words and words[0].startswith("-"):
+        words = words[2:] if words[0] in ("-s", "-k") else words[1:]
+    return words[1:]
+
+
+def _list_positional(args: list[str], value_options: frozenset[str]) -> list[str]:
+    positional: list[str] = []
+    at = 0
+    while at < len(args):
+        if args[at] == "--":
+            break
+        if args[at] in value_options:
+            at += 2
+            continue
+        if not args[at].startswith("-"):
+            positional.append(args[at])
+        at += 1
+    return positional
+
+
+def _list_make_targets(args: list[str]) -> list[str]:
+    targets: list[str] = []
+    at = 0
+    while at < len(args):
+        arg = args[at]
+        if arg in _MAKE_VALUE_OPTIONS or (arg == "-j" and at + 1 < len(args) and args[at + 1].isdigit()):
+            at += 2
+            continue
+        if not arg.startswith("-") and "=" not in arg:
+            targets.append(arg)
+        at += 1
+    return targets
+
+
+def find_load_note(conn: sqlite3.Connection, config: Config, job: str, conversation_id: str | None) -> str | None:
+    """Over the load threshold, says to run the job on worker_host, and logs it to slow.log for the leads."""
+    cores = os.cpu_count() or 1
+    load = os.getloadavg()[0]
+    if load <= config.heavy_job_load_per_core * cores:
+        return None
+    remote = next((r for r in config.remotes if r.name == config.worker_host), None)
+    host = remote.ssh if remote else config.worker_host
+    who = _find_handle(conn, conversation_id) or (conversation_id or "?")[:8]
+    log_slow("load note", f"load note: {who} {job} at load {load:.0f}")
+    head = f"bridge: this Mac's load is {load:.0f} on {cores} cores, and {job} would add to it."
+    if not host:
+        return f"{head} Run a targeted subset (one test file, -k) or wait for the load to fall; no worker_host is set."
+    run = f"job-{re.sub(r'[^A-Za-z0-9_-]', '', who) or 'x'}"
+    return (
+        f"{head} Run it on {host} if you can, detached, then poll: d={run}-$(date +%s); t=$(git stash create); "
+        f'git -C "$(git rev-parse --show-toplevel)" archive ${{t:-HEAD}} | ssh {host} "mkdir ~/$d && tar -x -C '
+        f'~/$d" && ssh {host} "cd ~/$d && nohup bash -lc \'<command>\' > ~/$d.log 2>&1 &", then poll '
+        f'ssh {host} "tail -n 20 ~/$d.log". The whole checkout is sent with its uncommitted changes (git stash '
+        "create leaves the stash list alone), not untracked files; run <command> from the same subfolder."
+    )
+
+
+def _find_handle(conn: sqlite3.Connection, conversation_id: str | None) -> str | None:
+    if not conversation_id:
+        return None
+    row = conn.execute(
+        "SELECT s.handle FROM instances i JOIN surfaces s ON s.surface = i.surface "
+        "WHERE i.conversation_id = ? AND s.handle IS NOT NULL ORDER BY i.last_observed_at DESC LIMIT 1",
+        (conversation_id,),
+    ).fetchone()
+    return str(row[0]) if row else None
 
 
 def _check_pre_tool_use(
