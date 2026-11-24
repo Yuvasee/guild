@@ -28,6 +28,8 @@ REFUSED = [
     "if true; then pkill worker; fi",
     "kill `pgrep -f worker`",
     "pgrep -f worker | xargs /bin/kill",
+    "ssh box -t pkill -f worker",
+    "ssh -ti ~/.ssh/key box pkill -f worker",
 ]
 ALLOWED = [
     "kill 4242",

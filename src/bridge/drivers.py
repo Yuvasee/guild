@@ -9,7 +9,7 @@ from typing import cast
 
 from bridge.config import Remote
 from bridge.db import transaction
-from bridge.guard import segment_command
+from bridge.guard import SSH_VALUE_OPTIONS, segment_command
 from bridge.registry import NEVER_RECENT_TURN
 from bridge.reviews import record_agent_marks, record_branch_writes
 from bridge.transcript import find_transcript
@@ -22,10 +22,6 @@ _SCRIPT_NAME_RE = re.compile(r"(resume|launch)[\w-]*\.sh$")
 _SESSION_RE = re.compile(r"\w[\w.-]*|\$\d+")
 _SHELL_KEYWORDS = frozenset({"until", "while", "if", "then", "do", "else", "elif", "!"})
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash"})
-_SSH_VALUE_OPTIONS = frozenset(
-    {"-B", "-b", "-c", "-D", "-E", "-e", "-F", "-I", "-i", "-J", "-L", "-l", "-m", "-O", "-o", "-p", "-Q", "-R",
-     "-S", "-W", "-w"}
-)  # fmt: skip
 _REPO_RE = re.compile(r"[\w.-]+/[\w.-]+")
 _REDIRECTION_RE = re.compile(r"\d*(<<-?|<<<|>>|>&|<&|<|>)")
 
@@ -284,7 +280,7 @@ def _parse_ssh(tokens: list[str], remotes: tuple[Remote, ...]) -> tuple[Remote, 
     i = 1
     while i < len(tokens) and tokens[i].startswith("-"):
         option = tokens[i]
-        i += 2 if option in _SSH_VALUE_OPTIONS else 1
+        i += 2 if option in SSH_VALUE_OPTIONS else 1
     if i >= len(tokens):
         return None
     host = tokens[i].rpartition("@")[2]

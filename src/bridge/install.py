@@ -34,12 +34,14 @@ _PR_ISSUE_GLOBS = ("*gh*pr*create*", "*gh*pr*new*", "*gh*pr*edit*")
 _PR_ANSWER_GLOBS = ("*gh*pr*comment*", "*gh*pr*review*", "*gh*api*comments*", "*gh*api*reviews*")
 # Killing processes by name or pattern is refused whether or not a claim exists.
 _KILL_GLOBS = ("*pkill*", "*killall*", "*pgrep*")
+# So is a kubectl, helm or k9s command that names no cluster, and one that changes the machine's default cluster.
+_CLUSTER_GLOBS = ("*kubectl*", "*kubectx*", "*kubens*", "*helm*", "*k9s*")
 # A checker piped into a filter loses its exit code; the hook adds a note, it never refuses.
 _PIPE_GLOBS = (
     "*pre-commit*", "*pytest*", "*ruff*", "*mypy*", "*pyright*", "*git*commit*", "*npm*", "*pnpm*", "*yarn*",
     "*go*test*", "*cargo*", "*jest*", "*vitest*", "*eslint*", "*tsc*", "*tox*", "*nox*", "*make*",
 )  # fmt: skip
-_PYTHON_GLOBS = (*_LABEL_GLOBS, *_PR_ISSUE_GLOBS, *_PR_ANSWER_GLOBS, *_KILL_GLOBS, *_PIPE_GLOBS)
+_PYTHON_GLOBS = (*_LABEL_GLOBS, *_PR_ISSUE_GLOBS, *_PR_ANSWER_GLOBS, *_KILL_GLOBS, *_CLUSTER_GLOBS, *_PIPE_GLOBS)
 
 type JsonObject = dict[str, object]
 
@@ -122,7 +124,7 @@ def convert_event_to_command(executable: str, event: str) -> str:
 
 def list_guard_globs() -> list[str]:
     """The shell guard's gate: a command matching none of these cannot push, merge, set a robot-prefixed title, change
-    a label, open or edit a PR, comment on one, or kill processes by name."""
+    a label, open or edit a PR, comment on one, kill processes by name, or reach a Kubernetes cluster."""
     # The host's gate matches a literal pipe, so a checker run without one is not sent to the Mac.
     plain = [glob for glob in _PYTHON_GLOBS if glob not in _PIPE_GLOBS]
     return [

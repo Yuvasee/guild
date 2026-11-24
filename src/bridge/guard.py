@@ -57,6 +57,10 @@ _HARMLESS_ENV_RE = re.compile(
 )
 _QUOTING_RE = re.compile(r"[\"'\\]")
 _WRAPPERS = frozenset({"command", "env", "time", "nohup", "exec"})
+SSH_VALUE_OPTIONS = frozenset(
+    {"-B", "-b", "-c", "-D", "-E", "-e", "-F", "-I", "-i", "-J", "-L", "-l", "-m", "-O", "-o", "-p", "-Q", "-R",
+     "-S", "-W", "-w"}
+)  # fmt: skip
 SHELL_KEYWORDS = frozenset(
     {"if", "then", "else", "elif", "fi", "do", "done", "while", "until", "for", "case", "esac", "select", "function",
      "{", "}", "!", "[[", "]]", "coproc"}
@@ -1564,6 +1568,7 @@ def segment_command(
     prefixes: list[list[str]] | None = None,
     expanding_bodies: list[tuple[int, str]] | None = None,
     redirections: list[list[str]] | None = None,
+    substitutions: list[str] | None = None,
 ) -> list[tuple[list[str], str]]:
     """Simple commands, each with the operator that joined it to the previous one.
 
@@ -1572,6 +1577,8 @@ def segment_command(
     when prefixes is given, each segment's dropped words are appended to it. expanding_bodies gets the bodies whose
     delimiter is unquoted, which the shell expands, substitutions included. When redirections is given, each
     segment's unquoted redirections (>f, 2>&1, < f, &>f) leave its words and are appended to it instead.
+    substitutions gets the body of each $( ) and backtick pair inside double quotes and of each unquoted backtick
+    pair: the shell runs them, while this lexer keeps them inside one word.
 
     A small shell lexer: quotes and backslashes are honoured, so a quoted or escaped `;` stays part of a
     word, adjacent quoted parts join into one word, and `#` starts a comment only at a word boundary.
@@ -1594,6 +1601,10 @@ def segment_command(
     target_pending = False
     # The word so far ends in an unquoted < or >, so a following & belongs to it (2>&1), not a new command.
     operator_end = False
+    # Backticks pair across quotes: "`date "+%F"`" holds one substitution.
+    open_tick = False
+    # One $( with no closing ) means every later scan would also run to the end: scan no more.
+    unbalanced = False
 
     def end_word() -> None:
         nonlocal in_word, quoted_start, pending_operator, word_quoted, target_pending
@@ -1676,6 +1687,20 @@ def segment_command(
             word_quoted = True
             j = i + 1
             while j < n and command[j] != '"':
+                if command.startswith("$(", j) and not unbalanced:
+                    # A substitution's own quotes do not end the string: "$(kubectl -n "shop" get pods)".
+                    end = _find_substitution_end(command, j + 2)
+                    if end >= 0:
+                        if substitutions is not None:
+                            substitutions.append(command[j + 2 : end])
+                        word.append(command[j : end + 1])
+                        j = end + 1
+                        continue
+                    unbalanced = True
+                if command[j] == "`":
+                    if not open_tick and substitutions is not None and (close := command.find("`", j + 1)) > 0:
+                        substitutions.append(command[j + 1 : close])
+                    open_tick = not open_tick
                 if command[j] == "\\" and j + 1 < n and command[j + 1] in '"\\$`':
                     word.append(command[j + 1])
                     j += 2
@@ -1722,12 +1747,52 @@ def segment_command(
             end_segment(ch)
             i += 1
         else:
+            if ch == "`":
+                if not open_tick and substitutions is not None and (close := command.find("`", i + 1)) > 0:
+                    substitutions.append(command[i + 1 : close])
+                open_tick = not open_tick
             word.append(ch)
             in_word = True
             operator_end = ch in "<>"
             i += 1
     end_segment(";")
     return segments
+
+
+def _find_substitution_end(command: str, at: int, depth: int = 0) -> int:
+    """The index of the ) that closes a $( whose body starts at `at`, reading the quotes inside it; -1 if none."""
+    n = len(command)
+    open_parens = 1
+    while at < n:
+        ch = command[at]
+        if ch == "\\":
+            at += 2
+            continue
+        if ch == "'":
+            close = command.find("'", at + 1)
+            if close < 0:
+                return -1
+            at = close + 1
+            continue
+        if ch == '"':
+            at += 1
+            while at < n and command[at] != '"':
+                if command.startswith("$(", at):
+                    end = _find_substitution_end(command, at + 2, depth + 1) if depth < 8 else -1
+                    if end < 0:
+                        return -1
+                    at = end
+                at += 2 if command[at] == "\\" else 1
+            if at >= n:
+                return -1
+        elif ch == "(":
+            open_parens += 1
+        elif ch == ")":
+            open_parens -= 1
+            if not open_parens:
+                return at
+        at += 1
+    return -1
 
 
 def _strip_prefixes(tokens: list[str]) -> list[str]:

@@ -54,6 +54,7 @@ from bridge.guard import (
     MERGE,
     PUSH,
     SHELL_KEYWORDS,
+    SSH_VALUE_OPTIONS,
     WRAPPED,
     HostRepoReader,
     Unreadable,
@@ -233,6 +234,7 @@ def run_artifact_hook() -> int:
 
 _KILL_BY_NAME = frozenset({"pkill", "killall"})
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash"})
+_SHELL_VALUE_OPTIONS = frozenset({"-o", "+o", "-O", "+O", "--rcfile", "--init-file"})
 _SUDO_VALUE_OPTIONS = frozenset({"-u", "-g", "-U", "-C", "-D", "-h", "-p", "-r", "-t"})
 _XARGS_VALUE_OPTIONS = frozenset({"-n", "-L", "-I", "-P", "-s", "-d", "-E", "-a"})
 
@@ -261,32 +263,229 @@ def find_kill_by_name_refusal(command: str, depth: int = 0) -> str | None:
                 "sessions' and the owner's processes. Find the PID first (pgrep -fl …, ps), check it is yours, then "
                 "kill <PID>."
             )
-        if depth < 2 and (program == "ssh" or program in _SHELLS):
-            inner = (
-                words[2:]
-                if program == "ssh"
-                else [
-                    words[at + 1]
-                    for at, w in enumerate(words[:-1])
-                    if (w[:1] == "-" and w[1:2] != "-" and "c" in w and w[1:].isalpha() and len(w) < 8)
-                ]
-            )
-            for text in inner:
+        if depth < 2:
+            for text in _list_inner_commands(program, words):
                 if refusal := find_kill_by_name_refusal(text, depth + 1):
                     return refusal
     return None
 
 
+def _list_inner_commands(program: str, words: list[str]) -> list[str]:
+    """The command lines an ssh or a shell's -c runs."""
+    if program == "ssh":
+        remote = _map_ssh_to_remote_command(words)
+        return [remote] if remote else []
+    if program in _SHELLS:
+        return [
+            words[at + 1]
+            for at, w in enumerate(words[:-1])
+            if (w[:1] == "-" and w[1:2] != "-" and "c" in w and w[1:].isalpha() and len(w) < 8)
+        ]
+    return []
+
+
+def _map_ssh_to_remote_command(words: list[str]) -> str:
+    """ssh reads options before and after the destination (-ti key, -ikey, box -t) and joins the remaining words with
+    spaces, as the remote shell then reads them."""
+    at, seen_host = 1, False
+    while at < len(words):
+        word = words[at]
+        if word == "--":
+            at += 1
+            if seen_host:
+                break
+        elif word.startswith("-") and len(word) > 1:
+            at += 1
+            for end, letter in enumerate(word[1:], 2):
+                if "-" + letter in SSH_VALUE_OPTIONS:
+                    at += 1 if end == len(word) else 0
+                    break
+        elif not seen_host:
+            seen_host = True
+            at += 1
+        else:
+            break
+    return " ".join(words[at:])
+
+
+def _reads_script_on_stdin(program: str, words: list[str]) -> bool:
+    """A shell with no -c and no script file, or ssh with no remote command or one such shell, runs a heredoc as
+    commands."""
+    words = _drop_redirections(words)
+    if program == "ssh":
+        remote = _map_ssh_to_remote_command(words)
+        first = segment_command(remote)[:1] if remote else []
+        inner = _drop_command_prefix(first[0][0]) if first else []
+        shell = os.path.basename(inner[0]) if inner else ""
+        return not remote or (shell in _SHELLS and _reads_script_on_stdin(shell, inner))
+    if program not in _SHELLS or _list_inner_commands(program, words):
+        return False
+    at = 1
+    while at < len(words) and words[at][:1] in "-+":
+        letters = words[at][1:] if words[at][:1] == "-" and words[at][1:].isalpha() else ""
+        if "n" in letters:
+            return False
+        if "s" in letters:
+            return True
+        at += 2 if words[at] in _SHELL_VALUE_OPTIONS else 1
+    return at >= len(words)
+
+
+def _drop_redirections(words: list[str]) -> list[str]:
+    """<<EOF, << EOF, 2>&1, > out: redirections, not the program's arguments."""
+    kept: list[str] = []
+    skip = False
+    for word in words:
+        if skip:
+            skip = False
+        elif _REDIRECT_RE.match(word):
+            skip = bool(_BARE_REDIRECT_RE.fullmatch(word))
+        else:
+            kept.append(word)
+    return kept
+
+
+_UNNAMED_CLUSTER = (
+    "bridge: this command names no cluster, so it runs against this machine's default context, which differs per "
+    "machine and may be production. Add --context <cluster> (helm: --kube-context <cluster>); "
+    "kubectl config get-contexts lists them."
+)
+_DEFAULT_SWITCH = (
+    "bridge: kubectl config use-context, set-context --current, kubectx and kubens change the default cluster or "
+    "namespace for every session on this machine. Leave the default alone and name the cluster on each command: "
+    "--context <cluster> (helm: --kube-context <cluster>)."
+)
+# Global options of kubectl, helm and k9s that take their value as the next word, so it is not read as a subcommand.
+_CLUSTER_VALUE_OPTIONS = frozenset({
+    "-n", "--namespace", "--context", "--kube-context", "--cluster", "--user", "--kubeconfig", "-s", "--server",
+    "--token", "--as", "--as-group", "--as-uid", "--request-timeout", "-v", "--v", "--cache-dir",
+    "--certificate-authority", "--client-certificate", "--client-key", "--tls-server-name", "--username",
+    "--password", "--profile", "--profile-output", "--log-file", "--log-dir", "--kube-apiserver", "--kube-token",
+    "--kube-as-user", "--kube-as-group", "--kube-ca-file", "--kube-tls-server-name", "--registry-config",
+    "--repository-config", "--repository-cache", "--burst-limit", "--qps", "-c", "--command", "-l", "--logLevel",
+    "--logFile", "-r", "--refresh",
+})  # fmt: skip
+# kubectl explain is not here: it reads the resource schema from the cluster's API server.
+_KUBECTL_LOCAL = frozenset({"config", "completion", "kustomize", "help", "options", "plugin"})
+_HELM_LOCAL = frozenset({
+    "template", "lint", "package", "repo", "dependency", "dep", "show", "inspect", "pull", "fetch", "push",
+    "registry", "create", "version", "completion", "env", "plugin", "search", "verify", "help",
+})  # fmt: skip
+_K9S_LOCAL = frozenset({"version", "help", "info", "completion"})
+
+
+def find_unnamed_cluster_refusal(command: str, depth: int = 0) -> str | None:
+    """A kubectl, helm or k9s command that names no context runs against the machine's default one, which differs per
+    machine and changes; a command that changes that default changes it for every session. Read like the kill guard:
+    quoted text, heredoc bodies and comments are data; ssh, a shell's -c, a heredoc fed to a shell and a command
+    substitution in double quotes or backticks are read too."""
+    bodies: list[tuple[int, str]] = []
+    substitutions: list[str] = []
+    segments = segment_command(command, heredoc_bodies=bodies, substitutions=substitutions)
+    bodies_by_owner: dict[int, list[str]] = {}
+    for owner, body in bodies:
+        bodies_by_owner.setdefault(owner, []).append(body)
+    inner: list[str] = list(substitutions)
+    for index, (tokens, _) in enumerate(segments):
+        words = _drop_command_prefix(tokens)
+        program = os.path.basename(words[0]) if words else ""
+        if refusal := _map_cluster_command_to_refusal(program, words[1:]):
+            return refusal
+        inner += _list_inner_commands(program, words)
+        if index in bodies_by_owner and _reads_script_on_stdin(program, words):
+            inner += bodies_by_owner[index]
+    if depth < 2:
+        for text in inner:
+            if refusal := find_unnamed_cluster_refusal(text, depth + 1):
+                return refusal
+    return None
+
+
+def _map_cluster_command_to_refusal(program: str, all_args: list[str]) -> str | None:
+    if program in ("kubectx", "kubens"):
+        return _DEFAULT_SWITCH
+    if program not in ("kubectl", "helm", "k9s"):
+        return None
+    # After --, words belong to the command kubectl exec or helm's post-renderer runs.
+    args = all_args[: all_args.index("--")] if "--" in all_args else all_args
+    positional = _list_positionals(args)
+    if program == "kubectl" and (
+        positional[:2] in (["config", "use-context"], ["config", "use"])
+        or (positional[:2] == ["config", "set-context"] and _is_on(args, "--current"))
+        or (positional[:3] in (["config", "set", "current-context"], ["config", "unset", "current-context"]))
+    ):
+        return _DEFAULT_SWITCH
+    if _option_value(args, "--kube-context" if program == "helm" else "--context"):
+        return None
+    if "-h" in args or "--help" in args:
+        return None
+    if not positional:
+        # Bare kubectl and helm print their help; bare k9s opens the default cluster.
+        return _UNNAMED_CLUSTER if program == "k9s" else None
+    first = positional[0]
+    if program == "kubectl" and (
+        first in _KUBECTL_LOCAL or (first == "version" and _is_on(args, "--client")) or _is_on(args, "--local")
+    ):
+        return None
+    validated = first == "template" and (_is_on(args, "--validate") or "--dry-run=server" in args)
+    if program == "helm" and ((first in _HELM_LOCAL and not validated) or "--dry-run=client" in args):
+        return None
+    if program == "k9s" and first in _K9S_LOCAL:
+        return None
+    return _UNNAMED_CLUSTER
+
+
+def _list_positionals(args: list[str]) -> list[str]:
+    found: list[str] = []
+    at = 0
+    while at < len(args) and len(found) < 3:
+        if args[at].startswith("-"):
+            at += 2 if args[at] in _CLUSTER_VALUE_OPTIONS else 1
+        else:
+            found.append(args[at])
+            at += 1
+    return found
+
+
+def _option_value(args: list[str], option: str) -> str | None:
+    """The value the last --option or --option=value gives, as the tool reads it; None when absent."""
+    value: str | None = None
+    at = 0
+    while at < len(args):
+        arg = args[at]
+        if arg == option:
+            value = args[at + 1] if at + 1 < len(args) else ""
+            at += 2
+            continue
+        if arg.startswith(option + "="):
+            value = arg[len(option) + 1 :]
+        at += 1 + (arg in _CLUSTER_VALUE_OPTIONS)
+    return value
+
+
+def _is_on(args: list[str], flag: str) -> bool:
+    """A boolean flag's last setting: --flag or --flag=true and the like turn it on."""
+    on = False
+    at = 0
+    while at < len(args):
+        arg = args[at]
+        if arg == flag:
+            on = True
+        elif arg.startswith(flag + "="):
+            on = arg[len(flag) + 1 :].lower() in ("true", "1", "t")
+        at += 1 + (arg in _CLUSTER_VALUE_OPTIONS)
+    return on
+
+
 def _drop_command_prefix(tokens: list[str]) -> list[str]:
-    words = list(tokens)
-    while words and words[0] in SHELL_KEYWORDS:
-        words = words[1:]
-    if words and words[0] == "sudo":
-        at = 1
-        while at < len(words) and words[at].startswith("-"):
-            at += 2 if words[at] in _SUDO_VALUE_OPTIONS else 1
-        words = words[at:]
-    return words
+    at = 0
+    while at < len(tokens) and tokens[at] in SHELL_KEYWORDS:
+        at += 1
+    if at < len(tokens) and tokens[at] == "sudo":
+        at += 1
+        while at < len(tokens) and tokens[at].startswith("-"):
+            at += 2 if tokens[at] in _SUDO_VALUE_OPTIONS else 1
+    return tokens[at:]
 
 
 def _program_of(tokens: list[str]) -> str:
@@ -339,6 +538,7 @@ def find_hidden_exit_code_note(command: str) -> str | None:
 
 
 _REDIRECT_RE = re.compile(r"^\d*(?:[<>]|&>)")
+_BARE_REDIRECT_RE = re.compile(r"\d*(?:<<-?|<<<|>>|>\||<>|[<>]&?|&>>?)")
 _KEEPS_EXIT_CODE_RE = re.compile(
     r"(?:set\s+-o\s+pipefail|setopt\s+pipefail|\bset\s+-\w*e\w*o\s+pipefail|pipestatus)", re.I
 )
@@ -399,6 +599,8 @@ def _check_pre_tool_use(
         return ""
     if kill := find_kill_by_name_refusal(command):
         return _deny(kill)
+    if unnamed_cluster := find_unnamed_cluster_refusal(command):
+        return _deny(unnamed_cluster)
     titles = find_prefixed_titles(command)
     if titles:
         return _deny(map_titles_to_denial(titles))
