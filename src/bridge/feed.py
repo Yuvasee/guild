@@ -25,6 +25,7 @@ from bridge.board import (
     add_user_item,
     convert_item_id_to_question_ref,
     convert_text_to_preview,
+    fit_body,
     is_delivery_owner,
     resolve_handle,
     send_message,
@@ -147,6 +148,13 @@ def build_decision_body(
     return "\n\n".join(part for part in (body.strip(), "\n".join(lines)) if part)
 
 
+def fit_title(title: str) -> str:
+    if len(title) <= USER_ITEM_MAX_CHARS:
+        return title
+    print(f"post title cut from {len(title)} to {USER_ITEM_MAX_CHARS} chars: {title[:100]!r}", flush=True)
+    return title[: USER_ITEM_MAX_CHARS - 1].rstrip() + "\u2026"
+
+
 def add_post(
     conn: sqlite3.Connection,
     sender: Party,
@@ -163,6 +171,8 @@ def add_post(
     title = " ".join(title.split())
     if not title:
         raise MessageStateError("empty title")
+    if sender.conversation_id == SYSTEM_CONVERSATION:
+        title, body = fit_title(title), fit_body(body)
     cited = "\n".join([title, body, *(link.url for link in links)])
     from bridge.pages import find_unready_citations, map_unready_citations_to_error  # hooks never cite a page
 
