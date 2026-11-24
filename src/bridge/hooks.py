@@ -76,8 +76,7 @@ from bridge.leads import (
     take_assistant_role,
     take_lead_role,
 )
-from bridge.pins import PinError
-from bridge.procinfo import process_args, process_start_ms
+from bridge.procinfo import process_age_us, process_args, process_start_ms
 from bridge.refs import extract_refs
 from bridge.registry import (
     Observation,
@@ -99,7 +98,6 @@ from bridge.registry import (
     take_english_name_nudge,
     take_focus_nudge,
 )
-from bridge.rewake import run_rewake
 from bridge.start_context import (
     KEEP_COMMAND,
     UNREADABLE_START_LINE,
@@ -118,16 +116,6 @@ from bridge.start_context import (
     read_start_parts,
     take_pending_start,
     write_pending_start,
-)
-from bridge.title_guard import (
-    find_colleague_reply_refusal,
-    find_missing_issue_refusal,
-    find_owner_label_writes,
-    find_prefixed_linear_title,
-    find_prefixed_titles,
-    find_restricted_path_refusal,
-    map_label_write_to_denial,
-    map_titles_to_denial,
 )
 from bridge.turncut import take_turn_cut
 
@@ -173,6 +161,11 @@ class HookCaller:
 def main() -> int:
     event = sys.argv[1] if len(sys.argv) > 1 else ""
     if event == "rewake":
+        try:
+            from bridge.rewake import run_rewake  # it loads the HTTP client, which hooks never use
+        except ImportError:
+            log_error("hook rewake", traceback.format_exc())
+            return 0
         return run_rewake()
     if event == ARTIFACT_HOOK:
         return run_artifact_hook()
@@ -216,11 +209,16 @@ def run_hook(event: str) -> int:
 def run_artifact_hook() -> int:
     """Fails open like every hook: a publish that cannot be pinned leaves a line in errors.log, never blocks."""
     try:
+        from bridge.pins import PinError  # only this hook needs it
+    except ImportError:
+        log_error(f"hook {ARTIFACT_HOOK}", traceback.format_exc())
+        return 0
+    try:
         payload = map_stdin_to_payload(sys.stdin.read())
         config = load_config()
         conn = connect(db_path(), HOOK_BUSY_TIMEOUT_MS)
         try:
-            from bridge.artifacts import capture_artifact_publish  # noqa: PLC0415: only this hook needs it
+            from bridge.artifacts import capture_artifact_publish  # only this hook needs it
 
             with transaction(conn, retry_busy_timeout_ms=HOOK_RETRY_BUSY_TIMEOUT_MS):
                 capture_artifact_publish(conn, config, payload, os.environ, time.time_ns() // 1_000_000)
@@ -721,6 +719,17 @@ def _check_pre_tool_use(
 
     host_checkout is set for a host worker: git facts come from its report, and a merge it names no PR for is refused.
     """
+    from bridge.title_guard import (  # it loads the review modules, which other hooks never use
+        find_colleague_reply_refusal,
+        find_missing_issue_refusal,
+        find_owner_label_writes,
+        find_prefixed_linear_title,
+        find_prefixed_titles,
+        find_restricted_path_refusal,
+        map_label_write_to_denial,
+        map_titles_to_denial,
+    )
+
     raw_input = payload.get("tool_input")
     tool_input = cast(dict[str, object], raw_input) if isinstance(raw_input, dict) else {}
     tool = str(payload.get("tool_name") or "")
@@ -782,7 +791,7 @@ def _check_pre_tool_use(
             if t.action == "git push" and len(parts := t.key.split(":", 2)) == 3 and parts[0] == "branch"
         ]
         if host_checkout is not None and conversation_id and pushed:
-            from bridge.reviews import record_host_pushes  # noqa: PLC0415: a third of every hook's start-up otherwise
+            from bridge.reviews import record_host_pushes  # a third of every hook's start-up otherwise
 
             with transaction(conn):
                 record_host_pushes(conn, config, conversation_id, pushed, time.time_ns() // 1_000_000)
@@ -1260,8 +1269,7 @@ def is_harness_prompt(text: str) -> bool:
 
 def record_hook_run(conn: sqlite3.Connection, event: str, instance_id: str, at_ms: int) -> None:
     """Records wall time since this process started, so interpreter start-up and lock waits are included."""
-    own_start = process_start_ms(os.getpid())
-    duration_us = (time.time_ns() // 1000 - own_start * 1000) if own_start else 0
+    duration_us = process_age_us(os.getpid()) or 0
     cursor = conn.execute(
         "INSERT INTO hook_runs (at, event, instance_id, duration_us, outcome) VALUES (?, ?, ?, ?, 'ok')",
         (at_ms, event, instance_id, duration_us),

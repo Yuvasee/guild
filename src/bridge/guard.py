@@ -8,18 +8,19 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING
 
 from bridge.agent_prefix import ROBOT
-from bridge.backport import check_backport, is_backport_base
 from bridge.claims import Holder, map_row_to_holder
 from bridge.config import Config, state_dir
 from bridge.db import transaction
 from bridge.gitinfo import RepoFacts, read_repo_facts
 from bridge.procinfo import process_start_ms
 from bridge.registry import PROC_START_TOLERANCE_MS
-from bridge.restricted import find_pr_restricted_block, list_touched, map_row_to_files
-from bridge.review_deps import PRECONDITION_PREFIX, map_markdown_to_preconditions
-from bridge.review_github import GitHubError, LiveMergeFacts, fetch_merge_facts, fetch_pr_body
+
+# Every hook loads this module, so backport, review_deps and review_github load inside the merge checks that use them.
+if TYPE_CHECKING:
+    from bridge.review_github import LiveMergeFacts
 
 # Shell-glob fragments for the hook's fast gate; spacing and `git -C dir push` must still reach Python.
 DEFAULT_TRIGGERS = (
@@ -1103,6 +1104,8 @@ def map_row_to_dependency_blockers(
 ) -> list[str]:
     """Its waits on PRs outside its siblings, then, with_siblings, on the siblings it merges after. `live`: by ref,
     the preconditions of a body just read from GitHub, in place of the queue's."""
+    from bridge.review_deps import PRECONDITION_PREFIX
+
     outside: list[str] = json.loads(str(row["dep_blockers"] or "[]"))
     if live is not None and (fresh := live.get(str(row["ref"]))) is not None:
         outside = [*fresh, *(b for b in outside if not b.startswith(PRECONDITION_PREFIX))]
@@ -1188,6 +1191,9 @@ def find_merge_blocks(
     from GitHub once before it is refused, and a PR whose state cannot be read is refused. A merge not mapped to a
     queued PR passes: this guard only knows the owner's PRs. A backport (base in `backport_bases`) whose diff equals
     the merged default-branch PRs it names needs no approval; `waived` gets a line for each one that passes so."""
+    from bridge.backport import check_backport, is_backport_base
+    from bridge.review_github import GitHubError, fetch_merge_facts
+
     deadline = time.monotonic() + MERGE_CHECK_BUDGET_S
     rows: dict[str, sqlite3.Row] = {}
     for target in targets:
@@ -1285,6 +1291,9 @@ def find_live_restricted_block(
 ) -> str | None:
     """A PR changing another team's code merges only with its why and the assistant's OK in its body, read now: the
     queue does not keep bodies. However it was opened, a host worker's included."""
+    from bridge.restricted import find_pr_restricted_block, list_touched, map_row_to_files
+    from bridge.review_github import GitHubError, fetch_pr_body
+
     if not list_touched(config, map_row_to_files(row)):
         return None
     try:
@@ -1304,6 +1313,9 @@ def find_live_dependency_wait(conn: sqlite3.Connection, row: sqlite3.Row, deadli
     """find_dependency_wait, but a wait on a sentence of a PR's body, its own or a sibling's, holds only if the body
     read from GitHub now still says it: the queue's copy has lagged an edit by minutes. A body that cannot be read
     keeps the queue's sentence, said to be as of its last poll."""
+    from bridge.review_deps import PRECONDITION_PREFIX, map_markdown_to_preconditions
+    from bridge.review_github import GitHubError, fetch_pr_body
+
     wait = find_dependency_wait(conn, row)
     if wait is None or PRECONDITION_PREFIX not in wait:
         return wait
@@ -1337,11 +1349,13 @@ def map_live_threads_to_merge_block(row: sqlite3.Row, his_threads: int) -> str |
     return "; ".join([*live, *kept]) or None
 
 
-def find_standing_rule_block(config: Config, row: sqlite3.Row, live: LiveMergeFacts) -> MergeRefusal | None:
+def find_standing_rule_block(config: Config, row: sqlite3.Row, live: "LiveMergeFacts") -> MergeRefusal | None:
     """The guard's check under the owner's standing rule for merging without them, on facts just read from GitHub.
     Their review is replaced by the rule: a colleague's approval (the review bot's alone or a waiver does not count),
     the review bot's review of the head without changes asked, GitHub's CLEAN, the head the queue read, and a base
     that is the default branch or a backport branch. None: it may merge."""
+    from bridge.backport import is_backport_base
+
     ref = str(row["ref"])
     if row["held_at"] is not None:
         return MergeRefusal(ref, (HELD,), row["merge_block"], held_why=row["held_why"])

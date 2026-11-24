@@ -15,7 +15,7 @@ from conftest import VENV_BIN, BridgeEnv, SpawnProcess, wait_for
 from bridge import db
 from bridge.config import load_config
 from bridge.hooks import handle_hook
-from bridge.procinfo import process_start_ms
+from bridge.procinfo import process_age_us, process_start_ms
 from bridge.start_context import (
     PendingStart,
     finish_taken_start,
@@ -207,6 +207,33 @@ def test_hook_latency(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> Non
     print(f"hook wall p50={statistics.median(wall):.1f}ms, in-process p50={statistics.median(in_process):.1f}ms")
     # Recorded durations run from process start, so they include interpreter start-up and lock waits.
     assert statistics.median(in_process) < 100
+
+
+def test_process_age_is_the_time_since_it_started() -> None:
+    before_spawn = time.perf_counter()
+    proc = subprocess.Popen(["sleep", "5"])
+    after_spawn = time.perf_counter()
+    try:
+        time.sleep(0.2)
+        before_read = time.perf_counter()
+        age_ms = (process_age_us(proc.pid) or 0) / 1000
+        after_read = time.perf_counter()
+    finally:
+        proc.kill()
+        proc.wait()
+    # Linux counts a start in 10 ms ticks; an age read against /proc/stat's btime was tens of ms or more too long.
+    assert (before_read - after_spawn) * 1000 - 1 <= age_ms <= (after_read - before_spawn) * 1000 + 11
+
+
+def test_hook_start_loads_no_module_only_other_paths_use() -> None:
+    # Each of these once reached every hook's start through a single import line, adding milliseconds to each prompt.
+    only_on_their_paths = {
+        "bridge.title_guard", "bridge.reviews", "bridge.review_github", "bridge.backport", "bridge.shadow_filter",
+        "bridge.classifier", "bridge.pages", "bridge.pins", "bridge.dream", "bridge.rewake", "urllib.request",
+    }  # fmt: skip
+    code = "import sys, bridge.hooks; print(' '.join(sys.modules))"
+    loaded = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout.split()
+    assert only_on_their_paths.isdisjoint(loaded)
 
 
 def _github_repo(path: Path, branch: str) -> Path:

@@ -10,7 +10,6 @@ from typing import cast
 
 from bridge.compaction import convert_keep_to_context, load_keep
 from bridge.config import Config, state_dir
-from bridge.dream import read_dream
 from bridge.inject import Packed, Part
 from bridge.leads import (
     Lead,
@@ -66,6 +65,8 @@ def convert_lead_to_parts(lead: Lead, config: Config) -> list[Part]:
     notes = convert_notes_to_lead_section(read_notes(lead_dir(lead.name)))
     # Notes before the dream: with the constitution and the role they still fit one message; the dream can wait.
     parts.append(Part(notes, "your notes", "guild notes", True))
+    from bridge.dream import read_dream  # only a lead's or the assistant's start reads it
+
     if dream := read_dream(lead_dir(lead.name)):
         parts.append(Part(dream, "your dream from last night", rebuilt=True))
     return parts
@@ -76,6 +77,8 @@ def convert_assistant_to_parts(conn: sqlite3.Connection, config: Config) -> list
     parts = [read_constitution_part(), Part(role, "your role", rebuilt=True)]
     if (notes := read_notes(assistant_dir())).strip():
         parts.append(Part(convert_notes_to_section(notes), "your notes", "guild notes", True))
+    from bridge.dream import read_dream  # only a lead's or the assistant's start reads it
+
     if dream := read_dream(assistant_dir()):
         parts.append(Part(dream, "your dream from last night", rebuilt=True))
     return parts

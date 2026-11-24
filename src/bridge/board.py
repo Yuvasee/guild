@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from bridge.config import state_dir
-from bridge.pages import find_unready_citations, map_unready_citations_to_error
 
 BODY_MAX_CHARS = 2000
 PREVIEW_MAX_CHARS = 200
@@ -123,6 +122,8 @@ def send_message(
     if len(body) > BODY_MAX_CHARS:
         print(f"refused a {len(body)}-char message: {body[:100]!r}", flush=True)
         raise MessageStateError(f"message is {len(body)} chars; keep it under {BODY_MAX_CHARS}")
+    from bridge.pages import find_unready_citations, map_unready_citations_to_error  # hooks never cite a page
+
     if unready := find_unready_citations(conn, body):
         raise MessageStateError(map_unready_citations_to_error(unready))
     if reply_to is not None:
@@ -299,6 +300,8 @@ def convert_item_id_to_question_ref(item_id: int) -> str:
 def add_user_item(conn: sqlite3.Connection, sender: Party, severity: str, text: str, at_ms: int) -> int:
     if len(text) > USER_ITEM_MAX_CHARS:
         raise MessageStateError(f"keep it to one line under {USER_ITEM_MAX_CHARS} chars (got {len(text)})")
+    from bridge.pages import find_unready_citations, map_unready_citations_to_error  # hooks never cite a page
+
     if unready := find_unready_citations(conn, text):
         raise MessageStateError(map_unready_citations_to_error(unready))
     cursor = conn.execute(

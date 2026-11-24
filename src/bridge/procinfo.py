@@ -4,6 +4,7 @@ import os
 import struct
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
@@ -63,6 +64,18 @@ def process_start_ms(pid: int) -> int | None:
     if sys.platform.startswith("linux"):
         return _linux_start_ms(pid)
     return None
+
+
+def process_age_us(pid: int) -> int | None:
+    """On Linux read against the boot clock: /proc/stat's btime is whole seconds and drifts from the wall clock, so an
+    age taken from process_start_ms is off by up to a second."""
+    if sys.platform == "linux":
+        ticks = _linux_start_ticks(pid)
+        if ticks is None:
+            return None
+        return time.clock_gettime_ns(time.CLOCK_BOOTTIME) // 1000 - ticks * 1_000_000 // os.sysconf("SC_CLK_TCK")
+    start_ms = process_start_ms(pid)
+    return time.time_ns() // 1000 - start_ms * 1000 if start_ms else None
 
 
 def process_args(pid: int) -> ProcessArgs | None:
@@ -129,15 +142,23 @@ def _libc() -> ctypes.CDLL:
 
 
 def _linux_start_ms(pid: int) -> int | None:
+    start_ticks = _linux_start_ticks(pid)
     try:
-        stat = Path(f"/proc/{pid}/stat").read_text()
         boot_line = next(line for line in Path("/proc/stat").read_text().splitlines() if line.startswith("btime"))
     except (OSError, StopIteration):
         return None
-    fields = stat.rsplit(")", 1)[1].split()
-    start_ticks = int(fields[19])
+    if start_ticks is None:
+        return None
     boot_s = int(boot_line.split()[1])
     return boot_s * 1000 + start_ticks * 1000 // os.sysconf("SC_CLK_TCK")
+
+
+def _linux_start_ticks(pid: int) -> int | None:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    return int(stat.rsplit(")", 1)[1].split()[19])
 
 
 def _linux_args(pid: int) -> ProcessArgs | None:

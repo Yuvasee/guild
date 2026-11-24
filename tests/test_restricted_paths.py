@@ -253,8 +253,8 @@ MERGE_FACTS = (False, True, "SUCCESS", "CLEAN", 0, "a1", (), ())
 def merge_waits(conn: sqlite3.Connection, body: str | Exception) -> tuple[str, ...]:
     fetch = mock.Mock(side_effect=body) if isinstance(body, Exception) else mock.Mock(return_value=body)
     with (
-        mock.patch("bridge.guard.fetch_merge_facts", return_value=MERGE_FACTS),
-        mock.patch("bridge.guard.fetch_pr_body", fetch),
+        mock.patch("bridge.review_github.fetch_merge_facts", return_value=MERGE_FACTS),
+        mock.patch("bridge.review_github.fetch_pr_body", fetch),
     ):
         refusals = find_merge_blocks(conn, CONFIG, [Target(REF, "gh pr merge")], 1000)
     return tuple(w for r in refusals for w in r.waits if "another team's code" in w or "Pricing service" in w)
@@ -276,7 +276,7 @@ def test_the_merge_guard_refuses_a_restricted_pr_until_its_body_has_why_and_ok(t
     assert "could not be read (gh failed: timeout)" in unread
     with transaction(conn):
         conn.execute("UPDATE review_prs SET files = ?", (json.dumps(["app/x.py"]),))
-    with mock.patch("bridge.guard.fetch_pr_body") as fetch:
+    with mock.patch("bridge.review_github.fetch_pr_body") as fetch:
         assert merge_waits(conn, "x") == ()
     fetch.assert_not_called()
 

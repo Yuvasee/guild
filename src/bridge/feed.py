@@ -34,12 +34,10 @@ from bridge.config import Config, state_dir
 from bridge.db import is_lock_error, now_ms, transaction
 from bridge.errlog import log_error
 from bridge.leads import find_lead_conversations, is_conversation_locked, is_surface_locked, list_leads
-from bridge.pages import find_unready_citations, map_unready_citations_to_error
 from bridge.procinfo import pid_alive, process_start_ms
 from bridge.refs import extract_refs
 from bridge.registry import PROC_START_TOLERANCE_MS, RECENT_REF_TURNS, current_ref_sql
 from bridge.rewake_marks import WaiterDeferral
-from bridge.shadow_filter import is_wake_held
 from bridge.tabinput import (
     BRIDGE_TEXT_PREFIX,
     PROBE_KEY,
@@ -166,6 +164,8 @@ def add_post(
     if not title:
         raise MessageStateError("empty title")
     cited = "\n".join([title, body, *(link.url for link in links)])
+    from bridge.pages import find_unready_citations, map_unready_citations_to_error  # hooks never cite a page
+
     if unready := find_unready_citations(conn, cited):
         raise MessageStateError(map_unready_citations_to_error(unready))
     if len(title) > USER_ITEM_MAX_CHARS:
@@ -609,6 +609,8 @@ def retry_when_locked[T](what: str, call: Callable[[], T], delays: tuple[float, 
 def _find_typable_row(
     conn: sqlite3.Connection, config: Config, message_id: int, conversation_id: str
 ) -> sqlite3.Row | None:
+    from bridge.shadow_filter import is_wake_held  # it loads the HTTP client, which hooks never use
+
     if is_wake_held(conn, config, message_id, conversation_id, now_ms()):
         # The live filter starts its delivery once it lets it through.
         return None

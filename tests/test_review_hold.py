@@ -113,7 +113,7 @@ def test_the_merge_guard_refuses_a_held_pr_without_asking_github(tmp_path: Path)
     hold(conn, ref="pr:Acme/Web#12")
     targets = map_command_to_targets("gh pr merge https://github.com/Acme/Web/pull/12", str(web))
 
-    with mock.patch("bridge.guard.fetch_merge_facts") as fetch:
+    with mock.patch("bridge.review_github.fetch_merge_facts") as fetch:
         [refused] = find_merge_blocks(conn, CONFIG, targets, 1000)
     fetch.assert_not_called()
     assert refused.waits == (HELD,)

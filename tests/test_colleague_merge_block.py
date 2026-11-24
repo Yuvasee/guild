@@ -133,13 +133,15 @@ def test_the_guard_reads_the_threads_live_and_lets_a_thread_resolved_since_the_c
     conn, targets = guard_setup(tmp_path)
     fresh = 1000 + GITHUB_STALE_S * 1000
     with mock.patch(
-        "bridge.guard.fetch_merge_facts", return_value=(False, True, None, "CLEAN", 0, "a1", ("mira",), ())
+        "bridge.review_github.fetch_merge_facts", return_value=(False, True, None, "CLEAN", 0, "a1", ("mira",), ())
     ):
         [refused] = find_merge_blocks(conn, CONFIG, targets, fresh)
     assert refused.waits == (COLLEAGUE_COMMENTS_OPEN,)
     [line] = map_merge_blocks_to_lines([refused], "the owner", "The owner")
     assert "a colleague's comments are not processed: 1 thread neither resolved nor answered (mira)" in line
-    with mock.patch("bridge.guard.fetch_merge_facts", return_value=(False, True, None, "CLEAN", 0, "a1", (), ())):
+    with mock.patch(
+        "bridge.review_github.fetch_merge_facts", return_value=(False, True, None, "CLEAN", 0, "a1", (), ())
+    ):
         assert find_merge_blocks(conn, CONFIG, targets, fresh) == []
 
 
