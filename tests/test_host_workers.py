@@ -1112,3 +1112,22 @@ def test_a_reopened_host_worker_gets_gbridge_in_its_old_worktree_restored_at_the
     assert (tmp_path / ".local" / "bin" / "gbridge").exists()
 
     assert host_side.run(payload) == {"ok": False, "error": f"{directory} already exists here"}
+
+
+def test_a_configured_host_sync_dir_goes_with_its_subfolders(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    skill = tmp_path / ".claude/skills/slides"
+    (skill / "references").mkdir(parents=True)
+    (skill / "SKILL.md").write_text("slides\n")
+    (skill / "references/fonts.md").write_text("fonts\n")
+    (skill / ".git").mkdir()
+    (skill / ".git/HEAD").write_text("ref\n")
+    (skill / "icon.jpeg").write_bytes(b"\xff\xd8\xff\xe0\x00")
+
+    files, notes = read_host_rule_files(Config(host_sync_dirs=("~/.claude/skills/slides",)))
+
+    paths = [f["path"] for f in files]
+    assert ".claude/skills/slides/SKILL.md" in paths and ".claude/skills/slides/references/fonts.md" in paths
+    assert not any(".git" in p or "icon.jpeg" in p for p in paths), "hidden folders and binaries stay"
+    assert notes == []
+    assert ".claude/skills/slides/SKILL.md" not in [f["path"] for f in read_host_rule_files(Config())[0]]

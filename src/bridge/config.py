@@ -196,6 +196,9 @@ class Config:
     review_python_paths: tuple[str, ...] = ()
     """Repo-relative Python source roots that review worktrees add to the editor's and each service's import paths."""
     overlay_dir: str = ""
+    host_sync_dirs: tuple[str, ...] = ()
+    """More folders under home that every deploy copies to each worker host with their subfolders (skills a host
+    worker also uses); the bridge skill and overlay_dir go anyway."""
     """Folder of this install's own texts (house rules), one <slot>.md per named slot; empty uses the generic texts."""
     people_dir: str = ""
     """Local folder whose people.toml holds the keys about people (PEOPLE_KEYS); set, config.toml may not hold them."""
@@ -397,6 +400,7 @@ def map_toml_to_config(raw: dict[str, object]) -> Config:
         review_generated_files=_str_list(raw, "review_generated_files", defaults.review_generated_files),
         review_python_paths=_str_list(raw, "review_python_paths", defaults.review_python_paths),
         overlay_dir=_str(raw, "overlay_dir", defaults.overlay_dir),
+        host_sync_dirs=_str_list(raw, "host_sync_dirs", defaults.host_sync_dirs),
         people_dir=_str(raw, "people_dir", defaults.people_dir),
         shadow_filter=_bool(raw, "shadow_filter", defaults.shadow_filter),
         shadow_filter_url=_str(raw, "shadow_filter_url", defaults.shadow_filter_url),

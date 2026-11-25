@@ -318,28 +318,30 @@ def read_host_rule_files(config: Config) -> tuple[list[dict[str, Any]], list[str
     Top-level text files only. Over RULE_FILES_MAX_BYTES none is sent: half a set would mix old rules with new.
     """
     home = Path.home()
-    folders = [(Path(BRIDGE_SKILL_DIR).expanduser(), 0o644)]
+    folders = [(Path(BRIDGE_SKILL_DIR).expanduser(), 0o644, False)]
     if config.overlay_dir:
-        folders.append((Path(config.overlay_dir).expanduser(), 0o600))
+        folders.append((Path(config.overlay_dir).expanduser(), 0o600, False))
+    folders += [(Path(d).expanduser(), 0o644, True) for d in config.host_sync_dirs]
     # A host has no guild to run `guild review doc`; the skill tells its workers to run this copy of its checks.
     checker = files("bridge").joinpath(REVIEW_DOC_CHECKER).read_text()
     rule_files: list[dict[str, Any]] = []
     notes: list[str] = []
     size = len(checker.encode("utf-8"))
-    for folder, mode in folders:
+    for folder, mode, nested in folders:
         if not folder.is_dir():
             continue
         if not folder.is_relative_to(home):
             notes.append(f"{folder} is not under {home}, so it has no path on the host")
             continue
         try:
-            paths = sorted(folder.iterdir())
+            paths = sorted(folder.rglob("*") if nested else folder.iterdir())
         except OSError as exc:
             notes.append(f"{folder} could not be listed ({exc}); not sent")
             continue
         for path in paths:
             try:
-                if _SKIPPED_RULE_FILE_RE.search(path.name) or not path.is_file():
+                skipped = any(_SKIPPED_RULE_FILE_RE.search(part) for part in path.relative_to(folder).parts)
+                if skipped or not path.is_file():
                     continue
                 size += path.stat().st_size
                 if size > RULE_FILES_MAX_BYTES:
@@ -353,7 +355,7 @@ def read_host_rule_files(config: Config) -> tuple[list[dict[str, Any]], list[str
                 continue
             if "\0" in text:
                 continue
-            relative = folder.relative_to(home) / path.name
+            relative = folder.relative_to(home) / path.relative_to(folder)
             rule_files.append({"path": relative.as_posix(), "text": text, "mode": mode})
     path = PurePosixPath(BRIDGE_SKILL_DIR.removeprefix("~/"), REVIEW_DOC_CHECKER)
     rule_files.append({"path": path.as_posix(), "text": checker, "mode": 0o644})

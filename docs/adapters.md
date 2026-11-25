@@ -188,6 +188,7 @@ review_python_paths = ["lib/python"]      # extra Python roots for review worktr
 pages_dir = "~/pages"                     # where published pages' sources live (the default)
 disk_folders = ["~/code/worktrees"]       # measured hourly; Right Hand hears when the disk runs low
 overlay_dir = "~/.config/bridge/house"    # your house texts, below
+host_sync_dirs = ["~/.claude/skills/slides"]  # more folders each deploy copies to worker hosts, with subfolders
 people_dir = "~/.config/bridge/people"    # your people file, below
 ask_autoclose_decision = "Q#12"           # your decision that verified asks close, cited when they do
 verifier_lead = "dana"                    # verifies claims first (empty: the least loaded live lead) and gets new dreams
