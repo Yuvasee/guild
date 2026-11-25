@@ -29,6 +29,7 @@ from bridge.compaction import (
     PHASE_REQUESTED,
     RETRY_AFTER_MS,
     TOLD_FORCED,
+    WORKER_WINDOW_SHARE,
     clear_death,
     convert_tokens_to_request,
     estimate_window,
@@ -270,7 +271,10 @@ def _record_screen(
         return
     if not config.compact_at_tokens:
         return
-    share_pct = int(COMPACT_AT_WINDOW_SHARE * 100)
+    kind = conn.execute("SELECT kind FROM instances WHERE instance_id = ?", (tab.instance_id,)).fetchone()
+    host = kind is not None and str(kind["kind"] or "").startswith(HOST_KIND_PREFIX)
+    # Every host tab is a worker.
+    share_pct = int((WORKER_WINDOW_SHARE if host else COMPACT_AT_WINDOW_SHARE) * 100)
     phase = row["compact_phase"]
     requested = row["compact_requested_at"]
     since_request = at_ms - int(requested) if requested is not None else None

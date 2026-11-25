@@ -14,6 +14,9 @@ KEEP_MAX_CHARS = 8_000
 """With its header the list must fit one hook message (bridge.inject.INJECT_MAX_CHARS) on its own."""
 COMPACT_AT_WINDOW_SHARE = 0.75
 """Share of a tab's own context window (from its status line) past which it compacts, if below compact_at_tokens."""
+WORKER_WINDOW_SHARE = 0.35
+"""A worker's share: the owner's rule, as every turn re-reads the whole context and a worker's brief and notes
+survive compaction."""
 NEAR_MARGIN_SHARE = 4
 """Within a quarter of the threshold (150k of 600k), tool hooks check every call instead of every 30 s."""
 FAILED_TURNS_DEAD = 3

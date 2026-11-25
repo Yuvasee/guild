@@ -108,11 +108,8 @@ def test_a_first_deploy_moves_the_entry_points_onto_a_release_and_keeps_uvs_venv
     assert (bridge_env.state_dir / f"deploys/{sha}-check-after.txt").exists()
     assert (bridge_env.state_dir / f"deploys/{sha}-sync-rules.txt").read_text() == "no remotes configured\n"
     with bridge_env.connect() as conn:
-        assert (
-            conn.execute("SELECT body FROM messages WHERE board = 1")
-            .fetchone()["body"]
-            .startswith(f"Deploying bridge {sha}")
-        )
+        # Each board post wakes every lead; a deploy is no news they act on.
+        assert conn.execute("SELECT count(*) FROM messages WHERE board = 1").fetchone()[0] == 0
 
 
 def test_a_remote_the_rule_sync_cannot_reach_is_a_warning_not_a_failed_deploy(

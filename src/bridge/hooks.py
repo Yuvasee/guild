@@ -35,6 +35,7 @@ from bridge.compaction import (
     PHASE_COMPACTING,
     PHASE_CONTINUE,
     PHASE_REQUESTED,
+    WORKER_WINDOW_SHARE,
     estimate_pending_tokens,
     give_up_driving,
     is_context_full,
@@ -1022,6 +1023,12 @@ def _deny(reason: str) -> str:
     )
 
 
+def _find_window_share(conn: sqlite3.Connection, surface: str | None) -> float:
+    """A tab with a lead above it, not a lead itself, is a worker."""
+    lead_surface = find_lead_of(conn, surface)[1]
+    return WORKER_WINDOW_SHARE if lead_surface is not None and lead_surface != surface else COMPACT_AT_WINDOW_SHARE
+
+
 def handle_hook(
     conn: sqlite3.Connection,
     event: str,
@@ -1227,7 +1234,7 @@ def handle_hook(
                 # The usage predates this prompt or tool result; a large one can jump straight to compaction.
                 estimate_pending_tokens(event, payload),
                 config.compact_at_tokens,
-                COMPACT_AT_WINDOW_SHARE,
+                _find_window_share(conn, surface),
                 can_deliver=event in _DELIVERY_EVENTS,
                 driven=can_drive,
                 at_ms=at_ms,
@@ -1308,7 +1315,7 @@ def handle_hook(
             # Waiting parts must reach the very next tool result, not one 30 s later.
             hint_due = next_hint_epoch(leftover or bool(packed.later))
             if conversation_id and is_near_threshold(
-                conn, conversation_id, config.compact_at_tokens, COMPACT_AT_WINDOW_SHARE
+                conn, conversation_id, config.compact_at_tokens, _find_window_share(conn, surface)
             ):
                 # Close to the warning, one long tool run could reach compaction between 30 s checks.
                 hint_due = int(time.time())

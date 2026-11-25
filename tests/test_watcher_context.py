@@ -5,12 +5,14 @@ from conftest import BridgeEnv, SpawnProcess
 from test_leads import Team
 
 from bridge.compaction import (
+    COMPACT_AT_WINDOW_SHARE,
     DEAD_FAILING,
     DEAD_LIMIT_SCREEN,
     DEAD_TOO_LONG,
     FULL_CONTEXT_SQL,
     PHASE_COMPACTING,
     PHASE_REQUESTED,
+    WORKER_WINDOW_SHARE,
     end_driving,
     is_request_delivered,
     read_context_full,
@@ -26,6 +28,7 @@ from bridge.context_watch import (
 )
 from bridge.db import transaction
 from bridge.guildview import Evidence, map_evidence_to_state
+from bridge.hooks import _find_window_share  # pyright: ignore[reportPrivateUsage]
 
 RULE = "\u2500" * 40
 
@@ -171,6 +174,43 @@ def test_a_host_tab_past_the_share_is_asked_by_message_then_compacted_once_it_is
     assert not waiting, "its Stop hook must not start /compact before the request is in"
     assert delivered
     assert again.messages == [] and again.drives == []
+
+
+def test_a_host_worker_is_asked_at_35_percent_and_a_mac_tab_without_tokens_at_75(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    _, tabs = _worker_team(bridge_env, spawn_process)
+    config = Config(compact_at_tokens=600_000)
+
+    def asked_at(pct: int, at_ms: int) -> bool:
+        screen = _screen(f"  Opus 5.5 | {pct}% ctx | ~/.local/state/gbridge/worktrees/g-x")
+        with bridge_env.connect() as conn, transaction(conn):
+            conn.execute("UPDATE conversations SET compact_phase = NULL, compact_warned_at = NULL,"
+                         " compact_requested_at = NULL WHERE conversation_id = 'conv-b'")  # fmt: skip
+            return bool(record_context_screens(conn, config, tabs, {"conv-b": (screen, at_ms)}, at_ms).messages)
+
+    mac_at_40 = asked_at(40, 1_000_000)
+    with bridge_env.connect() as conn, transaction(conn):
+        conn.execute("UPDATE instances SET kind = 'host:devbox' WHERE conversation_id = 'conv-b'")
+    host_at_34 = asked_at(34, 2_000_000)
+    host_at_35 = asked_at(35, 3_000_000)
+
+    assert not mac_at_40
+    assert not host_at_34
+    assert host_at_35
+
+
+def test_a_worker_compacts_at_35_percent_of_its_window_and_a_lead_at_the_usual_share(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    _worker_team(bridge_env, spawn_process)
+    with bridge_env.connect() as conn, transaction(conn):
+        conn.execute("INSERT INTO tab_parents (agterm_session, parent_session) VALUES ('TAB-B', 'TAB-A')")
+    with bridge_env.connect() as conn:
+        surface = dict(conn.execute("SELECT conversation_id, surface FROM instances WHERE ended_at IS NULL").fetchall())
+        shares = {conv: _find_window_share(conn, surface[conv]) for conv in ("conv-a", "conv-b")}
+
+    assert shares == {"conv-a": COMPACT_AT_WINDOW_SHARE, "conv-b": WORKER_WINDOW_SHARE}
 
 
 def test_a_full_idle_tab_that_ignored_the_request_is_compacted_anyway(
