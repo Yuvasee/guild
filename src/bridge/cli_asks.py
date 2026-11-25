@@ -13,6 +13,7 @@ from bridge.asks import (
     AskError,
     add_ask,
     assign_verifiers,
+    change_ask_refs,
     claim_ask_done,
     close_ask,
     convert_wait_to_text,
@@ -64,9 +65,15 @@ def add_ask_commands(sub: "argparse._SubParsersAction[argparse.ArgumentParser]",
     p = ask_sub.add_parser("start", help="open → in_progress")
     p.add_argument("id", type=int)
     p.set_defaults(func=cmd_ask_start)
-    p = ask_sub.add_parser("note", help="news on an ask not done yet or not verified yet; it counts as an update")
+    p = ask_sub.add_parser(
+        "note",
+        help="news on an ask not done yet or not verified yet; it counts as an update. --ref and --drop-ref alone "
+        "change its refs and nothing else",
+    )
     p.add_argument("id", type=int)
-    p.add_argument("text")
+    p.add_argument("text", nargs="?")
+    p.add_argument("--ref", action="append", default=[], help="a PR, issue or page URL to add; repeat")
+    p.add_argument("--drop-ref", action="append", default=[], metavar="URL", help="a ref to remove; repeat")
     p.set_defaults(func=cmd_ask_note)
     p = ask_sub.add_parser(
         "wait",
@@ -205,9 +212,19 @@ def cmd_ask_start(args: argparse.Namespace, conn: sqlite3.Connection, config: Co
 
 def cmd_ask_note(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
     actor = current_actor(conn, config)
+    added, dropped = [str(r) for r in args.ref], [str(r) for r in args.drop_ref]
+    if args.text is None and not added and not dropped:
+        raise AskError("a note says what changed, or --ref / --drop-ref change its refs")
     with transaction(conn):
-        ask = note_ask(conn, int(args.id), actor, str(args.text), now_ms())
-    print(f"#{ask.id} noted ({ask.state})")
+        if added or dropped:
+            change_ask_refs(conn, int(args.id), actor, added, dropped, now_ms())
+        if args.text is not None:
+            note_ask(conn, int(args.id), actor, str(args.text), now_ms())
+    ask = get_ask(conn, int(args.id))
+    if added or dropped:
+        print(f"#{ask.id} refs: {' '.join(ask.refs) or 'none'}")
+    if args.text is not None:
+        print(f"#{ask.id} noted ({ask.state})")
     return 0
 
 

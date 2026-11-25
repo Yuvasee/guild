@@ -733,6 +733,24 @@ def test_cli_wait_shows_in_list_and_show(bridge_env: BridgeEnv, spawn_process: S
     assert ", waiting on a colleague" in team.guild("ask", "list").stdout
 
 
+def test_cli_note_adds_and_drops_refs_alone_or_with_its_text(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    team = make_lead_and_assistant(bridge_env, spawn_process)
+    pr, page = "https://github.com/acme/web/pull/12", "https://x.example/spec"
+    assert team.guild("ask", "add", "alex", "--words", "Ship it", "--ref", page, pid=team.b).returncode == 0
+
+    added = team.guild("ask", "note", "1", "--ref", pr, pid=team.a)
+    swapped = team.guild("ask", "note", "1", "PR 12 replaces the spec", "--drop-ref", page, pid=team.a)
+    empty = team.guild("ask", "note", "1", pid=team.a)
+
+    assert added.stdout == f"#1 refs: {page} {pr}\n", added.stderr
+    assert swapped.stdout == f"#1 refs: {pr}\n#1 noted (open)\n", swapped.stderr
+    assert empty.returncode == 2 and "--ref / --drop-ref" in empty.stderr
+    shown = team.guild("ask", "show", "1").stdout
+    assert f"refs: {pr}\n" in shown and f"note: refs: +{pr}" in shown and f"note: refs: -{page}" in shown
+
+
 def test_cli_pause_until_a_day(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:
     team = make_lead_and_assistant(bridge_env, spawn_process)
     assert team.guild("ask", "add", "alex", "--words", "Sweep the weekend", pid=team.b).returncode == 0

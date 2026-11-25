@@ -219,6 +219,29 @@ def note_ask(conn: sqlite3.Connection, ask_id: int, by: Actor, text: str, at_ms:
     return get_ask(conn, ask_id)
 
 
+def change_ask_refs(
+    conn: sqlite3.Connection, ask_id: int, by: Actor, added: list[str], dropped: list[str], at_ms: int
+) -> Ask:
+    """Only the refs change: a wait stays, since the review-queue rule reads the refs of an ask that waits."""
+    ask = get_ask(conn, ask_id)
+    _require(ask, WAITABLE, "change the refs of")
+    for ref in added:
+        if not ref.startswith(("https://", "http://")):
+            raise AskError(f"a ref is a URL: {ref!r}")
+    missing = [ref for ref in dropped if ref not in ask.refs]
+    if missing:
+        raise AskError(f"#{ask_id} has no ref {missing[0]}; its refs: {' '.join(ask.refs) or 'none'}")
+    refs = list(dict.fromkeys(ref for ref in [*ask.refs, *added] if ref not in dropped))
+    if len(refs) > REFS_MAX:
+        raise AskError(f"at most {REFS_MAX} refs")
+    if refs == list(ask.refs):
+        raise AskError(f"#{ask_id} already has these refs")
+    conn.execute("UPDATE asks SET refs = ? WHERE id = ?", (json.dumps(refs), ask_id))
+    change = [*(f"+{ref}" for ref in refs if ref not in ask.refs), *(f"-{ref}" for ref in dropped)]
+    _log(conn, ask_id, at_ms, by.handle, None, "refs: " + " ".join(change))
+    return get_ask(conn, ask_id)
+
+
 def claim_ask_done(conn: sqlite3.Connection, ask_id: int, by: Actor, claim: str, at_ms: int) -> Ask:
     ask = get_ask(conn, ask_id)
     _require(ask, ("open", "in_progress"), "claim done")

@@ -15,6 +15,7 @@ from bridge.asks import (
     AskError,
     add_ask,
     assign_verifiers,
+    change_ask_refs,
     claim_ask_done,
     find_overdue_asks,
     get_ask,
@@ -580,3 +581,34 @@ def test_a_card_tied_by_ask_or_by_link_counts_and_a_queued_pr_review_needs_none(
     team.execute("UPDATE user_items SET resolved_at = 1 WHERE id = ?", (resolved,))
     with pytest.raises(AskError, match="no open question or blocker card"):
         link_card_to_ask(team, plain, resolved)
+
+
+def test_a_ref_added_to_a_waiting_ask_feeds_the_review_queue_rule_and_keeps_the_wait(team: sqlite3.Connection) -> None:
+    queue_pr(team, "Acme/Web", 12)
+    ask_id = add_ask(team, "alex", "aide", "Ship the fix", "tab", ["https://linear.app/acme/issue/ACME-4"], 0).id
+    owner_wait(team, ask_id, HOUR, "approval", "Theo reviews it")
+    pr = "https://github.com/Acme/Web/pull/12"
+
+    changed = change_ask_refs(team, ask_id, ALEX, [pr], ["https://linear.app/acme/issue/ACME-4"], HOUR + 1)
+    sent = send_card_notices(team, CONFIG, HOUR + 15 * 60_000)
+    change_ask_refs(team, ask_id, ALEX, [], [pr], HOUR + 16 * 60_000)
+    sent_after_drop = send_card_notices(team, CONFIG, 3 * HOUR)
+
+    assert (changed.refs, changed.wait_on) == ((pr,), "approval")
+    assert list_ask_events(team, ask_id)[-2]["note"] == f"refs: -{pr}"
+    assert sent == [], "its only PR is in the review queue"
+    assert [line.split(" ")[0] for line in bodies_to(team, sent_after_drop, "aide")[0].splitlines()[1:]] == [
+        f"#{ask_id}"
+    ]
+
+
+def test_a_ref_change_refuses_a_non_url_a_ref_the_ask_lacks_and_no_change(team: sqlite3.Connection) -> None:
+    ask_id = add_ask(team, "alex", "aide", "Ship the fix", "tab", ["https://x.example/a"], 0).id
+
+    for added, dropped, message in (
+        (["ACME-4"], [], "a ref is a URL"),
+        ([], ["https://x.example/b"], "has no ref https://x.example/b; its refs: https://x.example/a"),
+        (["https://x.example/a"], [], "already has these refs"),
+    ):
+        with pytest.raises(AskError, match=message):
+            change_ask_refs(team, ask_id, ALEX, added, dropped, 1)
