@@ -9,8 +9,9 @@ import pytest
 from test_reviews import CONFIG, make_pr
 
 from bridge.db import connect
-from bridge.review_github import GitHubError, OpenPr, RoundOver, bound_gh_round, run_gh
+from bridge.review_github import GitHubError, OpenPr, RoundOver, bound_gh_round, map_iso_to_ms, run_gh
 from bridge.reviews import (
+    COMMENTS_LIST_LAG_MS,
     ROUND_LIMIT_S,
     SLOW_ROUND_S,
     list_refs_with_new_activity,
@@ -19,6 +20,8 @@ from bridge.reviews import (
 )
 
 PRS = [make_pr(ref=f"pr:Org/app#{n}", number=n, url=f"https://github.com/Org/app/pull/{n}") for n in range(1, 9)]
+SETTLED = (map_iso_to_ms(PRS[0].updated_at) or 0) + COMMENTS_LIST_LAG_MS
+"""Rounds run at SETTLED + now: a read this long after the PRs' change counts them as read."""
 
 
 class FakeGh:
@@ -56,7 +59,7 @@ def poll_round(conn: Any, gh: FakeGh, now: int, prs: list[OpenPr] = PRS) -> list
         mock.patch("bridge.review_github.subprocess.run", side_effect=gh.run),
         mock.patch("bridge.review_github.time.monotonic", side_effect=gh.monotonic),
     ):
-        return list(poll_review_queue(conn, CONFIG, now, None, None))
+        return list(poll_review_queue(conn, CONFIG, SETTLED + now, None, None))
 
 
 def read_slow_log(tmp_path: Path) -> str:
@@ -79,7 +82,7 @@ def test_a_round_on_a_hanging_gh_stops_at_its_limit_logs_itself_and_the_next_rou
     assert failure == (
         f"the review poll round ran past {ROUND_LIMIT_S // 60} min and stopped after {calls} gh calls ({calls} failed);"
         " the next round starts over",
-        1000,
+        SETTLED + 1000,
     )
     assert f"review poll\nround took {ROUND_LIMIT_S} s: {calls} gh calls, {calls} failed\n" in read_slow_log(tmp_path)
     assert len(list_refs_with_new_activity(conn)) == len(PRS), "every unread PR is still due"

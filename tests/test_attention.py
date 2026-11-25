@@ -307,7 +307,7 @@ def test_only_a_pr_with_green_ci_and_the_review_bot_clear_at_its_head_gets_a_pla
     )
     for ref, commit in (("pr:Org/app#3", "h3"), ("pr:Org/app#4", "old")):
         store_comments(
-            conn, CONFIG, ref, "U", [comment(f"r-{commit}", author="bot", state="CHANGES_REQUESTED", commit=commit)]
+            conn, CONFIG, ref, "U", [comment(f"r-{commit}", author="bot", state="CHANGES_REQUESTED", commit=commit)], 0
         )
 
     reviews = map_db_to_reviews(conn, CONFIG, 2)

@@ -40,6 +40,7 @@ from bridge.review_github import (
     list_loc_excluded,
     map_checks_to_ci_blocked_by,
     map_files_to_loc,
+    map_iso_to_ms,
     map_node_to_open_pr,
     map_reviews_to_approvers,
     map_threads_to_review_threads,
@@ -49,6 +50,7 @@ from bridge.reviews import (
     AGENT,
     AGENT_PREFIX,
     COLLEAGUE,
+    COMMENTS_LIST_LAG_MS,
     HIS,
     OLD,
     READY,
@@ -344,7 +346,7 @@ def setup_reviewed_pr(tmp_path: Path, **changes: Any) -> Any:
 
 def store(conn: Any, *comments: FetchedComment) -> None:
     with transaction(conn):
-        store_comments(conn, CONFIG, REF, "U", list(comments))
+        store_comments(conn, CONFIG, REF, "U", list(comments), 0)
 
 
 def comment(
@@ -1088,8 +1090,9 @@ def test_comments_are_read_only_when_github_says_the_pr_changed(tmp_path: Path) 
         mock.patch("bridge.reviews.fetch_open_prs", return_value=[make_pr()]),
         mock.patch("bridge.reviews.fetch_comments", return_value=[]) as fetched,
     ):
-        poll_review_queue(conn, CONFIG, 900, None, None)
-        poll_review_queue(conn, CONFIG, 990, None, None)
+        settled = (map_iso_to_ms(make_pr().updated_at) or 0) + COMMENTS_LIST_LAG_MS
+        poll_review_queue(conn, CONFIG, settled, None, None)
+        poll_review_queue(conn, CONFIG, settled + 90_000, None, None)
     assert fetched.call_count == 1
 
 
@@ -2646,7 +2649,7 @@ def answered_view(conn: Any, *comments: FetchedComment, threads: tuple[HisThread
     )
     with transaction(conn):
         store_open_prs(conn, [pr], 600)
-        store_comments(conn, CONFIG, REF, "U", list(comments))
+        store_comments(conn, CONFIG, REF, "U", list(comments), 0)
         classify_pending_comments(conn, CONFIG, ANSWERED_AT + 100_000)
         store_review_threads(conn, REF, map_pr_to_threads_key(pr), ReviewThreads(len(threads), threads))
         store_merge_blocks(conn)

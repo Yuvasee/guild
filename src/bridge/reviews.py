@@ -78,6 +78,7 @@ from bridge.review_github import (
     is_loc_excluded,
     list_loc_excluded,
     list_unanswered_colleague_comments,
+    map_iso_to_ms,
 )
 from bridge.review_marks import convert_reviews_to_text, map_text_to_reviews
 from bridge.review_worktree import (
@@ -94,6 +95,12 @@ WAKES_PER_HOUR_MAX = 3
 HOUR_MS = 3_600_000
 CLOCK_SKEW_MS = 60_000
 SETTLE_MS = 30_000
+COMMENTS_LIST_LAG_MS = 60_000
+"""GitHub's comment lists can lag the PR's updatedAt that a new comment set: a read this soon after a change is made
+again next round."""
+UNCLASSIFIED_LOG_AFTER_MS = 3 * 60_000
+"""Past its settle a comment gets its verdict within a scan (30 s) and a poll round (90 s); past this, each round logs
+that it still waits."""
 OPAQUE_MARK_WINDOW_MS = 600_000
 VISIBLE_MARK_WINDOW_MS = 90_000
 REMOTE_ACTIVE_WINDOW_MS = 900_000
@@ -484,10 +491,29 @@ def list_refs_with_new_activity(conn: sqlite3.Connection) -> list[tuple[str, str
 
 
 def store_comments(
-    conn: sqlite3.Connection, config: Config, ref: str, updated_at: str, comments: list[FetchedComment]
+    conn: sqlite3.Connection, config: Config, ref: str, updated_at: str, comments: list[FetchedComment], now: int
 ) -> None:
+    """The PR counts as read for updated_at only once that change is COMMENTS_LIST_LAG_MS old; nothing reads it again
+    until it changes. A comment that a read counted for a change at or after it did not return is logged when a later
+    read stores it."""
+    read = conn.execute("SELECT comments_read_for FROM review_prs WHERE ref = ?", (ref,)).fetchone()
+    read_for = map_iso_to_ms(read[0]) if read else None
+    known = {str(r[0]) for r in conn.execute("SELECT comment_id FROM review_comments WHERE ref = ?", (ref,))}
     for comment in comments:
         if is_worth_keeping(config, comment):
+            # An inline comment carries when it was drafted, so one in a review submitted later is not late.
+            if (
+                read_for is not None
+                and comment.review_id is None
+                and comment.comment_id not in known
+                and comment.created_at <= read_for
+            ):
+                print(
+                    f"review comments of {ref}: {comment.comment_id} of {_format_utc(comment.created_at)} was not in "
+                    f"the read for the PR's change at {_format_utc(read_for)}; stored only now, by the read for "
+                    f"{updated_at}",
+                    flush=True,
+                )
             conn.execute(
                 """
                 INSERT INTO review_comments (ref, comment_id, created_at, body, url, parent_id, parent_author, author,
@@ -499,9 +525,14 @@ def store_comments(
                 (ref, comment.comment_id, comment.created_at, comment.body, comment.url, comment.parent_id,
                  comment.parent_author, comment.author, comment.state, comment.commit_id, comment.review_id),
             )  # fmt: skip
+    changed_at = map_iso_to_ms(updated_at)
+    settled = changed_at is None or now - changed_at >= COMMENTS_LIST_LAG_MS
     conn.execute(
-        "UPDATE review_prs SET comments_read_for = ?, colleague_comments = ? WHERE ref = ?",
-        (updated_at, json.dumps(map_ref_to_colleague_waits(conn, config, ref)), ref),
+        """
+        UPDATE review_prs SET comments_read_for = coalesce(?, comments_read_for), colleague_comments = ?
+        WHERE ref = ?
+        """,
+        (updated_at if settled else None, json.dumps(map_ref_to_colleague_waits(conn, config, ref)), ref),
     )
 
 
@@ -761,6 +792,33 @@ def classify_pending_comments(conn: sqlite3.Connection, config: Config, scanned_
             (verdict, reason, told_at, owner_asked_at, ref, row["comment_id"]),
         )
     record_owner_reviews(conn, config)
+
+
+def log_unclassified_comments(conn: sqlite3.Connection, now: int, scanned_from: int | None) -> None:
+    row = conn.execute(
+        """
+        SELECT count(*) AS waiting, c.ref, c.comment_id, min(c.created_at) AS oldest
+        FROM review_comments c JOIN review_prs p ON p.ref = c.ref
+        WHERE c.verdict IS NULL AND p.closed_at IS NULL AND c.created_at + ? <= ?
+        """,
+        (SETTLE_MS + UNCLASSIFIED_LOG_AFTER_MS, now),
+    ).fetchone()
+    if not row["waiting"]:
+        return
+    scan = (
+        "no transcript scan has finished since serve started"
+        if scanned_from is None
+        else f"this round classified against the scan begun at {_format_utc(scanned_from)}"
+    )
+    print(
+        f"review poll: {row['waiting']} comment(s) have no verdict past their settle; the oldest, {row['comment_id']} "
+        f"of {row['ref']}, for {(now - int(row['oldest']) - SETTLE_MS) // 60_000} min; {scan}",
+        flush=True,
+    )
+
+
+def _format_utc(at: int) -> str:
+    return time.strftime("%m-%d %H:%M:%S UTC", time.gmtime(at / 1000))
 
 
 def record_owner_reviews(conn: sqlite3.Connection, config: Config) -> None:
@@ -1484,6 +1542,7 @@ def poll_review_queue(
         if scanned_from is not None:
             classify_pending_comments(conn, config, scanned_from)
             prune_marks(conn, now)
+        log_unclassified_comments(conn, now, scanned_from)
         store_merge_blocks(conn)
         wakes = [
             *take_comment_wakes(conn, config, now),
@@ -1547,7 +1606,7 @@ def read_github(
             print(f"review comments of {ref} failed: {exc}", flush=True)
             continue
         with transaction(conn):
-            store_comments(conn, config, ref, updated_at, comments)
+            store_comments(conn, config, ref, updated_at, comments, now)
     for ref, repo, number, key in shuffle(list_refs_with_new_threads(conn)):
         try:
             threads = fetch_review_threads(config, repo, number)
