@@ -319,6 +319,14 @@ def test_an_edited_reply_to_a_review_is_a_pr_comment_quoting_it(
     )
 
 
+def test_a_long_edited_reply_reaches_the_lead_whole(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    conn, state, item = drafted(tmp_path, monkeypatch, comment("p1", author="mira"))
+    reply = " ".join(f"w{i}x" for i in range(1_600))[:7_900]
+    assert choose(state, item, "edited", reply)[0] is True
+    told_lead = conn.execute("SELECT body FROM messages ORDER BY id DESC").fetchone()[0]
+    assert told_lead.endswith(reply)
+
+
 def test_answering_themselves_posts_nothing_and_tells_the_lead_not_to_reply(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

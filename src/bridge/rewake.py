@@ -6,11 +6,13 @@ import time
 import traceback
 from typing import TextIO
 
-from bridge.board import is_delivery_owner, next_hint_epoch, take_delivery, write_hint
+from bridge.board import is_delivery_owner, merge_user_messages, next_hint_epoch, take_delivery, write_hint
+from bridge.compaction import is_context_full
 from bridge.config import Config, db_path, load_config
 from bridge.db import connect, transaction
 from bridge.errlog import log_error
 from bridge.feed import TYPED_MESSAGE_SQL, release_dead_typing_claims
+from bridge.inject import Part, add_parts, pack_parts, read_later_parts, save_later_parts, take_later_parts
 from bridge.leads import is_conversation_locked, is_surface_locked
 from bridge.procinfo import process_start_ms
 from bridge.registry import make_instance_id, record_activity
@@ -74,20 +76,31 @@ def write_rewake(conn: sqlite3.Connection, config: Config, pid: int, event_ns: i
             not is_delivery_owner(conn, conversation_id, instance_id)
             or is_conversation_locked(conn, config, conversation_id)
             or is_surface_locked(conn, config, row["surface"])
-            or not _has_wakeful_mail(conn, config, conversation_id, instance_id, at_ms)
+            or is_context_full(conn, conversation_id)
+        ):
+            return False
+        # The user's words a hook left waiting wake the tab too: after its turn ended, no tool call would take them.
+        waiting = read_later_parts(conn, conversation_id)
+        if not any(p.in_order for p in waiting) and not _has_wakeful_mail(
+            conn, config, conversation_id, instance_id, at_ms
         ):
             return False
         release_dead_typing_claims(conn, at_ms, conversation_id)
-        # Parts a hook saved for later stay for the woken turn's first tool call, which takes them before mail.
         delivery = take_delivery(conn, conversation_id, at_ms, False)
-        if delivery.context is None:
+        if delivery.context is None and not delivery.user_messages and not waiting:
             return False
+        take_later_parts(conn, conversation_id)
+        context = [Part(delivery.context, "your bridge messages", "bridge inbox")] if delivery.context else []
+        # What waited goes first, as a hook gives it; the user's newer words wait behind any of theirs still waiting.
+        user_parts = merge_user_messages(delivery.user_messages)
+        packed = add_parts(pack_parts(waiting), [*user_parts, *context])
+        save_later_parts(conn, conversation_id, packed.later)
         record_activity(conn, instance_id, "active", event_ns)
-        out.write(delivery.context + "\n")
+        out.write(packed.text + "\n")
         out.flush()
     try:
         # What did not fit goes to this turn's next tool call, or to the next rewake once it ends.
-        write_hint(pid, next_hint_epoch(delivery.leftover))
+        write_hint(pid, next_hint_epoch(delivery.leftover or bool(packed.later)))
     except OSError:
         log_error("rewake", traceback.format_exc())
     return True

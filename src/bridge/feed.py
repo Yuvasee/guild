@@ -23,9 +23,11 @@ from bridge.board import (
     Recipient,
     SendResult,
     add_user_item,
+    check_user_words,
     convert_item_id_to_answer_ref,
     convert_item_id_to_question_ref,
     convert_text_to_preview,
+    convert_user_message_to_parts,
     fit_body,
     is_delivery_owner,
     resolve_handle,
@@ -35,6 +37,7 @@ from bridge.compaction import DEAD_COMPACTABLE, FULL_CONTEXT_SQL, map_screen_to_
 from bridge.config import Config, state_dir
 from bridge.db import is_lock_error, now_ms, transaction
 from bridge.errlog import log_error
+from bridge.inject import Part
 from bridge.leads import find_lead_conversations, is_conversation_locked, is_surface_locked, list_leads
 from bridge.procinfo import pid_alive, process_start_ms
 from bridge.refs import extract_refs
@@ -59,11 +62,11 @@ ANSWER_KINDS = frozenset({"done", "insight"})
 OPTIONS_MAX = 6
 OPTION_MAX_CHARS = 60
 LINKS_MAX = 8
-ANSWER_MAX_CHARS = 1000
 _PR_NUMBER_RE = re.compile(r"(?<![\w/.-])#?(\d{3,6})\b")
 POST_TYPES = ("heads-up", "question", "report", "handoff")
 TYPED_PEER_PREVIEW_CHARS = 500
 TYPED_USER_MAX_CHARS = 700
+TYPED_CUT_MARK = "(cut here; these are the user's words"
 """The user's words are typed whole up to here; a longer text is typed as its start and where to read it all."""
 DELIVERY_RETRY_EVERY_MS = 120_000
 UNDELIVERED_ALERT_AFTER_MS = 300_000
@@ -227,7 +230,7 @@ def answer_post(
     """Closes a blocked or decision post with the user's answer and queues the answer for the session.
 
     Sent as the user only for the user's own click; a relayed answer stays the relay's message and says so."""
-    answer = _check_answer(answer)
+    answer = check_user_words(answer)
     row = _load_answerable_post(conn, item_id, user)
     conn.execute(
         """
@@ -256,7 +259,7 @@ def reply_on_card(
 ) -> tuple[SendResult, bool]:
     """Text typed on a card is the owner's answer and closes it; only the card's own 'Ask back' button sends a
     question, which reaches the session and leaves the post open, on the board so the page's room shows it."""
-    text = _check_answer(text)
+    text = check_user_words(text)
     row = _load_answerable_post(conn, item_id, user)
     if not ask:
         return answer_post(conn, item_id, text, user, at_ms), False
@@ -281,7 +284,7 @@ def reply_on_answer(
 ) -> SendResult:
     """The owner's reply on an Answers item reaches the assistant, tied to the item and naming its author: a worker
     may be closed, and the assistant routes it on; the post stays until the owner's OK."""
-    text = _check_answer(text)
+    text = check_user_words(text)
     row = conn.execute(
         "SELECT kind, text, from_handle FROM user_items WHERE id = ? AND source = 'agent'", (item_id,)
     ).fetchone()
@@ -305,15 +308,6 @@ def mark_answer_opened(conn: sqlite3.Connection, item_id: int, at_ms: int) -> bo
         (at_ms, item_id, *sorted(ANSWER_KINDS)),
     )
     return cursor.rowcount > 0
-
-
-def _check_answer(answer: str) -> str:
-    answer = answer.strip()
-    if not answer:
-        raise MessageStateError("empty answer")
-    if len(answer) > ANSWER_MAX_CHARS:
-        raise MessageStateError(f"answer is {len(answer)} chars; keep it under {ANSWER_MAX_CHARS}")
-    return answer
 
 
 def _load_answerable_post(conn: sqlite3.Connection, item_id: int, user: str) -> sqlite3.Row:
@@ -447,6 +441,7 @@ def post_from_user_to_room(
     conn: sqlite3.Connection, config: Config, user: str, text: str, at_ms: int, reply_to: int | None
 ) -> tuple[SendResult, list[Recipient]]:
     """The room is a log: the user's post reaches who it concerns, and mentions and the person answered are typed in."""
+    text = check_user_words(text)
     party = Party(USER_CONVERSATION, user)
     if reply_to is not None:
         return _reply_in_room(conn, config, user, text, at_ms, reply_to)
@@ -965,10 +960,38 @@ def convert_user_message_to_typed_text(handle: str, text: str, message_id: int) 
     if len(body) <= TYPED_USER_MAX_CHARS:
         return head + body
     # Claude Code folds a long insert into a "[Pasted text #N]" chip; kept under it, the text shows and gets its Enter.
+    # The hook of the prompt this submits adds the whole text: find_cut_user_parts.
     return (
-        f"{head}{body[: TYPED_PEER_PREVIEW_CHARS - 1]}… (cut here; these are the user's words: read all of them "
-        f"with bridge show {message_id} before you act)"
+        f"{head}{body[: TYPED_PEER_PREVIEW_CHARS - 1]}… {TYPED_CUT_MARK}: all of them come with "
+        f"this prompt as bridge context; if not, read them with bridge show {message_id} before you act)"
     )
+
+
+_TYPED_USER_HEAD_RE = re.compile(r"\[bridge\] [^\[\]]*? on the dashboard \(#(\d+)\): ")
+
+
+def find_cut_user_parts(
+    conn: sqlite3.Connection, conversation_id: str, prompt: str
+) -> tuple[tuple[int, tuple[Part, ...]], ...]:
+    """The whole of the user's message whose start was typed into this tab as the prompt, and nothing for a prompt
+    that only quotes one: it must be the typed text exactly, spacing aside."""
+    match = _TYPED_USER_HEAD_RE.match(prompt.strip())
+    if match is None or TYPED_CUT_MARK not in prompt:
+        return ()
+    row = conn.execute(
+        """
+        SELECT m.id, m.from_handle, m.body FROM messages m JOIN message_recipients r ON r.message_id = m.id
+        WHERE m.id = ? AND m.from_conversation = ? AND r.conversation_id = ?
+        """,
+        (int(match.group(1)), USER_CONVERSATION, conversation_id),
+    ).fetchone()
+    if row is None:
+        return ()
+    handle, body, message_id = str(row["from_handle"]), str(row["body"]), int(row["id"])
+    typed = map_text_to_typable(convert_user_message_to_typed_text(handle, body, message_id))
+    if "".join(typed.split()) != "".join(prompt.split()):
+        return ()
+    return ((message_id, tuple(convert_user_message_to_parts(message_id, handle, body))),)
 
 
 def map_typed_text_to_pattern(text: str) -> re.Pattern[str]:

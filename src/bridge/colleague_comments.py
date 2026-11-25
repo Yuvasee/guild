@@ -7,13 +7,13 @@ from typing import cast
 
 from bridge.agent_prefix import CLAUDE_PREFIX as AGENT_PREFIX
 from bridge.board import (
-    BODY_MAX_CHARS,
+    USER_BODY_MAX_CHARS,
     USER_CONVERSATION,
     USER_ITEM_MAX_CHARS,
+    USER_WORDS_MAX_CHARS,
     MessageStateError,
     Party,
     SendResult,
-    fit_body,
     send_message,
 )
 from bridge.config import Config
@@ -31,7 +31,7 @@ FEED_MAX = 60
 NOTE_MAX_CHARS = 1000
 BREACH_LATCHED_FOR_MS = 24 * 3_600_000
 QUOTED_PREFIX_CHARS = 40
-DRAFT_MAX_CHARS = 8000
+DRAFT_MAX_CHARS = USER_WORDS_MAX_CHARS
 QUOTED_LINES = 4
 ERROR_MAX_CHARS = 300
 UNFINISHED_AFTER_MS = 5 * 60_000
@@ -580,7 +580,7 @@ def finish_choice(
             + (", adjusted to the edited text." if chosen.choice == EDITED else ".")
             + "\n\nFinal text:\n"
         )
-        room = BODY_MAX_CHARS - len(head)
+        room = USER_BODY_MAX_CHARS - len(head)
         text = str(chosen.reply)
         body = head + (text if len(text) <= room else text[: room - 1] + "…")
     conn.execute(
@@ -590,7 +590,7 @@ def finish_choice(
         (answer, now, now, chosen.item_id),
     )
     recipient = resolve_tab(conn, str(row["called_conversation"]), str(row["called_by"]))
-    sent = send_message(conn, Party(USER_CONVERSATION, user), [recipient], "info", fit_body(body), now)
+    sent = send_message(conn, Party(USER_CONVERSATION, user), [recipient], "info", body, now)
     conn.execute("UPDATE user_items SET answer_message_id = ? WHERE id = ?", (sent.message_id, chosen.item_id))
     return sent
 

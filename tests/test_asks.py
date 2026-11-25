@@ -34,10 +34,11 @@ from bridge.asks import (
     send_ask_nags,
     split_text_to_bodies,
     start_ask,
+    tell_owner_of_reopen,
     verify_ask,
     wait_ask,
 )
-from bridge.board import Recipient
+from bridge.board import Recipient, merge_user_messages, take_delivery
 from bridge.capacity import read_owner_presence, record_owner_off, record_owner_on
 from bridge.config import Config, map_toml_to_config
 from bridge.db import connect
@@ -551,17 +552,54 @@ def test_page_shows_asks_and_closes_or_reopens_them(
 
     again = json.loads(http_request(dashboard + "/api/asks/1/close", post=True, data={}, expect=409))
     assert "it is closed" in again["detail"]
-    http_request(dashboard + "/api/asks/2/reopen", post=True, data={"why": "still old " + "x" * 1900})
+    why = "still old, see /p/no-such-page " + "x" * 7_800
+    http_request(dashboard + "/api/asks/2/reopen", post=True, data={"why": why})
     http_request(dashboard + "/api/asks/2/reopen", post=True, data={"why": 3}, expect=400)
 
     conn = bridge_env.connect()
     assert (get_ask(conn, 1).state, get_ask(conn, 1).closed_how) == ("closed", "auto")
-    assert (get_ask(conn, 2).state, get_ask(conn, 2).reopen_why) == ("open", "on the page: still old " + "x" * 1900)
-    told = conn.execute("SELECT body FROM messages WHERE from_handle = 'bridge' ORDER BY id DESC LIMIT 1").fetchone()
-    assert "reopened ask #2 (on the page: still old xxx" in told[0] and "Fix the export" in told[0]
+    assert (get_ask(conn, 2).state, get_ask(conn, 2).reopen_why) == ("open", "on the page: " + why)
+    [told] = conn.execute("SELECT body FROM messages WHERE body LIKE '%reopened ask #2%'").fetchall()
+    assert "reopened ask #2 (on the page: still old, see (page no-such-page, no local file) xxx" in told[0]
+    assert "x" * 7_800 in told[0] and "Fix the export" in told[0], "the whole reason, and a dead page link no refusal"
     page = json.loads(http_request(dashboard + "/api/guild"))
     assert page["asks"]["verified"] == []
     assert next(lead for lead in page["leads"] if lead["name"] == "alex")["asks"]["open"] == 2
+
+
+def test_a_reopen_reason_reaches_the_asks_owner_whole_as_the_owners_words(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    team = make_lead_and_assistant(bridge_env, spawn_process)
+    assert team.guild("ask", "add", "alex", "--words", "Fix the export", pid=team.b).returncode == 0
+    assert team.guild("ask", "done", "1", "--claim", "Deployed it to the status page", pid=team.a).returncode == 0
+    assert team.guild("ask", "verify", "1", "--evidence", EVIDENCE, "--how", HOW, pid=team.b).returncode == 0
+    conn = bridge_env.connect()
+    why = "on the page: still old " + " ".join(f"w{i}x" for i in range(1_400))
+    ask = reopen_ask(conn, 1, "user", why, 9_000)
+
+    tell_owner_of_reopen(conn, Config(), ask, 9_000)
+
+    delivery = take_delivery(conn, "conv-a", 9_000, False)
+    given = "\n".join(p.text for p in merge_user_messages(delivery.user_messages))
+    assert "the user's own words" in given and "…" not in given.replace('"…")', "")
+    at = [given.find(f"w{i}x") for i in range(1_400)]
+    assert -1 not in at and at == sorted(at), "every word of the reason, in order"
+
+
+def test_a_reopen_nobody_could_be_told_of_says_so_on_the_page(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess, dashboard: str
+) -> None:
+    team = make_lead_and_assistant(bridge_env, spawn_process)
+    assert team.guild("ask", "add", "alex", "--words", "Fix the export", pid=team.b).returncode == 0
+    assert team.guild("ask", "done", "1", "--claim", "Deployed it to the status page", pid=team.a).returncode == 0
+    assert team.guild("ask", "verify", "1", "--evidence", EVIDENCE, "--how", HOW, pid=team.b).returncode == 0
+    bridge_env.hook("SessionEnd", {"session_id": "conv-a", "cwd": str(bridge_env.root), "reason": "other"}, team.a)
+
+    reopened = json.loads(http_request(dashboard + "/api/asks/1/reopen", post=True, data={"why": "still old"}))
+
+    assert reopened["ok"] is True
+    assert reopened["detail"] == "open again, but alex was not told: its tab is locked or has no live session"
 
 
 def test_a_note_on_a_claim_counts_as_an_update(conn: sqlite3.Connection) -> None:

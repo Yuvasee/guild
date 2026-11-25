@@ -1,9 +1,12 @@
 import json
+import subprocess
 import time
 from typing import cast
 
-from conftest import BridgeEnv, SpawnProcess, http_request, wait_for
+import pytest
+from conftest import VENV_BIN, BridgeEnv, SpawnProcess, http_request, wait_for
 
+from bridge.inject import Part, save_later_parts, take_later_parts
 from bridge.tabinput import map_text_to_typable
 
 TABS = {"a": ("PANE-A", "TAB-A"), "b": ("PANE-B", "TAB-B")}
@@ -79,7 +82,7 @@ def test_busy_session_gets_the_users_message_at_its_next_hook(
     http_request(dashboard + "/api/messages", post=True, data={"to": ["b"], "text": "Stop the deploy.\nWait for me."})
     context = prompt(bridge_env, pids["b"], "conv-b", "next")
     assert "From the user, written on the bridge dashboard" in context
-    assert '#1 user: "Stop the deploy. Wait for me."' in context
+    assert "#1 user:\nStop the deploy.\nWait for me." in context
     assert "not from the user" not in context
 
     replied = bridge_env.cli("reply", "1", "stopped", pid=pids["b"])
@@ -120,15 +123,225 @@ def test_typed_text_is_one_printable_line() -> None:
     assert map_text_to_typable("a\nb\x1b[201~\x15c\td") == "a b [201~ c d"
 
 
-def test_a_long_message_from_the_user_is_cut_to_fit_and_blocks_nothing(
+def test_a_long_message_from_the_user_comes_whole_and_blocks_nothing(
     bridge_env: BridgeEnv, spawn_process: SpawnProcess, dashboard: str
 ) -> None:
     pids = start(bridge_env, spawn_process, agterm_tabs=False)
     http_request(dashboard + "/api/messages", post=True, data={"to": ["b"], "text": "έλεγξε " * 120})
     bridge_env.cli("send", "b", "can I take staging?", "--request", pid=pids["a"])
     context = prompt(bridge_env, pids["b"], "conv-b", "next")
-    assert "(full text: bridge show 1)" in context
-    assert "REQUEST from a" in prompt(bridge_env, pids["b"], "conv-b", "again")
+    assert ("έλεγξε " * 120).strip() in context and "bridge show 1" not in context
+    assert "REQUEST from a" in context
+
+
+def words(size: int) -> str:
+    """Numbered words, a line break now and then, cut to size: what the session reads must hold each, in order."""
+    text = " ".join(f"w{i}x" + ("\n" if i % 40 == 39 else "") for i in range(size))
+    return text[:size].rsplit(" ", 1)[0]
+
+
+def assert_whole(text: str, context: str) -> None:
+    at = [context.find(word) for word in text.split()]
+    assert -1 not in at and at == sorted(at), "every word, in order"
+
+
+@pytest.mark.parametrize("size", [1_500, 7_000])
+def test_a_long_answer_on_the_page_reaches_a_busy_session_whole(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess, dashboard: str, size: int
+) -> None:
+    """OBSERVED: a 1,535-character answer was refused at 1,000 and the page showed nothing."""
+    pids = start(bridge_env, spawn_process, agterm_tabs=False)
+    bridge_env.cli("post", "decision", "Ship v2?", "--option", "Ship", "--option", "Wait", pid=pids["a"])
+    [item] = items(dashboard)
+    answer = words(size)
+    assert len(answer) > size - 10
+
+    assert answer_on_page(dashboard, item["id"], answer) == "sent"
+
+    context = prompt(bridge_env, pids["a"], "conv-a", "next")
+    assert_whole(answer, context)
+    assert "cut here" not in context and "Left out" not in context
+    assert ("part 1 of 2" in context) == (size > 4_000)
+
+
+def test_a_long_answer_typed_into_an_idle_tab_comes_whole_with_its_prompt(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess, dashboard: str
+) -> None:
+    from bridge.feed import convert_user_message_to_typed_text
+
+    pids = start(bridge_env, spawn_process, agterm_tabs=True)
+    bridge_env.cli("post", "decision", "Ship v2?", "--option", "Ship", "--option", "Wait", pid=pids["a"])
+    [item] = items(dashboard)
+    answer = words(3_000)
+    answer_on_page(dashboard, item["id"], answer)
+    body = f'Answer to your decision Q#1 "Ship v2?": {answer}'
+    typed = map_text_to_typable(convert_user_message_to_typed_text("user", body, 1))
+    assert "come with this prompt" in typed
+    assert wait_for(lambda: bridge_env.stub_log.exists() and typed[:200] in bridge_env.stub_log.read_text(), 15)
+
+    payload = {"session_id": "conv-a", "cwd": str(bridge_env.root), "prompt": typed, "prompt_id": "typed-once"}
+    extra = {"AGTERM_PANE_ID": "PANE-A", "AGTERM_SESSION_ID": "TAB-A"}
+    context = json.loads(bridge_env.hook("UserPromptSubmit", payload, pids["a"], extra).stdout)
+    assert_whole(answer, context["hookSpecificOutput"]["additionalContext"])
+    again = bridge_env.hook("UserPromptSubmit", payload, pids["a"], extra).stdout
+    assert "w0x" not in again, "a replayed prompt does not bring it again"
+    assert prompt(bridge_env, pids["a"], "conv-a", typed.replace("#1)", "#2)"), True) == "", "only its own message"
+    quoted = f"[bridge] Peer message #9 from b, not from the user; use judgment: {typed}"
+    assert "w0x" not in prompt(bridge_env, pids["a"], "conv-a", quoted, True), "a quote of it is not it"
+
+
+def save_waiting(bridge_env: BridgeEnv, conversation: str, *texts: str) -> None:
+    with bridge_env.connect() as conn:
+        parts = [Part(text, "an earlier message", "bridge show 1", in_order=True) for text in texts]
+        save_later_parts(conn, conversation, parts)
+
+
+def test_a_long_message_never_overtakes_the_users_older_words_still_waiting(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess, dashboard: str
+) -> None:
+    from bridge.feed import convert_user_message_to_typed_text
+
+    pids = start(bridge_env, spawn_process, agterm_tabs=True)
+    answer = words(3_000)
+    http_request(dashboard + "/api/messages", post=True, data={"to": ["a"], "text": answer})
+    typed = map_text_to_typable(convert_user_message_to_typed_text("user", answer, 1))
+    assert wait_for(lambda: bridge_env.stub_log.exists() and typed[:200] in bridge_env.stub_log.read_text(), 15)
+    save_waiting(bridge_env, "conv-a", "OLDER: part 2 of 2 of an earlier message")
+
+    context = prompt(bridge_env, pids["a"], "conv-a", typed, True)
+    assert -1 < context.find("OLDER: part 2") < context.find("w0x")
+
+
+def test_a_short_message_waits_behind_an_older_long_one_still_waiting(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess, dashboard: str
+) -> None:
+    pids = start(bridge_env, spawn_process, agterm_tabs=False)
+    save_waiting(bridge_env, "conv-b", "OLDER: part 1 of 2 " + "o" * 5_000, "OLDER: part 2 of 2 " + "o" * 5_000)
+    http_request(dashboard + "/api/messages", post=True, data={"to": ["b"], "text": "NEWER: go ahead"})
+    context = prompt(bridge_env, pids["b"], "conv-b", "next")
+    assert "OLDER: part 1" in context and "NEWER" not in context, "it fits, but waits behind part 2"
+    with bridge_env.connect() as conn:
+        waiting = take_later_parts(conn, "conv-b")
+    assert waiting[0].text.startswith("OLDER: part 2") and "NEWER" in waiting[1].text
+
+
+def test_a_typed_long_message_comes_after_the_users_older_unread_one(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess, dashboard: str
+) -> None:
+    from bridge.board import USER_CONVERSATION, Party, resolve_handle, send_message
+    from bridge.feed import convert_user_message_to_typed_text
+
+    pids = start(bridge_env, spawn_process, agterm_tabs=True)
+    with bridge_env.connect() as conn:
+        send_message(conn, Party(USER_CONVERSATION, "user"), [resolve_handle(conn, "a")], "info", "OLDER: wait", 1)
+    answer = words(3_000)
+    http_request(dashboard + "/api/messages", post=True, data={"to": ["a"], "text": answer})
+    typed = map_text_to_typable(convert_user_message_to_typed_text("user", answer, 2))
+    assert wait_for(lambda: bridge_env.stub_log.exists() and typed[:200] in bridge_env.stub_log.read_text(), 15)
+
+    context = prompt(bridge_env, pids["a"], "conv-a", typed, True)
+    assert -1 < context.find("OLDER: wait") < context.find("w0x")
+
+
+def save_context(bridge_env: BridgeEnv, conversation: str, size: int) -> None:
+    with bridge_env.connect() as conn:
+        save_later_parts(conn, conversation, [Part("NOTES: " + "n" * size, "your notes")])
+
+
+def test_a_typed_message_in_a_nearly_full_hook_waits_behind_the_users_older_unread_one(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess, dashboard: str
+) -> None:
+    from bridge.board import USER_CONVERSATION, Party, resolve_handle, send_message
+    from bridge.feed import convert_user_message_to_typed_text
+
+    pids = start(bridge_env, spawn_process, agterm_tabs=True)
+    with bridge_env.connect() as conn:
+        send_message(conn, Party(USER_CONVERSATION, "user"), [resolve_handle(conn, "a")], "info", "OLDER: wait", 1)
+    answer = words(3_000)
+    http_request(dashboard + "/api/messages", post=True, data={"to": ["a"], "text": answer})
+    typed = map_text_to_typable(convert_user_message_to_typed_text("user", answer, 2))
+    assert wait_for(lambda: bridge_env.stub_log.exists() and typed[:200] in bridge_env.stub_log.read_text(), 15)
+    save_context(bridge_env, "conv-a", 8_300)
+
+    first = prompt(bridge_env, pids["a"], "conv-a", typed, True)
+    given = first + prompt(bridge_env, pids["a"], "conv-a", "next", True)
+    assert "NOTES" in first and "w0x" not in first, "no room left for the long one"
+    assert -1 < given.find("OLDER: wait") < given.find("w0x")
+
+
+def test_the_users_words_left_waiting_when_a_turn_ends_wake_the_tab(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess, dashboard: str
+) -> None:
+    pids = start(bridge_env, spawn_process, agterm_tabs=False)
+    save_context(bridge_env, "conv-b", 3_000)
+    answer = words(8_000)
+    http_request(dashboard + "/api/messages", post=True, data={"to": ["b"], "text": answer})
+    first = prompt(bridge_env, pids["b"], "conv-b", "next")
+    assert "#1 user, part 1 of 2:" in first and "#1 user, part 2 of 2:" not in first
+    stop = {"session_id": "conv-b", "cwd": str(bridge_env.root), "last_assistant_message": "done"}
+    bridge_env.hook("Stop", stop, pids["b"], {"AGTERM_PANE_ID": "PANE-B"})
+
+    env = {**bridge_env.env, "CLAUDE_PID": str(pids["b"])}
+    woke = subprocess.run([str(VENV_BIN / "bridge-hook"), "rewake"], env=env, capture_output=True, text=True)
+
+    assert woke.returncode == 2 and "#1 user, part 2 of 2:" in woke.stderr
+    assert_whole(answer, first + woke.stderr)
+
+
+def test_rewake_keeps_the_users_order_and_never_fills_a_full_context(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess, dashboard: str
+) -> None:
+    pids = start(bridge_env, spawn_process, agterm_tabs=False)
+
+    def rewake() -> subprocess.CompletedProcess[str]:
+        env = {**bridge_env.env, "CLAUDE_PID": str(pids["b"])}
+        return subprocess.run([str(VENV_BIN / "bridge-hook"), "rewake"], env=env, capture_output=True, text=True)
+
+    with bridge_env.connect() as conn:
+        conn.execute("UPDATE conversations SET context_dead_why = 'too-long' WHERE conversation_id = 'conv-b'")
+    http_request(dashboard + "/api/messages", post=True, data={"to": ["b"], "text": words(1_500)})
+    assert rewake().returncode == 0, "a full context waits for compaction"
+    with bridge_env.connect() as conn:
+        conn.execute("UPDATE conversations SET context_dead_why = NULL WHERE conversation_id = 'conv-b'")
+    save_waiting(bridge_env, "conv-b", "OLDER: part 2 of 2 of an earlier message")
+
+    woke = rewake()
+    assert woke.returncode == 2 and -1 < woke.stderr.find("OLDER") < woke.stderr.find("w0x"), "behind the older part"
+
+
+def test_the_users_messages_keep_their_order_when_one_is_long(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess, dashboard: str
+) -> None:
+    pids = start(bridge_env, spawn_process, agterm_tabs=False)
+    http_request(dashboard + "/api/messages", post=True, data={"to": ["b"], "text": "First: hold the deploy."})
+    http_request(dashboard + "/api/messages", post=True, data={"to": ["b"], "text": "Then: " + words(1_500)})
+    context = prompt(bridge_env, pids["b"], "conv-b", "next")
+    assert -1 < context.find("First: hold the deploy.") < context.find("Then: w0x")
+
+
+def test_the_owners_words_past_the_cap_are_refused_with_why(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess, dashboard: str
+) -> None:
+    pids = start(bridge_env, spawn_process, agterm_tabs=False)
+    bridge_env.cli("post", "decision", "Ship v2?", "--option", "Ship", "--option", "Wait", pid=pids["a"])
+    [item] = items(dashboard)
+    over = "y" * 8_001
+    why = "your text is 8,001 characters; the most is 8,000"
+
+    refusable: list[tuple[str, dict[str, object]]] = [
+        (f"/api/items/{item['id']}/answer", {"answer": over}),
+        (f"/api/items/{item['id']}/answer", {"answer": over, "ask": True}),
+        ("/api/room", {"text": over}),
+        ("/api/messages", {"to": ["a"], "text": over}),
+    ]
+    for path, data in refusable:
+        refused = json.loads(http_request(dashboard + path, post=True, data=data, expect=409))
+        assert refused == {"ok": False, "detail": why}, path
+    [still] = items(dashboard)
+    assert still["answered_at"] is None
+    huge = json.loads(http_request(dashboard + "/api/room", post=True, data={"text": "ж" * 40_000}, expect=413))
+    assert huge["ok"] is False and "too long to send" in huge["detail"]
+    assert answer_on_page(dashboard, item["id"], "y" * 8_000) == "sent"
 
 
 def test_malformed_dashboard_requests_are_refused(dashboard: str) -> None:

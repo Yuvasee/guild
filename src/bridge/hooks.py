@@ -19,9 +19,11 @@ from bridge.board import (
     Party,
     Recipient,
     is_delivery_owner,
+    merge_user_messages,
     next_hint_epoch,
     retarget_open_messages,
     take_delivery,
+    take_user_messages,
     write_hint,
 )
 from bridge.claims import record_nudges, take_expired_claim_reminder
@@ -50,7 +52,7 @@ from bridge.config import Config, db_path, load_config
 from bridge.db import HOOK_BUSY_TIMEOUT_MS, HOOK_RETRY_BUSY_TIMEOUT_MS, connect, transaction
 from bridge.entry import import_modules
 from bridge.errlog import log_error, log_slow
-from bridge.feed import release_dead_typing_claims, spawn_typed_delivery
+from bridge.feed import find_cut_user_parts, release_dead_typing_claims, spawn_typed_delivery
 from bridge.gitinfo import GitInfo, read_git_info, read_repo_facts
 from bridge.guard import (
     CLOSE,
@@ -70,7 +72,16 @@ from bridge.guard import (
     map_merge_blocks_to_lines,
     segment_command,
 )
-from bridge.inject import Packed, Part, add_part, cap_context, pack_parts, save_later_parts, take_later_parts
+from bridge.inject import (
+    Packed,
+    Part,
+    add_part,
+    add_parts,
+    cap_context,
+    pack_parts,
+    save_later_parts,
+    take_later_parts,
+)
 from bridge.leads import (
     find_lead_of,
     forget_assistant_role,
@@ -95,6 +106,7 @@ from bridge.registry import (
     make_instance_id,
     map_env_to_surface,
     mark_ended,
+    mark_prompt_seen,
     observe_instance,
     record_activity,
     record_prompt,
@@ -1196,6 +1208,13 @@ def handle_hook(
                 parts = [p for p in parts if not p.rebuilt]
             if pending is not None:
                 parts = [*pending.later, *parts]
+            typed: tuple[tuple[int, tuple[Part, ...]], ...] = ()
+            # A full context would fail the request carrying them; the typed line names bridge show for that case.
+            if event == "UserPromptSubmit" and conversation_id and not is_context_full(conn, conversation_id):
+                typed = find_cut_user_parts(conn, conversation_id, text or "")
+                # Typed prompts are harness prompts, which record no prompt_id unless marked here.
+                if typed and prompt_id is not None and not mark_prompt_seen(conn, conversation_id, prompt_id, at_ms):
+                    typed = ()
             if restored:
                 # First of all, even what waited: alone it always fits, so the list is never left waiting.
                 parts.insert(0, restored)
@@ -1220,6 +1239,9 @@ def handle_hook(
             if owner and conversation_id and packed.room < _MAIL_MIN_ROOM:
                 # Taking mail marks it offered; with no room it waits for the next event instead.
                 leftover = True
+                # Its older unread ones wait with it, in order; other mail stays unoffered.
+                older = take_user_messages(conn, conversation_id, at_ms) if typed else ()
+                packed = add_parts(packed, merge_user_messages(older, typed))
                 save_later_parts(conn, conversation_id, packed.later)
             elif owner and conversation_id:
                 # Notices and mail share the inbox budget; roles and notes stay outside it, as their own memory.
@@ -1227,12 +1249,16 @@ def handle_hook(
                 budget = min(INJECT_BUDGET_BYTES - spent, packed.room)
                 release_dead_typing_claims(conn, at_ms, conversation_id)
                 delivery = take_delivery(conn, conversation_id, at_ms, starting, budget_bytes=budget)
+                # The typed message and the user's unread ones, oldest first, behind the user's parts still waiting.
+                packed = add_parts(packed, merge_user_messages(delivery.user_messages, typed))
                 if delivery.context:
                     packed = add_part(packed, Part(delivery.context, "your bridge messages", "bridge inbox"))
                 leftover = delivery.leftover
                 save_later_parts(conn, conversation_id, packed.later)
-            elif conversation_id and packed.later:
-                save_later_parts(conn, conversation_id, take_later_parts(conn, conversation_id) + packed.later)
+            else:
+                packed = add_parts(packed, merge_user_messages(typed))
+                if conversation_id and packed.later:
+                    save_later_parts(conn, conversation_id, take_later_parts(conn, conversation_id) + packed.later)
             # Waiting parts must reach the very next tool result, not one 30 s later.
             hint_due = next_hint_epoch(leftover or bool(packed.later))
             if conversation_id and is_near_threshold(

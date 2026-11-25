@@ -271,17 +271,21 @@ def is_seen_prompt(conn: sqlite3.Connection, conversation_id: str, prompt_id: st
     return row is not None
 
 
+def mark_prompt_seen(conn: sqlite3.Connection, conversation_id: str, prompt_id: str, at_ms: int) -> bool:
+    """False when this prompt was seen before: Claude Code delivered it again."""
+    seen = conn.execute(
+        "INSERT OR IGNORE INTO seen_prompts (conversation_id, prompt_id, at) VALUES (?, ?, ?)",
+        (conversation_id, prompt_id, at_ms),
+    )
+    return seen.rowcount > 0
+
+
 def record_prompt(
     conn: sqlite3.Connection, conversation_id: str, prompt: str, prompt_id: str | None, at_ms: int
 ) -> bool:
     """Counts a turn once per prompt_id; returns False for a repeated delivery of an already seen prompt."""
-    if prompt_id is not None:
-        seen = conn.execute(
-            "INSERT OR IGNORE INTO seen_prompts (conversation_id, prompt_id, at) VALUES (?, ?, ?)",
-            (conversation_id, prompt_id, at_ms),
-        )
-        if seen.rowcount == 0:
-            return False
+    if prompt_id is not None and not mark_prompt_seen(conn, conversation_id, prompt_id, at_ms):
+        return False
     conn.execute(
         """
         UPDATE conversations SET turns = turns + 1, last_prompt = ?, last_seen_at = max(last_seen_at, ?)

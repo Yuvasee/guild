@@ -115,6 +115,7 @@ header .end { margin-left: auto; }
 .card.delivering { background: var(--row); }
 .card.delivering .title { font-size: 14px; font-weight: 500; color: var(--soft); }
 .card .delivery { font-size: 12px; color: var(--faint); margin-top: 6px; }
+.input-error { font-size: 12px; color: var(--stuck); font-weight: 600; margin-top: 4px; white-space: pre-wrap; }
 .card .urgent { color: var(--stuck); font-weight: 700; font-size: 12px; letter-spacing: .04em; margin-right: 8px; }
 .attention-mark { display: inline-block; min-width: 16px; font-size: 12px; font-weight: 600; line-height: 16px; text-align: center; color: var(--you); border: 1px solid var(--you); border-radius: 50%; cursor: help; font-variant-numeric: tabular-nums; }
 .card .attention-mark { margin-right: 8px; vertical-align: 1px; border: 0; padding: 0 4px; border-radius: 999px; background: color-mix(in srgb, var(--you) 16%, var(--raise)); }
@@ -454,6 +455,7 @@ details td.what { color: var(--faint); font-weight: 400; }
       <textarea id="text" rows="1" placeholder="Write to the team; @name reaches a lead now"></textarea>
       <button type="submit">Send</button>
     </form>
+    <div class="input-error" id="compose-error" data-error-for="compose" role="alert" hidden></div>
     <div id="replying" hidden></div>
     <div class="body" id="room"></div>
   </section>
@@ -523,17 +525,53 @@ function dayName(ms) {
   return when.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
 }
 
+// Never throws: a refusal, a non-JSON answer and no answer at all each come back as {ok: false, detail}.
 async function post(path, body) {
-  const response = await fetch(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-Bridge": "1" },
-    body: JSON.stringify(body || {}),
-  });
-  return response.json();
+  let response;
+  try {
+    response = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Bridge": "1" },
+      body: JSON.stringify(body || {}),
+    });
+  } catch (error) {
+    return { ok: false, detail: "bridge did not answer: " + error.message };
+  }
+  try {
+    return await response.json();
+  } catch (error) {
+    return { ok: false, detail: "bridge answered " + response.status + " with no result" };
+  }
 }
 
-function jump(surface) {
-  if (surface) post("/api/sessions/" + encodeURIComponent(surface) + "/jump");
+// A refusal shows under the input it refuses, keyed like its draft, so a card rebuilt by a poll shows it again.
+const inputErrors = new Map();
+
+function errorLine(key) {
+  const line = el("div", "input-error", inputErrors.get(key) || "");
+  line.dataset.errorFor = key;
+  line.setAttribute("role", "alert");
+  line.hidden = !inputErrors.has(key);
+  return line;
+}
+
+function setInputError(key, text) {
+  if (text) inputErrors.set(key, text); else inputErrors.delete(key);
+  for (const line of document.querySelectorAll(".input-error")) {
+    if (line.dataset.errorFor !== key) continue;
+    line.textContent = text || "";
+    line.hidden = !text;
+  }
+}
+
+function refusal(done, fallback) {
+  return done.detail || fallback;
+}
+
+async function jump(surface) {
+  if (!surface) return;
+  const done = await post("/api/sessions/" + encodeURIComponent(surface) + "/jump");
+  if (!done.ok) setStatus("Go to tab: " + refusal(done, "the tab did not open"));
 }
 
 function plural(count, word) {
@@ -705,11 +743,12 @@ function renderDeliveringCard(need) {
   }
   const dismiss = el("button", "dismiss", "Dismiss");
   dismiss.onclick = async () => {
-    await post("/api/items/" + need.id + "/resolve");
+    const done = await post("/api/items/" + need.id + "/resolve");
+    setInputError("q:" + need.id, done.ok ? "" : refusal(done, "not dismissed"));
     refresh();
   };
   actions.append(dismiss);
-  card.append(actions);
+  card.append(actions, errorLine("q:" + need.id));
   return card;
 }
 
@@ -735,13 +774,16 @@ function renderNeedCard(need) {
   title.append(need.text);
   card.append(title);
   const actions = el("div", "actions");
+  const errorKey = "q:" + need.id;
   const send = async (answer, ask = false) => {
     const done = await post("/api/items/" + need.id + "/answer", { answer, ask });
+    // A refused answer stays in the box, with why under it, until it is sent or changed.
+    setInputError(errorKey, done.ok ? "" : refusal(done, "not sent"));
     if (done.ok && done.detail === "asked") {
       // The card stays as it was, so its node and box stay too; text typed since sending is not this question.
       if (input.value.trim() === answer) { input.value = ""; drafts.delete(need.id); }
       setStatus("Asked " + need.from + "; " + need.question_ref + " stays open until you choose");
-    } else if (done.ok) drafts.delete(need.id); else setStatus(done.detail || "not sent");
+    } else if (done.ok) drafts.delete(need.id);
     refresh();
   };
   if (need.card) renderDecisionCard(need, card, send);
@@ -756,7 +798,7 @@ function renderNeedCard(need) {
   const input = el("input");
   input.placeholder = need.card && need.card.options.length ? "Other answer" : "Your answer";
   input.value = drafts.get(need.id) || "";
-  input.oninput = () => drafts.set(need.id, input.value);
+  input.oninput = () => { drafts.set(need.id, input.value); setInputError(errorKey, ""); };
   input.onkeydown = (event) => {
     if (event.key === "Enter" && input.value.trim()) send(input.value.trim());
   };
@@ -767,11 +809,12 @@ function renderNeedCard(need) {
   actions.append(input, askBack);
   const dismiss = el("button", "dismiss", "Dismiss");
   dismiss.onclick = async () => {
-    await post("/api/items/" + need.id + "/resolve");
+    const done = await post("/api/items/" + need.id + "/resolve");
+    setInputError(errorKey, done.ok ? "" : refusal(done, "not dismissed"));
     refresh();
   };
   actions.append(dismiss);
-  card.append(actions, renderNeedFoot(need));
+  card.append(actions, errorLine(errorKey), renderNeedFoot(need));
   return card;
 }
 
@@ -821,7 +864,7 @@ function renderColleagueDraftCard(need) {
   const editor = el("div", "part");
   const box = el("textarea");
   box.value = drafts.has(key) ? drafts.get(key) : c.draft;
-  box.oninput = () => drafts.set(key, box.value);
+  box.oninput = () => { drafts.set(key, box.value); setInputError(key, ""); };
   editor.append(el("span", "label", "Your reply (posted after “🤖 Claude:”)"), box);
   card.append(view, editor);
   card.append(colleagueCardPart("Plan", c.note));
@@ -831,13 +874,9 @@ function renderColleagueDraftCard(need) {
     return card;
   }
   const send = async (choice, text) => {
-    let done;
-    try {
-      done = await post("/api/colleague-replies/" + need.id, { choice, text: text || "" });
-    } catch (error) {
-      done = { ok: false, detail: "bridge did not answer: " + error.message };
-    }
-    if (done.ok) drafts.delete(key); else setStatus(done.detail || "not sent");
+    const done = await post("/api/colleague-replies/" + need.id, { choice, text: text || "" });
+    if (done.ok) drafts.delete(key);
+    setInputError(key, done.ok ? "" : refusal(done, "not sent"));
     refresh();
     return done.ok;
   };
@@ -858,7 +897,7 @@ function renderColleagueDraftCard(need) {
   edit.onclick = () => { setEditing(true); box.focus(); };
   cancel.onclick = () => setEditing(false);
   setEditing(drafts.has(key));
-  card.append(choose, editing);
+  card.append(choose, editing, errorLine(key));
   return card;
 }
 
@@ -941,27 +980,29 @@ function renderAnswerCard(answer) {
     }
   }
   const actions = el("div", "actions");
+  const key = "answer:" + answer.id;
   const ok = el("button", "", "OK");
   ok.title = "Take it off Answers; it stays in history";
   ok.onclick = async () => {
-    await post("/api/items/" + answer.id + "/resolve");
+    const done = await post("/api/items/" + answer.id + "/resolve");
+    setInputError(key, done.ok ? "" : refusal(done, "not taken off"));
     refresh();
   };
   actions.append(ok);
   if (answer.can_reply) {
-    const key = "answer:" + answer.id;
     const input = el("input");
     input.placeholder = "Reply";
     input.value = drafts.get(key) || "";
-    input.oninput = () => drafts.set(key, input.value);
+    input.oninput = () => { drafts.set(key, input.value); setInputError(key, ""); };
     const send = async () => {
       const text = input.value.trim();
       if (!text) return;
       const done = await post("/api/items/" + answer.id + "/reply", { text });
+      setInputError(key, done.ok ? "" : refusal(done, "not sent"));
       if (done.ok) {
         if (input.value.trim() === text) { input.value = ""; drafts.delete(key); }
         setStatus("Reply sent; " + answer.ref + " stays until you press OK");
-      } else setStatus(done.detail || "not sent");
+      }
       refresh();
     };
     input.onkeydown = (event) => { if (event.key === "Enter") send(); };
@@ -974,7 +1015,7 @@ function renderAnswerCard(answer) {
   when.title = "posted " + fullTime(answer.at);
   foot.append(el("span", "chip", answer.ref), el("span", "", "from " + answer.from), el("span", "", answer.kind), when);
   for (const link of answer.links) foot.append(linkTo(link.url, link.label, "chip"));
-  card.append(actions, foot);
+  card.append(actions, errorLine(key), foot);
   card.addEventListener("click", () => openAnswer(answer, card));
   card.addEventListener("focusin", () => openAnswer(answer, card));
   return card;
@@ -1167,9 +1208,13 @@ function renderAskCard(ask, verified) {
   card.append(renderAskPart("Seen by " + ask.by, ask.evidence));
   card.append(renderAskPart("How", ask.how));
   const actions = el("div", "actions");
+  const errorKey = "ask:" + ask.id;
   const act = async (path, body) => {
     const done = await post("/api/asks/" + ask.id + "/" + path, body);
-    if (done.ok) askReasons.delete(ask.id); else setStatus(done.detail || "not saved");
+    if (done.ok) askReasons.delete(ask.id);
+    // Saved, yet worth seeing: a reopen nobody was told of.
+    const note = done.ok && !["open again", "closed"].includes(done.detail) ? done.detail : "";
+    setInputError(errorKey, done.ok ? note : refusal(done, "not saved"));
     refresh();
   };
   const close = el("button", "", "Close");
@@ -1177,14 +1222,14 @@ function renderAskCard(ask, verified) {
   const reason = el("input");
   reason.placeholder = "What is still wrong (optional)";
   reason.value = askReasons.get(ask.id) || "";
-  reason.oninput = () => askReasons.set(ask.id, reason.value);
+  reason.oninput = () => { askReasons.set(ask.id, reason.value); setInputError(errorKey, ""); };
   const reopen = el("button", "", "Reopen");
   reopen.onclick = () => act("reopen", { why: reason.value.trim() });
   reason.onkeydown = (event) => {
     if (event.key === "Enter") reopen.onclick();
   };
   actions.append(close, reason, reopen);
-  card.append(actions);
+  card.append(actions, errorLine(errorKey));
   return card;
 }
 
@@ -1789,7 +1834,8 @@ function queueAction(pr, label, path, armed = "Really post?") {
     }
     queueArmed = null;
     const done = await post("/api/reviews/" + pr.repo + "/" + pr.number + "/" + path);
-    setStatus(done.ok ? pr.label + ": recorded" : done.detail || "not recorded");
+    if (done.ok) setStatus(pr.label + ": recorded");
+    setQueueError(pr, done.ok ? "" : refusal(done, "not recorded"));
     refresh();
   };
   return button;
@@ -1800,12 +1846,16 @@ function queuePublishButton(pr, label = "Publish to Slack", path = "publish") {
   const open = queueForm && queueForm.ref === pr.ref && queueForm.path === path;
   const button = el("button", "act", open ? "Close" : label);
   button.onclick = () => {
-    queueForm = open ? null : { ref: pr.ref, path, direct: false, mention: [] };
-    queueComment = emptyQueueComment();
+    const refused = refusedPublish.get(pr.ref + " " + path);
+    queueForm = open ? null : refused ? { ...refused.form } : { ref: pr.ref, path, direct: false, mention: [] };
+    queueComment = !open && refused ? { ...emptyQueueComment(), text: refused.comment } : emptyQueueComment();
     rerenderQueue();
   };
   return button;
 }
+
+// A refused publish keeps its form and comment per PR: another PR's form may be open when the refusal comes back.
+const refusedPublish = new Map();
 
 function rerenderQueue() {
   lastRendered.delete("queue");
@@ -1829,8 +1879,8 @@ function queuePostPreview(pr, form) {
 function renderPublishComment(pr, preview) {
   const box = el("textarea");
   box.rows = 2;
-  box.maxLength = state.reviews.comment_max_chars;
-  box.placeholder = "Comment after the mentions (optional)";
+  // No maxLength: it cuts a paste without a word; a longer comment is refused under the row, and kept.
+  box.placeholder = "Comment after the mentions (optional, up to " + state.reviews.comment_max_chars + " characters)";
   box.value = queueComment.text;
   const keep = () => {
     queueComment.text = box.value;
@@ -1840,6 +1890,7 @@ function renderPublishComment(pr, preview) {
   box.oninput = () => {
     keep();
     preview.textContent = queuePostPreview(pr, queueForm);
+    setInputError("queue:" + pr.ref, "");
   };
   box.onselect = box.onkeyup = box.onclick = keep;
   box.onfocus = () => (queueComment.focused = true);
@@ -1934,7 +1985,8 @@ function queueMergeOkButton(pr) {
     queueArmed = null;
     button.disabled = true;
     const done = await post("/api/reviews/" + pr.repo + "/" + pr.number + "/merge-ok", { head_oid: pr.head_oid });
-    setStatus(done.ok ? pr.label + ": merge OK sent to " + done.detail : done.detail || "not sent");
+    if (done.ok) setStatus(pr.label + ": merge OK sent to " + done.detail);
+    setQueueError(pr, done.ok ? "" : refusal(done, "not sent"));
     refresh();
   };
   return button;
@@ -1956,6 +2008,20 @@ function queueMergeBlockedButton(pr) {
   wrap.title = pr.merge_blocked_by_github + ": Merge comes back once CI runs green at " + pr.pr_at + (why ? "; " + why : "");
   wrap.append(button, el("span", "note", pr.merge_blocked_by_github));
   return wrap;
+}
+
+function setQueueError(pr, text) {
+  setInputError("queue:" + pr.ref, text);
+  rerenderQueue();
+}
+
+function renderQueueErrorRow(pr) {
+  const row = el("tr", "queueerror");
+  const cell = el("td");
+  cell.colSpan = QUEUE_COLUMNS.length;
+  cell.append(errorLine("queue:" + pr.ref));
+  row.append(cell);
+  return row;
 }
 
 function renderMergeOkRow(pr) {
@@ -2021,7 +2087,18 @@ function renderPublishForm(pr) {
     queueComment = emptyQueueComment();
     for (const control of row.querySelectorAll("input, textarea, button")) control.disabled = true;
     const done = await post("/api/reviews/" + pr.repo + "/" + pr.number + "/" + form.path, { direct: form.direct, mention: form.mention, comment });
-    setStatus(done.ok ? pr.label + ": recorded" : done.detail || "not recorded");
+    const key = pr.ref + " " + form.path;
+    if (done.ok) {
+      refusedPublish.delete(key);
+      setStatus(pr.label + ": recorded");
+    } else {
+      refusedPublish.set(key, { form, comment });
+      if (!queueForm) {
+        queueForm = form;
+        queueComment = { ...emptyQueueComment(), text: comment };
+      }
+    }
+    setQueueError(pr, done.ok ? "" : refusal(done, "not recorded"));
     refresh();
   };
   const cancel = el("button", "act", "Cancel");
@@ -2332,6 +2409,7 @@ function renderQueueGroup(title, prs, first) {
     if (listAnsweredOnly(pr).length) rows.push(renderAnsweredRow(pr));
     if (wantsMergeOkRow(pr)) rows.push(renderMergeOkRow(pr));
     if (queueForm && queueForm.ref === pr.ref && (pr.can_publish || pr.can_repost)) rows.push(renderPublishForm(pr));
+    if (inputErrors.has("queue:" + pr.ref)) rows.push(renderQueueErrorRow(pr));
     rows.forEach((row, at) => {
       if (index % 2 === 0) row.classList.add("tint");
       if (at > 0) row.classList.add("follows");
@@ -2735,15 +2813,16 @@ document.getElementById("compose").addEventListener("submit", async (event) => {
   const text = input.value.trim();
   if (!text) return;
   const done = await post("/api/room", { text, reply_to: replyTo });
+  setInputError("compose", done.ok ? "" : refusal(done, "not sent"));
   if (done.ok) {
     input.value = "";
     setReply(null);
     setStatus("sent to " + done.detail);
     refresh();
-  } else {
-    setStatus(done.detail || "not sent");
   }
 });
+
+document.getElementById("text").addEventListener("input", () => setInputError("compose", ""));
 
 document.getElementById("text").addEventListener("keydown", (event) => {
   if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {

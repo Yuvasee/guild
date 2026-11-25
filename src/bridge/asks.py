@@ -9,6 +9,7 @@ from typing import Literal, cast
 from bridge.board import (
     BODY_MAX_CHARS,
     SYSTEM_CONVERSATION,
+    USER_CONVERSATION,
     AddressError,
     MessageStateError,
     Party,
@@ -1128,14 +1129,20 @@ def send_spot_check(conn: sqlite3.Connection, config: Config, now: int) -> list[
 
 
 def tell_owner_of_reopen(conn: sqlite3.Connection, config: Config, ask: Ask, now: int) -> list[tuple[int, Recipient]]:
+    """The owner reopened it on the page: sent as the owner's message, so their reason reaches the session whole."""
     if is_owner_locked(conn, config, ask.owner):
         return []
+    try:
+        recipient = resolve_handle(conn, ask.owner)
+    except AddressError:
+        return []
     text = (
-        f"{config.owner_name_at_start} reopened ask #{ask.id} ({_cut(ask.reopen_why or '', 600)}): "
+        f"{config.owner_name_at_start} reopened ask #{ask.id} ({map_words_to_sendable(conn, ask.reopen_why or '')}): "
         f'"{_cut(map_words_to_sendable(conn, ask.words), 600)}". It is open again; '
         f"`guild ask show {ask.id}` has the earlier claim and evidence."
     )
-    return send_from_bridge(conn, config, ask.owner, text, now)
+    owner = Party(USER_CONVERSATION, config.user_alias or "user")
+    return [(send_message(conn, owner, [recipient], "info", text, now).message_id, recipient)]
 
 
 def is_recipient_locked(conn: sqlite3.Connection, config: Config, to: str) -> bool:

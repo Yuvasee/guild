@@ -20,6 +20,8 @@ class Part:
     """Prints the part's source now, for a session that does not want to wait."""
     rebuilt: bool = False
     """Made afresh at every session start, so a copy still waiting from before is dropped then."""
+    in_order: bool = False
+    """Waits while an earlier in_order part waits: the user's messages and their numbered parts keep their order."""
 
 
 @dataclass(frozen=True)
@@ -64,7 +66,9 @@ def pack_parts(parts: list[Part], budget: int = INJECT_MAX_CHARS) -> Packed:
     used = 0
     for part in parts:
         size = measure_chars(part.text) + len(_SEPARATOR)
-        if used + size <= room:
+        if _is_held_back(part, later):
+            later.append(part)
+        elif used + size <= room:
             shown.append(part)
             used += size
         elif size > room and room - used >= _MIN_CUT_CHARS:
@@ -78,9 +82,19 @@ def pack_parts(parts: list[Part], budget: int = INJECT_MAX_CHARS) -> Packed:
 
 def add_part(packed: Packed, part: Part) -> Packed:
     """One more part after packing: shown if it fits the room left, else it waits."""
-    if measure_chars(part.text) <= packed.room:
+    if measure_chars(part.text) <= packed.room and not _is_held_back(part, packed.later):
         return Packed([*packed.shown, part], packed.later)
     return Packed(packed.shown, [*packed.later, part])
+
+
+def add_parts(packed: Packed, parts: list[Part]) -> Packed:
+    for part in parts:
+        packed = add_part(packed, part)
+    return packed
+
+
+def _is_held_back(part: Part, later: list[Part]) -> bool:
+    return part.in_order and any(p.in_order for p in later)
 
 
 def _cut_part(part: Part, limit: int) -> Part:
@@ -111,17 +125,24 @@ def cap_context(text: str) -> str:
 
 
 def take_later_parts(conn: sqlite3.Connection, conversation_id: str) -> list[Part]:
+    parts = read_later_parts(conn, conversation_id)
+    if parts:
+        conn.execute("UPDATE conversations SET later_context = NULL WHERE conversation_id = ?", (conversation_id,))
+    return parts
+
+
+def read_later_parts(conn: sqlite3.Connection, conversation_id: str) -> list[Part]:
     row = conn.execute(
         "SELECT later_context FROM conversations WHERE conversation_id = ?", (conversation_id,)
     ).fetchone()
     if row is None or not row["later_context"]:
         return []
-    conn.execute("UPDATE conversations SET later_context = NULL WHERE conversation_id = ?", (conversation_id,))
     return _map_json_to_parts(str(row["later_context"]))
 
 
 def save_later_parts(conn: sqlite3.Connection, conversation_id: str, parts: list[Part]) -> None:
-    text = json.dumps([[p.text, p.name, p.command, p.rebuilt] for p in parts], ensure_ascii=False) if parts else None
+    rows = [[p.text, p.name, p.command, p.rebuilt, p.in_order] for p in parts]
+    text = json.dumps(rows, ensure_ascii=False) if parts else None
     conn.execute("UPDATE conversations SET later_context = ? WHERE conversation_id = ?", (text, conversation_id))
 
 
@@ -135,6 +156,14 @@ def _map_json_to_parts(text: str) -> list[Part]:
     parts: list[Part] = []
     for item in cast(list[object], raw):
         fields = cast(list[object], item) if isinstance(item, list) else []
-        if len(fields) == 4 and all(isinstance(f, str) for f in fields[:3]):
-            parts.append(Part(str(fields[0]), str(fields[1]), str(fields[2]), bool(fields[3])))
+        if len(fields) in (4, 5) and all(isinstance(f, str) for f in fields[:3]):
+            parts.append(
+                Part(
+                    str(fields[0]),
+                    str(fields[1]),
+                    str(fields[2]),
+                    bool(fields[3]),
+                    len(fields) == 5 and bool(fields[4]),
+                )
+            )
     return parts

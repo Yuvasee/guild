@@ -41,6 +41,7 @@ from bridge.board import (
     Party,
     Recipient,
     SendResult,
+    check_user_words,
     flag_overdue,
     resolve_handle,
     send_message,
@@ -218,7 +219,6 @@ MAINTAIN_EVERY_S = 30
 ASKS_EVERY_S = 60
 QUEUE_EVERY_S = 20
 CAPACITY_EVERY_S = 300
-ASK_WHY_MAX_CHARS = 2000
 ENRICH_EVERY_S = 60
 REMOTE_EVERY_S = 60
 SCAN_EVERY_S = 30
@@ -232,7 +232,8 @@ ACTIVITY_EVERY_S = 10
 NOTIFY_EVERY_S = 10
 RESOLVED_SHOWN_FOR_MS = 7 * 24 * 3_600_000
 DRIVER_WINDOW_MS = 12 * 3_600_000
-MAX_POST_BYTES = 16_384
+MAX_POST_BYTES = 65_536
+"""Room for the owner's longest words in any script, as JSON."""
 # Every SQLite call gives up the GIL, and taking it back waits out a busy sibling thread's slice: at the default 5 ms
 # serve's transactions held the write lock about 9x longer, and every hook and CLI waited on them.
 GIL_SWITCH_INTERVAL_S = 0.0005
@@ -835,16 +836,22 @@ class DashboardState:
 
     def reopen_ask_by_owner(self, ask_id: int, why: str) -> tuple[bool, str]:
         try:
+            why = check_user_words(why) if why.strip() else ""
+        except MessageStateError as exc:
+            return False, str(exc)
+        try:
             with self._connection() as conn, transaction(conn):
-                reason = f"on the page: {why.strip()}" if why.strip() else "on the page, no reason given"
+                reason = f"on the page: {why}" if why else "on the page, no reason given"
                 ask = reopen_ask(conn, ask_id, self.config.user_alias or "user", reason, now_ms())
                 told = tell_owner_of_reopen(conn, self.config, ask, now_ms())
-        except AskError as exc:
+        except (AskError, MessageStateError) as exc:
             return False, str(exc)
         for message_id, recipient in told:
             if recipient.pid:
                 write_hint(recipient.pid, HINT_SENT)
             spawn_typed_delivery(message_id, [recipient])
+        if not told:
+            return True, f"open again, but {ask.owner} was not told: its tab is locked or has no live session"
         return True, "open again"
 
     def maintain_forever(self) -> None:
@@ -1247,7 +1254,7 @@ class DashboardState:
         try:
             with self._connection() as conn, transaction(conn):
                 result, typed = send_from_user(
-                    conn, self.config, self.config.user_alias or "user", to, text, now_ms(), reply_to
+                    conn, self.config, self.config.user_alias or "user", to, check_user_words(text), now_ms(), reply_to
                 )
         except (MessageStateError, AddressError) as exc:
             return False, str(exc)
@@ -1666,6 +1673,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not self._trusted_request() or self.headers.get("X-Bridge") != "1":
             self._send(403, "text/plain", b"forbidden")
             return
+        length = self.headers.get("Content-Length") or ""
+        if length.isdigit() and int(length) > MAX_POST_BYTES:
+            detail = f"too long to send: {int(length):,} bytes, the most is {MAX_POST_BYTES:,}"
+            self._json(413, {"ok": False, "detail": detail})
+            return
         if match := re.fullmatch(r"/api/items/(\d+)/(resolve|unresolve)", self.path):
             ok = self.state.set_item_resolved(int(match.group(1)), match.group(2) == "resolve")
             self._json(200 if ok else 409, {"ok": ok})
@@ -1732,8 +1744,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         elif match := re.fullmatch(r"/api/asks/(\d{1,9})/(close|reopen)", self.path):
             data = self._read_json() or {}
             why = data.get("why", "")
-            if not isinstance(why, str) or len(why) > ASK_WHY_MAX_CHARS:
-                self._json(400, {"ok": False, "detail": f"expected {{why: string}} under {ASK_WHY_MAX_CHARS} chars"})
+            if not isinstance(why, str):
+                self._json(400, {"ok": False, "detail": "expected {why: string}"})
                 return
             if match.group(2) == "close":
                 ok, detail = self.state.close_ask_by_owner(int(match.group(1)))

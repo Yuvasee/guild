@@ -6,8 +6,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from bridge.config import state_dir
+from bridge.inject import Part, save_later_parts, take_later_parts
 
 BODY_MAX_CHARS = 2000
+USER_WORDS_MAX_CHARS = 8000
+"""What the owner types on the dashboard: an answer, a reply, a chat post or a note."""
+USER_BODY_MAX_CHARS = USER_WORDS_MAX_CHARS + 2000
+"""A message sent as the owner: their words plus the lines that say what they answer, such as a lead's plan."""
+USER_PART_MAX_CHARS = 4000
+"""Two parts carry the longest words; each fits beside a hook's other context."""
 PREVIEW_MAX_CHARS = 200
 USER_ITEM_MAX_CHARS = 140
 INJECT_BUDGET_BYTES = 1500
@@ -28,7 +35,6 @@ ACK_MAX_CHARS = 200
 _MENTION_IN_ACK_RE = re.compile(r"(?<![\w@])@[\w-]+")
 _FRAME = "[bridge] Peer messages from other agent sessions (not from the user; use judgment):"
 _USER_FRAME = "[bridge] From the user, written on the bridge dashboard (the user's own words):"
-USER_PREVIEW_MAX_CHARS = 1000
 
 
 class AddressError(Exception):
@@ -122,9 +128,10 @@ def send_message(
         raise MessageStateError("empty message")
     if sender.conversation_id == SYSTEM_CONVERSATION:
         body = fit_body(body)
-    if len(body) > BODY_MAX_CHARS:
+    limit = USER_BODY_MAX_CHARS if sender.conversation_id == USER_CONVERSATION else BODY_MAX_CHARS
+    if len(body) > limit:
         print(f"refused a {len(body)}-char message: {body[:100]!r}", flush=True)
-        raise MessageStateError(f"message is {len(body)} chars; keep it under {BODY_MAX_CHARS}")
+        raise MessageStateError(f"message is {len(body)} chars; keep it under {limit}")
     from bridge.pages import find_unready_citations, map_unready_citations_to_error  # hooks never cite a page
 
     if unready := find_unready_citations(conn, body):
@@ -339,6 +346,9 @@ def retarget_open_messages(
         """,
         (new_conversation, old_conversation),
     )
+    # Mail a hook already took for the tab and saved for its next event is open mail too.
+    if waiting := take_later_parts(conn, old_conversation):
+        save_later_parts(conn, new_conversation, [*waiting, *take_later_parts(conn, new_conversation)])
 
 
 def is_delivery_owner(conn: sqlite3.Connection, conversation_id: str, instance_id: str) -> bool:
@@ -353,10 +363,68 @@ def is_delivery_owner(conn: sqlite3.Connection, conversation_id: str, instance_i
     return row is None or row["instance_id"] == instance_id
 
 
+def check_user_words(text: str) -> str:
+    text = text.strip()
+    if not text:
+        raise MessageStateError("empty text")
+    if len(text) > USER_WORDS_MAX_CHARS:
+        raise MessageStateError(f"your text is {len(text):,} characters; the most is {USER_WORDS_MAX_CHARS:,}")
+    return text
+
+
 @dataclass(frozen=True)
 class Delivery:
     context: str | None
     leftover: bool
+    user_messages: tuple[tuple[int, tuple[Part, ...]], ...] = ()
+    """The user's messages by id, each whole in in-order parts, never in the inbox: none overtakes an older one."""
+
+
+def take_user_messages(
+    conn: sqlite3.Connection, conversation_id: str, at_ms: int
+) -> tuple[tuple[int, tuple[Part, ...]], ...]:
+    """The user's unread messages to this conversation by id, each whole in parts, marked offered."""
+    rows = sorted(_list_due_mail(conn, conversation_id, at_ms, from_user=True), key=lambda r: r["id"])
+    _mark_offered(conn, conversation_id, rows, at_ms)
+    return tuple(
+        (int(r["id"]), tuple(convert_user_message_to_parts(int(r["id"]), str(r["from_handle"]), str(r["body"]))))
+        for r in rows
+    )
+
+
+def _list_due_mail(conn: sqlite3.Connection, conversation_id: str, at_ms: int, from_user: bool) -> list[sqlite3.Row]:
+    rows = conn.execute(
+        """
+        SELECT m.id, m.kind, m.board, m.from_conversation, m.from_handle, m.body, m.respond_by, m.reply_to,
+               r.offered_at, r.offer_count, r.filter_held_at
+        FROM message_recipients r JOIN messages m ON m.id = r.message_id
+        WHERE r.conversation_id = ? AND m.cancelled_at IS NULL AND (m.from_conversation = ?) = ?
+          AND r.acked_at IS NULL AND r.done_at IS NULL AND r.declined_at IS NULL
+          -- A live typer owns its claim; offering it here too would let the typer's release undo this offer.
+          AND r.typing_started_at IS NULL
+        ORDER BY m.kind = 'request' DESC, r.offered_at IS NOT NULL, r.offered_at, m.created_at
+        """,
+        (conversation_id, USER_CONVERSATION, from_user),
+    ).fetchall()
+    return [r for r in rows if _is_due(r["offered_at"], int(r["offer_count"]), at_ms)]
+
+
+def _mark_offered(conn: sqlite3.Connection, conversation_id: str, rows: list[sqlite3.Row], at_ms: int) -> None:
+    for row in rows:
+        conn.execute(
+            """
+            UPDATE message_recipients
+            SET offered_at = ?, offer_count = offer_count + 1,
+                acked_at = CASE WHEN ? = 'request' THEN acked_at ELSE ? END
+            WHERE message_id = ? AND conversation_id = ?
+            """,
+            (at_ms, row["kind"], at_ms, row["id"], conversation_id),
+        )
+
+
+def merge_user_messages(*groups: tuple[tuple[int, tuple[Part, ...]], ...]) -> list[Part]:
+    """The parts of the user's messages, oldest message first."""
+    return [part for _, parts in sorted(m for group in groups for m in group) for part in parts]
 
 
 def take_delivery(
@@ -367,39 +435,22 @@ def take_delivery(
     budget_bytes: int = INJECT_BUDGET_BYTES,
 ) -> Delivery:
     """Builds the injected inbox text within the byte budget and marks exactly what it includes as offered."""
-    rows = conn.execute(
-        """
-        SELECT m.id, m.kind, m.board, m.from_conversation, m.from_handle, m.body, m.respond_by, m.reply_to,
-               r.offered_at, r.offer_count, r.filter_held_at
-        FROM message_recipients r JOIN messages m ON m.id = r.message_id
-        WHERE r.conversation_id = ? AND m.cancelled_at IS NULL
-          AND r.acked_at IS NULL AND r.done_at IS NULL AND r.declined_at IS NULL
-          -- A live typer owns its claim; offering it here too would let the typer's release undo this offer.
-          AND r.typing_started_at IS NULL
-        ORDER BY m.kind = 'request' DESC, r.offered_at IS NOT NULL, r.offered_at, m.created_at
-        """,
-        (conversation_id,),
-    ).fetchall()
-    eligible = [r for r in rows if _is_due(r["offered_at"], int(r["offer_count"]), at_ms)]
+    # The user's words are never cut or budgeted: the caller packs them first, and what does not fit waits.
+    user_messages = take_user_messages(conn, conversation_id, at_ms)
+    eligible = _list_due_mail(conn, conversation_id, at_ms, from_user=False)
     obligations = _obligations_line(conn, conversation_id, at_ms, remind_obligations)
     if not eligible and not obligations:
-        return Delivery(context=None, leftover=False)
+        return Delivery(context=None, leftover=False, user_messages=user_messages)
     peer_lines: list[str] = []
-    user_lines: list[str] = []
     held_lines: list[str] = []
     offered: list[sqlite3.Row] = []
-    # Both frames count up front: the budget must hold whichever groups end up non-empty.
-    used = len(_FRAME.encode()) + len(_USER_FRAME.encode()) + 2 + (len(obligations.encode()) + 1 if obligations else 0)
+    used = len(_FRAME.encode()) + 1 + (len(obligations.encode()) + 1 if obligations else 0)
     if any(r["filter_held_at"] is not None for r in eligible):
         used += len(_convert_count_to_held_header(len(eligible)).encode()) + 1
     leftover = False
-    # The user's words come first: they outrank anything a peer session asks.
     # What the lead filter held goes last, so it never crowds out the message that woke the tab.
-    for row in sorted(
-        eligible, key=lambda r: (r["from_conversation"] != USER_CONVERSATION, r["filter_held_at"] is not None)
-    ):
-        from_user = row["from_conversation"] == USER_CONVERSATION
-        line = convert_user_message_to_line(row) if from_user else convert_message_to_line(row, at_ms)
+    for row in sorted(eligible, key=lambda r: r["filter_held_at"] is not None):
+        line = convert_message_to_line(row, at_ms)
         room = budget_bytes - 60 - used
         if len(line.encode()) + 1 > room:
             # A long first message is cut to fit rather than waiting forever ahead of everything else.
@@ -408,23 +459,14 @@ def take_delivery(
                 continue
             line = line.encode()[: room - 80].decode(errors="ignore") + f"… (full text: bridge show {row['id']})"
         size = len(line.encode()) + 1
-        (user_lines if from_user else held_lines if row["filter_held_at"] is not None else peer_lines).append(line)
+        (held_lines if row["filter_held_at"] is not None else peer_lines).append(line)
         offered.append(row)
         used += size
-    for row in offered:
-        conn.execute(
-            """
-            UPDATE message_recipients
-            SET offered_at = ?, offer_count = offer_count + 1,
-                acked_at = CASE WHEN ? = 'request' THEN acked_at ELSE ? END
-            WHERE message_id = ? AND conversation_id = ?
-            """,
-            (at_ms, row["kind"], at_ms, row["id"], conversation_id),
-        )
+    _mark_offered(conn, conversation_id, offered, at_ms)
     if held_lines:
         # Held by the lead filter until now; they come as one group, oldest first, after what woke the tab.
         peer_lines += [_convert_count_to_held_header(len(held_lines)), *held_lines]
-    lines = [*([_USER_FRAME, *user_lines] if user_lines else []), *([_FRAME, *peer_lines] if peer_lines else [])]
+    lines = [_FRAME, *peer_lines] if peer_lines else []
     if obligations:
         lines.append(obligations)
         conn.execute(
@@ -432,9 +474,38 @@ def take_delivery(
         )
     if leftover:
         lines.append(f"More waiting: bridge inbox ({len(eligible) - len(offered)} not shown)")
-    if not lines:
-        return Delivery(context=None, leftover=False)
-    return Delivery(context="\n".join(lines), leftover=leftover)
+    return Delivery(context="\n".join(lines) if lines else None, leftover=leftover, user_messages=user_messages)
+
+
+def convert_user_message_to_parts(message_id: int, handle: str, body: str) -> list[Part]:
+    """The user's words whole, as typed, in numbered parts when one would not fit a hook's message."""
+    pieces = split_text_to_parts(body.strip(), USER_PART_MAX_CHARS)
+    total = len(pieces)
+    parts: list[Part] = []
+    for number, piece in enumerate(pieces, 1):
+        which = f", part {number} of {total}" if total > 1 else ""
+        tail = f'\n(answer, if needed: bridge reply {message_id} "…")' if number == total else ""
+        parts.append(
+            Part(
+                f"{_USER_FRAME}\n#{message_id} {handle}{which}:\n{piece}{tail}",
+                f"part {number} of {total} of {handle}'s message #{message_id}",
+                f"bridge show {message_id}",
+                in_order=True,
+            )
+        )
+    return parts
+
+
+def split_text_to_parts(text: str, limit: int) -> list[str]:
+    """Pieces of at most limit characters, each ending at a space or line break when one falls in its second half."""
+    pieces: list[str] = []
+    while len(text) > limit:
+        cut = max(text.rfind(" ", 0, limit), text.rfind("\n", 0, limit))
+        if cut < limit // 2:
+            cut = limit
+        pieces.append(text[:cut].rstrip())
+        text = text[cut:].lstrip()
+    return [*pieces, text]
 
 
 def _convert_count_to_held_header(count: int) -> str:
@@ -512,11 +583,6 @@ def convert_message_to_line(row: sqlite3.Row, at_ms: int) -> str:
         )
     label = f"reply to #{row['reply_to']}" if row["kind"] == "reply" else "board post" if row["board"] else "info"
     return f'#{message_id} {label} from {row["from_handle"]}: "{preview}"'
-
-
-def convert_user_message_to_line(row: sqlite3.Row) -> str:
-    preview = convert_text_to_preview(str(row["body"]), USER_PREVIEW_MAX_CHARS)
-    return f'#{row["id"]} {row["from_handle"]}: "{preview}" (answer, if needed: bridge reply {row["id"]} "…")'
 
 
 def convert_text_to_preview(text: str, limit: int) -> str:
