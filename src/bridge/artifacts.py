@@ -19,7 +19,10 @@ _DRIVE_EDITORS = {
     "application/vnd.google-apps.document": "document",
     "application/vnd.google-apps.presentation": "presentation",
     "application/vnd.google-apps.spreadsheet": "spreadsheets",
+    "application/vnd.google-apps.form": "forms",
+    "application/vnd.google-apps.drawing": "drawings",
 }
+_DRIVE_FOLDER = "application/vnd.google-apps.folder"
 UNKNOWN_SESSION = "a session bridge never saw"
 # A result with no structured payload still says where it went: "Published <path> at <url> (Version …".
 _PUBLISHED_AT = re.compile(r"\bPublished \S.*? at (https://claude\.ai/(?:code/)?artifact/[A-Za-z0-9_-]+)")
@@ -76,7 +79,7 @@ def map_tool_call_to_publish(tool_input: object, tool_response: object) -> Artif
 
 
 def map_drive_create_to_publish(tool_response: object) -> ArtifactPublish | None:
-    """The created file's link, built from its id: the connector's answer carries no view URL."""
+    """The created file's viewUrl; a link built from its id and type only when the answer lacks one."""
     created = _as_object(tool_response)
     if created is None:
         try:
@@ -85,12 +88,16 @@ def map_drive_create_to_publish(tool_response: object) -> ArtifactPublish | None
             return None
     if created is None or not isinstance(file_id := created.get("id"), str) or not file_id:
         return None
-    editor = _DRIVE_EDITORS.get(str(created.get("mimeType") or ""))
-    url = (
-        f"https://docs.google.com/{editor}/d/{file_id}/edit"
-        if editor
-        else f"https://drive.google.com/file/d/{file_id}/view"
-    )
+    mime = str(created.get("mimeType") or "")
+    view_url = created.get("viewUrl")
+    if isinstance(view_url, str) and view_url.startswith("https://"):
+        url = view_url
+    elif editor := _DRIVE_EDITORS.get(mime):
+        url = f"https://docs.google.com/{editor}/d/{file_id}/edit"
+    elif mime == _DRIVE_FOLDER:
+        url = f"https://drive.google.com/drive/folders/{file_id}"
+    else:
+        url = f"https://drive.google.com/file/d/{file_id}/view"
     title = created.get("title")
     return ArtifactPublish(url, title if isinstance(title, str) and title.strip() else url)
 

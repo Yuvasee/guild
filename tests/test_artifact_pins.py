@@ -316,12 +316,19 @@ def test_install_adds_one_artifact_hook_outside_the_hint_gate(tmp_path: Path) ->
     assert "PostToolUse" not in json.loads(settings.read_text())["hooks"]
 
 
-def test_hook_pins_a_file_the_drive_connector_created_with_a_link_built_from_its_id(bridge_env: BridgeEnv) -> None:
+def test_hook_pins_a_drive_file_at_its_view_url_and_builds_one_only_when_the_answer_has_none(
+    bridge_env: BridgeEnv,
+) -> None:
     with bridge_env.connect() as conn:
         add_tab(conn, "conv-x", "xavi", "Xavi · Right Hand")
+    form = {
+        "id": "f0Zz", "title": "Signup", "mimeType": "application/vnd.google-apps.form",
+        "viewUrl": "https://docs.google.com/forms/d/f0Zz/viewform",
+    }  # fmt: skip
     created = {"id": "f1Ab", "title": "Talk draft", "mimeType": "application/vnd.google-apps.presentation"}
     other = {"id": "f2Cd", "title": "notes.txt", "mimeType": "text/plain"}
-    for response in ([{"type": "text", "text": json.dumps(created)}], other, "not json"):
+    folder = {"id": "f3Ef", "title": "Talk", "mimeType": "application/vnd.google-apps.folder"}
+    for response in ([{"type": "text", "text": json.dumps(created)}], form, other, folder, "not json"):
         payload = {
             "hook_event_name": "PostToolUse", "tool_name": "mcp__claude_ai_Google_Drive__create_file",
             "tool_input": {"title": "x"}, "session_id": "conv-x", "tool_response": response,
@@ -330,6 +337,8 @@ def test_hook_pins_a_file_the_drive_connector_created_with_a_link_built_from_its
     with bridge_env.connect() as conn:
         pins = sorted((p.title, p.body, p.pinned_by) for p in list_pins(conn))
     assert pins == [
+        ("Signup", "https://docs.google.com/forms/d/f0Zz/viewform", "xavi"),
+        ("Talk", "https://drive.google.com/drive/folders/f3Ef", "xavi"),
         ("Talk draft", "https://docs.google.com/presentation/d/f1Ab/edit", "xavi"),
         ("notes.txt", "https://drive.google.com/file/d/f2Cd/view", "xavi"),
     ]
