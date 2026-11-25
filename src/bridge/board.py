@@ -437,7 +437,17 @@ def mark_user_parts_shown(conn: sqlite3.Connection, conversation_id: str, parts:
 
 def merge_user_messages(*groups: tuple[tuple[int, tuple[Part, ...]], ...]) -> list[Part]:
     """The parts of the user's messages, oldest message first."""
-    return [part for _, parts in sorted(m for group in groups for m in group) for part in parts]
+    return [part for _, parts in sorted((m for group in groups for m in group), key=lambda m: m[0]) for part in parts]
+
+
+def split_user_parts(parts: list[Part]) -> tuple[list[Part], tuple[tuple[int, tuple[Part, ...]], ...]]:
+    """The parts of the user's messages, by message, out of the rest: they join the user's newer and given-again
+    messages by id, so a message given again after compaction keeps its place before newer ones still waiting."""
+    by_message: dict[int, list[Part]] = {}
+    for part in parts:
+        if part.message_id:
+            by_message.setdefault(part.message_id, []).append(part)
+    return [p for p in parts if not p.message_id], tuple((i, tuple(ps)) for i, ps in by_message.items())
 
 
 def take_delivery(

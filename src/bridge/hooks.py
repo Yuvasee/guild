@@ -23,6 +23,7 @@ from bridge.board import (
     merge_user_messages,
     next_hint_epoch,
     retarget_open_messages,
+    split_user_parts,
     take_delivery,
     take_user_messages,
     write_hint,
@@ -1250,6 +1251,7 @@ def handle_hook(
                 parts = [p for p in parts if not p.rebuilt]
             if pending is not None:
                 parts = [*pending.later, *parts]
+            parts, waiting_user = split_user_parts(parts)
             typed: tuple[tuple[int, tuple[Part, ...]], ...] = ()
             # A full context would fail the request carrying them; the typed line names bridge show for that case.
             if event == "UserPromptSubmit" and conversation_id and not is_context_full(conn, conversation_id):
@@ -1283,7 +1285,7 @@ def handle_hook(
                 leftover = True
                 # Its older unread ones wait with it, in order; other mail stays unoffered.
                 older = take_user_messages(conn, conversation_id, at_ms) if typed else ()
-                packed = add_parts(packed, merge_user_messages(older, typed))
+                packed = add_parts(packed, merge_user_messages(waiting_user, older, typed))
                 save_later_parts(conn, conversation_id, packed.later)
             elif owner and conversation_id:
                 # Notices and mail share the inbox budget; roles and notes stay outside it, as their own memory.
@@ -1291,14 +1293,14 @@ def handle_hook(
                 budget = min(INJECT_BUDGET_BYTES - spent, packed.room)
                 release_dead_typing_claims(conn, at_ms, conversation_id)
                 delivery = take_delivery(conn, conversation_id, at_ms, starting, budget_bytes=budget)
-                # The typed message and the user's unread ones, oldest first, behind the user's parts still waiting.
-                packed = add_parts(packed, merge_user_messages(delivery.user_messages, typed))
+                # The user's words still waiting, unread, given again and typed, oldest message first.
+                packed = add_parts(packed, merge_user_messages(waiting_user, delivery.user_messages, typed))
                 if delivery.context:
                     packed = add_part(packed, Part(delivery.context, "your bridge messages", "bridge inbox"))
                 leftover = delivery.leftover
                 save_later_parts(conn, conversation_id, packed.later)
             else:
-                packed = add_parts(packed, merge_user_messages(typed))
+                packed = add_parts(packed, merge_user_messages(waiting_user, typed))
                 if conversation_id and packed.later:
                     save_later_parts(conn, conversation_id, take_later_parts(conn, conversation_id) + packed.later)
             if conversation_id:

@@ -11,6 +11,7 @@ from bridge.board import (
     mark_user_parts_shown,
     merge_user_messages,
     next_hint_epoch,
+    split_user_parts,
     take_delivery,
     write_hint,
 )
@@ -98,9 +99,10 @@ def write_rewake(conn: sqlite3.Connection, config: Config, pid: int, event_ns: i
             return False
         take_later_parts(conn, conversation_id)
         context = [Part(delivery.context, "your bridge messages", "bridge inbox")] if delivery.context else []
-        # What waited goes first, as a hook gives it; the user's newer words wait behind any of theirs still waiting.
-        user_parts = merge_user_messages(delivery.user_messages)
-        packed = add_parts(pack_parts(waiting), [*user_parts, *context])
+        # What waited goes first, as a hook gives it; the user's words, waiting or new, by message, oldest first.
+        others, waiting_user = split_user_parts(waiting)
+        user_parts = merge_user_messages(waiting_user, delivery.user_messages)
+        packed = add_parts(pack_parts(others), [*user_parts, *context])
         save_later_parts(conn, conversation_id, packed.later)
         mark_user_parts_shown(conn, conversation_id, packed.shown, at_ms)
         record_activity(conn, instance_id, "active", event_ns)

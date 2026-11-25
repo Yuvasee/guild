@@ -192,7 +192,9 @@ def _words(size: int) -> str:
     return " ".join(f"w{i}x" for i in range(size))[:size].rsplit(" ", 1)[0]
 
 
-def _start_with_a_long_message(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> tuple[int, Path, str]:
+def _start_with_a_long_message(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess, words: bool = True
+) -> tuple[int, Path, str]:
     """A tab whose next hook gives 3,000 characters of notes and part 1 of an 8,000-character message; part 2 waits."""
     config = Path(bridge_env.env["BRIDGE_CONFIG"])
     config.write_text(config.read_text() + "compact_at_tokens = 600000\n")
@@ -203,12 +205,13 @@ def _start_with_a_long_message(bridge_env: BridgeEnv, spawn_process: SpawnProces
     bridge_env.hook(
         "SessionStart", {"session_id": "conv-x", "transcript_path": str(transcript), "source": "startup"}, pid
     )
-    words = _words(8_000)
+    text = _words(8_000) if words else ""
     with bridge_env.connect() as conn, transaction(conn):
         save_later_parts(conn, "conv-x", [Part("NOTES " + "n" * 3_000, "your notes")])
-        recipient = resolve_tab(conn, "conv-x", "x")
-        send_message(conn, Party(USER_CONVERSATION, "user"), [recipient], "info", words, now_ms())
-    return pid, transcript, words
+        if text:
+            recipient = resolve_tab(conn, "conv-x", "x")
+            send_message(conn, Party(USER_CONVERSATION, "user"), [recipient], "info", text, now_ms())
+    return pid, transcript, text
 
 
 def _compact(bridge_env: BridgeEnv, pid: int, transcript: Path) -> str:
@@ -257,3 +260,33 @@ def test_a_message_given_again_after_compaction_comes_once_in_order(
     assert all(given.count(word) == 1 for word in numbered), "part 2 that waited does not come again besides"
     at = [given.find(word) for word in numbered]
     assert at == sorted(at)
+
+
+def test_a_message_given_again_keeps_its_place_before_a_newer_one_still_waiting(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    """A (three parts) is older than B (two): part 1 of A arrives and is answered, the request carrying parts 2 and 3
+    fails while B still waits, and only A is given again; it must still come before B."""
+    pid, transcript, _ = _start_with_a_long_message(bridge_env, spawn_process, words=False)
+    base = {"session_id": "conv-x", "transcript_path": str(transcript)}
+    older = " ".join(f"a{i}x" for i in range(2_200))[:9_000]
+    newer = " ".join(f"b{i}x" for i in range(1_200))[:5_000]
+    with bridge_env.connect() as conn, transaction(conn):
+        recipient = resolve_tab(conn, "conv-x", "x")
+        for words in (older, newer):
+            send_message(conn, Party(USER_CONVERSATION, "user"), [recipient], "info", words, now_ms())
+    first = _context(bridge_env.hook("UserPromptSubmit", {**base, "prompt": "go", "prompt_id": "p1"}, pid).stdout)
+    assert "user, part 1 of 3:" in first and "b0x" not in first
+    time.sleep(0.05)
+    with transcript.open("a") as f:
+        f.write(_assistant(230_000, now_ms()))
+    time.sleep(0.05)
+    second = _context(bridge_env.hook("PostToolUse", {**base, "tool_name": "Bash"}, pid).stdout)
+    assert "user, part 3 of 3:" in second and "b0x" not in second, "B still waits"
+
+    given = _compact(bridge_env, pid, transcript)
+    for n in range(3):
+        after = {**base, "prompt": f"more {n}", "prompt_id": f"q{n}"}
+        given += _context(bridge_env.hook("UserPromptSubmit", after, pid).stdout)
+
+    assert -1 < given.find("a0x") < given.find("b0x"), "the older message first"

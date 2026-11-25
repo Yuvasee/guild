@@ -155,9 +155,26 @@ const settle = () => new Promise((resolve) => setImmediate(resolve));
   const reopen = find(card, (n) => n.tag === "button" && n.textContent === "Reopen");
   const why = "open again, but alex was not told: its tab is locked or has no live session";
   answer = async () => ({ status: 200, json: async () => ({ ok: true, detail: why }) });
+  const lines = { fresh: new Node("span"), warn: new Node("div") };
+  document.getElementById = (id) => lines[id] || stub();
+  globalThis.getComputedStyle = () => ({ getPropertyValue: () => "" });
+  RENDERERS.splice(0, RENDERERS.length, renderVerdict);
+  // The refresh after the reopen brings a state without the ask: its card, and the red line in it, are gone.
+  let refreshed;
+  const done = new Promise((resolve) => { refreshed = resolve; });
+  globalThis.fetch = (path, options) => {
+    if (path !== "/api/guild") return answer(path, options);
+    refreshed();
+    return Promise.resolve({ ok: true, json: async () => ({ now: 2_000_000, tabs_at: 2_000_000, activity_at: 1,
+      needs: [], answers: [], leads: [], room: [], claims: [], colleague_comments: [],
+      asks: { attention: [], more: 0, verified: [] } }) });
+  };
   reopen.onclick();
+  await done;
   await settle();
-  eq(statusNote, "Ask #4 " + why);
+  eq(state.asks.verified.length, 0);
+  eq(lines.warn.hidden, true);
+  eq(lines.fresh.textContent, "Ask #4 " + why);
 })().catch((error) => { console.error(error.stack); process.exit(1); });
 """
 
