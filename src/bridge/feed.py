@@ -272,21 +272,29 @@ def reply_on_card(
     return sent, True
 
 
-def reply_on_answer(conn: sqlite3.Connection, item_id: int, text: str, user: str, at_ms: int) -> SendResult:
-    """The owner's words on a done or insight post reach its author as theirs; the post stays until the owner's OK."""
+def reply_on_answer(
+    conn: sqlite3.Connection,
+    item_id: int,
+    text: str,
+    user: str,
+    assistant: str,
+    at_ms: int,
+    locked: Callable[[str], bool] | None = None,
+) -> SendResult:
+    """The owner's reply on an Answers item reaches the assistant, tied to the item and naming its author: a worker
+    may be closed, and the assistant routes it on; the post stays until the owner's OK."""
     text = _check_answer(text)
     row = conn.execute(
-        "SELECT kind, text, from_conversation, from_handle FROM user_items WHERE id = ? AND source = 'agent'",
-        (item_id,),
+        "SELECT kind, text, from_handle FROM user_items WHERE id = ? AND source = 'agent'", (item_id,)
     ).fetchone()
     ref = convert_item_id_to_answer_ref(item_id)
     if row is None or row["kind"] not in ANSWER_KINDS:
         raise MessageStateError(f"no done or insight post {ref}")
-    if row["from_conversation"] in (None, SYSTEM_CONVERSATION):
-        raise MessageStateError(f"{ref} is bridge's own; no session reads a reply to it")
-    recipient = resolve_tab(conn, str(row["from_conversation"]), str(row["from_handle"]))
-    body = f'Reply to your {row["kind"]} post {ref} "{row["text"]}": {text}'
-    sent = send_message(conn, Party(USER_CONVERSATION, user), [recipient], "info", body, at_ms)
+    body = f'Reply on {row["from_handle"]}\'s {row["kind"]} post {ref} "{row["text"]}": {text}'
+    to = resolve_handle(conn, assistant)
+    if locked is not None and locked(to.conversation_id):
+        raise MessageStateError(f"{assistant}'s tab is locked, so nobody would read the reply; keep it and send later")
+    sent = send_message(conn, Party(USER_CONVERSATION, user), [to], "info", body, at_ms)
     conn.execute("UPDATE messages SET board = 1 WHERE id = ?", (sent.message_id,))
     mark_answer_opened(conn, item_id, at_ms)
     return sent
@@ -325,17 +333,19 @@ def _load_answerable_post(conn: sqlite3.Connection, item_id: int, user: str) -> 
     return row
 
 
-def withdraw_post(conn: sqlite3.Connection, sender: Party, item_id: int, at_ms: int) -> None:
-    """A question its author settled without the user. Its tab counts, so /clear does not orphan the post."""
+def withdraw_post(conn: sqlite3.Connection, sender: Party, item_id: int, at_ms: int, assistant: str = "") -> None:
+    """A question its author settled without the user, or an Answers item that should not be there: its author or
+    the assistant takes it off. Its tab counts, so /clear does not orphan the post."""
     row = conn.execute(
         "SELECT kind, from_conversation, from_handle, resolved_at FROM user_items WHERE id = ? AND source = 'agent'",
         (item_id,),
     ).fetchone()
-    if row is None or row["kind"] not in OPEN_KINDS:
-        raise MessageStateError(f"no blocked or decision post #{item_id}")
-    if resolve_tab(conn, str(row["from_conversation"]), str(row["from_handle"])).conversation_id != (
+    if row is None or row["kind"] not in OPEN_KINDS | ANSWER_KINDS:
+        raise MessageStateError(f"no blocked, decision, done or insight post #{item_id}")
+    is_author = resolve_tab(conn, str(row["from_conversation"]), str(row["from_handle"])).conversation_id == (
         sender.conversation_id
-    ):
+    )
+    if not is_author and not (row["kind"] in ANSWER_KINDS and assistant and sender.handle == assistant):
         raise MessageStateError(f"post #{item_id} is {row['from_handle']}'s, and only its author withdraws it")
     if row["resolved_at"] is not None:
         raise MessageStateError(f"post #{item_id} is already closed")

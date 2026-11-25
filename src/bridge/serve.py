@@ -102,6 +102,7 @@ from bridge.guildview import TABS_STALE_MS, map_db_to_guild, post_signals_to_lea
 from bridge.health import check_hooks
 from bridge.hooks import spawn_compact_drive
 from bridge.issue_sync import LinearError, run_issue_sync
+from bridge.leads import is_conversation_locked
 from bridge.notify import release_urgent_notice, show_notification, take_next_urgent_notice
 from bridge.outage import FailureSpell, LoopStalls, OutageNotices
 from bridge.pages import (
@@ -1203,8 +1204,11 @@ class DashboardState:
     def reply_on_answer(self, item_id: int, text: str) -> tuple[bool, str]:
         try:
             with self._connection() as conn, transaction(conn):
-                result = reply_on_answer(conn, item_id, text, self.config.user_alias or "user", now_ms())
-        except MessageStateError as exc:
+                result = reply_on_answer(
+                    conn, item_id, text, self.config.user_alias or "user", self.config.assistant_handle, now_ms(),
+                    lambda conversation: is_conversation_locked(conn, self.config, conversation),
+                )  # fmt: skip
+        except (MessageStateError, AddressError) as exc:
             return False, str(exc)
         self._deliver(result, result.recipients)
         return True, "sent"

@@ -17,13 +17,11 @@ from bridge.asks import (
     convert_wait_to_text,
     drop_ask,
     get_ask,
-    is_answer_due,
     list_ask_events,
     list_asks,
     map_owner_name_to_wait_on,
     map_wait_on_arg_to_stored,
     note_ask,
-    post_verified_ask,
     post_verified_batch,
     reopen_ask,
     start_ask,
@@ -31,7 +29,8 @@ from bridge.asks import (
     verify_ask,
     wait_ask,
 )
-from bridge.board import Party, convert_item_id_to_answer_ref
+from bridge.board import Party, resolve_handle
+from bridge.cli_board import nudge_recipients
 from bridge.config import Config
 from bridge.db import now_ms, transaction
 from bridge.feed import spawn_typed_delivery
@@ -218,15 +217,11 @@ def cmd_ask_verify(args: argparse.Namespace, conn: sqlite3.Connection, config: C
     at = now_ms()
     with transaction(conn):
         ask = verify_ask(conn, int(args.id), actor, str(args.evidence), str(args.how), at)
-        posted = None
-        if is_answer_due(conn, ask):
-            posted = post_verified_ask(conn, ask, Party(actor.conversation_id, actor.handle), at)
-    if posted is not None:
-        told = f"; {config.owner_name} waits for it: posted to Answers as {convert_item_id_to_answer_ref(posted)}"
-    elif ask.told_at is not None:
-        told = f"; {config.owner_name} already has its result in Answers"
-    else:
-        told = "; it goes into your next `guild ask summary`"
+    told = (
+        f"; {config.owner_name} already has its result in Answers"
+        if ask.told_at is not None
+        else f"; it goes into your next `guild ask summary` to {config.assistant_handle}, who tells the owner"
+    )
     print(f"#{ask.id} verified by {actor.handle}{told}")
     return 0
 
@@ -234,9 +229,17 @@ def cmd_ask_verify(args: argparse.Namespace, conn: sqlite3.Connection, config: C
 def cmd_ask_summary(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
     actor = current_actor(conn, config)
     with transaction(conn):
-        item_id, listed, left = post_verified_batch(conn, Party(actor.conversation_id, actor.handle), now_ms())
+        message_id, listed, left = post_verified_batch(
+            conn, config, Party(actor.conversation_id, actor.handle), now_ms()
+        )
+    assistant = [resolve_handle(conn, config.assistant_handle)]
+    nudge_recipients(assistant)
+    spawn_typed_delivery(message_id, assistant)
     more = f"; {left} more wait for the next summary" if left else ""
-    print(f"{convert_item_id_to_answer_ref(item_id)} lists {listed} verified ask{'' if listed == 1 else 's'}{more}")
+    print(
+        f"message #{message_id} to {config.assistant_handle} lists {listed} verified ask{'' if listed == 1 else 's'}"
+        f" (it picks what reaches the owner){more}"
+    )
     return 0
 
 

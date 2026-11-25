@@ -1456,9 +1456,14 @@ def test_lead_row_shows_declared_work_with_state_and_names_whom_it_waits_on(
     team.enroll()
     assert team.guild("work", "set", "Export worker", "ABC-7", "acme/web#9", pid=team.a).returncode == 0
     bridge_env.cli("focus", "Restoring the workspace", pid=team.a)
-    bridge_env.cli("post", "decision", "Ship?", "--body", "why", pid=team.a)
     bridge_env.cli("send", "old-b", "can you check staging?", "--request", pid=team.a)
     now = int(time.time() * 1000)
+    with bridge_env.connect() as conn:  # a lead's question now goes through the assistant; an older card still counts
+        conn.execute(
+            "INSERT INTO user_items (created_at, from_conversation, from_handle, severity, text, source, kind) "
+            "VALUES (?, 'conv-a', 'alex', 'action', 'Ship?', 'agent', 'decision')",
+            (now,),
+        )
     tree: dict[str, object] = {
         "workspaces": [
             {

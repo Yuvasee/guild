@@ -949,7 +949,7 @@ function renderAnswerCard(answer) {
   if (answer.can_reply) {
     const key = "answer:" + answer.id;
     const input = el("input");
-    input.placeholder = "Reply to " + answer.from;
+    input.placeholder = "Reply";
     input.value = drafts.get(key) || "";
     input.oninput = () => drafts.set(key, input.value);
     const send = async () => {
@@ -958,7 +958,7 @@ function renderAnswerCard(answer) {
       const done = await post("/api/items/" + answer.id + "/reply", { text });
       if (done.ok) {
         if (input.value.trim() === text) { input.value = ""; drafts.delete(key); }
-        setStatus("Sent to " + answer.from + "; " + answer.ref + " stays until you press OK");
+        setStatus("Reply sent; " + answer.ref + " stays until you press OK");
       } else setStatus(done.detail || "not sent");
       refresh();
     };

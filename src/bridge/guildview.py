@@ -793,7 +793,7 @@ def _load_answers(conn: sqlite3.Connection, config: Config) -> list[dict[str, ob
                 "links": json.loads(row["links"]) if row["links"] else [],
                 "unread": row["opened_at"] is None,
                 "ask": {"id": row["ask_id"], "words": row["ask_words"]} if row["ask_id"] is not None else None,
-                "can_reply": row["from_conversation"] not in (None, SYSTEM_CONVERSATION),
+                "can_reply": True,
             }
         )
     return answers

@@ -8,7 +8,6 @@ from typing import Literal, cast
 from bridge.board import (
     BODY_MAX_CHARS,
     SYSTEM_CONVERSATION,
-    USER_ITEM_MAX_CHARS,
     AddressError,
     MessageStateError,
     Party,
@@ -17,8 +16,8 @@ from bridge.board import (
     send_message,
 )
 from bridge.config import Config
-from bridge.feed import LINKS_MAX, TO_ASSISTANT, add_post, map_arg_to_link
-from bridge.leads import is_surface_locked
+from bridge.feed import TO_ASSISTANT
+from bridge.leads import is_conversation_locked, is_surface_locked
 from bridge.pages import find_unready_citations
 
 STATES = ("open", "in_progress", "done_claimed", "verified", "closed")
@@ -261,46 +260,19 @@ def verify_ask(conn: sqlite3.Connection, ask_id: int, by: Actor, evidence: str, 
     return get_ask(conn, ask_id)
 
 
-WAITED_ON_OWNER_NOTE = "waiting on owner:"
 BATCH_WORDS_CHARS = 90
 BATCH_LINK_MAX_CHARS = 300
-VERIFIED_TITLE = "Verified: "
-
-
-def is_answer_due(conn: sqlite3.Connection, ask: Ask) -> bool:
-    """Not told yet, and the owner's question or an ask that once waited on the owner: a claim or verify clears the
-    wait, its history keeps it."""
-    if ask.told_at is not None:
-        return False
-    if ask.question:
-        return True
-    row = conn.execute(
-        "SELECT 1 FROM ask_events WHERE ask_id = ? AND note LIKE ? LIMIT 1", (ask.id, WAITED_ON_OWNER_NOTE + "%")
-    ).fetchone()
-    return row is not None
-
-
-def post_verified_ask(conn: sqlite3.Connection, ask: Ask, by: Party, at_ms: int) -> int | None:
-    """The result of an ask the owner waits for, as one Answers post by its verifier. None when the post is refused
-    (e.g. it cites a page not built yet): the ask then waits for its verifier's batch summary."""
-    body = f"{ask.evidence or ''}\n\nHow: {ask.evidence_how or ''}"
-    try:
-        links = [map_arg_to_link(ref) for ref in ask.refs[:LINKS_MAX]]
-        title = VERIFIED_TITLE + _cut(ask.words, USER_ITEM_MAX_CHARS - len(VERIFIED_TITLE))
-        item_id = add_post(conn, by, "done", title, body, links, [], at_ms, ask_id=ask.id)
-    except MessageStateError:
-        return None
-    mark_ask_told(conn, ask.id, at_ms)
-    return item_id
+BATCH_TITLE_CHARS = 20
 
 
 def mark_ask_told(conn: sqlite3.Connection, ask_id: int, at_ms: int) -> None:
     conn.execute("UPDATE asks SET told_at = coalesce(told_at, ?) WHERE id = ?", (at_ms, ask_id))
 
 
-def post_verified_batch(conn: sqlite3.Connection, by: Party, at_ms: int) -> tuple[int, int, int]:
-    """One Answers post listing the asks `by` verified that the owner was not told of yet, oldest first, as many as
-    fit; the rest wait for the next batch. Returns the post's number, how many it lists and how many wait."""
+def post_verified_batch(conn: sqlite3.Connection, config: Config, by: Party, at_ms: int) -> tuple[int, int, int]:
+    """One message to the assistant listing the asks `by` verified that were not told yet, oldest first, as many as
+    fit; the rest wait for the next batch. The assistant picks what reaches the owner. Returns the message's number,
+    how many it lists and how many wait."""
     rows = conn.execute(
         """
         SELECT * FROM asks WHERE evidence_by = ? AND verified_at IS NOT NULL AND told_at IS NULL
@@ -318,19 +290,23 @@ def post_verified_batch(conn: sqlite3.Connection, by: Party, at_ms: int) -> tupl
         # An overlong link would crowd out every line, and a summary that lists nothing never ends the batch.
         if link and len(link) <= BATCH_LINK_MAX_CHARS:
             line += f" {link}"
-        if len("\n".join([*lines, line])) > BODY_MAX_CHARS:
+        if BATCH_TITLE_CHARS + len("\n".join([*lines, line])) + 1 > BODY_MAX_CHARS:
             break
         lines.append(line)
         listed.append(ask.id)
     count = len(listed)
     title = f"{count} ask{'' if count == 1 else 's'} verified"
     try:
-        item_id = add_post(conn, by, "done", title, "\n".join(lines), [], [], at_ms)
-    except MessageStateError as exc:
+        assistant = resolve_handle(conn, config.assistant_handle)
+        if is_conversation_locked(conn, config, assistant.conversation_id):
+            raise AskError(f"{assistant.handle}'s tab is locked; the summary waits until it is not")
+        sent = send_message(conn, by, [assistant], "info", "\n".join([title, *lines]), at_ms)
+        conn.execute("UPDATE messages SET post_type = ? WHERE id = ?", (TO_ASSISTANT, sent.message_id))
+    except (MessageStateError, AddressError) as exc:
         raise AskError(str(exc)) from exc
     for ask_id in listed:
         mark_ask_told(conn, ask_id, at_ms)
-    return item_id, count, len(rows) - count
+    return sent.message_id, count, len(rows) - count
 
 
 def close_ask(

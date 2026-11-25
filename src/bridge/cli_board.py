@@ -7,9 +7,11 @@ from datetime import datetime
 
 from bridge.asks import mark_ask_told
 from bridge.board import (
+    BODY_MAX_CHARS,
     DEFAULT_RESPOND_WITHIN_S,
     HINT_SENT,
     MAX_AGENT_HOPS,
+    SYSTEM_CONVERSATION,
     USER_CONVERSATION,
     AddressError,
     MessageStateError,
@@ -36,6 +38,7 @@ from bridge.feed import (
     POST_TYPES,
     TO_ASSISTANT,
     TO_LEAD,
+    WORKER_REPORT,
     add_post,
     build_decision_body,
     find_leads_to_wake,
@@ -47,7 +50,7 @@ from bridge.feed import (
     withdraw_post,
 )
 from bridge.identity import current_party
-from bridge.leads import find_lead_conversations, is_conversation_locked, is_lead_tab
+from bridge.leads import find_lead_conversations, find_lead_of, is_conversation_locked, is_lead_tab
 from bridge.pins import pin_link_once
 from bridge.registry import reconcile
 from bridge.watcher import (
@@ -284,7 +287,7 @@ def find_card_line_problem(words: str | None) -> str | None:
 def cmd_post(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
     me = current_party(conn)
     if args.kind == POST_RESOLVE:
-        return _withdraw_post(conn, me, str(args.title))
+        return _withdraw_post(conn, me, str(args.title), config.assistant_handle)
     structured = bool(args.what or args.why or args.cost or args.pick is not None or args.pick_why)
     if structured and args.kind not in OPEN_KINDS:
         raise UsageError("--what, --why, --cost and --pick are for blocked and decision posts")
@@ -316,6 +319,17 @@ def cmd_post(args: argparse.Namespace, conn: sqlite3.Connection, config: Config)
                 body, args.what, args.why, list(args.option), list(args.cost), args.pick, args.pick_why
             )
         links = [map_arg_to_link(str(link)) for link in args.link]
+    except MessageStateError as exc:
+        raise UsageError(str(exc)) from exc
+    if to := find_post_route(conn, config, me, str(args.kind), args.ask, bool(args.pin)):
+        flags = [*(["urgent"] if args.urgent else []), *(["pin its link"] if args.pin else [])]
+        fields = [
+            *(f"Answer {n}: {option}" for n, option in enumerate(args.option, 1)),
+            *(f"Link: {link.label}={link.url}" if link.label else f"Link: {link.url}" for link in links),
+            *([f"Answers ask #{args.ask}"] if args.ask is not None else []),
+        ]
+        return send_draft(conn, config, me, to, str(args.kind), str(args.title), body, fields, flags)
+    try:
         at = now_ms()
         pinned = None
         with transaction(conn):
@@ -337,12 +351,99 @@ def cmd_post(args: argparse.Namespace, conn: sqlite3.Connection, config: Config)
     return 0
 
 
-def _withdraw_post(conn: sqlite3.Connection, me: Party, text: str) -> int:
+def find_post_route(
+    conn: sqlite3.Connection, config: Config, me: Party, kind: str, ask: int | None, pin: bool
+) -> str | None:
+    """The handle a post goes to in place of the owner's feed, or None for the feed. Only the assistant puts questions
+    in front of the owner, and results only when it chose them: a worker's post goes to its lead, a lead's question
+    and a lead's result that answers no ask and pins nothing go to the assistant. A session under no lead posts as
+    before."""
+    if me.handle == config.assistant_handle or me.conversation_id == SYSTEM_CONVERSATION:
+        return None
+    if me.conversation_id in find_lead_conversations(conn):
+        if kind in ANSWER_KINDS and (ask is not None or pin):
+            return None
+        return config.assistant_handle
+    row: sqlite3.Row | None = conn.execute(
+        "SELECT surface FROM instances WHERE conversation_id = ? AND ended_at IS NULL ORDER BY first_seen_at DESC",
+        (me.conversation_id,),
+    ).fetchone()
+    lead_surface = find_lead_of(conn, str(row["surface"]) if row else None)[1]
+    if lead_surface is None:
+        return None
+    lead: sqlite3.Row | None = conn.execute("SELECT handle FROM surfaces WHERE surface = ?", (lead_surface,)).fetchone()
+    return str(lead["handle"]) if lead and lead["handle"] else config.assistant_handle
+
+
+def split_at_spaces(text: str, room: int) -> list[str]:
+    """Parts of at most `room` chars, each ending at a space or line break where one exists, so a link or a page
+    citation is never cut in two (each part is checked on its own)."""
+    parts: list[str] = []
+    while len(text) > room:
+        cut = max(text.rfind(" ", 0, room), text.rfind("\n", 0, room))
+        cut = cut if cut > 0 else room
+        parts.append(text[:cut])
+        text = text[cut:].lstrip(" ")
+    return [*parts, text] if text else parts
+
+
+def split_draft(text: str) -> list[str]:
+    """The draft as messages within the length limit, numbered when more than one, each cut at a space."""
+    if len(text) <= BODY_MAX_CHARS:
+        return [text]
+    count = 2
+    # The prefix grows with the part count, and splitting at spaces can need more parts than length alone says.
+    while len(parts := split_at_spaces(text, BODY_MAX_CHARS - len(f"(part {count} of {count}) "))) > count:
+        count = len(parts)
+    return [f"(part {n} of {len(parts)}) {part}" for n, part in enumerate(parts, 1)]
+
+
+def send_draft(
+    conn: sqlite3.Connection,
+    config: Config,
+    me: Party,
+    to: str,
+    kind: str,
+    title: str,
+    body: str,
+    fields: list[str],
+    flags: list[str],
+) -> int:
+    """A post the owner should not see straight away, as a draft message to `to` with every field, delivered like any
+    message so an idle recipient wakes; one too long for a message goes out in parts, never cut."""
+    head = f"Draft {kind} post{' (' + ', '.join(flags) + ')' if flags else ''}, not shown to the owner: {title}"
+    text = "\n".join(part for part in (head, body.strip(), "\n".join(fields)) if part)
+    parts = split_draft(text)
+    mark = TO_ASSISTANT if to == config.assistant_handle else WORKER_REPORT
+    sent: list[int] = []
+    try:
+        with transaction(conn):
+            reject_locked_sender(conn, config, me)
+            recipients = [resolve_handle(conn, to)]
+            reject_locked_recipients(conn, config, recipients)
+            for part in parts:
+                result = send_message(conn, me, recipients, "info", part, now_ms())
+                conn.execute("UPDATE messages SET post_type = ? WHERE id = ?", (mark, result.message_id))
+                sent.append(result.message_id)
+    except (MessageStateError, AddressError) as exc:
+        raise UsageError(str(exc)) from exc
+    nudge_recipients(recipients)
+    for message_id in sent:
+        spawn_typed_delivery(message_id, recipients)
+    print(
+        f"sent to {to} as draft message #{', #'.join(map(str, sent))}, not the owner's feed: a worker's post goes to "
+        "its lead; a lead's question, and a lead's result without --ask N or --pin, go to the assistant, who posts "
+        "what the owner should see"
+    )
+    return 0
+
+
+def _withdraw_post(conn: sqlite3.Connection, me: Party, text: str, assistant: str) -> int:
     if not text.isdecimal():
         raise UsageError("bridge post resolve N: N is the post's number")
     try:
         with transaction(conn):
-            withdraw_post(conn, me, int(text), now_ms())
+            withdraw_post(conn, me, int(text), now_ms(), assistant)
     except MessageStateError as exc:
         raise UsageError(str(exc)) from exc
     print(f"post #{text} withdrawn")
@@ -351,6 +452,8 @@ def _withdraw_post(conn: sqlite3.Connection, me: Party, text: str) -> int:
 
 def cmd_tell_user(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
     me = current_party(conn)
+    if to := find_post_route(conn, config, me, str(args.kind), None, False):
+        return send_draft(conn, config, me, to, str(args.kind), str(args.text), "", [], [])
     try:
         with transaction(conn):
             item_id = add_post(conn, me, str(args.kind), str(args.text), "", [], [], now_ms())

@@ -64,8 +64,10 @@ ROLE_TEMPLATE = "\n".join(
         "- A lead's or {owner}'s `board post` gets one line: "
         '`guild ack N "what it means for you"` or `"nothing for me"`; a question or @name, `bridge reply N`. Never '
         "ack your own post or an ack.",
-        "- Ask {owner} only when nothing else settles it: `bridge post blocked|decision`, --body lines `What:`, "
-        "`Why now:`, `<answer> cost:`. Done: a `--type report` post. Codex: your 2nd opinion.",
+        "- Questions for {owner} go through {assistant}, only when nothing else settles it: `bridge post "
+        "blocked|decision` with --body lines `What:`, `Why now:`, `<answer> cost:` reaches {assistant} as a draft, "
+        "who posts the card. A result reaches {owner} only with `--ask N` or `--pin`. Done: a `--type report` post. "
+        "Codex: your 2nd opinion.",
         "- `--urgent` only when prod or users are hurting, money is leaking, or a deadline is today.",
         "- No browser (Chrome, Playwright) unless the task says so, then a hidden tab group: "
         "{owner}'s screen is shared.",
