@@ -431,6 +431,14 @@ def map_screen_to_vim_insert(screen: str) -> bool:
 
 
 _VIM_INSERT_RE = re.compile(r"^\s+-- INSERT --")
+_VIM_MODE_RE = re.compile(r"^\s+-- [A-Z]+ --")
+
+
+def map_screen_to_vim_normal(screen: str) -> bool:
+    """In vim editorMode, a box whose footer names no mode: Claude Code 2.1.332 shows NORMAL so."""
+    lines = [line for line in screen.splitlines() if line.strip()]
+    box = _find_input_box(lines)
+    return box is not None and not any(_VIM_MODE_RE.match(line) for line in lines[box[1] :])
 
 
 def map_screen_to_dialog(screen: str) -> bool:

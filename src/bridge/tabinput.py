@@ -20,6 +20,7 @@ from bridge.compaction import (
     map_screen_to_idle,
     map_screen_to_transcript,
     map_screen_to_vim_insert,
+    map_screen_to_vim_normal,
 )
 from bridge.config import Config, state_dir
 from bridge.errlog import log_error, log_slow
@@ -31,6 +32,7 @@ PROBE_KEY = "."
 BACKSPACE = "\x7f"
 KILL_TO_END = "\x0b"
 KILL_TO_START = "\x15"
+VIM_INSERT_KEY = "i"
 
 
 def map_lines_to_clear_keys(lines: int) -> str:
@@ -149,7 +151,8 @@ def type_when_idle(
     once text is claimed it is not asked.
     A draft a probe proved is judged: stray keys are cleared once and the wait goes on, someone's words are kept,
     and text neither goes to tell_unsure once while the wait goes on. A clear the box does not show gives "failed".
-    With Claude Code in vim mode, no key goes in unless the footer shows INSERT.
+    With Claude Code in vim mode, no key goes in unless the footer shows INSERT; a NORMAL-mode box that may be probed
+    gets "i" first, which enters INSERT and leaves the box as it is.
     """
     command = map_text_to_typable(command)
     vim = is_claude_vim()
@@ -228,6 +231,29 @@ def type_when_idle(
                 looked = _Stopwatch()
                 continue
             looked = _Stopwatch()
+            if (
+                vim
+                and screen is not None
+                and map_screen_to_vim_normal(screen)
+                and not map_screen_to_busy(screen)
+                and may_probe_box is not None
+                and may_probe_box()
+            ):
+                with _pane_lock(pane):
+                    again = _read_screen(config, target)
+                    shown = map_screen_to_draft(again) if again is not None else None
+                    if (
+                        again is not None
+                        and shown is not None
+                        and map_screen_to_vim_normal(again)
+                        and not map_screen_to_busy(again)
+                        and may_probe_box()
+                        and not _enter_vim_insert(config, target, shown, may_probe_box)
+                    ):
+                        # The key may have gone in as text: the box is not as we left it, so no more keys.
+                        return "failed"
+                time.sleep(LOOK_EVERY_S)
+                continue
             draft = map_screen_to_draft(screen) if screen is not None else None
             if draft != suggested:
                 suggested = None
@@ -543,10 +569,38 @@ def _prove_typed(
     return "typed" if verdict == "draft" else verdict
 
 
-def _adds_probe_key(before: str, now: str) -> bool:
+def _enter_vim_insert(config: Config, target: list[str], before: str, still_allowed: Callable[[], bool]) -> bool:
+    """True once the footer shows INSERT over the box as it was: "i" in vim NORMAL does that (REPRODUCED on Claude
+    Code 2.1.332 with a draft, a lone "." and an empty box). A tab still in default mode takes it as text, added to a
+    draft or replacing a grey suggestion, and it is taken back; either way the caller sends no more keys."""
+    if run_agterm(config, ["session", "type", *target, VIM_INSERT_KEY]) is None:
+        return False
+    started = _Stopwatch()
+    while started.seconds() < PROBE_LANDS_S:
+        time.sleep(PROBE_SETTLE_S)
+        now = _read_screen(config, target)
+        draft = map_screen_to_draft(now) if now is not None else None
+        if now is None or draft is None or not still_allowed():
+            return False
+        after = _squash(draft)
+        # A draft that already was "i" stays as it was when the key enters INSERT.
+        if after != _squash(before) and (after == VIM_INSERT_KEY or _adds_key(_squash(before), after, VIM_INSERT_KEY)):
+            if run_agterm(config, ["session", "type", *target, BACKSPACE]) is not None:
+                # A suggestion the key replaced may come back or not.
+                back = {_squash(before), ""} if after == VIM_INSERT_KEY else {_squash(before)}
+                _await_box(config, target, lambda now, back=back: now in back, lambda now, after=after: now == after)
+            return False
+        if draft != before:
+            return False
+        if map_screen_to_vim_insert(now):
+            return True
+    return False
+
+
+def _adds_key(before: str, now: str, key: str = PROBE_KEY) -> bool:
     """The key lands where the cursor is, which the user may have left inside the text."""
     return len(now) == len(before) + 1 and any(
-        now[i] == PROBE_KEY and now[:i] + now[i + 1 :] == before for i in range(len(now))
+        now[i] == key and now[:i] + now[i + 1 :] == before for i in range(len(now))
     )
 
 
@@ -567,7 +621,7 @@ def _probe_box(
     after = _await_box(
         config,
         target,
-        lambda now: now != before and (now == PROBE_KEY or _adds_probe_key(before, now)),
+        lambda now: now != before and (now == PROBE_KEY or _adds_key(before, now)),
         lambda now: still_allowed(),
     )
     if after is None or not still_allowed():
@@ -576,7 +630,7 @@ def _probe_box(
         return "unknown"
     # A suggestion the key replaced may come back or not; a draft must be exactly as it was.
     back = {before, ""} if after == PROBE_KEY else {before}
-    restored = _await_box(config, target, lambda now: now in back, lambda now: now == after)
+    restored = _await_box(config, target, lambda now, back=back: now in back, lambda now, after=after: now == after)
     if restored is None or not still_allowed():
         return "unknown"
     return "suggestion" if after == PROBE_KEY else "draft"

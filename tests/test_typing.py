@@ -1444,25 +1444,95 @@ def test_a_clear_that_brings_up_other_text_gets_no_more_keys(tmp_path: Path) -> 
 
 
 class VimNormal(FakeClaudeBox):
-    """Vim NORMAL mode: Claude Code's footer shows no mode, and "." repeats the last edit."""
+    """Vim NORMAL mode: Claude Code's footer shows no mode, "i" enters INSERT, and "." repeats the last edit."""
+
+    normal = True
 
     def run(self, _: Config, args: list[str]) -> str | None:
+        if args[:2] == ["session", "type"] and self.normal and args[-1] == "i":
+            self.typed.append("i")
+            self.normal = False
+            return "ok"
         screen = super().run(_, args)
-        if args[:2] == ["session", "text"] and screen is not None:
+        if args[:2] == ["session", "text"] and screen is not None and self.normal:
             return screen.replace("  -- INSERT --", "  \u23f8 manual mode on")
         return screen
 
 
-def test_with_vim_in_normal_mode_no_key_goes_in_neither_probe_nor_clear_nor_text(tmp_path: Path) -> None:
+def test_with_vim_in_normal_mode_i_enters_insert_and_then_the_stray_dot_is_cleared(tmp_path: Path) -> None:
     stray, empty = VimNormal({"S": "."}), VimNormal()
 
     results = [
-        _type(tmp_path, stray, wait_s=4, may_probe_box=lambda: True, vim=True),
-        _type(tmp_path, empty, wait_s=4, may_probe_box=lambda: True, vim=True),
+        _type(tmp_path, stray, wait_s=10, may_probe_box=lambda: True, vim=True),
+        _type(tmp_path, empty, wait_s=10, may_probe_box=lambda: True, vim=True),
+    ]
+
+    assert results == ["typed", "typed"]
+    assert stray.typed == ["i", ".", "\x7f", CLEAR_KEYS, "hello", ENTER]
+    assert empty.typed == ["i", "hello", ENTER]
+    assert stray.submitted == empty.submitted == ["hello"]
+
+
+def test_a_draft_that_already_is_i_stays_when_i_enters_insert(tmp_path: Path) -> None:
+    fake = VimNormal({"S": "i"})
+
+    _type(tmp_path, fake, wait_s=4, may_probe_box=lambda: True, vim=True)
+
+    assert fake.typed[:2] == ["i", "."], "INSERT entered, then the usual probe"
+    assert fake.boxes["S"] == "i"
+
+
+def test_with_vim_in_normal_mode_no_key_goes_in_where_the_box_may_not_be_probed(tmp_path: Path) -> None:
+    selected, unprobed = VimNormal({"S": "."}), VimNormal({"S": "."})
+
+    results = [
+        _type(tmp_path, selected, wait_s=4, may_probe_box=lambda: False, vim=True),
+        _type(tmp_path, unprobed, wait_s=4, vim=True),
     ]
 
     assert results == ["timeout", "timeout"]
-    assert stray.typed == empty.typed == []
+    assert selected.typed == unprobed.typed == []
+
+
+def test_an_i_that_lands_as_text_is_taken_back_and_no_more_keys_follow(tmp_path: Path) -> None:
+    class DefaultModeFooter(VimNormal):
+        """Settings say vim, but this tab still runs default mode: "i" is text."""
+
+        def run(self, _: Config, args: list[str]) -> str | None:
+            if args[:2] == ["session", "type"] and args[-1] == "i":
+                self.typed.append("i")
+                self.boxes["S"] += "i"
+                return "ok"
+            return super().run(_, args)
+
+    fake = DefaultModeFooter({"S": "."})
+
+    result = _type(tmp_path, fake, wait_s=8, may_probe_box=lambda: True, vim=True)
+
+    assert result == "failed"
+    assert fake.typed == ["i", "\x7f"]
+    assert fake.boxes["S"] == "."
+
+
+def test_an_i_that_replaces_a_grey_suggestion_as_text_is_taken_back(tmp_path: Path) -> None:
+    class DefaultModeSuggestion(VimNormal):
+        """Settings say vim, but this tab runs default mode and shows grey text: "i" replaces it."""
+
+        def run(self, _: Config, args: list[str]) -> str | None:
+            if args[:2] == ["session", "type"] and args[-1] == "i":
+                self.typed.append("i")
+                self.suggestions.discard("S")
+                self.boxes["S"] = "i"
+                return "ok"
+            return super().run(_, args)
+
+    fake = DefaultModeSuggestion({"S": "Continue the task"}, suggestions={"S"})
+
+    result = _type(tmp_path, fake, wait_s=8, may_probe_box=lambda: True, vim=True)
+
+    assert result == "failed"
+    assert fake.typed == ["i", "\x7f"]
+    assert fake.boxes["S"] == ""
 
 
 def test_without_vim_the_same_footer_is_the_default_mode_and_gets_its_keys(tmp_path: Path) -> None:
