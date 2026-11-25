@@ -66,17 +66,22 @@ def claimed(conn: sqlite3.Connection, by: Actor = WORKER) -> int:
     return ask.id
 
 
-def test_an_ask_goes_open_to_closed_and_logs_each_step(conn: sqlite3.Connection) -> None:
+def test_an_ask_goes_open_to_closed_at_verification_and_logs_each_step(conn: sqlite3.Connection) -> None:
     ask_id = claimed(conn)
-    verify_ask(conn, ask_id, LEAD, EVIDENCE, HOW, 4000)
-    ask = close_ask(conn, ask_id, "owner", "you", 5000)
-    assert (ask.state, ask.closed_how, ask.evidence_by, ask.claim_by) == ("closed", "owner", "alex", "work-1")
-    assert (ask.started_at, ask.done_at, ask.verified_at, ask.closed_at) == (2000, 3000, 4000, 5000)
+    ask = verify_ask(conn, ask_id, LEAD, EVIDENCE, HOW, 4000, "Q#7")
+    assert (ask.state, ask.closed_how, ask.evidence_by, ask.claim_by) == ("closed", "auto", "alex", "work-1")
+    assert (ask.started_at, ask.done_at, ask.verified_at, ask.closed_at) == (2000, 3000, 4000, 4000)
     assert [e["state"] for e in list_ask_events(conn, ask_id)] == [
         "open", "in_progress", "done_claimed", "verified", "closed",
     ]  # fmt: skip
+    closed = list_ask_events(conn, ask_id)[-1]
+    assert (closed["by"], closed["note"]) == (
+        "bridge", "closed at once on verification, by the owner's standing rule (Q#7)",
+    )  # fmt: skip
+    assert verify_ask(conn, claimed(conn), OTHER_LEAD, EVIDENCE, HOW, 4000).state == "closed"
+    assert list_ask_events(conn, 2)[-1]["note"] == "closed at once on verification, by the owner's standing rule"
     assert list_asks(conn) == []
-    assert [a.id for a in list_asks(conn, include_closed=True)] == [ask_id]
+    assert [a.id for a in list_asks(conn, include_closed=True)] == [ask_id, 2]
 
 
 Action = Callable[[sqlite3.Connection, int], object]
@@ -97,7 +102,7 @@ WRONG_ACTIONS: dict[str, Action] = {
         (["start"], "start", "already in progress"),
         ([], "close", "not verified yet; --dropped"),
         ([], "reopen", "cannot reopen #1: it is open"),
-        (["start", "done", "verify"], "note", "cannot note #1: it is verified"),
+        (["start", "done", "verify"], "note", "cannot note #1: it is closed"),
         (["start", "done"], "done", "cannot claim done"),
     ],
 )
@@ -120,7 +125,7 @@ def test_the_claimer_cannot_verify_its_own_claim(conn: sqlite3.Connection) -> No
     same_conversation = Actor("alex-renamed", "conv-l", "lead")
     with pytest.raises(AskError, match="cannot verify it"):
         verify_ask(conn, ask_id, same_conversation, EVIDENCE, HOW, 4000)
-    assert verify_ask(conn, ask_id, OTHER_LEAD, EVIDENCE, HOW, 4000).state == "verified"
+    assert verify_ask(conn, ask_id, OTHER_LEAD, EVIDENCE, HOW, 4000).state == "closed"
 
 
 def test_a_worker_cannot_verify(conn: sqlite3.Connection) -> None:
@@ -203,13 +208,15 @@ def test_cli_records_quotes_and_verifies_across_sessions(bridge_env: BridgeEnv, 
     assert own.returncode == 2 and "cannot verify it" in own.stderr
     short = team.guild("ask", "verify", "1", "--evidence", "ok", "--how", "looked", pid=team.b)
     assert short.returncode == 2 and "a screenshot path" in short.stderr
-    assert team.guild("ask", "verify", "1", "--evidence", EVIDENCE, "--how", HOW, pid=team.b).returncode == 0
+    verified = team.guild("ask", "verify", "1", "--evidence", EVIDENCE, "--how", HOW, pid=team.b)
+    assert verified.returncode == 0 and "verified by old-b and closed" in verified.stdout
 
     by_lead = team.guild("ask", "close", "1", pid=team.a)
     assert by_lead.returncode == 2 and "only old-b closes" in by_lead.stderr
-    assert team.guild("ask", "close", "1", pid=team.b).returncode == 0
+    again = team.guild("ask", "close", "1", pid=team.b)
+    assert again.returncode == 2 and "it is closed" in again.stderr
     shown = team.guild("ask", "show", "1").stdout
-    assert "closed: assistant" in shown and "verified" in shown
+    assert "closed: auto" in shown and "verified" in shown
     assert "no open asks" not in team.guild("ask", "list").stdout
     assert [a["id"] for a in json.loads(team.guild("ask", "list", "--json").stdout)] == [2]
 
@@ -273,7 +280,8 @@ def test_nag_texts_go_to_each_owner_and_the_assistant_hears_claims_after_a_day_a
     mark_nagged(conn, [lead_claimed, worker_claimed, open_one, own], 5 * HOUR)
     later = map_overdue_to_texts(conn, 24 * HOUR)["aide"].splitlines()
     verify_at = later.index(
-        "To verify, claimed done over 24h ago and still not verified; each is sent once (Theo's words):"
+        "To verify, claimed done over 24h ago and still not verified, and no live lead can verify them; each is sent "
+        "once (Theo's words):"
     )
     assert [line.split(" ")[0] for line in later[verify_at + 1 : verify_at + 3]] == [
         f"#{lead_claimed}",
@@ -310,9 +318,16 @@ def test_an_ask_nobody_was_told_about_stays_due(conn: sqlite3.Connection) -> Non
     assert due_ids(conn, 5 * HOUR + 1) == [ask_id]
 
 
-def test_verified_asks_close_by_themselves_after_the_window(conn: sqlite3.Connection) -> None:
-    ask_id = claimed(conn)
+def verified_before_close_at_once(conn: sqlite3.Connection, ask_id: int) -> None:
+    """A row verified before verification closed the ask at once."""
     verify_ask(conn, ask_id, LEAD, EVIDENCE, HOW, 4000)
+    conn.execute("UPDATE asks SET state = 'verified', closed_how = NULL, closed_at = NULL WHERE id = ?", (ask_id,))
+    conn.execute("DELETE FROM ask_events WHERE ask_id = ? AND state = 'closed'", (ask_id,))
+
+
+def test_older_verified_asks_close_by_themselves_after_the_window(conn: sqlite3.Connection) -> None:
+    ask_id = claimed(conn)
+    verified_before_close_at_once(conn, ask_id)
     assert close_settled_asks(conn, 4000 + 24 * HOUR - 1, 24 * HOUR) == []
     assert close_settled_asks(conn, 4000 + 24 * HOUR, 24 * HOUR, "Q#7") == [ask_id]
     ask = get_ask(conn, ask_id)
@@ -325,7 +340,7 @@ def test_verified_asks_close_by_themselves_after_the_window(conn: sqlite3.Connec
 def test_a_reopened_ask_is_not_closed_by_itself_and_no_decision_cites_none(conn: sqlite3.Connection) -> None:
     reopened, kept = claimed(conn), claimed(conn)
     for ask_id in (reopened, kept):
-        verify_ask(conn, ask_id, LEAD, EVIDENCE, HOW, 4000)
+        verified_before_close_at_once(conn, ask_id)
     reopen_ask(conn, reopened, "aide", "the header still shows the old copy", 5000)
     assert close_settled_asks(conn, 4000 + 24 * HOUR, 24 * HOUR) == [kept]
     assert get_ask(conn, reopened).state == "open"
@@ -386,7 +401,7 @@ def test_an_owner_session_drops_its_obsolete_ask_with_the_reason_in_history(conn
     with pytest.raises(AskError, match=f"it is claimed done; it is verified, or `guild ask reopen {claim}"):
         drop_ask(conn, claim, LEAD, "not needed any more", 4000)
     verify_ask(conn, claim, OTHER_LEAD, EVIDENCE, HOW, 4000)
-    with pytest.raises(AskError, match="it is verified and closes by itself"):
+    with pytest.raises(AskError, match=f"cannot drop #{claim}: it is closed"):
         drop_ask(conn, claim, LEAD, "not needed any more", 5000)
 
 
@@ -519,20 +534,18 @@ def test_page_shows_asks_and_closes_or_reopens_them(
     assert team.guild("ask", "done", "3", "--claim", "Sent the vendor the answer", pid=team.a).returncode == 0
 
     page = json.loads(http_request(dashboard + "/api/guild"))
-    assert [a["id"] for a in page["asks"]["verified"]] == [1, 2]
+    assert page["asks"]["verified"] == []
     assert (page["asks"]["attention"], page["asks"]["more"]) == ([], 0)
     lead = next(lead for lead in page["leads"] if lead["name"] == "alex")
     assert (lead["asks"]["open"], [i["words"] for i in lead["asks"]["items"]]) == (1, ["Answer the vendor"])
 
-    closed = json.loads(http_request(dashboard + "/api/asks/1/close", post=True, data={}))
-    assert closed == {"ok": True, "detail": "closed"}
     again = json.loads(http_request(dashboard + "/api/asks/1/close", post=True, data={}, expect=409))
     assert "it is closed" in again["detail"]
     http_request(dashboard + "/api/asks/2/reopen", post=True, data={"why": "still old " + "x" * 1900})
     http_request(dashboard + "/api/asks/2/reopen", post=True, data={"why": 3}, expect=400)
 
     conn = bridge_env.connect()
-    assert (get_ask(conn, 1).state, get_ask(conn, 1).closed_how) == ("closed", "owner")
+    assert (get_ask(conn, 1).state, get_ask(conn, 1).closed_how) == ("closed", "auto")
     assert (get_ask(conn, 2).state, get_ask(conn, 2).reopen_why) == ("open", "on the page: still old " + "x" * 1900)
     told = conn.execute("SELECT body FROM messages WHERE from_handle = 'bridge' ORDER BY id DESC LIMIT 1").fetchone()
     assert "reopened ask #2 (on the page: still old xxx" in told[0] and "Fix the export" in told[0]
@@ -616,7 +629,7 @@ def test_a_wait_needs_a_known_kind_and_a_reason(conn: sqlite3.Connection, on: st
 def test_a_verified_ask_cannot_wait(conn: sqlite3.Connection) -> None:
     ask_id = claimed(conn)
     verify_ask(conn, ask_id, LEAD, EVIDENCE, HOW, 4000)
-    with pytest.raises(AskError, match="cannot wait #1: it is verified"):
+    with pytest.raises(AskError, match="cannot wait #1: it is closed"):
         wait_ask(conn, ask_id, LEAD, "owner", WAIT_WHY, 5000)
 
 

@@ -239,8 +239,8 @@ priority. An urgent question also raises a macOS notification.
 
 Beside them, **Answers** keeps what came back for you, so it does not scroll away in a chat: results, check results
 and artifacts (`bridge post done|insight`), newest first, a dot until you open one. OK takes one off (it stays in
-history); Reply sends your words to whoever posted it. A verified ask you were waiting on, or one you asked as a
-question, lands there by itself; the rest come as one summary per batch of verifications.
+history); Reply sends your words to whoever posted it. Verified asks reach the assistant, one summary per batch of
+verifications, and the assistant picks what lands there.
 </details>
 
 <details>
@@ -268,9 +268,10 @@ aimed at something another live agent holds. The page lists claims under **Resou
 **Why:** "done" from an agent often means "I changed something". You want to know it works where you will look.
 
 **How:** every request you give goes into a ledger in your own words and stays there until someone other than the
-agent that did the work has checked what you would see, and recorded where and how. Stale asks and unchecked claims
-nag their owner; an ask quiet for 3 days is checked daily (still current, done or obsolete), and a verified one closes
-by itself a day later unless you reopen it.
+agent that did the work has checked what you would see, and recorded where and how. Each claim goes at once to a lead
+picked to verify it (`verifier_lead`, else the least loaded live lead); a verified ask closes, and a reopen brings it
+back. Stale asks nag their owner, an ask quiet for 3 days is checked daily (still current, done or obsolete), and an
+ask waiting on you without a card on your feed is flagged to the assistant.
 </details>
 
 <details>
@@ -505,10 +506,11 @@ Full usage and flags: [docs/commands.md](docs/commands.md), or `<command> --help
 | [`guild ask start`](docs/commands.md#guild-ask-start) | open → in_progress |
 | [`guild ask note`](docs/commands.md#guild-ask-note) | news on an ask not done yet or not verified yet; it counts as an update |
 | [`guild ask wait`](docs/commands.md#guild-ask-wait) | it cannot move: its reminders pause until its next start, note, done, verify or reopen, or until --until passes |
-| [`guild ask done`](docs/commands.md#guild-ask-done) | claim it done; another session verifies |
-| [`guild ask verify`](docs/commands.md#guild-ask-verify) | done_claimed → verified, with evidence of what the owner would see |
-| [`guild ask summary`](docs/commands.md#guild-ask-summary) | one Answers post listing the asks you verified that the owner was not told of yet; one per batch |
-| [`guild ask close`](docs/commands.md#guild-ask-close) | verified → closed (the assistant only, relaying the owner) |
+| [`guild ask done`](docs/commands.md#guild-ask-done) | claim it done; bridge picks a live lead to verify it and sends it the ask |
+| [`guild ask assign-verifiers`](docs/commands.md#guild-ask-assign-verifiers) | pick a verifier for every claim that has none, one message per verifier |
+| [`guild ask verify`](docs/commands.md#guild-ask-verify) | done_claimed → closed, with evidence of what the owner would see |
+| [`guild ask summary`](docs/commands.md#guild-ask-summary) | one message to the assistant listing the asks you verified that were not told yet; one per batch |
+| [`guild ask close`](docs/commands.md#guild-ask-close) | verified → closed, for an ask verified before verification closed it (the assistant only) |
 | [`guild ask drop`](docs/commands.md#guild-ask-drop) | close an ask not yet claimed as obsolete, with why (its owner session or the assistant) |
 | [`guild ask reopen`](docs/commands.md#guild-ask-reopen) | back to open: the result is not what the owner asked for |
 | **`guild` · Right Hand** | |

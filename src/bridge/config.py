@@ -214,9 +214,11 @@ class Config:
     shadow_filter_refusal_phrases: tuple[str, ...] = ("Live now:", "is refused unless", "now refuses")
     """A message to a lead containing one of these (any case) announces a new refusal or rule and goes at once."""
     ask_autoclose_decision: str = ""
-    """The owner's decision that verified asks close by themselves (e.g. "Q#12"), cited in each automatic close."""
+    """The owner's decision that verified asks close (e.g. "Q#12"), cited in each close on verification."""
     verifier_lead: str = ""
-    """The lead that gets each night's new dreams to find candidate rules in; empty sends them to nobody."""
+    """The verification lead: it verifies every claim while its tab is live and it is neither the ask's owner, its
+    claimer nor the claimer's lead (otherwise, or when empty, another live lead with the fewest open verifications), and
+    gets each night's new dreams to find candidate rules in (empty: nobody)."""
     asks_panel_max: int = 10
     """Asks the page's Asks panel lists as needing attention; past it, the panel says how many more."""
     doc_screen: bool = False

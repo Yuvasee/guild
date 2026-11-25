@@ -97,7 +97,8 @@ bridge post decision "Ship the export worker behind a flag, or wait for the load
   it tomorrow, do not post it.
 - `--urgent` (blocked or decision only) marks the card loudly and raises one macOS notification on the owner's Mac. Only when prod or users are hurting, money is leaking, or a deadline is today. The assistant
   audits these with `guild urgent`.
-- `bridge post resolve N` withdraws your own open question when it settled without the user. Anyone else's is refused.
+- `bridge post resolve N` withdraws your own open question when it settled without the user, or takes an Answers
+  post (done or insight) off; only its author, or the assistant for an Answers post, may. Anyone else's is refused.
 - `bridge tell-user "one line" [--action|--blocker]` is the older short form.
 
 ### The team board: `bridge board`
@@ -222,32 +223,41 @@ guild ask wait N --on owner|approval|release|verifier 'who, for what'   # cannot
 guild ask wait N --until YYYY-MM-DD[THH:MM] 'why'  # its owner pauses it (local time); --on <owner's name> is --on owner
 guild ask done N --claim 'what was done, where it lives'
 guild ask verify N --evidence 'what the owner sees, and where' --how 'URL, screenshot path, or command and its output'
-guild ask summary                                    # one Answers post: the asks you verified, not told yet
+guild ask assign-verifiers                           # a verifier for each claim with none; one message per verifier
+guild ask summary                                    # one message to the assistant: the asks you verified, not told yet
 guild ask reopen N --why 'what is still wrong'
 guild ask list [--owner X] [--all] [--json]; guild ask show N    # show has the history
 ```
 
-- The owner's question goes in with `--question`. On verify, such an ask, or one that ever waited on the owner, goes
-  to the owner's Answers at once as a post by its verifier; every other one waits for that verifier's
-  `guild ask summary`, one post per batch of verifies.
+- Verify posts nothing to the owner's Answers. After a batch of verifies, `guild ask summary` sends the assistant one
+  message listing them, and the assistant picks what reaches the owner. `--question` marks an ask as the owner's
+  question in the ledger.
 - Verified means the user-visible result was seen: what the owner would see, where (the page, the PR, the
   channel), as it is now, and how it was checked so another session could repeat it. "Deployed" or "tests pass" is
   not that.
-- The session that claimed done cannot verify it. A lead verifies its worker's claim; the assistant or another lead
-  verifies a lead's. Workers do not verify.
-- Bridge nags: an open or in-progress ask with no update for 4 hours, or a claim unverified for 1 hour, types a message
-  into its owner's tab. While nothing changes it comes again after 4, 8, 16, then every 24 hours; any start, note,
+- On a claim, bridge picks its verifier and types it the ask, the claim, its refs and the verify line: the lead
+  `verifier_lead` names while its tab is live, else the live lead with the fewest open verifications (then the fewest
+  live workers); never the ask's owner, the claimer or the claimer's lead. The verifier checks the real artifact
+  (the PR's state, the page, the Linear issue, a cloud read), never only the claim, and says what it could not
+  check. The session that claimed done cannot verify it; workers do not verify; another lead or the assistant may.
+  No lead fits: the assistant verifies it, as below. Verify closes the ask at once; `guild ask reopen` brings it back.
+- Bridge nags: an open or in-progress ask with no update for 4 hours, or a claim with no verifier unverified for 1
+  hour, types a message into its owner's tab. While nothing changes it comes again after 4, 8, 16, then every 24 hours; any start, note,
   wait, claim or verify restarts that clock. An ask that waits (`guild ask wait --on`) gets none for 3 days; with no
   update for 3 days, waiting or not, its owner is asked once a day whether it is still current (`guild ask note`, or
   `wait` again), done (`guild ask done`) or obsolete (`guild ask drop N '<why>'` closes it as dropped, the reason in
-  its history, and tells the assistant). A claim, a lead's own included, reminds its lead from 1 hour; the assistant
-  gets each claim once, under "To verify", after it stayed unverified for 24 hours, and an open ask under "Asks
-  overdue" only once a reminder to its owner went unanswered (one that waits: only when its owner could not be told)
+  its history, and tells the assistant). A verifier whose tab is locked, or gone for 10 minutes, is replaced by the
+  same rule (not while the ask is paused). A claim unverified 24 hours after its verifier was picked reminds that
+  verifier once; one no lead fits reaches the assistant once, under "To verify". The assistant gets an open ask under "Asks overdue" only once a reminder to its owner went
+  unanswered (one that waits: only when its owner could not be told)
   or reached no one. None go out
   while the owner is off (night word, dreams, or off hours with no word in 24 h); the ones held go out once,
-  together, when the owner is back. One nobody was told about stays due. A verified ask closes by itself after 24
-  hours unless the owner reopens it on the page; a reopen is typed into the owner's tab. Only the assistant closes a
-  verified ask by hand (`guild ask close N`, or `--dropped '<why>'` for one the owner let go).
+  together, when the owner is back. One nobody was told about stays due. Once a day the assistant gets 3 asks leads
+  verified that day, picked at random, to check again. An ask waiting on the owner (`--on owner`, or `--on approval`
+  with the owner's name in its why) needs an open blocked or decision card on the owner's feed whose title or body
+  says "ask #N"; with none 15 minutes into the wait, the assistant is told once per wait to post one. A reopen is
+  typed into the owner's tab. Only the assistant closes an ask still verified from before verify closed it
+  (`guild ask close N`), or one the owner let go (`--dropped '<why>'`).
 
 ## Published pages (`bridge page`)
 

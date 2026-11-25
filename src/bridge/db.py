@@ -949,6 +949,14 @@ MIGRATIONS: tuple[str, ...] = (
     CREATE INDEX claim_events_at ON claim_events (at);
     CREATE INDEX claim_events_nudged ON claim_events (conversation_id, resource) WHERE kind = 'nudged';
     """,
+    # The lead bridge picked to verify a claim (NULL: none fitted, so the assistant verifies it as before), and the
+    # conversations that verified it and that set its wait: their locks hold after a lead is retired and its handle
+    # gone, so their words are never passed on from a locked tab.
+    """
+    ALTER TABLE asks ADD COLUMN verifier TEXT;
+    ALTER TABLE asks ADD COLUMN evidence_conversation TEXT;
+    ALTER TABLE asks ADD COLUMN wait_conversation TEXT;
+    """,
 )
 
 HOOK_BUSY_TIMEOUT_MS = 200

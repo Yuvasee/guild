@@ -12,6 +12,7 @@ from bridge.asks import (
     Ask,
     AskError,
     add_ask,
+    assign_verifiers,
     claim_ask_done,
     close_ask,
     convert_wait_to_text,
@@ -19,6 +20,7 @@ from bridge.asks import (
     get_ask,
     list_ask_events,
     list_asks,
+    list_unassigned_claims,
     map_owner_name_to_wait_on,
     map_wait_on_arg_to_stored,
     note_ask,
@@ -48,9 +50,7 @@ def add_ask_commands(sub: "argparse._SubParsersAction[argparse.ArgumentParser]",
     p.add_argument("--words", help="the owner's words verbatim; default: stdin")
     p.add_argument("--from", dest="from_id", type=int, metavar="N", help="quote message N's body as the words")
     p.add_argument("--ref", action="append", default=[], help="a PR, issue or page URL; repeat")
-    p.add_argument(
-        "--question", action="store_true", help="the owner asked it as a question: once verified, it goes to Answers"
-    )
+    p.add_argument("--question", action="store_true", help="the owner asked it as a question; kept in the ledger")
     p.set_defaults(func=cmd_ask_add)
     p = ask_sub.add_parser("list", help="asks not closed, oldest first")
     p.add_argument("--owner")
@@ -90,21 +90,38 @@ def add_ask_commands(sub: "argparse._SubParsersAction[argparse.ArgumentParser]",
     )
     p.add_argument("why", help="who exactly, and for what")
     p.set_defaults(func=cmd_ask_wait)
-    p = ask_sub.add_parser("done", help="claim it done; another session verifies")
+    p = ask_sub.add_parser(
+        "done",
+        help="claim it done; bridge picks a live lead to verify it and sends it the ask: the configured verifier lead, "
+        "else the one with the fewest open verifications, never the ask's owner, the claimer or the claimer's lead; "
+        "none fits: the assistant verifies it after a day",
+    )
     p.add_argument("id", type=int)
     p.add_argument("--claim", required=True, help="what was done and where it lives")
     p.set_defaults(func=cmd_ask_done)
-    p = ask_sub.add_parser("verify", help="done_claimed → verified, with evidence of what the owner would see")
+    p = ask_sub.add_parser(
+        "assign-verifiers",
+        help="pick a verifier for every claim that has none, by the same rule, and send each verifier one message "
+        "listing its asks (a lead or the assistant)",
+    )
+    p.set_defaults(func=cmd_ask_assign_verifiers)
+    p = ask_sub.add_parser(
+        "verify",
+        help="done_claimed → closed, with evidence of what the owner would see: verified closes it at once, by the "
+        "owner's standing rule; a reopen brings it back",
+    )
     p.add_argument("id", type=int)
     p.add_argument("--evidence", required=True, help="what the owner would see, and where")
     p.add_argument("--how", required=True, help="a URL, a screenshot path, or a command and its output")
     p.set_defaults(func=cmd_ask_verify)
     p = ask_sub.add_parser(
         "summary",
-        help="one Answers post listing the asks you verified that the owner was not told of yet; one per batch",
+        help="one message to the assistant listing the asks you verified that were not told yet; one per batch",
     )
     p.set_defaults(func=cmd_ask_summary)
-    p = ask_sub.add_parser("close", help="verified → closed (the assistant only, relaying the owner)")
+    p = ask_sub.add_parser(
+        "close", help="verified → closed, for an ask verified before verification closed it (the assistant only)"
+    )
     p.add_argument("id", type=int)
     p.add_argument("--dropped", metavar="WHY", help="close an unfinished ask the owner let go, and why")
     p.set_defaults(func=cmd_ask_close)
@@ -208,7 +225,31 @@ def cmd_ask_done(args: argparse.Namespace, conn: sqlite3.Connection, config: Con
     actor = current_actor(conn, config)
     with transaction(conn):
         ask = claim_ask_done(conn, int(args.id), actor, str(args.claim), now_ms())
-    print(f"#{ask.id} done_claimed by {actor.handle}; a different session verifies it with evidence")
+        picked, sent = assign_verifiers(conn, config, [ask], now_ms())
+    for message_id, recipient in sent:
+        spawn_typed_delivery(message_id, [recipient])
+    lead = picked[0][1] if picked else None
+    who = (
+        f"{lead.name} verifies it and is told"
+        if lead
+        else f"no live lead fits, so {config.assistant_handle} verifies it after a day"
+    )
+    print(f"#{ask.id} done_claimed by {actor.handle}; {who}")
+    return 0
+
+
+def cmd_ask_assign_verifiers(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
+    actor = current_actor(conn, config)
+    if actor.role == "other":
+        raise AskError("only a lead or the assistant assigns verifiers")
+    with transaction(conn):
+        picked, sent = assign_verifiers(conn, config, list_unassigned_claims(conn), now_ms())
+    for message_id, recipient in sent:
+        spawn_typed_delivery(message_id, [recipient])
+    if not picked:
+        print("no claim without a verifier")
+    for ask, lead in picked:
+        print(f"#{ask.id} → {lead.name if lead else f'none fits or could be told: {config.assistant_handle} has it'}")
     return 0
 
 
@@ -216,13 +257,15 @@ def cmd_ask_verify(args: argparse.Namespace, conn: sqlite3.Connection, config: C
     actor = current_actor(conn, config)
     at = now_ms()
     with transaction(conn):
-        ask = verify_ask(conn, int(args.id), actor, str(args.evidence), str(args.how), at)
+        ask = verify_ask(
+            conn, int(args.id), actor, str(args.evidence), str(args.how), at, config.ask_autoclose_decision
+        )
     told = (
         f"; {config.owner_name} already has its result in Answers"
         if ask.told_at is not None
         else f"; it goes into your next `guild ask summary` to {config.assistant_handle}, who tells the owner"
     )
-    print(f"#{ask.id} verified by {actor.handle}{told}")
+    print(f"#{ask.id} verified by {actor.handle} and closed{told}")
     return 0
 
 
@@ -314,6 +357,8 @@ def convert_ask_to_text(ask: Ask, now: int, owner_name: str) -> str:
         lines.append("  refs: " + " ".join(ask.refs))
     if ask.claim:
         lines.append(f"  claim ({ask.claim_by}): {ask.claim}")
+    if ask.verifier:
+        lines.append(f"  verifier: {ask.verifier}")
     if ask.evidence:
         lines.append(f"  evidence ({ask.evidence_by}): {ask.evidence}\n  how: {ask.evidence_how}")
     on = convert_wait_to_text(ask, owner_name, now)

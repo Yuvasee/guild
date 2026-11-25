@@ -1,4 +1,5 @@
 import json
+import random
 import re
 import sqlite3
 from dataclasses import dataclass, replace
@@ -17,7 +18,7 @@ from bridge.board import (
 )
 from bridge.config import Config
 from bridge.feed import TO_ASSISTANT
-from bridge.leads import is_conversation_locked, is_surface_locked
+from bridge.leads import find_lead_of, is_conversation_locked, is_surface_locked
 from bridge.pages import find_unready_citations
 
 STATES = ("open", "in_progress", "done_claimed", "verified", "closed")
@@ -31,13 +32,20 @@ again after 1, 2, 4… periods, a day at most. Held while the owner is off, sent
 ASK_VERIFY_HOURS = 1
 """A claimed-done ask unverified this long nags the same way."""
 ASK_AUTOCLOSE_HOURS = 24
-"""A verified ask closes by itself this long after, unless the owner reopens it."""
+"""A verified ask from before verification closed it at once closes by itself this long after."""
 ASK_CHECK_DAYS = 3
 """An open or in-progress ask with no update this long, waiting on someone or not, asks its owner once a day whether it
 is still current, done or obsolete."""
 ASK_TO_VERIFY_HOURS = 24
-"""A claim unverified this long reaches the assistant once, under "To verify"."""
+"""A claim unverified this long reminds its verifier once, or the assistant when no live lead can verify it."""
 TOLD_TO_VERIFY = "sent to the assistant to verify"
+SPOT_CHECK_SAMPLE = 3
+SPOT_CHECKED = "sampled for the assistant's spot-check"
+ASK_CARD_GRACE_MS = 15 * 60_000
+"""A lead marks an ask waiting on the owner, then posts its card: the check waits this long before telling."""
+NO_CARD = "told the assistant: no open card on the owner's feed names it"
+VERIFIER_GONE_MS = 10 * 60_000
+"""A verifier's session that just ended may be a restart: its claims move only once it stayed gone this long."""
 HOUR_MS = 3_600_000
 DAY_MS = 24 * HOUR_MS
 Role = Literal["assistant", "lead", "other"]
@@ -90,9 +98,10 @@ class Ask:
     wait_at: int | None
     wait_until: int | None
     question: bool = False
-    """The owner asked it as a question: its verified result is posted to Answers at once."""
+    """The owner asked it as a question; kept in the ledger."""
     told_at: int | None = None
-    """When its verified result reached the owner's Answers, alone or in a batch summary."""
+    """When its verifier's `guild ask summary` told the assistant of its verified result."""
+    verifier: str | None = None
 
 
 @dataclass(frozen=True)
@@ -134,6 +143,7 @@ def map_row_to_ask(row: sqlite3.Row) -> Ask:
         wait_until=row["wait_until"],
         question=bool(row["question"]),
         told_at=row["told_at"],
+        verifier=row["verifier"],
     )
 
 
@@ -225,14 +235,18 @@ def claim_ask_done(conn: sqlite3.Connection, ask_id: int, by: Actor, claim: str,
     return get_ask(conn, ask_id)
 
 
-def verify_ask(conn: sqlite3.Connection, ask_id: int, by: Actor, evidence: str, how: str, at_ms: int) -> Ask:
+def verify_ask(
+    conn: sqlite3.Connection, ask_id: int, by: Actor, evidence: str, how: str, at_ms: int, decision: str = ""
+) -> Ask:
+    """Verified closes it at once, by the owner's standing rule, cited from the config when it names it; a reopen
+    brings it back."""
     ask = get_ask(conn, ask_id)
     _require(ask, ("done_claimed",), "verify")
     row = conn.execute("SELECT claim_conversation FROM asks WHERE id = ?", (ask_id,)).fetchone()
     if by.conversation_id == row["claim_conversation"] or by.handle == ask.claim_by:
         raise AskError(
             f"#{ask_id} was claimed done by {ask.claim_by}, and the session that claimed it cannot verify it: "
-            "a lead verifies its worker's claim; the assistant or another lead verifies a lead's"
+            "its verifier (`guild ask show` names it), another lead or the assistant verifies it"
         )
     if by.role == "other":
         raise AskError("only a lead or the assistant verifies; ask the lead that started you to check the claim")
@@ -250,14 +264,22 @@ def verify_ask(conn: sqlite3.Connection, ask_id: int, by: Actor, evidence: str, 
         raise AskError("; ".join(problems) + f". {EVIDENCE_HINT}")
     conn.execute(
         f"""
-        UPDATE asks SET state = 'verified', evidence = ?, evidence_how = ?, evidence_by = ?, verified_at = ?,
-            updated_at = ?, {_RESET_NAGS}, {_CLEAR_WAIT}
+        UPDATE asks SET state = 'verified', evidence = ?, evidence_how = ?, evidence_by = ?,
+            evidence_conversation = ?, verified_at = ?, updated_at = ?, {_RESET_NAGS}, {_CLEAR_WAIT}
         WHERE id = ?
         """,
-        (evidence, how, by.handle, at_ms, at_ms, ask_id),
+        (evidence, how, by.handle, by.conversation_id, at_ms, at_ms, ask_id),
     )
     _log(conn, ask_id, at_ms, by.handle, "verified", f"{evidence}\nhow: {how}")
-    return get_ask(conn, ask_id)
+    cited = f" ({decision})" if decision else ""
+    return close_ask(
+        conn,
+        ask_id,
+        "auto",
+        "bridge",
+        at_ms,
+        note=f"closed at once on verification, by the owner's standing rule{cited}",
+    )
 
 
 BATCH_WORDS_CHARS = 90
@@ -386,6 +408,7 @@ def reopen_ask(conn: sqlite3.Connection, ask_id: int, by: str, why: str, at_ms: 
         UPDATE asks SET state = 'open', reopen_why = ?, reopened_at = ?, updated_at = ?, {_RESET_NAGS},
             claim = NULL, claim_by = NULL, claim_conversation = NULL, claim_role = NULL, done_at = NULL,
             evidence = NULL, evidence_how = NULL, evidence_by = NULL, verified_at = NULL, told_at = NULL,
+            verifier = NULL, evidence_conversation = NULL,
             closed_how = NULL, closed_at = NULL, {_CLEAR_WAIT}
         WHERE id = ?
         """,
@@ -412,11 +435,11 @@ def wait_ask(
         raise AskError("the why says who or what it waits on, and for what")
     conn.execute(
         f"""
-        UPDATE asks SET wait_on = ?, wait_until = ?, wait_why = ?, wait_by = ?, wait_at = ?, updated_at = ?,
-            {_RESET_NAGS}
+        UPDATE asks SET wait_on = ?, wait_until = ?, wait_why = ?, wait_by = ?, wait_conversation = ?, wait_at = ?,
+            updated_at = ?, {_RESET_NAGS}
         WHERE id = ?
         """,
-        (on, until, why, by.handle, at_ms, at_ms, ask_id),
+        (on, until, why, by.handle, by.conversation_id, at_ms, at_ms, ask_id),
     )
     what = f"waiting on {on}" if until is None else f"paused until {convert_ms_to_day(until)}"
     _log(conn, ask_id, at_ms, by.handle, None, f"{what}: {why}")
@@ -458,7 +481,9 @@ def list_ask_events(conn: sqlite3.Connection, ask_id: int) -> list[sqlite3.Row]:
 
 
 _RESET_NAGS = "last_nag_at = NULL, nag_count = 0"
-_CLEAR_WAIT = "wait_on = NULL, wait_until = NULL, wait_why = NULL, wait_by = NULL, wait_at = NULL"
+_CLEAR_WAIT = (
+    "wait_on = NULL, wait_until = NULL, wait_why = NULL, wait_by = NULL, wait_conversation = NULL, wait_at = NULL"
+)
 
 
 def _require(ask: Ask, allowed: tuple[str, ...], action: str, hint: dict[str, str] | None = None) -> None:
@@ -486,15 +511,15 @@ class Nag:
 
 
 def find_overdue_asks(conn: sqlite3.Connection, now: int, stale_ms: int, verify_ms: int) -> list[Ask]:
-    """Not paused; not waiting, and open or in progress with no update, or claimed and not verified; reminded again
-    only when nothing changed for one stale period after the first reminder, two after the second, and so on. An open
-    or in-progress ask quiet for days, waiting or not, is due once a day."""
+    """Not paused; not waiting, and open or in progress with no update, or claimed, not verified and with no verifier
+    picked; reminded again only when nothing changed for one stale period after the first reminder, two after the
+    second, and so on. An open or in-progress ask quiet for days, waiting or not, is due once a day."""
     rows = conn.execute(
         """
         SELECT * FROM asks
         WHERE (wait_until IS NULL OR wait_until <= ?3)
           AND ((wait_on IS NULL AND ((state IN ('open', 'in_progress') AND updated_at <= ?1)
-                                     OR (state = 'done_claimed' AND updated_at <= ?2)))
+                                     OR (state = 'done_claimed' AND verifier IS NULL AND updated_at <= ?2)))
                OR (state IN ('open', 'in_progress') AND updated_at <= ?4))
         ORDER BY owner, id
         """,
@@ -517,19 +542,29 @@ def is_ask_due_check(ask: Ask, now: int) -> bool:
 
 
 def find_asks_to_verify(conn: sqlite3.Connection, now: int, after_ms: int) -> list[Ask]:
-    """Claimed this long ago and not verified, waiting on someone or not, and not yet sent to the assistant since that
-    claim: a reopen and a new claim make it due again."""
+    """Claimed, or given its verifier, this long ago; not verified, waiting on someone or not; and not sent since to
+    its verifier, or with none to the assistant: a new verifier, a reopen and a new claim each start the clock again,
+    and a verifier dropped for none leaves the claim due to the assistant."""
     rows = conn.execute(
         """
-        SELECT * FROM asks a
-        WHERE state = 'done_claimed' AND done_at <= ? AND (wait_until IS NULL OR wait_until <= ?)
+        SELECT * FROM (
+          SELECT a.*, coalesce((
+            SELECT max(e.at) FROM ask_events e
+            WHERE e.ask_id = a.id AND e.by = 'bridge' AND e.state IS NULL AND e.note LIKE 'verifier:%'
+              AND e.at >= a.done_at
+          ), a.done_at) AS clock
+          FROM asks a
+          WHERE state = 'done_claimed' AND (wait_until IS NULL OR wait_until <= ?2)
+        ) a
+        WHERE clock <= ?1
           AND NOT EXISTS (
             SELECT 1 FROM ask_events e
-            WHERE e.ask_id = a.id AND e.by = 'bridge' AND e.state IS NULL AND e.note = ? AND e.at >= a.done_at
+            WHERE e.ask_id = a.id AND e.by = 'bridge' AND e.state IS NULL AND e.at >= a.clock
+              AND e.note = 'sent to ' || coalesce(a.verifier, 'the assistant') || ' to verify'
           )
         ORDER BY id
         """,
-        (now - after_ms, now, TOLD_TO_VERIFY),
+        (now - after_ms, now),
     )
     return [map_row_to_ask(r) for r in rows]
 
@@ -558,8 +593,8 @@ def map_overdue_to_assistant_nag(
         lines.append(nag.text)
     if to_verify:
         lines.append(
-            f"To verify, claimed done over {ASK_TO_VERIFY_HOURS}h ago and still not verified; each is sent once "
-            f"({owner_name}'s words):"
+            f"To verify, claimed done over {ASK_TO_VERIFY_HOURS}h ago and still not verified, and no live lead can "
+            f"verify them; each is sent once ({owner_name}'s words):"
         )
         lines.extend(convert_overdue_to_assistant_line(a, now, assistant) for a in to_verify)
     if overdue:
@@ -635,8 +670,16 @@ def send_ask_nags(conn: sqlite3.Connection, config: Config, now: int, owner_off:
     """Held while the owner is off (night word, dreams, or off hours); the morning gets one batch."""
     if owner_off:
         return []
+    sent = _send_reminders(conn, config, now)
+    sent += send_card_notices(conn, config, now)
+    sent += send_spot_check(conn, config, now)
+    return sent
+
+
+def _send_reminders(conn: sqlite3.Connection, config: Config, now: int) -> list[tuple[int, Recipient]]:
     hour = HOUR_MS
     assistant = config.assistant_handle
+    replaced = replace_gone_verifiers(conn, config, now)
 
     def sendable(asks: list[Ask]) -> list[Ask]:
         return [
@@ -651,10 +694,11 @@ def send_ask_nags(conn: sqlite3.Connection, config: Config, now: int, owner_off:
 
     found = find_overdue_asks(conn, now, ASK_STALE_HOURS * hour, ASK_VERIFY_HOURS * hour)
     overdue = sendable([a for a in found if not (a.owner == assistant and a.state == "done_claimed")])
-    to_verify = sendable(find_asks_to_verify(conn, now, ASK_TO_VERIFY_HOURS * hour))
-    if not overdue and not to_verify:
-        return []
-    sent: list[tuple[int, Recipient]] = []
+    due_claims = sendable(find_asks_to_verify(conn, now, ASK_TO_VERIFY_HOURS * hour))
+    if not overdue and not due_claims:
+        return replaced
+    sent, to_verify = remind_verifiers(conn, config, due_claims, now)
+    sent = replaced + sent
     unreached: list[str] = []
     told: set[int] = set()
 
@@ -685,6 +729,365 @@ def send_ask_nags(conn: sqlite3.Connection, config: Config, now: int, owner_off:
     return sent
 
 
+@dataclass(frozen=True)
+class LiveLead:
+    name: str
+    handle: str
+    surface: str
+    conversation_id: str
+    agterm_session: str | None
+
+
+def list_live_leads(conn: sqlite3.Connection, config: Config) -> list[LiveLead]:
+    """Not retired, a session running in its tab now, and the tab not locked."""
+    rows = conn.execute(
+        """
+        SELECT l.name, l.surface, s.handle, s.agterm_session, i.conversation_id FROM leads l
+        JOIN surfaces s ON s.surface = l.surface
+        JOIN instances i ON i.surface = l.surface AND i.ended_at IS NULL AND i.conversation_id IS NOT NULL
+        WHERE l.retired_at IS NULL AND s.handle IS NOT NULL
+        ORDER BY l.name, i.proc_start_ms DESC
+        """
+    )
+    leads: dict[str, LiveLead] = {}
+    for r in rows:
+        leads.setdefault(
+            str(r["name"]),
+            LiveLead(
+                str(r["name"]), str(r["handle"]), str(r["surface"]), str(r["conversation_id"]), r["agterm_session"]
+            ),
+        )
+    return [lead for lead in leads.values() if not is_surface_locked(conn, config, lead.surface)]
+
+
+def pick_verifier(conn: sqlite3.Connection, config: Config, ask: Ask) -> LiveLead | None:
+    """A live lead that is neither the ask's owner, nor its claimer, nor the lead above a worker that claimed it: the
+    configured verifier_lead when it fits, else fewest open verifications first, then fewest live workers, then by
+    name."""
+    row = conn.execute("SELECT claim_conversation FROM asks WHERE id = ?", (ask.id,)).fetchone()
+    claim_conversation: str | None = row["claim_conversation"] if row else None
+    claim_lead = _find_claim_lead_surface(conn, claim_conversation)
+    fit = [
+        lead
+        for lead in list_live_leads(conn, config)
+        if ask.owner not in (lead.name, lead.handle)
+        and ask.claim_by not in (lead.name, lead.handle)
+        and lead.conversation_id != claim_conversation
+        and lead.surface != claim_lead
+    ]
+    if not fit:
+        return None
+    if chosen := next((lead for lead in fit if lead.name == config.verifier_lead), None):
+        return chosen
+    open_counts: dict[str, int] = {
+        str(r[0]): int(r[1])
+        for r in conn.execute(
+            "SELECT verifier, count(*) FROM asks WHERE state = 'done_claimed' AND verifier IS NOT NULL "
+            "GROUP BY verifier"
+        )
+    }
+    return min(fit, key=lambda lead: (open_counts.get(lead.name, 0), _count_live_workers(conn, lead), lead.name))
+
+
+def _find_claim_lead_surface(conn: sqlite3.Connection, conversation_id: str | None) -> str | None:
+    """The tab of the lead the claiming session is, or works under."""
+    if conversation_id is None:
+        return None
+    row = conn.execute(
+        "SELECT surface FROM instances WHERE conversation_id = ? AND surface IS NOT NULL "
+        "ORDER BY proc_start_ms DESC LIMIT 1",
+        (conversation_id,),
+    ).fetchone()
+    return find_lead_of(conn, row["surface"])[1] if row else None
+
+
+def _count_live_workers(conn: sqlite3.Connection, lead: LiveLead) -> int:
+    """From the stored tab links, not agterm's tree: a claim must not wait on agterm."""
+    if lead.agterm_session is None:
+        return 0
+    row = conn.execute(
+        """
+        SELECT count(DISTINCT t.agterm_session) FROM tab_parents t
+        JOIN surfaces s ON s.agterm_session = t.agterm_session
+        JOIN instances i ON i.surface = s.surface AND i.ended_at IS NULL
+        WHERE t.parent_session = ?
+        """,
+        (lead.agterm_session,),
+    ).fetchone()
+    return int(row[0])
+
+
+def set_verifier(conn: sqlite3.Connection, ask_id: int, lead: str | None, note: str, at_ms: int) -> None:
+    conn.execute("UPDATE asks SET verifier = ? WHERE id = ?", (lead, ask_id))
+    _log(conn, ask_id, at_ms, "bridge", None, note)
+
+
+VERIFY_RULE = (
+    "Check the real artifact (OBSERVED: the PR's state, the page, the Linear issue, an AWS read), never only re-read "
+    "the claim, and say in --evidence what you could not check."
+)
+
+
+def convert_ask_to_verifier_lines(ask: Ask, owner_name: str) -> list[str]:
+    lines = [
+        f"#{ask.id} ({ask.owner}'s ask), {owner_name}'s words: \"{_cut(ask.words, 500)}\"",
+        f"  claimed done by {ask.claim_by}: {_cut(ask.claim or '', 400)}",
+    ]
+    if ask.refs:
+        lines.append("  refs: " + " ".join(ask.refs))
+    lines.append(
+        f"  `guild ask verify {ask.id} --evidence '<what {owner_name} would see, and where>' --how '<the URL, "
+        f"command or screenshot you checked it with>'`, or `guild ask reopen {ask.id} --why '<what is still wrong>'`"
+    )
+    return lines
+
+
+def send_to_verifier(
+    conn: sqlite3.Connection, config: Config, lead: LiveLead, asks: list[Ask], head: str, now: int
+) -> tuple[list[tuple[int, Recipient]], set[int]]:
+    """One message listing every ask, split only past the body limit; returns what was sent and the asks whose lines
+    were delivered."""
+    lines = [head, VERIFY_RULE]
+    for ask in asks:
+        lines.extend(convert_ask_to_verifier_lines(ask, config.owner_name))
+    text = map_words_to_sendable(conn, "\n".join(lines))
+    delivered = send_bodies_from_bridge(conn, config, lead.handle, text, now)
+    told = {int(i) for body, _, _ in delivered for i in _ASK_LINE.findall(body)}
+    return [(message_id, recipient) for _, message_id, recipient in delivered], told
+
+
+def assign_verifiers(
+    conn: sqlite3.Connection, config: Config, asks: list[Ask], now: int
+) -> tuple[list[tuple[Ask, LiveLead | None]], list[tuple[int, Recipient]]]:
+    """Each ask gets a verifier by pick_verifier, picked one after another so the counts include this batch; each
+    verifier gets one message. An ask whose verifier could not be told, or that no lead fits, keeps none: the
+    assistant has it after a day, as before verifiers."""
+    picked: list[tuple[Ask, LiveLead | None]] = []
+    by_lead: dict[str, tuple[LiveLead, list[Ask]]] = {}
+    for ask in asks:
+        if is_owner_hidden(conn, config, ask.owner) or is_claim_locked(conn, config, ask.id):
+            continue
+        lead = pick_verifier(conn, config, ask)
+        if lead is not None:
+            set_verifier(conn, ask.id, lead.name, f"verifier: {lead.name}", now)
+            by_lead.setdefault(lead.name, (lead, []))[1].append(ask)
+        picked.append((ask, lead))
+    sent: list[tuple[int, Recipient]] = []
+    untold: set[int] = set()
+    for lead, owned in by_lead.values():
+        count = "a claim" if len(owned) == 1 else f"{len(owned)} claims"
+        head = (
+            f"You verify {count} on {config.owner_name}'s asks: bridge picked you, a live lead other than each ask's "
+            "owner, its claimer and the claimer's lead, with the fewest open verifications."
+        )
+        out, told = send_to_verifier(conn, config, lead, owned, head, now)
+        sent += out
+        for ask in owned:
+            if ask.id not in told:
+                untold.add(ask.id)
+                set_verifier(conn, ask.id, None, f"verifier {lead.name} could not be told; none now", now)
+    return [(ask, None if ask.id in untold else lead) for ask, lead in picked], sent
+
+
+def replace_gone_verifiers(conn: sqlite3.Connection, config: Config, now: int) -> list[tuple[int, Recipient]]:
+    """A claim not paused whose verifier's tab is locked, or gone for VERIFIER_GONE_MS, gets a new one by the same
+    rule, told as on a claim; with none, it has no verifier again, so its owner's reminders and, a day later, the
+    assistant's notice come back."""
+    live = {lead.name for lead in list_live_leads(conn, config)}
+    rows = conn.execute(
+        """
+        SELECT a.* FROM asks a
+        WHERE state = 'done_claimed' AND verifier IS NOT NULL AND (wait_until IS NULL OR wait_until <= ?2)
+          AND NOT EXISTS (
+            SELECT 1 FROM leads l JOIN instances i ON i.surface = l.surface
+            WHERE l.name = a.verifier AND i.ended_at > ?1
+          )
+        ORDER BY id
+        """,
+        (now - VERIFIER_GONE_MS, now),
+    )
+    gone = [ask for ask in map(map_row_to_ask, rows) if ask.verifier not in live]
+    for ask in gone:
+        set_verifier(conn, ask.id, None, f"verifier {ask.verifier}'s tab is gone or locked", now)
+    return assign_verifiers(conn, config, [replace(ask, verifier=None) for ask in gone], now)[1]
+
+
+def remind_verifiers(
+    conn: sqlite3.Connection, config: Config, asks: list[Ask], now: int
+) -> tuple[list[tuple[int, Recipient]], list[Ask]]:
+    """A claim unverified for a day reminds its verifier once; one whose tab is gone or locked, or a claim with none,
+    gets a verifier by the same rule. Returns what was sent and the asks no lead was told of, for the assistant."""
+    live = {lead.name: lead for lead in list_live_leads(conn, config)}
+    by_lead: dict[str, tuple[LiveLead, list[Ask]]] = {}
+    left: list[Ask] = []
+    for ask in asks:
+        if is_claim_locked(conn, config, ask.id) or is_owner_hidden(conn, config, ask.owner):
+            left.append(ask)
+            continue
+        lead = live.get(ask.verifier or "")
+        if lead is None and ask.verifier and _ended_lately(conn, ask.verifier, now):
+            continue
+        if lead is None:
+            lead = pick_verifier(conn, config, ask)
+            if lead is not None:
+                set_verifier(conn, ask.id, lead.name, f"verifier: {lead.name}", now)
+        if lead is None:
+            left.append(ask)
+        else:
+            by_lead.setdefault(lead.name, (lead, []))[1].append(ask)
+    sent: list[tuple[int, Recipient]] = []
+    for lead, owned in by_lead.values():
+        head = (
+            f"To verify, claimed done over {ASK_TO_VERIFY_HOURS}h ago and still not verified; you are their verifier "
+            "and hear of each once:"
+        )
+        out, told = send_to_verifier(conn, config, lead, owned, head, now)
+        sent += out
+        for ask in owned:
+            if ask.id in told:
+                _log(conn, ask.id, now, "bridge", None, f"sent to {lead.name} to verify")
+            else:
+                set_verifier(conn, ask.id, None, f"verifier {lead.name} could not be told; none now", now)
+                left.append(ask)
+    return sent, sorted(left, key=lambda a: a.id)
+
+
+def is_claim_locked(conn: sqlite3.Connection, config: Config, ask_id: int) -> bool:
+    """The claim's words are the claiming session's: a locked one's never reach a verifier."""
+    row = conn.execute("SELECT claim_conversation FROM asks WHERE id = ?", (ask_id,)).fetchone()
+    return bool(row and row[0]) and is_conversation_locked(conn, config, str(row[0]))
+
+
+def _is_evidence_locked(conn: sqlite3.Connection, config: Config, ask: Ask) -> bool:
+    """By the verifying conversation; one not stored (verified before it was) counts as locked, since a retired
+    verifier's handle no longer leads to its tab."""
+    return _is_conversation_column_locked(conn, config, ask.id, "evidence_conversation")
+
+
+def _is_conversation_column_locked(conn: sqlite3.Connection, config: Config, ask_id: int, column: str) -> bool:
+    row = conn.execute(f"SELECT {column} FROM asks WHERE id = ?", (ask_id,)).fetchone()
+    return not (row and row[0]) or is_conversation_locked(conn, config, str(row[0]))
+
+
+def list_unassigned_claims(conn: sqlite3.Connection) -> list[Ask]:
+    rows = conn.execute("SELECT * FROM asks WHERE state = 'done_claimed' AND verifier IS NULL ORDER BY id")
+    return [map_row_to_ask(r) for r in rows]
+
+
+_CARD_ASK = re.compile(r"\bask #(\d+)\b", re.IGNORECASE)
+
+
+def is_waiting_on_owner(ask: Ask, owner_name: str) -> bool:
+    """On the owner, or on an approval whose why names the owner: `--on approval` does not say whose."""
+    if ask.state not in WAITABLE or ask.wait_on not in ("owner", "approval"):
+        return False
+    name = owner_name.strip()
+    return ask.wait_on == "owner" or bool(
+        name and re.search(rf"(?<!\w){re.escape(name)}(?!\w)", ask.wait_why or "", re.IGNORECASE)
+    )
+
+
+def find_asks_without_card(conn: sqlite3.Connection, config: Config, now: int) -> list[Ask]:
+    """Waiting on the owner for over ASK_CARD_GRACE_MS, no open blocked or decision card naming "ask #N" in its title
+    or body that the Questions column still shows, and not yet told since this wait began."""
+    rows = conn.execute(
+        """
+        SELECT * FROM asks a
+        WHERE wait_on IN ('owner', 'approval') AND state IN ('open', 'in_progress', 'done_claimed') AND wait_at <= ?
+          AND NOT EXISTS (
+            SELECT 1 FROM ask_events e
+            WHERE e.ask_id = a.id AND e.by = 'bridge' AND e.state IS NULL AND e.note = ? AND e.at >= a.wait_at
+          )
+        ORDER BY id
+        """,
+        (now - ASK_CARD_GRACE_MS, NO_CARD),
+    )
+    asks = [
+        ask
+        for ask in map(map_row_to_ask, rows)
+        if is_waiting_on_owner(ask, config.owner_name) and not is_owner_hidden(conn, config, ask.owner)
+    ]
+    if not asks:
+        return []
+    from bridge.guildview import STALE_QUESTION_MS  # the page's module; hooks never run this check
+
+    carded: set[int] = set()
+    for card in conn.execute(
+        "SELECT from_conversation, text, body FROM user_items WHERE kind IN ('blocked', 'decision') "
+        "AND resolved_at IS NULL AND (created_at > ? OR id IN (SELECT item_id FROM colleague_calls))",
+        (now - STALE_QUESTION_MS,),
+    ):
+        if card["from_conversation"] and is_conversation_locked(conn, config, str(card["from_conversation"])):
+            continue
+        carded.update(int(n) for n in _CARD_ASK.findall(f"{card['text']}\n{card['body'] or ''}"))
+    return [ask for ask in asks if ask.id not in carded]
+
+
+def send_card_notices(conn: sqlite3.Connection, config: Config, now: int) -> list[tuple[int, Recipient]]:
+    """Told once per wait; a new wait makes it due again. The card is never posted for anyone."""
+    assistant = config.assistant_handle
+    if is_recipient_locked(conn, config, assistant):
+        return []
+    asks = find_asks_without_card(conn, config, now)
+    if not asks:
+        return []
+    owner = config.owner_name
+    lines = [
+        f"Asks waiting on {owner} with no open card on {owner}'s feed: post one (`bridge post decision` or "
+        f'`blocked`) whose title or body names "ask #N", or have its lead post it:'
+    ]
+    for a in asks:
+        # The why is the waiting session's words: left out when its tab is locked or not known.
+        locked = _is_conversation_column_locked(conn, config, a.id, "wait_conversation")
+        why = "" if locked else f" — {_cut(a.wait_why or '', 200)}"
+        lines.append(
+            f'#{a.id} {a.owner}, waiting since {convert_ms_to_day(a.wait_at or now)}: "{_cut(a.words, 160)}"{why}'
+        )
+    text = map_words_to_sendable(conn, "\n".join(lines))
+    delivered = send_bodies_from_bridge(conn, config, assistant, text, now)
+    told = {int(i) for body, _, _ in delivered for i in _ASK_LINE.findall(body)}
+    for ask in asks:
+        if ask.id in told:
+            _log(conn, ask.id, now, "bridge", None, NO_CARD)
+    return [(message_id, recipient) for _, message_id, recipient in delivered]
+
+
+def send_spot_check(conn: sqlite3.Connection, config: Config, now: int) -> list[tuple[int, Recipient]]:
+    """Once a day, a random few of the asks leads verified since the last sample, for the assistant to check again."""
+    assistant = config.assistant_handle
+    last = conn.execute("SELECT max(at) FROM ask_events WHERE by = 'bridge' AND note = ?", (SPOT_CHECKED,)).fetchone()
+    if (last[0] is not None and now - int(last[0]) < DAY_MS) or is_recipient_locked(conn, config, assistant):
+        return []
+    rows = conn.execute(
+        "SELECT * FROM asks WHERE verified_at > ? AND verified_at <= ? AND evidence_by != ? ORDER BY id",
+        (now - DAY_MS, now, assistant),
+    )
+    verified = [
+        a
+        for a in map(map_row_to_ask, rows)
+        if not is_owner_hidden(conn, config, a.owner) and not _is_evidence_locked(conn, config, a)
+    ]
+    if not verified:
+        return []
+    sample = sorted(random.sample(verified, min(SPOT_CHECK_SAMPLE, len(verified))), key=lambda a: a.id)
+    lines = [
+        f"Spot-check: {len(sample)} of the {len(verified)} asks leads verified in the last day, picked at random. Open "
+        f"what each evidence names and see whether {config.owner_name} would see it; one that does not hold: "
+        "`guild ask reopen N --why '…'`."
+    ]
+    for ask in sample:
+        lines.append(f'#{ask.id} {ask.owner}, verified by {ask.evidence_by}: "{_cut(ask.words, 160)}"')
+        lines.append(f"  evidence: {_cut(ask.evidence or '', 300)}")
+        lines.append(f"  how: {_cut(ask.evidence_how or '', 200)}")
+    text = map_words_to_sendable(conn, "\n".join(lines))
+    delivered = send_bodies_from_bridge(conn, config, assistant, text, now)
+    told = {int(i) for body, _, _ in delivered for i in _ASK_LINE.findall(body)}
+    for ask in sample:
+        if ask.id in told:
+            _log(conn, ask.id, now, "bridge", None, SPOT_CHECKED)
+    return [(message_id, recipient) for _, message_id, recipient in delivered]
+
+
 def tell_owner_of_reopen(conn: sqlite3.Connection, config: Config, ask: Ask, now: int) -> list[tuple[int, Recipient]]:
     if is_owner_locked(conn, config, ask.owner):
         return []
@@ -701,6 +1104,21 @@ def is_recipient_locked(conn: sqlite3.Connection, config: Config, to: str) -> bo
         return is_owner_locked(conn, config, resolve_handle(conn, to).handle)
     except AddressError:
         return False
+
+
+def is_owner_hidden(conn: sqlite3.Connection, config: Config, owner: str) -> bool:
+    """Locked, or its handle no longer names a tab (a retired lead's), so whether it is locked is not known."""
+    row = conn.execute("SELECT surface FROM surfaces WHERE handle = ?", (owner,)).fetchone()
+    return row is None or is_surface_locked(conn, config, row["surface"])
+
+
+def _ended_lately(conn: sqlite3.Connection, lead: str, now: int) -> bool:
+    """A session of the lead's tab ended under VERIFIER_GONE_MS ago: maybe a restart, so its claims stay."""
+    row = conn.execute(
+        "SELECT 1 FROM leads l JOIN instances i ON i.surface = l.surface WHERE l.name = ? AND i.ended_at > ?",
+        (lead, now - VERIFIER_GONE_MS),
+    ).fetchone()
+    return row is not None
 
 
 def is_owner_locked(conn: sqlite3.Connection, config: Config, owner: str) -> bool:
@@ -770,7 +1188,7 @@ def mark_nagged(conn: sqlite3.Connection, ask_ids: list[int], now: int) -> None:
 
 
 def close_settled_asks(conn: sqlite3.Connection, now: int, autoclose_ms: int, decision: str = "") -> list[int]:
-    """Verified is the normal end; it closes by itself unless reopened within the window. The history row cites the
+    """An ask verified before verify closed it at once closes by itself after the window. The history row cites the
     owner's standing decision when the config names it."""
     ids = [
         int(r[0])

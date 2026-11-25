@@ -1108,10 +1108,11 @@ options:
 the owner's asks, each taken to verified with evidence of what they would see
 
 ```text
-usage: guild ask [-h] {add,list,show,start,note,wait,done,verify,close,drop,reopen} ...
+usage: guild ask [-h]
+                 {add,list,show,start,note,wait,done,assign-verifiers,verify,summary,close,drop,reopen} ...
 
 positional arguments:
-  {add,list,show,start,note,wait,done,verify,close,drop,reopen}
+  {add,list,show,start,note,wait,done,assign-verifiers,verify,summary,close,drop,reopen}
     add                 record an ask in the owner's own words
     list                asks not closed, oldest first
     show                one ask with its history
@@ -1119,9 +1120,18 @@ positional arguments:
     note                news on an ask not done yet or not verified yet; it counts as an update
     wait                it cannot move: its reminders pause until its next start, note, done,
                         verify or reopen, or until --until passes
-    done                claim it done; another session verifies
-    verify              done_claimed → verified, with evidence of what the owner would see
-    close               verified → closed (the assistant only, relaying the owner)
+    done                claim it done; bridge picks a live lead to verify it and sends it the ask:
+                        the configured verifier lead, else the one with the fewest open
+                        verifications, never the ask's owner, the claimer or the claimer's lead;
+                        none fits: the assistant verifies it after a day
+    assign-verifiers    pick a verifier for every claim that has none, by the same rule, and send
+                        each verifier one message listing its asks (a lead or the assistant)
+    verify              done_claimed → closed, with evidence of what the owner would see: verified
+                        closes it at once, by the owner's standing rule; a reopen brings it back
+    summary             one message to the assistant listing the asks you verified that were not
+                        told yet; one per batch
+    close               verified → closed, for an ask verified before verification closed it (the
+                        assistant only)
     drop                close an ask not yet claimed as obsolete, with why (its owner session or
                         the assistant)
     reopen              back to open: the result is not what the owner asked for
@@ -1145,7 +1155,7 @@ options:
   --words WORDS  the owner's words verbatim; default: stdin
   --from N       quote message N's body as the words
   --ref REF      a PR, issue or page URL; repeat
-  --question     the owner asked it as a question: once verified, it goes to Answers
+  --question     the owner asked it as a question; kept in the ledger
 ```
 
 ### guild ask list
@@ -1228,7 +1238,9 @@ options:
 
 ### guild ask done
 
-claim it done; another session verifies
+claim it done; bridge picks a live lead to verify it and sends it the ask: the configured verifier lead, else the one
+with the fewest open verifications, never the ask's owner, the claimer or the claimer's lead; none fits: the assistant
+verifies it after a day
 
 ```text
 usage: guild ask done [-h] --claim CLAIM id
@@ -1241,9 +1253,22 @@ options:
   --claim CLAIM  what was done and where it lives
 ```
 
+### guild ask assign-verifiers
+
+pick a verifier for every claim that has none, by the same rule, and send each verifier one message listing its asks (a
+lead or the assistant)
+
+```text
+usage: guild ask assign-verifiers [-h]
+
+options:
+  -h, --help  show this help message and exit
+```
+
 ### guild ask verify
 
-done_claimed → verified, with evidence of what the owner would see
+done_claimed → closed, with evidence of what the owner would see: verified closes it at once, by the owner's standing
+rule; a reopen brings it back
 
 ```text
 usage: guild ask verify [-h] --evidence EVIDENCE --how HOW id
@@ -1259,7 +1284,7 @@ options:
 
 ### guild ask summary
 
-one Answers post listing the asks you verified that the owner was not told of yet; one per batch
+one message to the assistant listing the asks you verified that were not told yet; one per batch
 
 ```text
 usage: guild ask summary [-h]
@@ -1270,7 +1295,7 @@ options:
 
 ### guild ask close
 
-verified → closed (the assistant only, relaying the owner)
+verified → closed, for an ask verified before verification closed it (the assistant only)
 
 ```text
 usage: guild ask close [-h] [--dropped WHY] id
