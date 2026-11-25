@@ -4,6 +4,7 @@ import sqlite3
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import cache
 from typing import TypedDict, cast
 
 from bridge.activity import RunningShell, SessionActivity
@@ -18,7 +19,7 @@ from bridge.board import (
     resolve_handle,
     send_message,
 )
-from bridge.claims import list_claims
+from bridge.claims import list_claims, load_hotspots
 from bridge.colleague_comments import load_draft_entry, map_db_to_colleague_feed
 from bridge.compaction import read_context_death
 from bridge.config import Config
@@ -213,6 +214,7 @@ def map_db_to_guild(
         "room": _load_room(conn, config, now, url_of, active, authors, worker_tasks),
         "colleague_comments": map_db_to_colleague_feed(conn, config, now),
         "claims": _load_active_claims(conn, config, now, url_of),
+        "hotspots": _load_hotspots(conn, config, now, url_of),
     }
 
 
@@ -1040,6 +1042,24 @@ def _convert_resource_to_label(resource: str) -> str:
     if kind == "branch":
         return value.rpartition(":")[2]
     return map_ref_to_label(resource) if kind in ("pr", "gh-issue", "issue") else value or resource
+
+
+def _load_hotspots(
+    conn: sqlite3.Connection, config: Config, now: int, url_of: Callable[[str], str]
+) -> dict[str, object]:
+    @cache
+    def shown(conversation_id: str) -> bool:
+        return not is_conversation_locked(conn, config, conversation_id)
+
+    hotspots = load_hotspots(conn, now, shown)
+    display = {lead.name: lead.display_name for lead in list_leads(conn, include_retired=True)}
+    return {
+        "resources": [
+            {"resource": r, "label": _convert_resource_to_label(r), "url": url_of(r), "count": n}
+            for r, n in hotspots.resources
+        ],
+        "pairs": [{"a": display.get(a, a), "b": display.get(b, b), "count": n} for a, b, n in hotspots.pairs],
+    }
 
 
 def _load_active_claims(

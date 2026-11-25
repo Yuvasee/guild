@@ -12,7 +12,8 @@ from bridge.agent_prefix import CLAUDE_PREFIX, LINEAR_ISSUE_TOOLS, TITLE_RULE, i
 from bridge.colleague_comments import SUBSTANTIVE, list_unhandled_colleague_comments
 from bridge.config import Config
 from bridge.gitinfo import RepoFacts, read_repo_facts
-from bridge.guard import SHELL_KEYWORDS, SHELLS, RepoReader, segment_command
+from bridge.guard import SHELL_KEYWORDS, SHELLS, RepoReader, Target, segment_command
+from bridge.leads import find_lead_name_of_conversation
 from bridge.refs import names_issue, needs_issue
 from bridge.restricted import find_restricted_block, find_session_surface, list_touched, map_row_to_files
 
@@ -581,6 +582,81 @@ def find_colleague_reply_refusal(
         if refusal := _check_colleague_answer(conn, config, ref, thread):
             return refusal
     return None
+
+
+_GH_PR_CHANGES = frozenset({"edit", "comment"})
+"""A push or merge is read from the shell guard's targets."""
+
+
+def find_unclaimed_prs(
+    conn: sqlite3.Connection,
+    command: str,
+    cwd: str | None,
+    targets: list[Target],
+    conversation_id: str,
+    read_repo: RepoReader,
+) -> list[str]:
+    """Queued PRs this command pushes to, merges, edits or comments on, whose claim neither this session nor another
+    under the same lead holds, and that it was not yet told about. Only queued PRs: the guard reads no GitHub."""
+    rows: dict[str, sqlite3.Row] = {}
+    for target in targets:
+        if target.action.startswith("git push") or target.action == "gh pr merge":
+            rows.update((str(row["ref"]), row) for row in _list_target_queue_rows(conn, target.key))
+    for call in _list_gh_calls(command, cwd):
+        if any(a in ("-h", "--help") for a in call.args):
+            continue
+        # Its value options hold gh pr comment's: a -R before the subcommand is read as an option, not as one.
+        found, positional = _scan(call.args, _GH_ISSUE_PR)
+        if positional[:1] != ["pr"] or positional[1:2] not in ([a] for a in _GH_PR_CHANGES):
+            continue
+        facts = read_repo(call.directory) if call.directory else None
+        repo = _read_repo([v for k, v in found if k == "repo"][-1:] or [call.env.get("GH_REPO", "")], facts)
+        selector = positional[2] if len(positional) > 2 else (facts.branch if facts and not call.branch_moved else None)
+        if repo is None and selector and (url := _PR_URL_RE.search(selector)):
+            repo = str(url.group(1))
+        if repo and (row := _find_queue_row(conn, repo, selector)) is not None:
+            rows[str(row["ref"])] = row
+    if not rows:
+        return []
+    lead = find_lead_name_of_conversation(conn, conversation_id)
+    unclaimed: list[str] = []
+    for ref, row in rows.items():
+        # A repo name is case-blind, a git branch is not: a claim key keeps the branch as written.
+        pr, branch = ref.lower(), f"branch:{str(row['repo']).lower()}:{row['head']}"
+        holders = [
+            str(h[0])
+            for h in conn.execute(
+                # An ended holder's claim no longer keeps anyone off the PR, so it covers no one either.
+                "SELECT holder_conversation FROM claims c WHERE (lower(resource) = ?1 OR lower(alias) = ?1 "
+                "OR resource = ?2 OR alias = ?2) AND EXISTS (SELECT 1 FROM instances i "
+                "WHERE i.conversation_id = c.holder_conversation AND i.ended_at IS NULL)",
+                (pr, branch),
+            )
+        ]
+        if conversation_id in holders or (
+            lead and any(find_lead_name_of_conversation(conn, h) == lead for h in holders)
+        ):
+            continue
+        told = conn.execute(
+            "SELECT 1 FROM claim_events WHERE kind = 'nudged' AND conversation_id = ? AND resource = ?",
+            (conversation_id, ref),
+        ).fetchone()
+        if told is None:
+            unclaimed.append(ref)
+    return unclaimed
+
+
+def _list_target_queue_rows(conn: sqlite3.Connection, key: str) -> list[sqlite3.Row]:
+    """A key ending in ':' (push --all or --mirror) is every branch of its repo."""
+    if key.startswith("pr:"):
+        return conn.execute(
+            "SELECT * FROM review_prs WHERE lower(ref) = ? AND closed_at IS NULL", (key.lower(),)
+        ).fetchall()
+    repo, _, head = key.removeprefix("branch:").partition(":")
+    return conn.execute(
+        "SELECT * FROM review_prs WHERE lower(repo) = ? AND (head = ? OR ? = '') AND closed_at IS NULL",
+        (repo.lower(), head, head),
+    ).fetchall()
 
 
 def _map_gh_call_to_answer(

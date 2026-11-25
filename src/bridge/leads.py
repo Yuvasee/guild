@@ -323,6 +323,17 @@ def find_lead_of(conn: sqlite3.Connection, surface: str | None) -> tuple[str | N
     return None, None
 
 
+def find_lead_name_of_conversation(conn: sqlite3.Connection, conversation_id: str) -> str | None:
+    """The lead a live session works for, itself if it is one."""
+    row = conn.execute(
+        "SELECT surface FROM instances WHERE conversation_id = ? AND surface IS NOT NULL "
+        "ORDER BY proc_start_ms DESC LIMIT 1",
+        (conversation_id,),
+    ).fetchone()
+    lead = find_lead_on_surface(conn, find_lead_of(conn, row[0] if row else None)[1])
+    return lead.name if lead else None
+
+
 def find_lead_on_surface(conn: sqlite3.Connection, surface: str | None) -> Lead | None:
     if surface is None:
         return None

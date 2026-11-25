@@ -15,6 +15,7 @@ from bridge.claims import (
     find_holder,
     list_claims,
     map_row_to_holder,
+    record_claim_event,
     release,
     renew,
     resolve_resource,
@@ -71,9 +72,12 @@ def cmd_claim(args: argparse.Namespace, conn: sqlite3.Connection, config: Config
         with transaction(conn):
             end_dead_instances(conn, at)
             outcome = acquire(conn, me, key, args.reason, int(args.ttl), at, force=bool(args.force))
+            if outcome.status.startswith("held") and outcome.holder:
+                record_claim_event(conn, "refused", outcome.holder.resource, me, outcome.holder, at)
             if outcome.status == "taken-over" and outcome.holder:
                 _tell_previous_holder(conn, me, outcome.holder, key.canonical, at)
                 if outcome.holder.live:
+                    record_claim_event(conn, "forced", outcome.holder.resource, me, outcome.holder, at)
                     # Only the user may force; the item makes an agent doing it on its own visible.
                     text = f"{me.handle} forced a takeover of {key.canonical} from {outcome.holder.holder_handle}"
                     add_user_item(conn, me, "blocker", text[:140], at)

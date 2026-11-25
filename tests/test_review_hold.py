@@ -182,7 +182,7 @@ def _verdict(conn: Any, command: str, cwd: Path | str, reader: HostRepoReader | 
         "session_id": "c1", "cwd": str(cwd), "tool_name": "Bash", "tool_input": {"command": command},
     }  # fmt: skip
     out = handle_pre_tool_use(conn, payload, OWNER, reader)
-    return json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"] if out else None
+    return json.loads(out)["hookSpecificOutput"].get("permissionDecisionReason") if out else None
 
 
 @pytest.mark.parametrize(

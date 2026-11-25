@@ -359,6 +359,8 @@ th.what { width: 32%; } th.who { width: 22%; } th.since { width: 44px; padding-r
 #resources tr:nth-child(even) td { background: var(--row); }
 #resources td:first-child { border-radius: 8px 0 0 8px; }
 #resources td:last-child { border-radius: 0 8px 8px 0; padding-right: 10px; }
+#resources h3 { font-size: 13px; font-weight: 600; color: var(--soft); margin: 14px 0 8px; }
+#resources th.count { width: 72px; }
 details { margin-top: 6px; font-size: 12px; color: var(--faint); }
 details summary { cursor: pointer; }
 details summary:hover { color: var(--soft); }
@@ -471,7 +473,7 @@ const drafts = new Map();
 const lastRendered = new Map();
 let replyTo = null;
 let chatLead = null;
-let state = { now: 0, needs: [], answers: [], leads: [], room: [], claims: [], colleague_comments: [], asks: { attention: [], more: 0, verified: [] } };
+let state = { now: 0, needs: [], answers: [], leads: [], room: [], claims: [], hotspots: { resources: [], pairs: [] }, colleague_comments: [], asks: { attention: [], more: 0, verified: [] } };
 let lastUpdate = 0;
 let offline = false;
 let mismatch = false;
@@ -1477,13 +1479,43 @@ function claimTable(claims) {
   return table;
 }
 
+function countTable(label, rows, cell) {
+  const table = el("table");
+  const head = el("tr");
+  head.append(el("th", "", label), el("th", "count", "Collisions"));
+  table.append(head);
+  for (const row of rows) {
+    const line = el("tr");
+    const what = el("td", "what");
+    what.append(cell(row));
+    line.append(what, el("td", "", String(row.count)));
+    table.append(line);
+  }
+  return table;
+}
+
+// Claims refused, or taken by force, in the last 7 days: where sessions keep meeting, and which teams.
+function hotspotsBlock(hotspots) {
+  const block = el("div");
+  block.append(el("h3", "", "Hotspots, last 7 days"));
+  block.append(countTable("Resource", hotspots.resources, (row) => {
+    const link = linkTo(row.url, row.label);
+    link.title = row.resource;
+    return link;
+  }));
+  block.append(countTable("Leads", hotspots.pairs, (row) => document.createTextNode(row.a === row.b ? row.a + " (within)" : row.a + " ↔ " + row.b)));
+  return block;
+}
+
 function renderResources() {
-  const box = showSection("resources", state.claims.length);
-  if (!changed("resources", [state.claims, Math.floor(state.now / 60000)])) return;
+  const hotspots = state.hotspots || { resources: [], pairs: [] };
+  const box = showSection("resources", state.claims.length + hotspots.resources.length);
+  if (!changed("resources", [state.claims, hotspots, Math.floor(state.now / 60000)])) return;
   const quiet = state.claims.filter((claim) => claim.kind === "pr" || claim.kind === "branch");
   const main = state.claims.filter((claim) => !quiet.includes(claim));
   const open = box.querySelector("details")?.open;
   box.replaceChildren();
+  if (!state.claims.length) box.append(el("p", "note", "Nothing claimed now."));
   if (main.length) box.append(claimTable(main));
   if (quiet.length) {
     const more = el("details");
@@ -1492,6 +1524,7 @@ function renderResources() {
     more.append(claimTable(quiet));
     box.append(more);
   }
+  if (hotspots.resources.length) box.append(hotspotsBlock(hotspots));
 }
 
 function stuckList() {

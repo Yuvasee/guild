@@ -4,15 +4,20 @@ import re
 import secrets
 import sqlite3
 import subprocess
+from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import cast
 
 from bridge.board import Party
+from bridge.leads import find_lead_name_of_conversation
 
 DEFAULT_TTL_S = 7200
 GH_TIMEOUT_S = 8
 CLAIM_REMINDER_EVERY_MS = 6 * 3_600_000
 CLAIM_REMINDERS_AT_ONCE = 3
+HOTSPOT_WINDOW_MS = 7 * 86_400_000
+HOTSPOTS_SHOWN = 5
 
 _KINDS = ("pr", "branch", "env", "path", "issue")
 _REPO_RE = r"[\w.-]+/[\w.-]+"
@@ -223,6 +228,75 @@ def list_claims(conn: sqlite3.Connection, conversation_id: str | None = None) ->
         """,
         (conversation_id,) if conversation_id else (),
     ).fetchall()
+
+
+def record_claim_event(
+    conn: sqlite3.Connection, kind: str, resource: str, me: Party, holder: Holder | None, at_ms: int
+) -> None:
+    """kind: refused, forced or nudged (see the claim_events table)."""
+    conn.execute(
+        """
+        INSERT INTO claim_events (at, kind, resource, conversation_id, handle, lead, holder_conversation,
+                                  holder_handle, holder_lead)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            at_ms,
+            kind,
+            resource,
+            me.conversation_id,
+            me.handle,
+            find_lead_name_of_conversation(conn, me.conversation_id),
+            holder.holder_conversation if holder else None,
+            holder.holder_handle if holder else None,
+            find_lead_name_of_conversation(conn, holder.holder_conversation) if holder else None,
+        ),
+    )
+
+
+def record_nudges(conn: sqlite3.Connection, me: Party, resources: list[str], at_ms: int) -> list[str]:
+    """The resources this session had no nudge on yet, now recorded; checked inside the caller's write transaction,
+    so of two hooks at once only one gets each."""
+    new: list[str] = []
+    for resource in resources:
+        told = conn.execute(
+            "SELECT 1 FROM claim_events WHERE kind = 'nudged' AND conversation_id = ? AND resource = ?",
+            (me.conversation_id, resource),
+        ).fetchone()
+        if told is None:
+            record_claim_event(conn, "nudged", resource, me, None, at_ms)
+            new.append(resource)
+    return new
+
+
+@dataclass(frozen=True)
+class Hotspots:
+    resources: list[tuple[str, int]]
+    """(resource, collisions), most first."""
+    pairs: list[tuple[str, str, int]]
+    """(team, team, collisions), most first; a team is a lead's name, or a handle of a session under no lead."""
+
+
+def load_hotspots(conn: sqlite3.Connection, at_ms: int, shown: Callable[[str], bool]) -> Hotspots:
+    """Where claims collided over the last week: a refusal or a forced takeover between two conversations shown."""
+    rows = [
+        r
+        for r in conn.execute(
+            """
+            SELECT resource, conversation_id, holder_conversation, coalesce(lead, handle, conversation_id) AS team,
+                   coalesce(holder_lead, holder_handle, holder_conversation) AS holder_team
+            FROM claim_events WHERE kind IN ('refused', 'forced') AND at >= ? ORDER BY at DESC, id DESC
+            """,
+            (at_ms - HOTSPOT_WINDOW_MS,),
+        )
+        if shown(str(r["conversation_id"])) and shown(str(r["holder_conversation"]))
+    ]
+    resources = Counter(str(r["resource"]) for r in rows)
+    pairs = Counter(tuple(sorted((str(r["team"]), str(r["holder_team"])))) for r in rows)
+    return Hotspots(
+        resources=resources.most_common(HOTSPOTS_SHOWN),
+        pairs=[(a, b, n) for (a, b), n in pairs.most_common(HOTSPOTS_SHOWN)],
+    )
 
 
 def map_row_to_holder(row: sqlite3.Row) -> Holder:

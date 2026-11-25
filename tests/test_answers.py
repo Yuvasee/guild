@@ -97,9 +97,10 @@ def test_asks_verified_before_the_change_count_as_told(tmp_path: Path) -> None:
 
     raw = sqlite3.connect(tmp_path / "old.db")
     raw.row_factory = sqlite3.Row
-    for migration in MIGRATIONS[:-1]:
+    before = next(i for i, m in enumerate(MIGRATIONS) if "ADD COLUMN ask_id" in m)
+    for migration in MIGRATIONS[:before]:
         raw.executescript(migration)
-    raw.execute(f"PRAGMA user_version = {len(MIGRATIONS) - 1}")
+    raw.execute(f"PRAGMA user_version = {before}")
     raw.execute(
         "INSERT INTO asks (owner, recorded_by, words, source, state, created_at, updated_at, verified_at) "
         "VALUES ('alex', 'aide', 'old words', 'tab', 'verified', 1, 2, 3)"
@@ -301,9 +302,10 @@ def test_results_posted_before_answers_existed_do_not_flood_the_column(tmp_path:
     from bridge.db import MIGRATIONS
 
     raw = sqlite3.connect(tmp_path / "old.db")
-    for migration in MIGRATIONS[:-1]:
+    before = next(i for i, m in enumerate(MIGRATIONS) if "ADD COLUMN ask_id" in m)
+    for migration in MIGRATIONS[:before]:
         raw.executescript(migration)
-    raw.execute(f"PRAGMA user_version = {len(MIGRATIONS) - 1}")
+    raw.execute(f"PRAGMA user_version = {before}")
     recent = int(time.time() * 1000) - DAY_MS
     for at, text in ((1000, "years old"), (recent, "yesterday")):
         raw.execute(

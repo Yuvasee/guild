@@ -930,6 +930,25 @@ MIGRATIONS: tuple[str, ...] = (
         WHERE kind IN ('done', 'insight') AND resolved_at IS NULL
           AND created_at < (CAST(strftime('%s', 'now') AS INTEGER) - 3 * 86400) * 1000;
     """,
+    # Whether claims work: a claim refused because another live session held it, one taken from a live holder by
+    # force, and a PR changed by a session whose team held no claim on it (nudged once per PR and session). lead is
+    # the lead the session worked for then, itself if a lead; a tab's parent link is gone once a worker closes.
+    """
+    CREATE TABLE claim_events (
+        id INTEGER PRIMARY KEY,
+        at INTEGER NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('refused', 'forced', 'nudged')),
+        resource TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        handle TEXT,
+        lead TEXT,
+        holder_conversation TEXT,
+        holder_handle TEXT,
+        holder_lead TEXT
+    );
+    CREATE INDEX claim_events_at ON claim_events (at);
+    CREATE INDEX claim_events_nudged ON claim_events (conversation_id, resource) WHERE kind = 'nudged';
+    """,
 )
 
 HOOK_BUSY_TIMEOUT_MS = 200

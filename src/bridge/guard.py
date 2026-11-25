@@ -842,9 +842,12 @@ def _git_targets(
     if git is None:
         return [], True
     push = _parse_push_args(args[i + 1 :])
-    if push.dry or push.tags or push.prune:
-        return [], unsure or push.unsure
     refspecs = push.positional[1:]
+    # --tags alone pushes only tags; beside a refspec, the refspec's branch is still pushed. --prune leaves which
+    # branches are pushed as it was, and may also delete remote branches the guard cannot name.
+    if push.dry or (push.tags and not refspecs):
+        return [], unsure or push.unsure
+    unsure = unsure or push.prune
     # pushDefault, pushRemote and push refspecs only steer a push that leaves out the remote or the refspec.
     unsure = unsure or push.unsure or git.custom_remote or (git.custom_push and not refspecs)
     current_branch = None if branch_unknown else branch_override or git.branch

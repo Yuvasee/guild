@@ -42,6 +42,11 @@ def test_push_and_merge_commands_map_to_claim_keys(tmp_path: Path) -> None:
     assert keys(f"cd {other} && git push", web) == ["branch:acme/web:main"]
     assert keys(f"git -C {other} push origin +topic", web) == ["branch:acme/web:topic"]
     assert keys("git push --all", web) == ["branch:acme/web:"]
+    assert keys("git push origin feat/x --tags", web) == ["branch:acme/web:feat/x"]
+    assert keys("git push --prune origin feat/x", web) == ["branch:acme/web:feat/x"]
+    assert keys("git push origin --tags", web) == []
+    assert keys("git push --prune", web) == ["branch:acme/web:feat/x"]
+    assert keys("git push --all --prune origin", web) == ["branch:acme/web:"]
     assert keys("GIT_TRACE=1 git push origin a b", web) == ["branch:acme/web:a", "branch:acme/web:b"]
     assert keys("gh pr merge 12 --squash", web) == ["pr:acme/web#12"]
     assert keys("gh pr merge https://github.com/Acme/Api/pull/7", web) == ["pr:acme/api#7"]
@@ -197,7 +202,9 @@ def test_a_merge_waits_for_approval_owners_comments_and_green_ci_by_number_and_b
     assert "waits for Acme/Lib#3 to merge (the PRs its body names merge first" in refusal("gh pr merge 12")
     update("UPDATE review_prs SET dep_blockers = NULL")
     assert (bridge_env.state_dir / "claims-active").exists()
-    assert _run_guard(bridge_env, pair.b, "conv-b", "gh pr merge 12", web) == ""
+    passed = json.loads(_run_guard(bridge_env, pair.b, "conv-b", "gh pr merge 12", web))["hookSpecificOutput"]
+    assert "permissionDecision" not in passed
+    assert passed["additionalContext"].startswith("bridge: no claim held on pr:Acme/Web#12:")
     update("UPDATE review_prs SET closed_at = 1")
     assert not (bridge_env.state_dir / "claims-active").exists()
 

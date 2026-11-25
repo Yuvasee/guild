@@ -15,6 +15,7 @@ from typing import cast
 from bridge.board import (
     HINT_SENT,
     INJECT_BUDGET_BYTES,
+    Party,
     Recipient,
     is_delivery_owner,
     next_hint_epoch,
@@ -22,7 +23,7 @@ from bridge.board import (
     take_delivery,
     write_hint,
 )
-from bridge.claims import take_expired_claim_reminder
+from bridge.claims import record_nudges, take_expired_claim_reminder
 from bridge.claude import read_session_file
 from bridge.compaction import (
     COMPACT_AT_WINDOW_SHARE,
@@ -49,7 +50,7 @@ from bridge.db import HOOK_BUSY_TIMEOUT_MS, HOOK_RETRY_BUSY_TIMEOUT_MS, connect,
 from bridge.entry import import_modules
 from bridge.errlog import log_error, log_slow
 from bridge.feed import release_dead_typing_claims, spawn_typed_delivery
-from bridge.gitinfo import GitInfo, read_git_info
+from bridge.gitinfo import GitInfo, read_git_info, read_repo_facts
 from bridge.guard import (
     CLOSE,
     MERGE,
@@ -740,6 +741,7 @@ def _check_pre_tool_use(
         find_prefixed_linear_title,
         find_prefixed_titles,
         find_restricted_path_refusal,
+        find_unclaimed_prs,
         map_label_write_to_denial,
         map_titles_to_denial,
     )
@@ -809,7 +811,13 @@ def _check_pre_tool_use(
 
             with transaction(conn):
                 record_host_pushes(conn, config, conversation_id, pushed, time.time_ns() // 1_000_000)
-        return _note("\n".join(waived)) if waived else ""
+        notes = waived
+        if conversation_id:
+            read_repo = host_checkout if host_checkout is not None else read_repo_facts
+            unclaimed = find_unclaimed_prs(conn, command, where, targets, conversation_id, read_repo)
+            if unclaimed and (told := _record_nudges(conn, conversation_id, unclaimed)):
+                notes = [*waived, *(map_unclaimed_pr_to_note(ref, host_checkout is not None) for ref in told)]
+        return _note("\n".join(notes)) if notes else ""
     lines = map_held_writes_to_lines(held, config.owner_name, now)
     lines += map_merge_blocks_to_lines(blocks, config.owner_name, config.owner_name_at_start)
     readable = host_checkout.roots if host_checkout is not None else None
@@ -829,6 +837,23 @@ def _check_pre_tool_use(
         "user it is blocked by this reservation; only the user may take it over."
     )
     return _deny("\n".join(lines))
+
+
+def map_unclaimed_pr_to_note(ref: str, on_host: bool) -> str:
+    if on_host:
+        return f"bridge: no claim held on {ref}: ask your lead to claim it first; this note comes once per PR."
+    return f"bridge: no claim held on {ref}: bridge claim it first (`bridge claim {ref}`); this note comes once per PR."
+
+
+def _record_nudges(conn: sqlite3.Connection, conversation_id: str, refs: list[str]) -> list[str]:
+    """The refs to tell about. None while the database is busy: the note comes on a later change, not a slow hook."""
+    me = Party(conversation_id, _find_handle(conn, conversation_id) or conversation_id[:8])
+    try:
+        with transaction(conn, retry_busy_timeout_ms=HOOK_RETRY_BUSY_TIMEOUT_MS):
+            return record_nudges(conn, me, refs, time.time_ns() // 1_000_000)
+    except sqlite3.OperationalError:
+        log_error("hook PreToolUse", f"claim nudge not recorded: {traceback.format_exc(limit=1)}")
+        return []
 
 
 def map_unreadable_to_line(unreadable: Unreadable, readable: tuple[str, ...] | None) -> str:
