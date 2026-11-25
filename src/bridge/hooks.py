@@ -959,8 +959,19 @@ def map_unreadable_to_line(unreadable: Unreadable, readable: tuple[str, ...] | N
         "bridge passes only a push, merge or close it reads: run it as a plain command of its own, not inside "
         "if/then, a subshell, bash -c, eval, xargs, a pipe into another program or a substitution, and with no "
         "repo-picking environment such as GH_REPO or GIT_DIR. E.g. `git push origin <branch>` or "
-        "`gh pr merge <number> -R <owner>/<repo>`."
+        "`gh pr merge <number> -R <owner>/<repo>`." + (_BODY_FILE_HINT if _is_text_with_code(unreadable.text) else "")
     )
+
+
+# A backtick or $( in a comment's text reads as a command the shell may run; from a file it is only text.
+_BODY_FILE_HINT = (
+    " A comment or reply whose text shows code (backticks, $(…)): write the text to a file and pass it as "
+    "`gh pr comment <number> --body-file <file>` or `gh api <path> -F body=@<file>`."
+)
+
+
+def _is_text_with_code(text: str) -> bool:
+    return re.search(r"(?:^|\s)gh\s", text) is not None and ("`" in text or "$(" in text)
 
 
 def _note(context: str) -> str:

@@ -30,7 +30,7 @@ from bridge.guard import (
     make_host_repo_reader,
     map_command_to_targets,
 )
-from bridge.hooks import handle_pre_tool_use
+from bridge.hooks import handle_pre_tool_use, map_unreadable_to_line
 from bridge.host_workers import HostWorker, find_mapped_root, hash_token, list_readable_roots, write_record
 from bridge.install import list_guard_globs
 from bridge.procinfo import process_start_ms
@@ -1388,3 +1388,18 @@ def test_a_host_workers_publish_is_refused_by_the_mac_unless_its_tab_is_locked(
     assert decision["permissionDecision"] == "deny" and "bridge page add" in decision["permissionDecisionReason"]
     assert locked == ""
     assert json.loads(unreachable)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_a_host_reply_showing_code_is_refused_with_the_body_file_way_and_that_way_passes() -> None:
+    reply = "gh api -X POST repos/Acme/web/pulls/5/comments/9/replies"
+    unreadable: list[Unreadable] = []
+    _keys(reply + r' -f body="the \`/api/\` route"', "/home/dev/web", unreadable)
+    line = map_unreadable_to_line(unreadable[0], ("/home/dev",))
+    assert "-F body=@<file>" in line and "--body-file <file>" in line
+    for command in (reply + " -F body=@/home/dev/web/reply.md", "gh pr comment 5 -R Acme/web --body-file reply.md"):
+        unreadable = []
+        _keys(command, "/home/dev/web", unreadable)
+        assert unreadable == [], command
+    other: list[Unreadable] = []
+    _keys("git push origin $(cat branch)", "/home/dev/web", other)
+    assert "--body-file" not in map_unreadable_to_line(other[0], ("/home/dev",))
