@@ -70,6 +70,8 @@ class Config:
     """Short names sessions write for a repo, as in web#12: the page links them to that owner/repo's PR."""
     assistant_handle: str = "aide"
     """The one session that may relay the user's answers to posts (`guild answer`)."""
+    lead_skills: tuple[str, ...] = ("bridge", "agterm", "pod")
+    """The only skills a lead or the assistant may load; a skill's body would stay in their context for good."""
     owner_name: str = "the owner"
     """How sessions and messages to leads name the person who leads the guild; the page itself says "you"."""
     night_words: tuple[str, ...] = ("Good night",)
@@ -349,6 +351,7 @@ def map_toml_to_config(raw: dict[str, object]) -> Config:
         pr_repo_aliases=MappingProxyType(_str_table(raw, "pr_repo_aliases")),
         pr_short_names=MappingProxyType(_str_table(raw, "pr_short_names")),
         assistant_handle=_str(raw, "assistant_handle", defaults.assistant_handle),
+        lead_skills=_str_list(raw, "lead_skills", defaults.lead_skills),
         owner_name=_str(raw, "owner_name", defaults.owner_name),
         night_words=_str_list(raw, "night_words", defaults.night_words),
         morning_words=_str_list(raw, "morning_words", defaults.morning_words),

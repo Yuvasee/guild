@@ -562,6 +562,7 @@ Settings live in `~/.config/bridge/config.toml`; every key is optional:
 ```toml
 owner_name = "Mira"           # how agents refer to you
 assistant_handle = "xavi"     # the tab with this name becomes Right Hand (default "aide")
+lead_skills = ["bridge", "agterm", "pod"]  # the only skills team leads and Right Hand may load (this is the default)
 night_words = ["Good night"]  # what you say to start the night's dreams
 compact_at_tokens = 150000    # save keep notes and compact at this context size; 0 (default) is off
 work_timezone = "Europe/Lisbon"  # your working hours' zone, for daytime-only nudges (default: this Mac's)

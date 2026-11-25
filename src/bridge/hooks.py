@@ -91,6 +91,7 @@ from bridge.inject import (
 )
 from bridge.leads import (
     find_lead_of,
+    find_lead_on_surface,
     forget_assistant_role,
     forget_lead_role,
     is_assistant_surface,
@@ -763,6 +764,29 @@ HOST_ARTIFACT_REFUSAL = (
 )
 
 
+SKILL_TOOL = "Skill"
+
+
+def find_lead_skill_refusal(conn: sqlite3.Connection, config: Config, payload: dict[str, object]) -> str | None:
+    """A lead or the assistant routes and reviews, and a skill's body would ride in its long-lived context; a locked
+    tab or the owner typing there changes nothing. A plugin or directory skill (a:b) matches by its last part."""
+    tool_input = payload.get("tool_input")
+    skill = cast(dict[str, object], tool_input).get("skill") if isinstance(tool_input, dict) else None
+    if not isinstance(skill, str) or skill.rsplit(":", 1)[-1] in config.lead_skills:
+        return None
+    row = conn.execute(
+        "SELECT s.surface, s.handle FROM instances i JOIN surfaces s ON s.surface = i.surface "
+        "WHERE i.conversation_id = ? AND i.ended_at IS NULL ORDER BY i.first_seen_at DESC LIMIT 1",
+        (str(payload.get("session_id") or ""),),
+    ).fetchone()
+    if row is None or (row["handle"] != config.assistant_handle and find_lead_on_surface(conn, row["surface"]) is None):
+        return None
+    return (
+        "Leads and the assistant route and review: give this to a worker (guild worker). "
+        f"Allowed here: {', '.join(config.lead_skills)}."
+    )
+
+
 def check_host_artifact(conn: sqlite3.Connection, config: Config, surface: str) -> str:
     """Every host worker has a lead, so only a locked tab makes it personal."""
     return "" if is_surface_locked(conn, config, surface) else _deny(HOST_ARTIFACT_REFUSAL)
@@ -806,6 +830,9 @@ def _check_pre_tool_use(
         conn, config, str(payload.get("session_id") or ""), (env or {}).get("AGTERM_PANE_ID")
     ):
         return _deny(ARTIFACT_REFUSAL)
+    if payload.get("tool_name") == SKILL_TOOL:
+        refusal = find_lead_skill_refusal(conn, config, payload)
+        return _deny(refusal) if refusal else ""
     from bridge.title_guard import (  # it loads the review modules, which other hooks never use
         find_colleague_reply_refusal,
         find_missing_issue_refusal,
