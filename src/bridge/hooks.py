@@ -12,6 +12,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import cast
 
+from bridge.agent_prefix import ARTIFACT_TOOL
 from bridge.board import (
     HINT_SENT,
     INJECT_BUDGET_BYTES,
@@ -71,11 +72,13 @@ from bridge.guard import (
 )
 from bridge.inject import Packed, Part, add_part, cap_context, pack_parts, save_later_parts, take_later_parts
 from bridge.leads import (
+    find_lead_of,
     forget_assistant_role,
     forget_lead_role,
     is_assistant_surface,
     is_conversation_locked,
     is_surface_locked,
+    list_tab_lineage,
     take_assistant_role,
     take_lead_role,
 )
@@ -200,7 +203,7 @@ def run_hook(event: str) -> int:
         try:
             if event == "PreToolUse":
                 import_modules(GUARD_LATE_MODULES)
-                result = HookResult(None, handle_pre_tool_use(conn, payload, config), "ok")
+                result = HookResult(None, handle_pre_tool_use(conn, payload, config, env=os.environ), "ok")
             elif event == "SessionStart":
                 try:
                     result = handle_hook(conn, event, payload, os.environ, config, event_ns, measure=True)
@@ -577,9 +580,13 @@ def _map_tokens_to_checker(words: list[str]) -> str | None:
 
 
 def handle_pre_tool_use(
-    conn: sqlite3.Connection, payload: dict[str, object], config: Config, host_checkout: HostRepoReader | None = None
+    conn: sqlite3.Connection,
+    payload: dict[str, object],
+    config: Config,
+    host_checkout: HostRepoReader | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> str:
-    decision = _check_pre_tool_use(conn, payload, config, host_checkout)
+    decision = _check_pre_tool_use(conn, payload, config, host_checkout, env)
     raw_input = payload.get("tool_input")
     command = cast(dict[str, object], raw_input).get("command") if isinstance(raw_input, dict) else None
     if decision or payload.get("tool_name") != "Bash" or not isinstance(command, str):
@@ -725,8 +732,50 @@ def _find_handle(conn: sqlite3.Connection, conversation_id: str | None) -> str |
     return str(row[0]) if row else None
 
 
+ARTIFACT_REFUSAL = (
+    "Pages are local: write _pages/<slug>/index.html, `bridge page add <slug>`, and link "
+    "http://127.0.0.1:8765/p/<slug>. The team never publishes to claude.ai."
+)
+
+
+HOST_ARTIFACT_REFUSAL = (
+    "The team never publishes to claude.ai: its pages are local, on the Mac. Push the page's HTML or tell your lead "
+    "its path, and the lead adds it with `bridge page add`."
+)
+
+
+def check_host_artifact(conn: sqlite3.Connection, config: Config, surface: str) -> str:
+    """Every host worker has a lead, so only a locked tab makes it personal."""
+    return "" if is_surface_locked(conn, config, surface) else _deny(HOST_ARTIFACT_REFUSAL)
+
+
+def is_team_conversation(conn: sqlite3.Connection, config: Config, conversation_id: str, pane: str | None) -> bool:
+    """A lead, the assistant, or a session in or under the tab of either, outside a locked tab: the owner's other
+    sessions are not. pane, the hook's own, stands in for a nested claude, whose instance has no surface."""
+    row = conn.execute(
+        "SELECT surface FROM instances WHERE conversation_id = ? AND ended_at IS NULL ORDER BY first_seen_at DESC",
+        (conversation_id,),
+    ).fetchone()
+    surface = (row["surface"] if row else None) or pane
+    if surface is None or is_surface_locked(conn, config, surface):
+        return False
+    own = conn.execute("SELECT handle FROM surfaces WHERE surface = ?", (surface,)).fetchone()
+    if (own is not None and own["handle"] == config.assistant_handle) or find_lead_of(conn, surface)[1] is not None:
+        return True
+    return any(
+        conn.execute(
+            "SELECT 1 FROM surfaces WHERE agterm_session = ? AND handle = ?", (tab, config.assistant_handle)
+        ).fetchone()
+        for tab in list_tab_lineage(conn, surface)
+    )
+
+
 def _check_pre_tool_use(
-    conn: sqlite3.Connection, payload: dict[str, object], config: Config, host_checkout: HostRepoReader | None = None
+    conn: sqlite3.Connection,
+    payload: dict[str, object],
+    config: Config,
+    host_checkout: HostRepoReader | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> str:
     """Denies a robot-prefixed title, a change to the owner's label, a PR that would name no issue or change another
     team's restricted path without a why and the assistant's OK, an answer to a colleague's comment no call handles
@@ -734,6 +783,10 @@ def _check_pre_tool_use(
 
     host_checkout is set for a host worker: git facts come from its report, and a merge it names no PR for is refused.
     """
+    if str(payload.get("tool_name") or "") == ARTIFACT_TOOL and is_team_conversation(
+        conn, config, str(payload.get("session_id") or ""), (env or {}).get("AGTERM_PANE_ID")
+    ):
+        return _deny(ARTIFACT_REFUSAL)
     from bridge.title_guard import (  # it loads the review modules, which other hooks never use
         find_colleague_reply_refusal,
         find_missing_issue_refusal,

@@ -125,6 +125,7 @@ def run_guard(home: Path) -> None:
         raw_input: Any = payload.get("tool_input")
         tool_input = cast(dict[str, Any], raw_input) if isinstance(raw_input, dict) else {}
         tool = payload.get("tool_name")
+        publish = tool == "Artifact"
         field = "command" if tool == "Bash" else "title" if tool in LINEAR_ISSUE_TOOLS else None
         text = tool_input.get(field) if field else None
         cwd = payload.get("cwd")
@@ -134,19 +135,20 @@ def run_guard(home: Path) -> None:
                 write_denial(refusal)
                 return
         globs = read_globs(home)
-        if not isinstance(text, str) or not may_need_guard(globs, text):
+        if not publish and (not isinstance(text, str) or not may_need_guard(globs, text)):
             return
-        if len(text) > GUARD_COMMAND_MAX_CHARS:
+        if isinstance(text, str) and len(text) > GUARD_COMMAND_MAX_CHARS:
             write_denial(f"this {field} is over {GUARD_COMMAND_MAX_CHARS} characters, too long for bridge's guard to "
                          "check; split it, keeping any push or merge in a short command of its own.")  # fmt: skip
             return
         body = {
             "event": "PreToolUse",
             "payload": {
-                "session_id": payload.get("session_id"), "cwd": cwd, "tool_name": tool, "tool_input": {field: text},
+                "session_id": payload.get("session_id"), "cwd": cwd, "tool_name": tool,
+                "tool_input": {field: text} if field else {},
             },
             "checkouts": read_guard_checkouts(home, text, cwd, lambda: expired)
-            if field == "command" and isinstance(cwd, str)
+            if field == "command" and isinstance(text, str) and isinstance(cwd, str)
             else [],
             "home": os.path.expanduser("~"),
             "real_roots": read_real_roots(home),
@@ -154,7 +156,13 @@ def run_guard(home: Path) -> None:
         try:
             answer = post(home, "/hook", body, GUARD_TIMEOUT_S)
         except OSError as exc:
-            what = "this command, which may push or merge," if field == "command" else "this Linear issue save"
+            what = (
+                "this command, which may push or merge,"
+                if field == "command"
+                else "this Linear issue save"
+                if field
+                else "this claude.ai publish"
+            )
             scope = (
                 f"{what} was not run. Commands that cannot push or merge still run"
                 if globs

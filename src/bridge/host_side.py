@@ -29,8 +29,8 @@ HOOK_EVENTS = (
     "SessionStart", "UserPromptSubmit", "Stop", "SessionEnd", "PostToolUse", "PostToolUseFailure", "Notification",
     "PreToolUse",
 )  # fmt: skip
-# bridge.agent_prefix.LINEAR_ISSUE_TOOLS go to the Mac's title check with Bash.
-HOOK_MATCHERS = {"Notification": "permission_prompt", "PreToolUse": "Bash|mcp__claude_ai_Linear__save_issue"}
+# bridge.agent_prefix.LINEAR_ISSUE_TOOLS go to the Mac's title check with Bash; gbridge refuses Artifact itself.
+HOOK_MATCHERS = {"Notification": "permission_prompt", "PreToolUse": "Bash|Artifact|mcp__claude_ai_Linear__save_issue"}
 HOOK_TIMEOUT_S = 15
 GLOBS_FILE = "guard-globs.json"
 ROOTS_FILE = "readable-roots.json"

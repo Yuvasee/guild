@@ -7,13 +7,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import cast
 
+from bridge.agent_prefix import ARTIFACT_TOOL
 from bridge.config import Config
 from bridge.leads import find_conversation_tab
 from bridge.pages import is_artifact_url
 from bridge.pins import Pin, PinError, record_artifact_publish
 from bridge.registry import map_env_to_surface
 
-ARTIFACT_TOOL = "Artifact"
 DRIVE_CREATE_TOOL = "mcp__claude_ai_Google_Drive__create_file"
 _DRIVE_EDITORS = {
     "application/vnd.google-apps.document": "document",

@@ -236,6 +236,13 @@ def test_hook_start_loads_no_module_only_other_paths_use() -> None:
     assert only_on_their_paths.isdisjoint(loaded)
 
 
+def test_the_guards_late_modules_load_no_page_or_pin_module() -> None:
+    # Every PreToolUse loads them; the Artifact check needs only the tool's name.
+    code = "import sys, bridge.hooks as h; h.import_modules(h.GUARD_LATE_MODULES); print(' '.join(sys.modules))"
+    loaded = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout.split()
+    assert {"bridge.artifacts", "bridge.pages", "bridge.pins"}.isdisjoint(loaded)
+
+
 def _github_repo(path: Path, branch: str) -> Path:
     path.mkdir()
     subprocess.run(["git", "init", "-q", "-b", branch], cwd=path, check=True)

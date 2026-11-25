@@ -37,7 +37,6 @@ LABEL_MAX_CHARS = 40
 WORK_NAME_MAX_CHARS = 80
 WORK_ABOUT_MAX_CHARS = 200
 DOMAIN_MAX_CHARS = 64
-PARENT_WALK_MAX = 5
 
 INTERNAL_WORDS = ("worker", "lead", "Guild", "bridge")
 CLAUDE_RULE = (
@@ -303,23 +302,22 @@ def list_lead_work(conn: sqlite3.Connection, lead: str) -> list[LeadWork]:
 
 
 def find_lead_of(conn: sqlite3.Connection, surface: str | None) -> tuple[str | None, str | None]:
-    """(display name, surface) of the lead above a tab, itself included."""
-    for _ in range(PARENT_WALK_MAX):
-        if surface is None:
-            return None, None
-        lead = find_lead_on_surface(conn, surface)
-        if lead is not None:
-            return lead.display_name, lead.surface
-        row = conn.execute(
+    """(display name, surface) of the lead above a tab, itself included: any pane of its tab or of any ancestor tab,
+    as a lead may share its tab and nesting has no depth limit."""
+    lead = find_lead_on_surface(conn, surface)
+    if lead is not None:
+        return lead.display_name, lead.surface
+    for tab in list_tab_lineage(conn, surface):
+        found = conn.execute(
             """
-            SELECT parent.surface FROM surfaces s
-            JOIN tab_parents t ON t.agterm_session = s.agterm_session
-            JOIN surfaces parent ON parent.agterm_session = t.parent_session
-            WHERE s.surface = ?
+            SELECT l.* FROM leads l JOIN surfaces s ON s.surface = l.surface
+            WHERE s.agterm_session = ? AND l.retired_at IS NULL ORDER BY l.surface LIMIT 1
             """,
-            (surface,),
+            (tab,),
         ).fetchone()
-        surface = row[0] if row else None
+        if found is not None:
+            lead = map_row_to_lead(found)
+            return lead.display_name, lead.surface
     return None, None
 
 
@@ -332,6 +330,18 @@ def find_lead_name_of_conversation(conn: sqlite3.Connection, conversation_id: st
     ).fetchone()
     lead = find_lead_on_surface(conn, find_lead_of(conn, row[0] if row else None)[1])
     return lead.name if lead else None
+
+
+def list_tab_lineage(conn: sqlite3.Connection, surface: str | None) -> list[str]:
+    """The surface's tab, then its parent tabs up to the first one with no parent or seen before."""
+    row = conn.execute("SELECT agterm_session FROM surfaces WHERE surface = ?", (surface,)).fetchone()
+    tab: str | None = row[0] if row else None
+    tabs: list[str] = []
+    while tab is not None and tab not in tabs:
+        tabs.append(tab)
+        row = conn.execute("SELECT parent_session FROM tab_parents WHERE agterm_session = ?", (tab,)).fetchone()
+        tab = row[0] if row else None
+    return tabs
 
 
 def find_lead_on_surface(conn: sqlite3.Connection, surface: str | None) -> Lead | None:

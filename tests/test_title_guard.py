@@ -148,11 +148,11 @@ def test_the_hook_runs_for_an_escaped_robot_too(bridge_env: BridgeEnv, tmp_path:
     assert json.loads(done.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
-def test_install_hooks_matches_the_linear_issue_tool(tmp_path: Path) -> None:
+def test_install_hooks_matches_the_linear_issue_tool_and_artifact(tmp_path: Path) -> None:
     settings = tmp_path / "settings.json"
     install_hooks(settings, "/home/u/.local/bin/bridge-hook")
     group = json.loads(settings.read_text())["hooks"]["PreToolUse"][0]
-    assert group["matcher"] == "Bash|mcp__claude_ai_Linear__save_issue"
+    assert group["matcher"] == "Bash|Artifact|mcp__claude_ai_Linear__save_issue"
 
 
 @pytest.mark.parametrize(

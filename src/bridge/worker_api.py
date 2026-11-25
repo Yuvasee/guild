@@ -12,12 +12,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, cast
 
+from bridge.agent_prefix import ARTIFACT_TOOL
 from bridge.config import Config, db_path
 from bridge.db import HOOK_BUSY_TIMEOUT_MS, connect
 from bridge.errlog import log_error
 from bridge.gitinfo import GitInfo, RepoFacts
 from bridge.guard import HostCheckout, make_host_repo_reader
-from bridge.hooks import HOOK_EVENTS, HookCaller, handle_hook, handle_pre_tool_use
+from bridge.hooks import HOOK_EVENTS, HookCaller, check_host_artifact, handle_hook, handle_pre_tool_use
 from bridge.host_workers import (
     HOST_KIND_PREFIX,
     HostWorker,
@@ -175,6 +176,12 @@ def handle_host_pre_tool_use(
         if not bind_conversation(conn, record.worker, conversation_id):
             log_error("worker api", f"{record.worker} sent a guard check for {conversation_id[:40]!r}, not its own")
             return {"checked": False, "reason": "the conversation is not this worker's own"}
+        if payload.get("tool_name") == ARTIFACT_TOOL:
+            return {
+                "checked": True,
+                "output": check_host_artifact(conn, config, record.pane),
+                "globs": list_guard_globs(),
+            }
         cwd = payload.get("cwd")
         legacy = not isinstance(checkouts, list)
         roots = list_readable_roots(record, dict(config.worker_path_map))

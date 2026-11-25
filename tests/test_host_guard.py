@@ -658,11 +658,11 @@ def test_gbridge_refuses_a_commit_in_a_worktree_whose_branch_another_checkout_mo
     assert _run_gbridge_guard(home, monkeypatch, capsys, "git commit -qam fix", str(worker)) == ""
 
 
-def test_host_settings_send_bash_and_linear_issue_saves_to_the_guard() -> None:
+def test_host_settings_send_bash_artifact_and_linear_issue_saves_to_the_guard() -> None:
     settings = host_side.build_settings("/nonexistent", [])
 
     group = settings["hooks"]["PreToolUse"][0]
-    assert group["matcher"] == "|".join(("Bash", *LINEAR_ISSUE_TOOLS))
+    assert group["matcher"] == "|".join(("Bash", "Artifact", *LINEAR_ISSUE_TOOLS))
     assert gbridge.LINEAR_ISSUE_TOOLS == LINEAR_ISSUE_TOOLS
     assert group["hooks"][0]["command"].endswith("/.local/bin/gbridge hook PreToolUse")
     assert group["hooks"][0]["timeout"] > gbridge.GUARD_DEADLINE_S
@@ -1351,3 +1351,40 @@ def test_a_push_the_guard_passes_on_a_host_records_the_branch_and_the_repo_it_we
         (CONV, "feat/y", "acme/web"),
         (CONV, "feat/z", "me/web"),
     ]
+
+
+def test_a_host_workers_publish_is_refused_by_the_mac_unless_its_tab_is_locked(
+    bridge_env: BridgeEnv,
+    spawn_process: SpawnProcess,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    _host_worker(bridge_env, spawn_process, monkeypatch)
+    with bridge_env.connect() as db:
+        db.execute(
+            "INSERT INTO surfaces (surface, agterm_session, tab_name, updated_at) VALUES ('PANE-H', 'TAB-H', 'Task', 0)"
+        )
+    payload = {"session_id": CONV, "cwd": str(tmp_path), "tool_name": "Artifact", "tool_input": {"action": "publish"}}
+
+    def publish(home: Path) -> str:
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+        gbridge.run_guard(home)
+        return capsys.readouterr().out
+
+    server = start_worker_api(map_toml_to_config({}), port=0)
+    home = _gbridge_home(tmp_path, server.server_address[1])
+    try:
+        denied = publish(home)
+        with bridge_env.connect() as db:
+            db.execute("UPDATE surfaces SET tab_name = '\U0001f512 Task' WHERE surface = 'PANE-H'")
+        locked = publish(home)
+    finally:
+        server.shutdown()
+    (home / "port").write_text("1")
+    unreachable = publish(home)
+
+    decision = json.loads(denied)["hookSpecificOutput"]
+    assert decision["permissionDecision"] == "deny" and "bridge page add" in decision["permissionDecisionReason"]
+    assert locked == ""
+    assert json.loads(unreachable)["hookSpecificOutput"]["permissionDecision"] == "deny"
