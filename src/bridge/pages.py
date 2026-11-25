@@ -231,6 +231,14 @@ def remove_other_urls(text: str) -> str:
     return _OTHER_URL.sub(" ", text)
 
 
+_BARE_PAGE_REF = re.compile(rf"(?<![\w.:/-])/p/([a-z0-9-]{{1,{SLUG_MAX_CHARS}}})(?:#[\w-]{{1,100}})?(?![\w-])")
+
+
+def find_bare_page_refs(text: str) -> list[tuple[str, str]]:
+    """(the /p/<slug> as written, its #fragment kept; its slug) for each one on its own, outside any URL."""
+    return list({m.group(0): m.group(1) for m in _BARE_PAGE_REF.finditer(remove_other_urls(text))}.items())
+
+
 def find_local_citations(text: str) -> list[str]:
     """The slugs a text cites on this dashboard: /p/<slug> on its own or on the dashboard's address."""
     return list(dict.fromkeys(_LOCAL_CITATION.findall(remove_other_urls(text))))
@@ -281,18 +289,18 @@ def map_url_to_page_slug(url: str) -> str | None:
 
 
 def find_unlinked_page_mention(
-    conn: sqlite3.Connection, text: str, link_urls: list[str], no_link: bool, options: Sequence[str] = ()
+    conn: sqlite3.Connection, text: str, link_urls: list[str], no_link: bool, in_buttons: Sequence[str] = ()
 ) -> str | None:
     """Why a post that names a page must carry its link, or None. A /p/<slug> needs its own --link; a live page's
     title (two words or more) or dashed slug needs one unless --no-link; so do the words page, analysis, explainer,
-    write-up or doc(ument) when the post has no --link, nor a URL in its text (title and body) that the card shows
-    as a link: one in an answer button or a `code` span is not."""
-    if unready := find_unready_citations(conn, "\n".join([text, *options, *link_urls])):
+    write-up or doc(ument) when the post has no --link, nor a URL the card shows as a link: one in `text` (shown
+    with links on) outside a `code` span, not one in `in_buttons` (answers, costs, why of the pick)."""
+    if unready := find_unready_citations(conn, "\n".join([text, *in_buttons, *link_urls])):
         return map_unready_citations_to_error(unready)
     linked = {slug for url in link_urls if (slug := map_url_to_page_slug(url))}
     artifacts = set(link_urls)
     clickable = _WEB_URL.search(_CODE_SPAN.sub(" ", text))
-    text = remove_other_urls("\n".join([text, *options]))
+    text = remove_other_urls("\n".join([text, *in_buttons]))
     for slug in find_local_citations(text):
         if slug not in linked:
             return (

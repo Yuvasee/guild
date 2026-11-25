@@ -492,7 +492,7 @@ function el(tag, cls, text) {
 }
 
 function linkTo(url, label, cls) {
-  if (typeof url !== "string" || !/^(https?:\/\/|\/p\/[a-z0-9-]+$)/.test(url)) return el("span", cls, label);
+  if (typeof url !== "string" || !/^(https?:\/\/|\/p\/[a-z0-9-]+(#[\w-]+)?$)/.test(url)) return el("span", cls, label);
   const a = el("a", cls, label);
   a.href = url;
   a.target = "_blank";

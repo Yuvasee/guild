@@ -37,7 +37,7 @@ from bridge.feed import (
 )
 from bridge.host_workers import HOST_KIND_PREFIX
 from bridge.leads import TINTS, Lead, find_lead_on_surface, is_conversation_locked, list_lead_work, list_leads
-from bridge.pages import find_local_citations, list_pages, map_url_to_page_slug
+from bridge.pages import find_bare_page_refs, list_pages, map_url_to_page_slug
 from bridge.refs import find_ref_spans, map_ref_to_label
 from bridge.registry import find_lead_tab_title, list_sessions
 from bridge.remote import REMOTE_STALE_AFTER_MS
@@ -828,9 +828,9 @@ def find_text_links(
 ) -> list[dict[str, str]]:
     """The PR, issue and /p/<slug> refs in a card's text that have a URL, as written; one without stays text."""
     found = [{"text": words, "url": url_of(ref)} for words, ref in find_ref_spans(text, config.issue_prefixes)]
-    for slug in find_local_citations(text):
+    for words, slug in find_bare_page_refs(text):
         if slug in titles:
-            found.append({"text": f"/p/{slug}", "url": f"/p/{slug}"})
+            found.append({"text": words, "url": words})
     return [link for link in found if link["url"]]
 
 

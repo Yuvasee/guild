@@ -317,6 +317,8 @@ def cmd_post(args: argparse.Namespace, conn: sqlite3.Connection, config: Config)
                 file=sys.stderr,
             )
     body = sys.stdin.read() if args.body == "-" else str(args.body)
+    shown = "\n".join([str(args.title), body, args.what or "", args.why or ""])
+    in_buttons = [*args.option, *(c for c in args.cost if c), args.pick_why or ""]
     try:
         if structured:
             body = build_decision_body(
@@ -325,9 +327,8 @@ def cmd_post(args: argparse.Namespace, conn: sqlite3.Connection, config: Config)
         links = [map_arg_to_link(str(link)) for link in args.link]
     except MessageStateError as exc:
         raise UsageError(str(exc)) from exc
-    text = f"{args.title}\n{body}"
     urls = [link.url for link in links]
-    if problem := find_unlinked_page_mention(conn, text, urls, bool(args.no_link), list(args.option)):
+    if problem := find_unlinked_page_mention(conn, shown, urls, bool(args.no_link), in_buttons):
         raise UsageError(problem)
     if to := find_post_route(conn, config, me, str(args.kind), args.ask, bool(args.pin)):
         flags = [*(["urgent"] if args.urgent else []), *(["pin its link"] if args.pin else [])]

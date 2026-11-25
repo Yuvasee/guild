@@ -82,7 +82,8 @@ def test_refs_in_card_text_get_their_urls_and_unknown_ones_none(conn: sqlite3.Co
         conn,
         "done",
         "ABC-12 fixed in acme/web#3",
-        "see /p/lambda-jobs, not /p/nope, https://x.example/p/lambda-jobs; XYZ-9 and abc-4 stay",
+        "see /p/lambda-jobs and /p/lambda-jobs#runs, not /p/nope, https://x.example/p/lambda-jobs; "
+        "XYZ-9 and abc-4 stay",
         [],
     )
 
@@ -93,8 +94,13 @@ def test_refs_in_card_text_get_their_urls_and_unknown_ones_none(conn: sqlite3.Co
         {"text": "acme/web#3", "url": "https://github.com/acme/web/pull/3"},
         {"text": "ABC-12", "url": "https://linear.app/acme/issue/ABC-12"},
         {"text": "/p/lambda-jobs", "url": "/p/lambda-jobs"},
+        {"text": "/p/lambda-jobs#runs", "url": "/p/lambda-jobs#runs"},
     ]
-    assert [r["text"] for r in cast(list[dict[str, str]], no_tracker)] == ["acme/web#3", "/p/lambda-jobs"]
+    assert [r["text"] for r in cast(list[dict[str, str]], no_tracker)] == [
+        "acme/web#3",
+        "/p/lambda-jobs",
+        "/p/lambda-jobs#runs",
+    ]
 
 
 CARDS = """
@@ -116,6 +122,7 @@ const refs = [
   { text: "acme/web#3", url: "https://github.com/acme/web/pull/3" },
   { text: "acme/2fa-tools#42", url: "https://github.com/acme/2fa-tools/pull/42" },
   { text: "/p/lambda-jobs", url: "/p/lambda-jobs" },
+  { text: "/p/lambda-jobs#runs", url: "/p/lambda-jobs#runs" },
   { text: "<b>x</b>", url: "javascript:alert(1)" },
 ];
 const links = [
@@ -126,7 +133,7 @@ const links = [
 state.now = 5000;
 const answer = { id: 1, ref: "A#1", at: 1000, kind: "done", from: "alex", unread: false, ask: null, can_reply: false,
   text: "ABC-12 shipped, ABC-19 not, notes at https://docs.example/report?issue=ABC-12&view=full",
-  body: "acme/web#3, acme/2fa-tools#42 and /p/lambda-jobs; /p/nope, XYZ-9 and <b>x</b> stay text",
+  body: "acme/web#3, acme/2fa-tools#42 and /p/lambda-jobs (/p/lambda-jobs#runs); /p/nope, XYZ-9 and <b>x</b> stay text",
   links, refs };
 const card = renderAnswerCard(answer);
 const body = card.children.find((k) => k.className === "links");
@@ -139,7 +146,8 @@ eq(anchors(card.children[0]), [["ABC-12", "https://linear.app/acme/issue/ABC-12"
 eq(texts(card.children[0]).join("").includes("ABC-19 not"), true);
 const md = card.children.find((k) => k.className === "md");
 eq(anchors(md), [["acme/web#3", "https://github.com/acme/web/pull/3"],
-  ["acme/2fa-tools#42", "https://github.com/acme/2fa-tools/pull/42"], ["/p/lambda-jobs", "/p/lambda-jobs"]]);
+  ["acme/2fa-tools#42", "https://github.com/acme/2fa-tools/pull/42"], ["/p/lambda-jobs", "/p/lambda-jobs"],
+  ["/p/lambda-jobs#runs", "/p/lambda-jobs#runs"]]);
 eq(texts(md).join("").includes("/p/nope, XYZ-9 and <b>x</b> stay text"), true);
 eq(find(md, (k) => k.tag === "b").length, 0);
 const need = { type: "post", id: 2, question_ref: "Q#2", at: 1000, kind: "decision", from: "alex", urgent: false,
@@ -190,6 +198,9 @@ def test_a_post_naming_a_page_needs_its_link(
     assert told.returncode != 0 and "tell-user carries no link: use `bridge post insight" in told.stderr
     assert other[0] != 0 and "the page 'Lambda jobs'" in other[1], "a link to something else is not the page's"
     assert option[0] != 0 and "names /p/lambda-jobs" in option[1], "an answer button is read too"
+    for flags in (("--cost", "See https://x.example"), ("--pick", "1", "--pick-why", "See https://x.example")):
+        priced = post("decision", "Read the analysis?", "--body", "Choose", "--option", "Yes", *flags)
+        assert priced[0] != 0 and "says 'analysis'" in priced[1], f"{flags[0]}: a button shows no link"
     with closing(bridge_env.connect()) as db:
         assert db.execute("SELECT count(*) FROM user_items").fetchone()[0] == 0
 
@@ -197,6 +208,7 @@ def test_a_post_naming_a_page_needs_its_link(
     assert post("done", "The analysis is ready", "--link", "Analysis=https://x.example/a")[0] == 0
     assert post("insight", "The status page is back", "--no-link")[0] == 0
     assert post("done", "Deployed the fix to staging")[0] == 0
+    assert post("decision", "Read the analysis?", "--what", "See https://x.example", "--option", "Yes")[0] == 0
     external = "https://x.example/p/external-only"
     assert post("done", f"Their notes: {external}", "--link", external)[0] == 0, "another site's /p/ is not ours"
     assert bridge_env.cli("send", "alex", f"see {external}", pid=team.b).returncode == 0
@@ -204,7 +216,7 @@ def test_a_post_naming_a_page_needs_its_link(
     with closing(bridge_env.connect()) as db:
         rows = db.execute("SELECT text, links FROM user_items ORDER BY id").fetchall()
     assert json.loads(rows[0]["links"]) == [{"label": "127.0.0.1:8765", "url": url}]
-    assert len(rows) == 6
+    assert len(rows) == 7
 
 
 def test_a_draft_to_the_assistant_is_checked_and_keeps_the_pages_link(
