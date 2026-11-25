@@ -1180,7 +1180,9 @@ function leadAskLine(item) {
   return "#" + item.id + " " + state + (item.overdue ? " (late)" : "") + wait + ": " + item.words;
 }
 
-const ASK_WAIT_ON = { owner: "you", approval: "an approval", release: "a release", verifier: "a verifier" };
+const ASK_WAIT_ON = {
+  owner: "you", approval: "an approval", release: "a release", verifier: "a verifier", colleague: "a colleague",
+};
 
 function askWaitText(wait) {
   return wait.until ? "paused until " + pauseDay(wait.until) : "waiting on " + (ASK_WAIT_ON[wait.on] || wait.on);

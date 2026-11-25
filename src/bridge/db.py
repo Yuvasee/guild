@@ -971,6 +971,14 @@ MIGRATIONS: tuple[str, ...] = (
     """
     ALTER TABLE messages ADD COLUMN goes_now INTEGER NOT NULL DEFAULT 0;
     """,
+    # A colleague's approval is one more wait: SQLite changes a column's CHECK only by replacing the column.
+    """
+    ALTER TABLE asks ADD COLUMN wait_on_kind TEXT
+        CHECK (wait_on_kind IN ('owner', 'approval', 'release', 'verifier', 'colleague'));
+    UPDATE asks SET wait_on_kind = wait_on;
+    ALTER TABLE asks DROP COLUMN wait_on;
+    ALTER TABLE asks RENAME COLUMN wait_on_kind TO wait_on;
+    """,
 )
 
 HOOK_BUSY_TIMEOUT_MS = 200

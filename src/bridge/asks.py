@@ -25,7 +25,7 @@ from bridge.pages import find_unready_citations
 STATES = ("open", "in_progress", "done_claimed", "verified", "closed")
 CLOSED_HOW = ("auto", "owner", "assistant")
 """Who closed it; NULL is a drop by the ask's own session (`guild ask drop`), whose history row names it."""
-WAIT_ON = ("owner", "approval", "release", "verifier")
+WAIT_ON = ("owner", "approval", "release", "verifier", "colleague")
 WAITABLE = ("open", "in_progress", "done_claimed")
 ASK_STALE_HOURS = 4
 """An open or in-progress ask with no update this long nags its owner, then the assistant too; while nothing changes,

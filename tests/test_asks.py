@@ -728,6 +728,9 @@ def test_cli_wait_shows_in_list_and_show(bridge_env: BridgeEnv, spawn_process: S
     assert f"waiting on Theo (alex, 0m ago): {WAIT_WHY}" in shown
     assert f"note: waiting on owner: {WAIT_WHY}" in shown
     assert team.guild("ask", "wait", "1", "--on", "owner", WAIT_WHY, pid=team.a).returncode == 0
+    colleague = team.guild("ask", "wait", "1", "--on", "colleague", "Mira approves the schema", pid=team.a)
+    assert "#1 waiting on a colleague; no reminders until it moves" in colleague.stdout, colleague.stderr
+    assert ", waiting on a colleague" in team.guild("ask", "list").stdout
 
 
 def test_cli_pause_until_a_day(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:

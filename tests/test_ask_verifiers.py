@@ -31,7 +31,7 @@ from bridge.asks import (
 )
 from bridge.board import Party, Recipient
 from bridge.config import Config
-from bridge.db import connect
+from bridge.db import MIGRATIONS, connect
 from bridge.feed import add_post, withdraw_post
 from bridge.leads import retire_lead
 
@@ -340,6 +340,40 @@ def test_an_ask_waiting_on_the_owner_with_no_card_is_told_to_the_assistant_once_
     owner_wait(team, no_card, 3 * HOUR, why="Theo picks the format after the call")
     sent = send_card_notices(team, CONFIG, 4 * HOUR)
     assert [line.split(" ")[0] for line in bodies_to(team, sent, "aide")[0].splitlines()[1:]] == [f"#{no_card}"]
+
+
+def test_a_wait_on_a_colleagues_approval_never_counts_as_waiting_on_the_owner(team: sqlite3.Connection) -> None:
+    colleague = add_ask(team, "alex", "aide", "Ship the schema change", "tab", [], 0).id
+    owner_wait(team, colleague, HOUR, "colleague", "Mira approves the schema Theo asked for")
+    approval = add_ask(team, "alex", "aide", "Ship the new copy", "tab", [], 0).id
+    owner_wait(team, approval, HOUR, "approval", "Mira approves the schema Theo asked for")
+
+    sent = send_card_notices(team, CONFIG, 2 * HOUR)
+
+    assert [line.split(" ")[0] for line in bodies_to(team, sent, "aide")[0].splitlines()[1:]] == [f"#{approval}"]
+    assert get_ask(team, colleague).wait_on == "colleague"
+
+
+def test_a_database_from_before_the_colleague_wait_keeps_its_waits_and_takes_the_new_one(tmp_path: Path) -> None:
+    raw = sqlite3.connect(tmp_path / "old.db")
+    before = len(MIGRATIONS) - 1
+    for migration in MIGRATIONS[:before]:
+        raw.executescript(migration)
+    raw.execute(f"PRAGMA user_version = {before}")
+    raw.execute(
+        "INSERT INTO asks (owner, recorded_by, words, source, state, created_at, updated_at, wait_on, wait_why) "
+        "VALUES ('alex', 'aide', 'Ship it', 'tab', 'open', 1, 2, 'release', 'the Friday release')"
+    )
+    raw.commit()
+    raw.close()
+
+    conn = connect(tmp_path / "old.db")
+    kept = get_ask(conn, 1)
+    waited = wait_ask(conn, 1, ALEX, "colleague", "Mira approves the schema", 3)
+    conn.close()
+
+    assert (kept.wait_on, kept.wait_why) == ("release", "the Friday release")
+    assert waited.wait_on == "colleague"
 
 
 def test_a_card_older_than_the_questions_column_shows_does_not_count(team: sqlite3.Connection) -> None:
