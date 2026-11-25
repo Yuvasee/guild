@@ -211,7 +211,6 @@ from bridge.workers import (
     start_worker_tab,
 )
 
-DEFAULT_PORT = 8765
 GUILD_PAGE_VERSION = hashlib.sha256(files("bridge").joinpath("web/guild.html").read_bytes()).hexdigest()[:12]
 """Of the page this service serves: an open page that loaded another one reloads itself."""
 RECONCILE_EVERY_S = 10

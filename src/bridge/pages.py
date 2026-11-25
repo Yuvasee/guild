@@ -4,6 +4,7 @@ import re
 import sqlite3
 import stat
 import urllib.parse
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from importlib.resources import files
@@ -12,6 +13,8 @@ from pathlib import Path
 from bridge.doc_nav import DOC_STYLE_ID, convert_page_to_styled
 from bridge.errors import UsageError
 
+DEFAULT_PORT = 8765
+PAGES_BASE_URL = f"http://127.0.0.1:{DEFAULT_PORT}/p/"
 SLUG_MAX_CHARS = 60
 TITLE_MAX_CHARS = 200
 _SLUG = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?")
@@ -218,13 +221,26 @@ def get_live_page(conn: sqlite3.Connection, slug: str) -> Page:
     return page
 
 
-_CITED_PAGE = re.compile(rf"/p/([a-z0-9-]{{1,{SLUG_MAX_CHARS}}})")
+_LOCAL_ORIGIN = rf"https?://(?:127\.0\.0\.1|localhost):{DEFAULT_PORT}"
+_OTHER_URL = re.compile(rf"(?!{_LOCAL_ORIGIN}/)https?://\S+")
+_LOCAL_CITATION = re.compile(rf"(?:{_LOCAL_ORIGIN}|(?<![\w.:/-]))/p/([a-z0-9-]{{1,{SLUG_MAX_CHARS}}})(?![\w-])")
+
+
+def remove_other_urls(text: str) -> str:
+    """The text without other sites' URLs: a /p/ path, slug or title in one, query and fragment too, is theirs."""
+    return _OTHER_URL.sub(" ", text)
+
+
+def find_local_citations(text: str) -> list[str]:
+    """The slugs a text cites on this dashboard: /p/<slug> on its own or on the dashboard's address."""
+    return list(dict.fromkeys(_LOCAL_CITATION.findall(remove_other_urls(text))))
 
 
 def find_unready_citations(conn: sqlite3.Connection, text: str) -> list[str]:
-    """Slugs a text links to under /p/ that would not open a page: unknown, archived, or with no local HTML file."""
+    """Slugs a text links to on this dashboard (/p/<slug>, not another site's /p/) that would not open a page:
+    unknown, archived, or with no local HTML file."""
     unready: list[str] = []
-    for slug in dict.fromkeys(_CITED_PAGE.findall(text)):
+    for slug in find_local_citations(text):
         page = find_page(conn, slug)
         if page is None or page.archived_at is not None or find_html_file(Path(page.source_dir).expanduser()) is None:
             unready.append(slug)
@@ -237,6 +253,73 @@ def map_unready_citations_to_error(slugs: list[str]) -> str:
         "folder, check the link opens, then send it"
         + (f" (also not ready: {', '.join('/p/' + s for s in slugs[1:])})" if slugs[1:] else "")
     )
+
+
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+# Not a part of a file name, path or compound such as pages.py or doc-style.
+_PAGE_WORDS = re.compile(
+    r"(?<![\w./-])(?:page|analysis|explainer|write-?up|doc|document)(?![\w/-]|\.\w)", re.IGNORECASE
+)
+_WEB_URL = re.compile(r"https?://\S")
+_CODE_SPAN = re.compile(r"`[^`\n]+`")
+NO_LINK_FLAG = "--no-link"
+
+
+def map_url_to_page_slug(url: str) -> str | None:
+    """The slug of a link to this Mac's dashboard /p/<slug>; None for any other link, another local server's too."""
+    try:
+        parts = urllib.parse.urlsplit(url.strip())
+    except ValueError:
+        return None
+    try:
+        port = parts.port
+    except ValueError:
+        return None
+    if parts.scheme not in ("http", "https") or parts.hostname not in _LOOPBACK_HOSTS or port != DEFAULT_PORT:
+        return None
+    return map_request_path_to_slug(parts.path) or None
+
+
+def find_unlinked_page_mention(
+    conn: sqlite3.Connection, text: str, link_urls: list[str], no_link: bool, options: Sequence[str] = ()
+) -> str | None:
+    """Why a post that names a page must carry its link, or None. A /p/<slug> needs its own --link; a live page's
+    title (two words or more) or dashed slug needs one unless --no-link; so do the words page, analysis, explainer,
+    write-up or doc(ument) when the post has no --link, nor a URL in its text (title and body) that the card shows
+    as a link: one in an answer button or a `code` span is not."""
+    if unready := find_unready_citations(conn, "\n".join([text, *options, *link_urls])):
+        return map_unready_citations_to_error(unready)
+    linked = {slug for url in link_urls if (slug := map_url_to_page_slug(url))}
+    artifacts = set(link_urls)
+    clickable = _WEB_URL.search(_CODE_SPAN.sub(" ", text))
+    text = remove_other_urls("\n".join([text, *options]))
+    for slug in find_local_citations(text):
+        if slug not in linked:
+            return (
+                f"the post names /p/{slug} but no --link opens it; add --link 'Title={PAGES_BASE_URL}{slug}' "
+                "so the owner's card shows the page as a link"
+            )
+    if no_link:
+        return None
+    escape = f"; if the words name no page, add {NO_LINK_FLAG}"
+    lowered = text.casefold()
+    for page in list_pages(conn):
+        if page.slug in linked or page.artifact_url in artifacts:
+            continue
+        by_slug = "-" in page.slug and re.search(rf"(?<![\w-]){re.escape(page.slug)}(?![\w-])", text)
+        title = page.title.casefold()
+        by_title = len(title.split()) > 1 and re.search(rf"(?<!\w){re.escape(title)}(?!\w)", lowered)
+        if by_slug or by_title:
+            return (
+                f"the post names the page {page.title!r} but carries no link to it; add "
+                f"--link '{page.title}={PAGES_BASE_URL}{page.slug}'{escape}"
+            )
+    if not link_urls and not clickable and (word := _PAGE_WORDS.search(text)):
+        return (
+            f"the post says {word.group(0)!r} but carries no link; add --link 'Title=https://…' (a page of ours: "
+            f"--link 'Title={PAGES_BASE_URL}<slug>', `bridge pages` lists them){escape}"
+        )
+    return None
 
 
 def list_pages(conn: sqlite3.Connection) -> list[Page]:

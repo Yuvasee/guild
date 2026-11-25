@@ -197,6 +197,7 @@ a post in the user's feed: blocked, decision, done or insight; `post resolve N` 
 ```text
 usage: bridge post [-h] [--body BODY] [--link LINK] [--option OPTION] [--what WHAT] [--why WHY]
                    [--cost COST] [--pick PICK] [--pick-why PICK_WHY] [--urgent] [--ask N] [--pin]
+                   [--no-link]
                    {blocked,decision,done,insight,resolve} title
 
 positional arguments:
@@ -218,6 +219,8 @@ options:
                         or a deadline is today
   --ask N               done/insight: the ask it answers
   --pin                 done/insight: also pin the first --link (an artifact) to the Pinned page
+  --no-link             the words page, analysis, explainer, write-up or doc here name no page;
+                        post without a --link
 ```
 
 ### bridge tell-user
@@ -225,7 +228,7 @@ options:
 one line for the user's feed (older form of post)
 
 ```text
-usage: bridge tell-user [-h] [--action | --blocker] text
+usage: bridge tell-user [-h] [--action | --blocker] [--no-link] text
 
 positional arguments:
   text
@@ -234,6 +237,8 @@ options:
   -h, --help  show this help message and exit
   --action
   --blocker
+  --no-link   the words page, analysis, explainer, write-up or doc here name no page; post without
+              a --link
 ```
 
 ### bridge board

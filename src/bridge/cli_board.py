@@ -51,6 +51,7 @@ from bridge.feed import (
 )
 from bridge.identity import current_party
 from bridge.leads import find_lead_conversations, find_lead_of, is_conversation_locked, is_lead_tab
+from bridge.pages import NO_LINK_FLAG, find_unlinked_page_mention
 from bridge.pins import pin_link_once
 from bridge.registry import reconcile
 from bridge.watcher import (
@@ -63,6 +64,7 @@ from bridge.watcher import (
 
 USER_TARGET = "user"
 POST_RESOLVE = "resolve"
+NO_LINK_HELP = "the words page, analysis, explainer, write-up or doc here name no page; post without a --link"
 
 
 def add_board_commands(sub: "argparse._SubParsersAction[argparse.ArgumentParser]", config: Config) -> None:  # pyright: ignore[reportPrivateUsage]
@@ -118,6 +120,7 @@ def add_board_commands(sub: "argparse._SubParsersAction[argparse.ArgumentParser]
     p.add_argument(
         "--pin", action="store_true", help="done/insight: also pin the first --link (an artifact) to the Pinned page"
     )
+    p.add_argument(NO_LINK_FLAG, action="store_true", help=NO_LINK_HELP)
     p.set_defaults(func=cmd_post)
 
     aliases = [f"tell-{config.user_alias}"] if config.user_alias else []
@@ -126,6 +129,7 @@ def add_board_commands(sub: "argparse._SubParsersAction[argparse.ArgumentParser]
     severity = p.add_mutually_exclusive_group()
     severity.add_argument("--action", dest="kind", action="store_const", const="decision")
     severity.add_argument("--blocker", dest="kind", action="store_const", const="blocked")
+    p.add_argument(NO_LINK_FLAG, action="store_true", help=NO_LINK_HELP)
     p.set_defaults(func=cmd_tell_user, kind="insight")
 
     p = sub.add_parser("board", help="the team board: post to everyone (no TEXT: read recent posts)")
@@ -321,6 +325,10 @@ def cmd_post(args: argparse.Namespace, conn: sqlite3.Connection, config: Config)
         links = [map_arg_to_link(str(link)) for link in args.link]
     except MessageStateError as exc:
         raise UsageError(str(exc)) from exc
+    text = f"{args.title}\n{body}"
+    urls = [link.url for link in links]
+    if problem := find_unlinked_page_mention(conn, text, urls, bool(args.no_link), list(args.option)):
+        raise UsageError(problem)
     if to := find_post_route(conn, config, me, str(args.kind), args.ask, bool(args.pin)):
         flags = [*(["urgent"] if args.urgent else []), *(["pin its link"] if args.pin else [])]
         fields = [
@@ -452,6 +460,8 @@ def _withdraw_post(conn: sqlite3.Connection, me: Party, text: str, assistant: st
 
 def cmd_tell_user(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
     me = current_party(conn)
+    if problem := find_unlinked_page_mention(conn, str(args.text), [], bool(args.no_link)):
+        raise UsageError(f'{problem}. tell-user carries no link: use `bridge post {args.kind} "…" --link …`')
     if to := find_post_route(conn, config, me, str(args.kind), None, False):
         return send_draft(conn, config, me, to, str(args.kind), str(args.text), "", [], [])
     try:

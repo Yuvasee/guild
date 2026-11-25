@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from functools import cache
 from typing import TypedDict, cast
+from urllib.parse import urlsplit
 
 from bridge.activity import RunningShell, SessionActivity
 from bridge.board import (
@@ -36,7 +37,8 @@ from bridge.feed import (
 )
 from bridge.host_workers import HOST_KIND_PREFIX
 from bridge.leads import TINTS, Lead, find_lead_on_surface, is_conversation_locked, list_lead_work, list_leads
-from bridge.refs import map_ref_to_label
+from bridge.pages import find_local_citations, list_pages, map_url_to_page_slug
+from bridge.refs import find_ref_spans, map_ref_to_label
 from bridge.registry import find_lead_tab_title, list_sessions
 from bridge.remote import REMOTE_STALE_AFTER_MS
 from bridge.reviews import find_lead_of
@@ -106,7 +108,7 @@ def map_db_to_guild(
             holds_of.setdefault(conversation_id, []).append({"label": claim["label"], "url": claim["url"]})
     enrichment = load_enrichment(conn, now)
     leads: list[dict[str, object]] = []
-    needs: list[dict[str, object]] = _map_open_posts_to_needs(conn, config, now)
+    needs: list[dict[str, object]] = _map_open_posts_to_needs(conn, config, now, url_of)
     authors: dict[str, str] = {}
     worker_tasks: dict[str, str] = {}
     active = list_leads(conn)
@@ -200,7 +202,7 @@ def map_db_to_guild(
     needs.extend(_load_undelivered_to_needs(conn, config))
     needs.extend(_load_assistant_undelivered_to_needs(conn, config))
     needs.extend(find_owner_needs(config.watchers, now))
-    answers = _load_answers(conn, config)
+    answers = _load_answers(conn, config, url_of)
     return {
         "now": now,
         "tabs_at": tree_at,
@@ -704,10 +706,13 @@ def map_sections_to_card(sections: list[dict[str, object]], options: list[str]) 
     }
 
 
-def _map_open_posts_to_needs(conn: sqlite3.Connection, config: Config, now: int) -> list[dict[str, object]]:
+def _map_open_posts_to_needs(
+    conn: sqlite3.Connection, config: Config, now: int, url_of: Callable[[str], str]
+) -> list[dict[str, object]]:
     """A question leaves only when its answer has reached the session, or the owner dismisses it. A claim to type it
     counts as offered so a hook does not deliver it too, but it has not arrived until the typing is over."""
     marks = ",".join("?" * len(OPEN_KINDS))
+    titles = {page.slug: page.title for page in list_pages(conn)}
     needs: list[dict[str, object]] = []
     for row in conn.execute(
         f"""
@@ -747,7 +752,8 @@ def _map_open_posts_to_needs(conn: sqlite3.Connection, config: Config, now: int)
                 "urgent": bool(row["urgent"]),
                 "sections": sections,
                 "card": map_sections_to_card(sections, options),
-                "links": json.loads(row["links"]) if row["links"] else [],
+                "links": map_stored_links_to_card_links(row["links"], titles),
+                "refs": find_text_links(config, url_of, titles, f"{row['text']}\n{row['body'] or ''}"),
                 "options": options,
                 **({"colleague": colleague} if colleague is not None else {}),
                 **(
@@ -766,10 +772,11 @@ def _map_open_posts_to_needs(conn: sqlite3.Connection, config: Config, now: int)
     return needs
 
 
-def _load_answers(conn: sqlite3.Connection, config: Config) -> list[dict[str, object]]:
+def _load_answers(conn: sqlite3.Connection, config: Config, url_of: Callable[[str], str]) -> list[dict[str, object]]:
     """Done and insight posts the owner has not OK'd yet, newest first, however old; past ANSWERS_MAX, the page
     says how many more wait."""
     marks = ",".join("?" * len(ANSWER_KINDS))
+    titles = {page.slug: page.title for page in list_pages(conn)}
     answers: list[dict[str, object]] = []
     for row in conn.execute(
         f"""
@@ -792,13 +799,39 @@ def _load_answers(conn: sqlite3.Connection, config: Config) -> list[dict[str, ob
                 "from": row["from_handle"],
                 "text": row["text"],
                 "body": row["body"] or "",
-                "links": json.loads(row["links"]) if row["links"] else [],
+                "links": map_stored_links_to_card_links(row["links"], titles),
+                "refs": find_text_links(config, url_of, titles, f"{row['text']}\n{row['body'] or ''}"),
                 "unread": row["opened_at"] is None,
                 "ask": {"id": row["ask_id"], "words": row["ask_words"]} if row["ask_id"] is not None else None,
                 "can_reply": True,
             }
         )
     return answers
+
+
+def map_stored_links_to_card_links(stored: str | None, titles: dict[str, str]) -> list[dict[str, str]]:
+    """A post's links as its card shows them: a link to one of our live pages (titles, by slug) by the page's title;
+    a label that is only the host, which `--link URL` gives, left empty so the page shows the address short."""
+    shown: list[dict[str, str]] = []
+    for link in cast(list[dict[str, str]], json.loads(stored) if stored else []):
+        url, label = link["url"], link.get("label") or ""
+        if (slug := map_url_to_page_slug(url)) and slug in titles:
+            label = titles[slug]
+        elif label == urlsplit(url).netloc:
+            label = ""
+        shown.append({"url": url, "label": label})
+    return shown
+
+
+def find_text_links(
+    config: Config, url_of: Callable[[str], str], titles: dict[str, str], text: str
+) -> list[dict[str, str]]:
+    """The PR, issue and /p/<slug> refs in a card's text that have a URL, as written; one without stays text."""
+    found = [{"text": words, "url": url_of(ref)} for words, ref in find_ref_spans(text, config.issue_prefixes)]
+    for slug in find_local_citations(text):
+        if slug in titles:
+            found.append({"text": f"/p/{slug}", "url": f"/p/{slug}"})
+    return [link for link in found if link["url"]]
 
 
 def _load_undelivered_to_needs(conn: sqlite3.Connection, config: Config) -> list[dict[str, object]]:

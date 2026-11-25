@@ -40,6 +40,18 @@ def extract_refs(
     return list(found)[:MAX_REFS_PER_TEXT]
 
 
+def find_ref_spans(text: str, issue_prefixes: tuple[str, ...]) -> list[tuple[str, str]]:
+    """(the words as written, its ref) for each owner/repo#N and configured issue key in the text, once each. Unlike
+    extract_refs, keys match only as configured and in its case: these become links in prose, where the generic
+    pattern or a lowercase abc-4 would link words that are no issue."""
+    scanned = text[:MAX_SCAN_CHARS]
+    found = {m.group(0): f"pr:{m.group(1)}/{m.group(2)}#{m.group(3)}" for m in _REPO_NUM_RE.finditer(scanned)}
+    if issue_prefixes:
+        for m in map_prefixes_to_key_re(issue_prefixes, ignore_case=False).finditer(scanned):
+            found.setdefault(m.group(0), f"issue:{m.group(0)}")
+    return list(found.items())[:MAX_REFS_PER_TEXT]
+
+
 def map_text_to_ref(text: str, *, issue_prefixes: tuple[str, ...], default_repo: str | None) -> str | None:
     """One whole argument as a PR or issue ref; None rather than a guess, so a typo is refused and not dropped."""
     value = text.strip()

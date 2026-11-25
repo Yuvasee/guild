@@ -89,12 +89,15 @@ bridge post decision "Ship the export worker behind a flag, or wait for the load
   first `--link` to the Pinned page (an artifact); OK never unpins.
 - A question becomes a card: `--what` and `--why` as its facts, each `--option` a row with the `--cost` given right
   after it, `--pick N` marks the answer you recommend (1 = the first option) with `--pick-why` in one line, links as
-  chips. They are written into the body as labelled lines (What:, Why now:, "<answer> cost:", My pick:), so every
+  lines in the card. They are written into the body as labelled lines (What:, Why now:, "<answer> cost:", My pick:), so every
   other reader sees plain text. `--body` adds free text above them. Text renders as safe Markdown: **bold**,
   `code`, lists, links; PR, Q#N and A#N references become chips.
 - Title: one line under 140 chars that stands on its own. Details in `--body` (`-` reads stdin),
-  links with `--link label=https://…`. No chatter: if the user would not act on it or want to know
-  it tomorrow, do not post it.
+  links with `--link label=https://…`; each shows as its own line in the card, a page of ours under its title.
+  A post that names a page carries its link: /p/<slug>, a registered page's title or slug, or the words page,
+  analysis, explainer, write-up or doc with no `--link` is refused (`--no-link` when those words name no page).
+  Issue keys, owner/repo#N and /p/<slug> in the text become links. No chatter: if the user would not act on it
+  or want to know it tomorrow, do not post it.
 - `--urgent` (blocked or decision only) marks the card loudly and raises one macOS notification on the owner's Mac. Only when prod or users are hurting, money is leaking, or a deadline is today. The assistant
   audits these with `guild urgent`.
 - `bridge post resolve N` withdraws your own open question when it settled without the user, or takes an Answers

@@ -126,6 +126,9 @@ header .end { margin-left: auto; }
 .card .part .label { font-size: 12px; color: var(--soft); margin-right: 7px; }
 .card .part .text { display: inline; white-space: pre-wrap; overflow-wrap: anywhere; }
 .card .md { margin-top: 8px; overflow-wrap: anywhere; }
+.card .links { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin-top: 10px; }
+.card .links a { font-weight: 600; color: var(--you); overflow-wrap: anywhere; }
+.card .links a::before { content: "\2197\00a0"; }
 .card .md p { margin: 0 0 10px; }
 .card .pill { --c: #6e7781; display: inline-block; font: 650 10.5px/1.6 -apple-system, BlinkMacSystemFont, sans-serif; letter-spacing: .04em; padding: 0 7px; border-radius: 999px; color: var(--c); background: color-mix(in srgb, var(--c) 15%, transparent); vertical-align: 1px; white-space: nowrap; }
 .card .pill-observed, .card .pill-risk { --c: #cf222e; }
@@ -489,7 +492,7 @@ function el(tag, cls, text) {
 }
 
 function linkTo(url, label, cls) {
-  if (typeof url !== "string" || !/^https?:\/\//.test(url)) return el("span", cls, label);
+  if (typeof url !== "string" || !/^(https?:\/\/|\/p\/[a-z0-9-]+$)/.test(url)) return el("span", cls, label);
   const a = el("a", cls, label);
   a.href = url;
   a.target = "_blank";
@@ -600,11 +603,28 @@ function dot(item, tiny) {
 
 // Agent text, never HTML: every piece goes in as text, so markup in it shows as typed. Bold, `code`, lists, links,
 // and PR, Q# and A# references as chips; "ask #12" names an ask, not a PR, so it stays text.
-const MD_INLINE = /(`[^`\n]+`)|\*\*([^*\n]+)\*\*|\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<>"')\]]+[^\s<>"')\].,;:!?])|\b([QA]#\d+)\b|(\b(?:[\w.-]+\/)?[A-Za-z][\w.-]*#\d+\b|(?<![\w#&])(?<!\b[Aa]sks? )#\d{2,6}\b)/g;
+const MD_INLINE = /(`[^`\n]+`)|\*\*([^*\n]+)\*\*|\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<>"')\]]+[^\s<>"')\].,;:!?])|\b([QA]#\d+)\b|(\b(?:[\w.-]+\/[\w.-]+|[A-Za-z][\w.-]*)#\d+\b|(?<![\w#&])(?<!\b[Aa]sks? )#\d{2,6}\b)/g;
 
 // Inside an answer button a link would answer the question when opened, so links there stay text.
 // The review docs' evidence and risk words, as the same coloured pills: a card reads like the doc it comes from.
 const PILL_WORDS = /\b(FROM CODE|REPRODUCED|OBSERVED|NOT VERIFIED|UNVERIFIED|VERIFIED|CUSTOMER-VISIBLE|RISK)\b/g;
+
+// The refs the server found in a card's text with a URL, as links; one it could not resolve is not listed, so stays text.
+function withRefs(text, refs, rest = withPills) {
+  if (!refs || !refs.length) return rest(text);
+  const escaped = refs.map((ref) => ref.text).sort((a, b) => b.length - a.length)
+    .map((words) => words.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&"));
+  const pattern = new RegExp("(?<![\\w/-])(?:" + escaped.join("|") + ")(?![\\w-])", "g");
+  const parts = [];
+  let at = 0;
+  for (const m of String(text).matchAll(pattern)) {
+    if (m.index > at) parts.push(...rest(text.slice(at, m.index)));
+    parts.push(linkTo(refs.find((ref) => ref.text === m[0]).url, m[0]));
+    at = m.index + m[0].length;
+  }
+  if (at < text.length) parts.push(...rest(text.slice(at)));
+  return parts;
+}
 
 function withPills(text) {
   const parts = [];
@@ -618,29 +638,40 @@ function withPills(text) {
   return parts;
 }
 
-function renderInline(text, plain) {
+function renderInline(text, plain, refs) {
+  if (plain) refs = null;
   const parts = [];
   let at = 0;
   for (const m of String(text).matchAll(MD_INLINE)) {
-    if (m.index > at) parts.push(...withPills(text.slice(at, m.index)));
+    if (m.index > at) parts.push(...withRefs(text.slice(at, m.index), refs));
     if (m[1]) parts.push(el("code", "", m[1].slice(1, -1)));
     else if (m[2]) {
       const strong = el("strong");
-      strong.append(...renderInline(m[2], plain));
+      strong.append(...renderInline(m[2], plain, refs));
       parts.push(strong);
     }
     else if (m[3]) parts.push(plain ? m[3] : linkTo(m[4], m[3]));
     else if (m[5] && plain) parts.push(shortUrl(m[5]));
     else if (m[5]) parts.push(/^https:\/\/github\.com\/[^/]+\/[^/]+\/(pull|issues)\/\d+$/.test(m[5])
       ? linkTo(m[5], shortUrl(m[5]), "chip") : linkTo(m[5], shortUrl(m[5])));
-    else parts.push(el("span", "chip", m[6] || m[7]));
+    else {
+      const ref = m[7] && refs && refs.find((r) => r.text === m[7]);
+      parts.push(ref ? linkTo(ref.url, m[7], "chip") : el("span", "chip", m[6] || m[7]));
+    }
     at = m.index + m[0].length;
   }
-  if (at < text.length) parts.push(...withPills(text.slice(at)));
+  if (at < text.length) parts.push(...withRefs(text.slice(at), refs));
   return parts;
 }
 
-function renderMarkdown(text) {
+// Each link of a post as its own line in the card, named by the page's title or the address short.
+function renderPostLinks(links) {
+  const box = el("div", "links");
+  for (const link of links) box.append(linkTo(link.url, link.label || shortUrl(link.url)));
+  return box;
+}
+
+function renderMarkdown(text, refs) {
   const box = el("div", "md");
   for (const block of String(text).trim().split(/\n[ \t]*\n+/)) {
     let list = null, listTag = "", para = null;
@@ -650,12 +681,12 @@ function renderMarkdown(text) {
         const tag = item[1] ? "ul" : "ol";
         if (!list || listTag !== tag) { list = el(tag); listTag = tag; box.append(list); }
         const li = el("li");
-        li.append(...renderInline(item[3]));
+        li.append(...renderInline(item[3], false, refs));
         list.append(li);
         para = null;
       } else if (line.trim()) {
         if (!para) { para = el("p"); box.append(para); } else para.append(el("br"));
-        para.append(...renderInline(line.trim()));
+        para.append(...renderInline(line.trim(), false, refs));
         list = null;
       }
     }
@@ -665,12 +696,12 @@ function renderMarkdown(text) {
 
 function renderDecisionCard(need, card, send) {
   const c = need.card;
-  if (c.intro) card.append(renderMarkdown(c.intro));
+  if (c.intro) card.append(renderMarkdown(c.intro, need.refs));
   if (c.facts.length) {
     const facts = el("dl", "facts");
     for (const fact of c.facts) {
       const dd = el("dd");
-      dd.append(renderMarkdown(fact.text));
+      dd.append(renderMarkdown(fact.text, need.refs));
       facts.append(el("dt", "", fact.label), dd);
     }
     card.append(facts);
@@ -699,7 +730,6 @@ function renderNeedFoot(need) {
   const when = el("span", "", age(state.now - need.at) + " ago");
   when.title = "posted " + fullTime(need.at);
   foot.append(el("span", "chip", need.question_ref), el("span", "", "from " + need.from), el("span", "", need.kind), when);
-  for (const link of need.links) foot.append(linkTo(link.url, link.label, "chip"));
   return foot;
 }
 
@@ -771,7 +801,7 @@ function renderNeedCard(need) {
   const title = el("div", "title");
   title.append(el("span", "attention-slot"));
   if (need.urgent) title.append(el("span", "urgent", "URGENT"));
-  title.append(need.text);
+  title.append(...withUrls(need.text, need.refs));
   card.append(title);
   const actions = el("div", "actions");
   const errorKey = "q:" + need.id;
@@ -788,7 +818,7 @@ function renderNeedCard(need) {
   };
   if (need.card) renderDecisionCard(need, card, send);
   else {
-    for (const section of need.sections) card.append(renderMarkdown(section.text));
+    for (const section of need.sections) card.append(renderMarkdown(section.text, need.refs));
     for (const option of need.options) {
       const button = el("button", "", option);
       button.onclick = () => send(option);
@@ -814,6 +844,7 @@ function renderNeedCard(need) {
     refresh();
   };
   actions.append(dismiss);
+  if (need.links.length) card.append(renderPostLinks(need.links));
   card.append(actions, errorLine(errorKey), renderNeedFoot(need));
   return card;
 }
@@ -951,7 +982,7 @@ function renderAnswerCard(answer) {
     dot.title = "new: not opened yet";
     title.append(dot);
   }
-  title.append(answer.text);
+  title.append(...withUrls(answer.text, answer.refs));
   card.append(title);
   if (answer.ask) {
     const source = el("div", "source");
@@ -960,7 +991,7 @@ function renderAnswerCard(answer) {
     card.append(source);
   }
   if (answer.body) {
-    const body = renderMarkdown(answer.body);
+    const body = renderMarkdown(answer.body, answer.refs);
     card.append(body);
     if (!answersOpen.has(answer.id)) {
       body.classList.add("folded");
@@ -1014,7 +1045,7 @@ function renderAnswerCard(answer) {
   const when = el("span", "", age(state.now - answer.at) + " ago");
   when.title = "posted " + fullTime(answer.at);
   foot.append(el("span", "chip", answer.ref), el("span", "", "from " + answer.from), el("span", "", answer.kind), when);
-  for (const link of answer.links) foot.append(linkTo(link.url, link.label, "chip"));
+  if (answer.links.length) card.append(renderPostLinks(answer.links));
   card.append(actions, errorLine(key), foot);
   card.addEventListener("click", () => openAnswer(answer, card));
   card.addEventListener("focusin", () => openAnswer(answer, card));
@@ -1311,11 +1342,15 @@ function renderChips() {
   }
 }
 
+// Whole URLs first, so a ref inside one (?issue=ABC-12) does not cut it in two.
+function withUrls(words, refs) {
+  return String(words).split(/(https?:\/\/[^\s<>"')\]]+[^\s<>"')\].,;:!?])/)
+    .flatMap((part) => /^https?:\/\//.test(part) ? [linkTo(part, shortUrl(part))] : withRefs(part, refs, (w) => [w]));
+}
+
 function renderText(body) {
   const text = el("div", "text");
-  for (const part of String(body).split(/(https?:\/\/[^\s<>"')\]]+[^\s<>"')\].,;:!?])/)) {
-    text.append(/^https?:\/\//.test(part) ? linkTo(part, shortUrl(part)) : part);
-  }
+  text.append(...withUrls(body));
   return text;
 }
 

@@ -70,6 +70,7 @@ from bridge.identity import ensure_current_instance
 from bridge.inject import measure_chars
 from bridge.install import find_hook_executable, install_hooks, uninstall_hooks
 from bridge.issue_sync import map_report_to_lines, run_issue_sync
+from bridge.pages import DEFAULT_PORT
 from bridge.procinfo import process_args, process_start_ms
 from bridge.registry import (
     FOCUS_MAX_CHARS,
@@ -88,7 +89,7 @@ from bridge.review_post import run_review_post
 from bridge.review_slack import run_connector_read
 from bridge.review_worktree import run_next_worktree_job
 from bridge.rewake_marks import install_waiter_script
-from bridge.serve import DEFAULT_PORT, serve
+from bridge.serve import serve
 from bridge.service import install_service, restart_service, uninstall_service
 from bridge.shadow_filter import map_rows_to_report
 from bridge.shadow_filter import read_rows as read_shadow_rows

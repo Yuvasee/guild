@@ -7,6 +7,7 @@ from bridge.config import Config
 from bridge.db import now_ms, transaction
 from bridge.identity import current_party
 from bridge.pages import (
+    PAGES_BASE_URL,
     Page,
     add_doc_style_to_page,
     add_page,
@@ -17,9 +18,6 @@ from bridge.pages import (
     set_page_url,
     share_page,
 )
-from bridge.serve import DEFAULT_PORT
-
-PAGES_BASE_URL = f"http://127.0.0.1:{DEFAULT_PORT}/p/"
 
 
 def add_page_commands(sub: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:  # pyright: ignore[reportPrivateUsage]
