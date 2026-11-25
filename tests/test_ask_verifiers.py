@@ -377,6 +377,23 @@ def test_a_database_from_before_the_colleague_wait_keeps_its_waits_and_takes_the
     assert waited.wait_on == "colleague"
 
 
+def test_a_wait_reason_naming_an_open_question_card_counts_as_its_card(team: sqlite3.Connection) -> None:
+    aide = Party("conv-aide", "aide")
+    open_card = add_post(team, aide, "decision", "Which format?", "", [], ["A", "B"], HOUR)
+    resolved = add_post(team, aide, "blocked", "Need the key", "", [], [], HOUR)
+    team.execute("UPDATE user_items SET resolved_at = 1 WHERE id = ?", (resolved,))
+    answer = add_post(team, aide, "done", "Shipped the export", "", [], [], HOUR)
+    asks: dict[str, int] = {}
+    for name, card in (("named", open_card), ("resolved", resolved), ("not_a_question", answer)):
+        asks[name] = add_ask(team, "alex", "aide", f"Pick {name}", "tab", [], 0).id
+        owner_wait(team, asks[name], HOUR, why=f"Theo answers Q#{card} first")
+
+    sent = send_card_notices(team, CONFIG, HOUR + 15 * 60_000)
+
+    flagged = [line.split(" ")[0] for line in bodies_to(team, sent, "aide")[0].splitlines()[1:]]
+    assert flagged == [f"#{asks['resolved']}", f"#{asks['not_a_question']}"]
+
+
 def test_a_card_older_than_the_questions_column_shows_does_not_count(team: sqlite3.Connection) -> None:
     ask_id = add_ask(team, "alex", "aide", "Choose the vendor", "tab", [], 0).id
     owner_wait(team, ask_id, 4 * DAY)

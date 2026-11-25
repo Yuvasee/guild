@@ -1017,6 +1017,7 @@ def list_unassigned_claims(conn: sqlite3.Connection) -> list[Ask]:
 
 
 _CARD_ASK = re.compile(r"\bask #(\d+)\b", re.IGNORECASE)
+_WAIT_CARD = re.compile(r"\bQ#(\d+)\b", re.IGNORECASE)
 _PR_URL = re.compile(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)")
 
 
@@ -1057,8 +1058,9 @@ def find_asks_without_card(conn: sqlite3.Connection, config: Config, now: int) -
     from bridge.guildview import STALE_QUESTION_MS  # the page's module; hooks never run this check
 
     carded: set[int] = set()
+    open_cards: set[int] = set()
     for card in conn.execute(
-        "SELECT from_conversation, text, body, ask_id FROM user_items WHERE kind IN ('blocked', 'decision') "
+        "SELECT id, from_conversation, text, body, ask_id FROM user_items WHERE kind IN ('blocked', 'decision') "
         "AND resolved_at IS NULL AND (created_at > ? OR id IN (SELECT item_id FROM colleague_calls))",
         (now - STALE_QUESTION_MS,),
     ):
@@ -1067,7 +1069,10 @@ def find_asks_without_card(conn: sqlite3.Connection, config: Config, now: int) -
         carded.update(int(n) for n in _CARD_ASK.findall(f"{card['text']}\n{card['body'] or ''}"))
         if card["ask_id"] is not None:
             carded.add(int(card["ask_id"]))
-    return [ask for ask in asks if ask.id not in carded]
+        open_cards.add(int(card["id"]))
+    # A wait reason naming Q#N of such a card stands for it, as `--card Q#N` would.
+    named = {ask.id for ask in asks if open_cards & {int(n) for n in _WAIT_CARD.findall(ask.wait_why or "")}}
+    return [ask for ask in asks if ask.id not in carded | named]
 
 
 def is_review_queued(conn: sqlite3.Connection, ask: Ask) -> bool:
