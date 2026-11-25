@@ -431,6 +431,82 @@ def test_a_wait_on_a_body_sentence_holds_only_while_the_body_read_live_still_say
     assert blocks(12, "Adds the warp drive.") == []
 
 
+def test_a_wait_on_a_pr_quoting_a_body_sentence_holds_while_the_body_read_live_still_names_that_pr(
+    tmp_path: Path,
+) -> None:
+    from test_reviews import CONFIG, make_pr
+
+    from bridge.db import connect
+    from bridge.review_deps import map_dependencies_to_quotes, map_markdown_to_dependencies, map_states_to_blockers
+    from bridge.review_github import GitHubError
+    from bridge.reviews import store_open_prs
+
+    def map_body_to_waits(body: str, number: int = 13) -> list[str]:
+        said = map_markdown_to_dependencies(body, "Acme/Web", number)
+        refs = tuple(ref for ref, _ in said)
+        return list(map_states_to_blockers(refs, set(), dict.fromkeys(refs, "OPEN"), map_dependencies_to_quotes(said)))
+
+    [stored] = map_body_to_waits("Adds the warp drive. Merge after Acme/Web#12, not before.")
+    web = repo(tmp_path / "web")
+    conn = connect(tmp_path / "t.db")
+    with transaction(conn):
+        store_open_prs(
+            conn,
+            [make_pr(ref=f"pr:Acme/Web#{n}", repo="Acme/Web", number=n, head=f"feat/{n}") for n in (12, 13, 14)],
+            500,
+        )
+        conn.execute("""UPDATE review_prs SET approved_by = '["mira"]', reviewed_at = 600""")
+        conn.execute("INSERT OR REPLACE INTO review_poll (id, ok_at) VALUES (1, 1000)")
+        conn.execute(
+            """UPDATE review_prs SET dep_blockers = ?, must_merge = '["Acme/Web#12"]' WHERE number = 13""",
+            (json.dumps([stored]),),
+        )
+
+    def blocks(*bodies: str | Exception) -> tuple[list[str], list[int]]:
+        targets = map_command_to_targets("gh pr merge 13", str(web))
+        with (
+            mock.patch("bridge.review_github.fetch_pr_body", side_effect=bodies) as read,
+            mock.patch("bridge.review_github.fetch_merge_facts", side_effect=GitHubError("gh failed: timeout")),
+        ):
+            refusals = find_merge_blocks(conn, CONFIG, targets, 1000)
+        return [refusal.waits_on or "" for refusal in refusals], [call.args[1] for call in read.call_args_list]
+
+    def quoting(sentence: str) -> str:
+        return stored.partition(" (")[0] + f' (its body says: "{sentence}")'
+
+    assert blocks("Adds the warp drive.") == ([], [13]), "the body no longer names the PR"
+    edited = "Adds the warp drive. Merge only after Acme/Web#12 is in."
+    [now] = map_body_to_waits(edited)
+    assert blocks(edited)[0] == [now] and "is in." in now, "the live sentence is quoted"
+    for sentence in ("Merge once #12 is merged.", "Do not merge before #12 is merged."):
+        assert blocks(f"Adds the warp drive. {sentence}")[0] == [quoting(sentence)], "other words that name it"
+    url = "Merge after #12. History: https://github.com/Other/Web/pull/12."
+    assert blocks(url)[0] == [quoting("Merge after #12.")], "a link to another repo's #12 does not move the bare #12"
+    [[new], _] = blocks("Adds the warp drive. Merge after #14.")
+    assert new == (
+        "its body now says it merges after Acme/Web#14, which the queue has not read yet: wait for its next poll"
+        ' (its body says: "Merge after #14.")'
+    )
+    [[unread], _] = blocks(GitHubError("gh failed: timeout"))
+    assert unread.startswith(stored) and "as of the queue's last poll" in unread
+
+    [sibling_wait] = map_body_to_waits("Merge after Acme/Web#12.", 14)
+    with transaction(conn):
+        conn.execute(
+            """UPDATE review_prs SET dep_blockers = ?, must_merge = '["Acme/Web#12"]' WHERE number = 14""",
+            (json.dumps([sibling_wait]),),
+        )
+        conn.execute(
+            """UPDATE review_prs SET siblings = '["pr:Acme/Web#14"]', sibling_quotes = '{}' WHERE number = 13"""
+        )
+    assert blocks(edited)[1] == [13], "its own live wait decides: the sibling's body is not read"
+    with transaction(conn):
+        conn.execute("UPDATE review_prs SET dep_blockers = '[]', must_merge = '[]' WHERE number = 13")
+    assert blocks("Adds the warp drive.") == ([], [14]), "the sibling's body no longer names the PR"
+    [[waits], _] = blocks("Merge once Acme/Web#12 is in.")
+    assert "which is not ready" in waits and waits.endswith('(its body says: "Merge once Acme/Web#12 is in.")')
+
+
 def test_a_merge_refused_for_ci_github_would_not_run_names_github_only_at_the_head_it_was_read_for(
     tmp_path: Path,
 ) -> None:

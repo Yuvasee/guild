@@ -191,6 +191,22 @@ def map_markdown_to_preconditions(body: str, repo: str, number: int) -> tuple[st
     return tuple(found)
 
 
+def find_sentence_naming(body: str, repo: str, pr: str) -> str | None:
+    """The first sentence of its body that names `pr` (owner/repo#N) in any words, cut to show. A bare #N names this
+    repo's #N, as well as any other repo's #N the body names in full."""
+    text = _MD_LINK_RE.sub(r"\1", MD_HIDDEN_RE.sub("", body))
+    full = _map_text_to_full_refs(text, repo)
+    key = pr.casefold()
+    for block in _map_text_to_blocks(text):
+        for sentence in re.split(r"(?<=[.!?])\s+", _EMPHASIS_RE.sub("", block)):
+            for match in _PR_RE.finditer(sentence):
+                named = _map_match_to_full_ref(match, repo)
+                refs = {named} if named else {f"{repo}#{match['number']}", *full.get(match["number"], ())}
+                if key in {ref.casefold() for ref in refs}:
+                    return _cut_to_shown(" ".join(sentence.split()))
+    return None
+
+
 def _cut_to_shown(sentence: str) -> str:
     if len(sentence) <= _PRECONDITION_SHOWN_MAX:
         return sentence

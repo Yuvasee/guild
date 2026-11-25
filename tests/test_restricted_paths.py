@@ -281,6 +281,26 @@ def test_the_merge_guard_refuses_a_restricted_pr_until_its_body_has_why_and_ok(t
     fetch.assert_not_called()
 
 
+def test_the_merge_guard_reads_a_restricted_prs_body_once_for_its_waits_and_its_ok(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "t.db")
+    with transaction(conn):
+        store_open_prs(conn, [make_pr(files=("services/pricing/round.py",), approved_by=("mira",))], 500)
+        conn.execute("INSERT OR REPLACE INTO review_poll (id, ok_at) VALUES (1, 1000)")
+        conn.execute(
+            """UPDATE review_prs SET dep_blockers = ?, must_merge = '["Org/lib#3"]', reviewed_at = 600""",
+            (json.dumps(['waits for Org/lib#3 to merge (its body says: "Merge after Org/lib#3.")']),),
+        )
+        add_session(conn, "c-worker", "worker", branch="dev/x")
+    ok = send(conn, "aide", "OK", "worker")
+    fetch = mock.Mock(side_effect=[WHY + f"OK: #{ok}", GitHubError("gh failed: timeout")])
+    with (
+        mock.patch("bridge.review_github.fetch_merge_facts", return_value=MERGE_FACTS),
+        mock.patch("bridge.review_github.fetch_pr_body", fetch),
+    ):
+        assert find_merge_blocks(conn, CONFIG, [Target(REF, "gh pr merge")], 1000) == []
+    assert fetch.call_count == 1
+
+
 def test_auto_merge_holds_a_restricted_pr_until_its_body_has_why_and_ok(tmp_path: Path) -> None:
     on = replace(AUTO_ON, restricted_paths=(PRICING,))
     conn = auto_setup(tmp_path, make_pr(**CLEAN, files=("services/pricing/round.py",)))
