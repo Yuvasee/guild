@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, cast
 
-from bridge.agent_prefix import ARTIFACT_TOOL
+from bridge.agent_prefix import ARTIFACT_TOOL, is_artifact_publish
 from bridge.config import Config, db_path
 from bridge.db import HOOK_BUSY_TIMEOUT_MS, connect
 from bridge.errlog import log_error
@@ -177,6 +177,8 @@ def handle_host_pre_tool_use(
             log_error("worker api", f"{record.worker} sent a guard check for {conversation_id[:40]!r}, not its own")
             return {"checked": False, "reason": "the conversation is not this worker's own"}
         if payload.get("tool_name") == ARTIFACT_TOOL:
+            if not is_artifact_publish(payload):
+                return {"checked": True, "output": "", "globs": list_guard_globs()}
             return {
                 "checked": True,
                 "output": check_host_artifact(conn, config, record.pane),

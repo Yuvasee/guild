@@ -141,3 +141,27 @@ def test_a_claude_nested_in_a_leads_pane_is_refused(bridge_env: BridgeEnv, spawn
     assert row is not None and row["surface"] is None, "a nested claude owns no pane"
 
     assert decision(publish(bridge_env, nested, "conv-n", "PANE-A")) == "deny"
+
+
+def test_a_lead_may_read_and_list_artifacts_but_not_publish_or_delete(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    team = Team(bridge_env, spawn_process)
+    assert team.enroll().returncode == 0
+
+    def call(tool_input: dict[str, str]) -> str:
+        payload = {
+            "session_id": "conv-a",
+            "cwd": str(bridge_env.root),
+            "tool_name": "Artifact",
+            "tool_input": tool_input,
+        }
+        return decision(bridge_env.hook("PreToolUse", payload, team.a, {"AGTERM_PANE_ID": "PANE-A"}))
+
+    url = "https://claude.ai/artifact/abc"
+    assert [call({"action": "read", "url": url}), call({"action": "list"})] == ["allow", "allow"]
+    assert call({"file_path": "/tmp/page.html"}) == "deny", "no action is a publish"
+    assert [call({"action": "publish", "file_path": "/tmp/p.html"}), call({"action": "delete", "url": url})] == [
+        "deny",
+        "deny",
+    ]

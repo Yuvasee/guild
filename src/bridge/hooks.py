@@ -12,7 +12,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import cast
 
-from bridge.agent_prefix import ARTIFACT_TOOL
+from bridge.agent_prefix import is_artifact_publish
 from bridge.board import (
     HINT_SENT,
     INJECT_BUDGET_BYTES,
@@ -783,7 +783,7 @@ def _check_pre_tool_use(
 
     host_checkout is set for a host worker: git facts come from its report, and a merge it names no PR for is refused.
     """
-    if str(payload.get("tool_name") or "") == ARTIFACT_TOOL and is_team_conversation(
+    if is_artifact_publish(payload) and is_team_conversation(
         conn, config, str(payload.get("session_id") or ""), (env or {}).get("AGTERM_PANE_ID")
     ):
         return _deny(ARTIFACT_REFUSAL)
