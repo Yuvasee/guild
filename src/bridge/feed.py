@@ -196,8 +196,6 @@ def add_post(
         raise MessageStateError(f"up to {OPTIONS_MAX} options, each 1 to {OPTION_MAX_CHARS} chars")
     if len(links) > LINKS_MAX:
         raise MessageStateError(f"up to {LINKS_MAX} links")
-    if ask_id is not None and kind not in ANSWER_KINDS:
-        raise MessageStateError("only a done or insight post answers an ask")
     if ask_id is not None and conn.execute("SELECT 1 FROM asks WHERE id = ?", (ask_id,)).fetchone() is None:
         raise MessageStateError(f"no ask #{ask_id}")
     cursor = conn.execute(

@@ -154,16 +154,18 @@ def test_a_result_post_shows_in_answers_until_ok_and_a_reply_reaches_the_assista
     assert [(p["title"], p["body"], p["source"]) for p in pins] == [("Export fixed", "https://x.example/r/1", "ask #1")]
 
 
-def test_pin_and_ask_are_for_results_and_a_link_is_pinned_once(
+def test_pin_is_for_results_any_post_may_name_its_ask_and_a_link_is_pinned_once(
     bridge_env: BridgeEnv, spawn_process: SpawnProcess
 ) -> None:
     pids = start(bridge_env, spawn_process, agterm_tabs=False)
-    on_question = bridge_env.cli("post", "decision", "Ship?", "--ask", "1", pid=pids["a"])
+    on_question = bridge_env.cli("post", "decision", "Ship?", "--link", "https://x.example", "--pin", pid=pids["a"])
+    asked_question = bridge_env.cli("post", "decision", "Ship?", "--ask", "9", pid=pids["a"])
     no_link = bridge_env.cli("post", "done", "Shipped", "--pin", pid=pids["a"])
     no_ask = bridge_env.cli("post", "done", "Shipped", "--ask", "9", pid=pids["a"])
     assert on_question.returncode == 2 and "for done and insight posts" in on_question.stderr
     assert no_link.returncode == 2 and "give one" in no_link.stderr
     assert no_ask.returncode == 2 and "no ask #9" in no_ask.stderr
+    assert asked_question.returncode == 2 and "no ask #9" in asked_question.stderr, "a question may name its ask"
 
     link = "Page=https://claude.example/artifact/abc"
     assert "pinned as #1" in bridge_env.cli("post", "done", "Page", "--link", link, "--pin", pid=pids["a"]).stdout

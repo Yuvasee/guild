@@ -12,11 +12,13 @@ from bridge.asks import (
     SPOT_CHECKED,
     VERIFY_RULE,
     Actor,
+    AskError,
     add_ask,
     assign_verifiers,
     claim_ask_done,
     find_overdue_asks,
     get_ask,
+    link_card_to_ask,
     list_ask_events,
     list_unassigned_claims,
     pick_verifier,
@@ -502,3 +504,45 @@ def test_an_ask_of_a_retired_owner_is_neither_flagged_nor_sampled(team: sqlite3.
     sample = all_bodies(team, send_spot_check(team, CONFIG, DAY + HOUR))
     assert ("Pick the export format" in notice) is not retired
     assert ("Fix the export" in sample) is not retired
+
+
+def queue_pr(conn: sqlite3.Connection, repo: str, number: int) -> None:
+    conn.execute(
+        "INSERT INTO review_prs (ref, repo, number, title, url, draft, head, head_oid, base, loc, updated_at, "
+        "first_seen_at, fetched_at) VALUES (?, ?, ?, 't', ?, 0, 'b', 'o', 'main', 1, 0, 0, 0)",
+        (f"pr:{repo}#{number}", repo, number, f"https://github.com/{repo}/pull/{number}"),
+    )
+
+
+def test_a_card_tied_by_ask_or_by_link_counts_and_a_queued_pr_review_needs_none(team: sqlite3.Connection) -> None:
+    def ask(words: str, why: str = "Theo picks", refs: list[str] | None = None) -> int:
+        ask_id = add_ask(team, "alex", "aide", words, "tab", refs or [], 0).id
+        owner_wait(team, ask_id, HOUR, "approval", why)
+        return ask_id
+
+    by_flag = ask("Pick the export format")
+    add_post(team, Party("conv-aide", "aide"), "decision", "Which format?", "", [], ["A", "B"], HOUR, False, by_flag)
+    linked = ask("Choose the vendor")
+    card = add_post(team, Party("conv-aide", "aide"), "decision", "Which vendor?", "", [], ["A", "B"], HOUR)
+    link_card_to_ask(team, linked, card)
+    queue_pr(team, "Acme/Web", 12)
+    queue_pr(team, "Acme/Infra", 3)
+    reviewed = ask(
+        "Delete the old gate",
+        "Theo reviews https://github.com/Acme/Web/pull/12 and https://github.com/Acme/Infra/pull/3",
+    )
+    by_ref = ask("Ship the fix", "Theo reviews it", ["https://github.com/Acme/Web/pull/12"])
+    missing = ask(
+        "Drop the flag", "Theo reviews https://github.com/Acme/Web/pull/12 and https://github.com/Acme/Web/pull/99"
+    )
+    plain = ask("Approve the copy")
+
+    sent = send_card_notices(team, CONFIG, HOUR + 15 * 60_000)
+    flagged = [line.split(" ")[0] for line in bodies_to(team, sent, "aide")[0].splitlines()[1:]]
+    assert flagged == [f"#{missing}", f"#{plain}"], "tied cards and fully queued PR reviews are not flagged"
+    assert by_flag not in (linked, reviewed, by_ref)
+
+    resolved = add_post(team, Party("conv-aide", "aide"), "decision", "Old?", "", [], ["A", "B"], HOUR)
+    team.execute("UPDATE user_items SET resolved_at = 1 WHERE id = ?", (resolved,))
+    with pytest.raises(AskError, match="no open question or blocker card"):
+        link_card_to_ask(team, plain, resolved)

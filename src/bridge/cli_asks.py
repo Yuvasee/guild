@@ -18,6 +18,7 @@ from bridge.asks import (
     convert_wait_to_text,
     drop_ask,
     get_ask,
+    link_card_to_ask,
     list_ask_events,
     list_asks,
     list_unassigned_claims,
@@ -83,6 +84,7 @@ def add_ask_commands(sub: "argparse._SubParsersAction[argparse.ArgumentParser]",
         metavar=shown,
         help=f"who or what it waits on; --on {owner_word or 'owner'}: waiting on {owner_name}",
     )
+    p.add_argument("--card", metavar="Q#M", help="the open question card on the owner's feed that stands for it")
     when.add_argument(
         "--until",
         metavar="YYYY-MM-DD[THH:MM]",
@@ -214,8 +216,11 @@ def cmd_ask_wait(args: argparse.Namespace, conn: sqlite3.Connection, config: Con
     now = now_ms()
     on = None if args.on is None else map_wait_on_arg_to_stored(str(args.on), config.owner_name)
     until = None if args.until is None else map_local_time_arg_to_ms(str(args.until))
+    card = None if args.card is None else int(str(args.card).upper().removeprefix("Q#"))
     with transaction(conn):
         ask = wait_ask(conn, int(args.id), actor, on, str(args.why), now, until)
+        if card is not None:
+            link_card_to_ask(conn, ask.id, card)
     after = "it moves" if until is None else "then, or until it moves"
     print(f"#{ask.id} {convert_wait_to_text(ask, config.owner_name, now)}; no reminders until {after}")
     return 0

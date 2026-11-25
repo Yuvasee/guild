@@ -982,6 +982,7 @@ def list_unassigned_claims(conn: sqlite3.Connection) -> list[Ask]:
 
 
 _CARD_ASK = re.compile(r"\bask #(\d+)\b", re.IGNORECASE)
+_PR_URL = re.compile(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)")
 
 
 def is_waiting_on_owner(ask: Ask, owner_name: str) -> bool:
@@ -1012,7 +1013,9 @@ def find_asks_without_card(conn: sqlite3.Connection, config: Config, now: int) -
     asks = [
         ask
         for ask in map(map_row_to_ask, rows)
-        if is_waiting_on_owner(ask, config.owner_name) and not is_owner_hidden(conn, config, ask.owner)
+        if is_waiting_on_owner(ask, config.owner_name)
+        and not is_owner_hidden(conn, config, ask.owner)
+        and not is_review_queued(conn, ask)
     ]
     if not asks:
         return []
@@ -1020,14 +1023,43 @@ def find_asks_without_card(conn: sqlite3.Connection, config: Config, now: int) -
 
     carded: set[int] = set()
     for card in conn.execute(
-        "SELECT from_conversation, text, body FROM user_items WHERE kind IN ('blocked', 'decision') "
+        "SELECT from_conversation, text, body, ask_id FROM user_items WHERE kind IN ('blocked', 'decision') "
         "AND resolved_at IS NULL AND (created_at > ? OR id IN (SELECT item_id FROM colleague_calls))",
         (now - STALE_QUESTION_MS,),
     ):
         if card["from_conversation"] and is_conversation_locked(conn, config, str(card["from_conversation"])):
             continue
         carded.update(int(n) for n in _CARD_ASK.findall(f"{card['text']}\n{card['body'] or ''}"))
+        if card["ask_id"] is not None:
+            carded.add(int(card["ask_id"]))
     return [ask for ask in asks if ask.id not in carded]
+
+
+def is_review_queued(conn: sqlite3.Connection, ask: Ask) -> bool:
+    """It waits on the owner's review of PRs (named in its refs or wait reason) that are all open in the review
+    queue, the owner's other stream: no card needed."""
+    text = " ".join([*ask.refs, ask.wait_why or ""])
+    prs = {f"pr:{repo.lower()}#{number}" for repo, number in _PR_URL.findall(text)}
+    if not prs:
+        return False
+    queued = {
+        str(r[0]).lower()
+        for r in conn.execute(
+            f"SELECT ref FROM review_prs WHERE closed_at IS NULL AND lower(ref) IN ({','.join('?' * len(prs))})",
+            sorted(prs),
+        )
+    }
+    return prs <= queued
+
+
+def link_card_to_ask(conn: sqlite3.Connection, ask_id: int, item_id: int) -> None:
+    """An open question or blocker card already on the owner's feed stands for the ask."""
+    cursor = conn.execute(
+        "UPDATE user_items SET ask_id = ? WHERE id = ? AND kind IN ('blocked', 'decision') AND resolved_at IS NULL",
+        (ask_id, item_id),
+    )
+    if cursor.rowcount == 0:
+        raise AskError(f"Q#{item_id} is no open question or blocker card")
 
 
 def send_card_notices(conn: sqlite3.Connection, config: Config, now: int) -> list[tuple[int, Recipient]]:

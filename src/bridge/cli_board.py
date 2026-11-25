@@ -291,8 +291,8 @@ def cmd_post(args: argparse.Namespace, conn: sqlite3.Connection, config: Config)
     structured = bool(args.what or args.why or args.cost or args.pick is not None or args.pick_why)
     if structured and args.kind not in OPEN_KINDS:
         raise UsageError("--what, --why, --cost and --pick are for blocked and decision posts")
-    if (args.ask is not None or args.pin) and args.kind not in ANSWER_KINDS:
-        raise UsageError("--ask and --pin are for done and insight posts")
+    if args.pin and args.kind not in ANSWER_KINDS:
+        raise UsageError("--pin is for done and insight posts")
     if args.pin and not args.link:
         raise UsageError("--pin pins the first --link; give one")
     if (
@@ -337,7 +337,7 @@ def cmd_post(args: argparse.Namespace, conn: sqlite3.Connection, config: Config)
                 conn, me, str(args.kind), str(args.title), body, links, list(args.option), at, bool(args.urgent),
                 args.ask,
             )  # fmt: skip
-            if args.ask is not None:
+            if args.ask is not None and args.kind in ANSWER_KINDS:
                 mark_ask_told(conn, int(args.ask), at)
             if args.pin:
                 source = f"ask #{args.ask}" if args.ask is not None else convert_item_id_to_answer_ref(item_id)
