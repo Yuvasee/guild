@@ -1181,6 +1181,11 @@ def _check_pre_tool_use(
             command, _str(payload, "cwd") or "", unreadable, host_checkout, strict=True,
             home=host_checkout.home,
         )  # fmt: skip
+    if host_checkout is None and any(t.pushed is not None for t in targets):
+        from bridge.empty_files import find_new_empty_files, map_empty_files_to_denial  # git runs only for a push
+
+        if empty := find_new_empty_files(targets):
+            return _deny(map_empty_files_to_denial(empty))
     all_targets = add_merge_base_targets(conn, targets)
     conflicts = find_conflicts(conn, all_targets, _str(payload, "session_id"))
     held = find_held_writes(conn, all_targets)

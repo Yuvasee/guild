@@ -10,7 +10,7 @@ from typing import cast
 from bridge.agent_prefix import LINEAR_ISSUE_TOOLS, ROBOT
 from bridge.artifacts import ARTIFACT_TOOL, DRIVE_CREATE_TOOL
 from bridge.config import state_dir
-from bridge.guard import DEFAULT_TRIGGERS, convert_trigger_to_glob
+from bridge.guard import DEFAULT_TRIGGERS, PUSH_TRIGGER, convert_trigger_to_glob
 from bridge.hooks import ARTIFACT_HOOK, HOOK_EVENTS, SKILL_TOOL
 from bridge.rewake_marks import WAITER_SCRIPT
 
@@ -119,14 +119,14 @@ def map_waiter_to_hook_groups(waiter_script: Path, executable: str) -> dict[str,
 def convert_event_to_command(executable: str, event: str) -> str:
     direct = f"{shlex.quote(executable)} {event}"
     if event == "PreToolUse":
-        # Every shell command passes through here; Python starts only for a robot (a title to check) or, if a claim
-        # exists, for text that could match a trigger.
+        # Every shell command passes through here; Python starts only for a robot (a title to check), a push (an empty
+        # file to refuse) or, if a claim exists, for text that could match a trigger.
         cases = "|".join(convert_trigger_to_glob(t) for t in DEFAULT_TRIGGERS)
         # exec in a pipeline replaces only its subshell, so exit before the claims gate runs the hook again.
         run = f"printf '%s' \"$p\" | {direct}; exit 0;;"
-        tools = f"{_ROBOT_GLOBS}|{_ARTIFACT_GLOBS}|{_SKILL_GLOBS}"
+        always = "|".join([_ROBOT_GLOBS, _ARTIFACT_GLOBS, _SKILL_GLOBS, convert_trigger_to_glob(PUSH_TRIGGER), *_PYTHON_GLOBS])
         return (
-            f'p=$(cat); case "$p" in {tools}|{"|".join(_PYTHON_GLOBS)}) {run} esac; '
+            f'p=$(cat); case "$p" in {always}) {run} esac; '
             '[ -f "${BRIDGE_STATE_DIR:-$HOME/.local/state/bridge}/claims-active" ] || exit 0; '
             f'case "$p" in {cases}) {run} esac; exit 0'
         )

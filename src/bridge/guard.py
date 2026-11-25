@@ -5,7 +5,7 @@ import re
 import sqlite3
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import pairwise
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
@@ -23,8 +23,9 @@ if TYPE_CHECKING:
     from bridge.review_github import LiveMergeFacts
 
 # Shell-glob fragments for the hook's fast gate; spacing and `git -C dir push` must still reach Python.
+PUSH_TRIGGER = "git*push"
 DEFAULT_TRIGGERS = (
-    "git*push", "gh*pr*merge", "gh*pr*close", "gh*pr*update-branch", "gh*api*merge", "gh*api*pulls", "gh*api*issues",
+    PUSH_TRIGGER, "gh*pr*merge", "gh*pr*close", "gh*pr*update-branch", "gh*api*merge", "gh*api*pulls", "gh*api*issues",
     "gh*api*graphql", "gh*api*git/refs",
 )  # fmt: skip
 PUSH, MERGE, CLOSE, COMMAND = "push", "merge", "close", "command"
@@ -245,6 +246,8 @@ class Target:
     key: str
     """A claim key, or a prefix ending in ':' that matches every branch of a repo (push --all)."""
     action: str
+    pushed: tuple[str, str] | None = field(default=None, compare=False)
+    """A git push's checkout and the local revision it sends there."""
 
 
 @dataclass(frozen=True)
@@ -885,17 +888,22 @@ def _git_targets(
     if not refspecs and git.push_default not in ("simple", "current", None):
         return [], True
     if not refspecs:
-        return ([Target(f"branch:{repo}:{current_branch}", "git push")] if current_branch else []), unsure
+        if not current_branch:
+            return [], unsure
+        return [Target(f"branch:{repo}:{current_branch}", "git push", (directory, current_branch))], unsure
     targets: list[Target] = []
     for refspec in refspecs:
         if "*" in refspec or refspec.startswith(":"):
             return [], True
+        source = refspec.lstrip("+").split(":")[0]
         destination = refspec.lstrip("+").split(":")[-1].removeprefix("refs/heads/")
         if destination == "HEAD":
             destination = current_branch or ""
         if destination.startswith("refs/") or not destination:
             return [], True
-        targets.append(Target(f"branch:{repo}:{destination}", "git push"))
+        if source == "HEAD" and current_branch:
+            source = current_branch
+        targets.append(Target(f"branch:{repo}:{destination}", "git push", (directory, source)))
     return targets, unsure
 
 

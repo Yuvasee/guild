@@ -216,6 +216,8 @@ WORKER_CODEX_RULE = (
     "Run codex exec with </dev/null and under a timeout (timeout 900 codex exec ... </dev/null); "
     "without them it waits on stdin forever."
 )
+# git add -A once committed a stray empty file an unquoted heredoc had made; the push guard refuses such a file too.
+WORKER_STAGING_RULE = "Stage files by path; never git add -A or git add ."
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -856,7 +858,7 @@ def build_worker_brief(
     return (
         f"{constitution}\n\n{place}# Your task\n\n{prompt.strip()}\n\n{rules}\n"
         f"{WORKER_BROWSER_RULE.format(owner=config.owner_name)}\n{WORKER_PAGES_RULE}\n{WORKER_SIZES_RULE}\n"
-        f"{WORKER_CODEX_RULE}\n\n{report}\n"
+        f"{WORKER_CODEX_RULE}\n{WORKER_STAGING_RULE}\n\n{report}\n"
     )
 
 

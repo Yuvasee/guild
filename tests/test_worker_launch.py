@@ -109,6 +109,7 @@ def test_guild_worker_starts_claude_without_chrome_and_briefs_it_on_the_browser(
     brief = Path(brief_path.group(1)).read_text()
     assert brief.startswith("# The Guild constitution") and "# Your task\n\nFix the thing\n" in brief
     assert "codex exec ... </dev/null" in brief
+    assert "Stage files by path; never git add -A or git add ." in brief
     assert BROWSER_RULE in brief
     assert "a part headed Reviews" in brief
     assert "Sizes are in kLOC" in brief

@@ -1,14 +1,19 @@
 import json
 import os
+import shutil
 import subprocess
+import tempfile
 import time
+from collections.abc import Generator
 from pathlib import Path
 from unittest import mock
 
+import pytest
 from conftest import VENV_BIN, BridgeEnv, SpawnProcess
 from test_board import Pair
 
 from bridge.db import transaction
+from bridge.empty_files import EMPTY_BLOB, map_raw_diff_to_new_empty_files
 from bridge.guard import (
     GITHUB_STALE_S,
     Unreadable,
@@ -94,6 +99,97 @@ def _run_guard(bridge_env: BridgeEnv, pid: int, conversation: str, command: str,
     done = subprocess.run(["/bin/sh", "-c", guard], input=payload, env=env, capture_output=True, text=True, check=False)
     assert done.returncode == 0, done.stderr
     return done.stdout
+
+
+def _commit(path: Path, files: dict[str, str], message: str) -> None:
+    for name, text in files.items():
+        (path / name).parent.mkdir(parents=True, exist_ok=True)
+        (path / name).write_text(text)
+    subprocess.run(["git", "add", "--", *files], cwd=path, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-q", "-m", message],
+        cwd=path, check=True,
+    )  # fmt: skip
+
+
+def _denial(output: str) -> str | None:
+    decision = json.loads(output)["hookSpecificOutput"] if output.strip() else {}
+    return decision.get("permissionDecisionReason") if decision.get("permissionDecision") == "deny" else None
+
+
+@pytest.fixture
+def outside_pytest() -> Generator[Path]:
+    """A checkout whose path holds no word of the shell gate, as pytest's own temp paths do."""
+    path = Path(tempfile.mkdtemp(prefix="gs-", dir="/tmp"))
+    yield path
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def test_a_push_starts_the_hook_without_any_claim(tmp_path: Path) -> None:
+    hook = tmp_path / "hook"
+    hook.write_text("#!/bin/sh\ncat > /dev/null; echo started\n")
+    hook.chmod(0o755)
+    payload = json.dumps(
+        {"session_id": "c", "cwd": "/repo/web", "tool_name": "Bash", "tool_input": {"command": "git push"}}
+    )
+
+    done = subprocess.run(
+        ["sh", "-c", convert_event_to_command(str(hook), "PreToolUse")], input=payload, capture_output=True, text=True,
+        env={"BRIDGE_STATE_DIR": str(tmp_path), "PATH": "/usr/bin:/bin"}, check=False,
+    )  # fmt: skip
+
+    assert done.stdout.strip() == "started"
+
+
+def test_a_push_that_adds_an_empty_file_is_refused_naming_it(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess, outside_pytest: Path
+) -> None:
+    pair = Pair(bridge_env, spawn_process)
+    web = repo(outside_pytest / "web")
+    _commit(web, {"README.md": "web\n", "old-empty": ""}, "base")
+    subprocess.run(["git", "update-ref", "refs/remotes/origin/feat/x", "HEAD"], cwd=web, check=True)
+    _commit(web, {"app/main.py": "print(1)\n", "app/0": "", "app/later": "draft\n"}, "stray")
+    _commit(web, {"app/later": "", "caf\u00e9.txt": ""}, "emptied")
+
+    refused = [
+        _denial(_run_guard(bridge_env, pair.a, "conv-a", command, cwd))
+        for command, cwd in (("git push", web), ("git push origin HEAD:feat/y", web), ("git push", web / "app"))
+    ]
+
+    assert not (bridge_env.state_dir / "claims-active").exists()
+    expected = "adds empty files: app/0, app/later, caf\u00e9.txt."
+    assert all(reason is not None and expected in reason for reason in refused), refused
+
+
+def test_a_push_of_allowed_empty_files_a_filled_one_a_renamed_one_or_one_already_pushed_goes(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess, outside_pytest: Path
+) -> None:
+    pair = Pair(bridge_env, spawn_process)
+    web = repo(outside_pytest / "web")
+    _commit(web, {"old-empty": "", "keep-empty": ""}, "base")
+    subprocess.run(["git", "update-ref", "refs/remotes/origin/feat/x", "HEAD"], cwd=web, check=True)
+    _commit(web, {"pkg/__init__.py": "", "data/.gitkeep": "", "notes.md": ""}, "scaffold")
+    _commit(web, {"notes.md": "filled\n"}, "fill")
+    scaffolded = _denial(_run_guard(bridge_env, pair.a, "conv-a", "git push", web))
+    subprocess.run(["git", "update-ref", "refs/remotes/origin/feat/x", "HEAD"], cwd=web, check=True)
+    (web / "docs").mkdir()
+    subprocess.run(["git", "mv", "old-empty", "docs/new-empty"], cwd=web, check=True)
+    _commit(web, {}, "move")
+
+    assert scaffolded is None
+    assert _denial(_run_guard(bridge_env, pair.a, "conv-a", "git push", web)) is None
+
+
+def test_an_empty_file_moved_to_an_allowed_name_excuses_no_stray_beside_it() -> None:
+    def raw(status: str, path: str) -> str:
+        blobs = f"{EMPTY_BLOB} {'0' * 40}" if status == "D" else f"{'0' * 40} {EMPTY_BLOB}"
+        return f":100644 100644 {blobs} {status}\0{path}\0"
+
+    moved_and_stray = raw("D", "old-empty") + raw("A", "pkg/__init__.py") + raw("A", "stray")
+    moved_only = raw("D", "old-empty") + raw("A", "docs/new-empty")
+
+    assert map_raw_diff_to_new_empty_files(moved_and_stray) == ["stray"]
+    assert map_raw_diff_to_new_empty_files(moved_only) == []
 
 
 def test_parsing_cases_from_review(tmp_path: Path) -> None:
