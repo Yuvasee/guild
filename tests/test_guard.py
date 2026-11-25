@@ -113,7 +113,7 @@ def _commit(path: Path, files: dict[str, str], message: str) -> None:
 
 
 def _denial(output: str) -> str | None:
-    decision = json.loads(output)["hookSpecificOutput"] if output.strip() else {}
+    decision: dict[str, str] = json.loads(output)["hookSpecificOutput"] if output.strip() else {}
     return decision.get("permissionDecisionReason") if decision.get("permissionDecision") == "deny" else None
 
 
