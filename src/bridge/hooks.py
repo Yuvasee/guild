@@ -19,6 +19,7 @@ from bridge.board import (
     Party,
     Recipient,
     is_delivery_owner,
+    mark_user_parts_shown,
     merge_user_messages,
     next_hint_epoch,
     retarget_open_messages,
@@ -1300,6 +1301,8 @@ def handle_hook(
                 packed = add_parts(packed, merge_user_messages(typed))
                 if conversation_id and packed.later:
                     save_later_parts(conn, conversation_id, take_later_parts(conn, conversation_id) + packed.later)
+            if conversation_id:
+                mark_user_parts_shown(conn, conversation_id, packed.shown, at_ms)
             # Waiting parts must reach the very next tool result, not one 30 s later.
             hint_due = next_hint_epoch(leftover or bool(packed.later))
             if conversation_id and is_near_threshold(

@@ -1243,9 +1243,10 @@ function renderAskCard(ask, verified) {
   const act = async (path, body) => {
     const done = await post("/api/asks/" + ask.id + "/" + path, body);
     if (done.ok) askReasons.delete(ask.id);
-    // Saved, yet worth seeing: a reopen nobody was told of.
+    // Saved, yet worth seeing: a reopen nobody was told of. The page line keeps it once the card leaves the section.
     const note = done.ok && !["open again", "closed"].includes(done.detail) ? done.detail : "";
     setInputError(errorKey, done.ok ? note : refusal(done, "not saved"));
+    if (note) setStatus("Ask #" + ask.id + " " + note);
     refresh();
   };
   const close = el("button", "", "Close");

@@ -6,7 +6,14 @@ import time
 import traceback
 from typing import TextIO
 
-from bridge.board import is_delivery_owner, merge_user_messages, next_hint_epoch, take_delivery, write_hint
+from bridge.board import (
+    is_delivery_owner,
+    mark_user_parts_shown,
+    merge_user_messages,
+    next_hint_epoch,
+    take_delivery,
+    write_hint,
+)
 from bridge.compaction import is_context_full
 from bridge.config import Config, db_path, load_config
 from bridge.db import connect, transaction
@@ -95,6 +102,7 @@ def write_rewake(conn: sqlite3.Connection, config: Config, pid: int, event_ns: i
         user_parts = merge_user_messages(delivery.user_messages)
         packed = add_parts(pack_parts(waiting), [*user_parts, *context])
         save_later_parts(conn, conversation_id, packed.later)
+        mark_user_parts_shown(conn, conversation_id, packed.shown, at_ms)
         record_activity(conn, instance_id, "active", event_ns)
         out.write(packed.text + "\n")
         out.flush()

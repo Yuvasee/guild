@@ -141,8 +141,10 @@ def words(size: int) -> str:
 
 
 def assert_whole(text: str, context: str) -> None:
-    at = [context.find(word) for word in text.split()]
-    assert -1 not in at and at == sorted(at), "every word, in order"
+    numbered = text.split()
+    assert all(context.count(word) == 1 for word in numbered), "every word, once"
+    at = [context.find(word) for word in numbered]
+    assert at == sorted(at), "in order"
 
 
 @pytest.mark.parametrize("size", [1_500, 7_000])

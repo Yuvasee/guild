@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import cast
 
+from bridge.inject import drop_later_parts_of
 from bridge.registry import format_age
 
 KEEP_MAX_CHARS = 8_000
@@ -705,17 +706,22 @@ def reopen_unread_messages(conn: sqlite3.Connection, conversation_id: str) -> in
     ).fetchone()
     if row is None or row["context_unread_from"] is None:
         return 0
-    cursor = conn.execute(
-        """
-        UPDATE message_recipients
-        SET offered_at = NULL, acked_at = NULL, stuck_at = NULL, delivery_failed_at = NULL
-        WHERE conversation_id = ?1 AND offered_at >= ?2 AND typing_started_at IS NULL
-          AND done_at IS NULL AND declined_at IS NULL AND (acked_at IS NULL OR acked_at >= ?2)
-          AND message_id IN (SELECT id FROM messages WHERE cancelled_at IS NULL)
-        """,
-        (conversation_id, int(row["context_unread_from"])),
-    )
-    return cursor.rowcount
+    reopened = {
+        int(r[0])
+        for r in conn.execute(
+            """
+            UPDATE message_recipients
+            SET offered_at = NULL, acked_at = NULL, stuck_at = NULL, delivery_failed_at = NULL
+            WHERE conversation_id = ?1 AND offered_at >= ?2 AND typing_started_at IS NULL
+              AND done_at IS NULL AND declined_at IS NULL AND (acked_at IS NULL OR acked_at >= ?2)
+              AND message_id IN (SELECT id FROM messages WHERE cancelled_at IS NULL)
+            RETURNING message_id
+            """,
+            (conversation_id, int(row["context_unread_from"])),
+        ).fetchall()
+    }
+    drop_later_parts_of(conn, conversation_id, reopened)
+    return len(reopened)
 
 
 def save_keep(conn: sqlite3.Connection, conversation_id: str, text: str, at_ms: int) -> None:

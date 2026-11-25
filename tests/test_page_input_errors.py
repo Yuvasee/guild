@@ -143,3 +143,30 @@ def test_a_refused_publish_keeps_its_comment_while_another_form_is_open(tmp_path
     path.write_text(DOM + script.group(1) + PUBLISH_CHECKS)
     done = subprocess.run(["node", str(path)], capture_output=True, text=True, timeout=20, check=False)
     assert done.returncode == 0, done.stderr
+
+
+REOPEN_CHECKS = """
+const eq = (a, b) => { if (a !== b) throw new Error(JSON.stringify(a) + " !== " + JSON.stringify(b)); };
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+(async () => {
+  state.now = 1_000_000;
+  const ask = { id: 4, words: "Fix the export", at: 0, by: "lead", evidence: "e", how: "h" };
+  const card = renderAskCard(ask, true);
+  const reopen = find(card, (n) => n.tag === "button" && n.textContent === "Reopen");
+  const why = "open again, but alex was not told: its tab is locked or has no live session";
+  answer = async () => ({ status: 200, json: async () => ({ ok: true, detail: why }) });
+  reopen.onclick();
+  await settle();
+  eq(statusNote, "Ask #4 " + why);
+})().catch((error) => { console.error(error.stack); process.exit(1); });
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node to run the page's script")
+def test_a_reopen_nobody_was_told_of_stays_on_the_page_after_its_card_leaves(tmp_path: Path) -> None:
+    script = re.search(r"<script>(.*)</script>", PAGE.read_text(), re.S)
+    assert script is not None
+    path = tmp_path / "guild.js"
+    path.write_text(DOM + script.group(1) + REOPEN_CHECKS)
+    done = subprocess.run(["node", str(path)], capture_output=True, text=True, timeout=20, check=False)
+    assert done.returncode == 0, done.stderr

@@ -422,6 +422,19 @@ def _mark_offered(conn: sqlite3.Connection, conversation_id: str, rows: list[sql
         )
 
 
+def mark_user_parts_shown(conn: sqlite3.Connection, conversation_id: str, parts: list[Part], at_ms: int) -> None:
+    """A message's offer is dated by its last part shown, so a failed request that carried any part of it gives the
+    whole message again (reopen_unread_messages)."""
+    for message_id in {p.message_id for p in parts if p.message_id}:
+        conn.execute(
+            """
+            UPDATE message_recipients SET offered_at = ?1, acked_at = CASE WHEN acked_at IS NULL THEN NULL ELSE ?1 END
+            WHERE message_id = ?2 AND conversation_id = ?3 AND done_at IS NULL AND declined_at IS NULL
+            """,
+            (at_ms, message_id, conversation_id),
+        )
+
+
 def merge_user_messages(*groups: tuple[tuple[int, tuple[Part, ...]], ...]) -> list[Part]:
     """The parts of the user's messages, oldest message first."""
     return [part for _, parts in sorted(m for group in groups for m in group) for part in parts]
@@ -491,6 +504,7 @@ def convert_user_message_to_parts(message_id: int, handle: str, body: str) -> li
                 f"part {number} of {total} of {handle}'s message #{message_id}",
                 f"bridge show {message_id}",
                 in_order=True,
+                message_id=message_id,
             )
         )
     return parts

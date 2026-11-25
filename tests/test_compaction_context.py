@@ -1,10 +1,11 @@
 import json
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
 from conftest import BridgeEnv, SpawnProcess
 
-from bridge.board import SYSTEM_CONVERSATION, Party, send_message
+from bridge.board import SYSTEM_CONVERSATION, USER_CONVERSATION, Party, send_message
 from bridge.compaction import (
     DEAD_FAILING,
     DEAD_REFUSED,
@@ -17,6 +18,7 @@ from bridge.compaction import (
 )
 from bridge.db import now_ms, transaction
 from bridge.feed import resolve_tab
+from bridge.inject import Part, save_later_parts
 
 
 def _stamp(ms: int) -> str:
@@ -184,3 +186,74 @@ def test_clear_on_a_dead_tab_carries_its_unread_mail_as_unread(
     cleared = bridge_env.hook("SessionStart", {"session_id": "conv-z", "source": "clear"}, pid)
 
     assert "read me later" in _context(cleared.stdout)
+
+
+def _words(size: int) -> str:
+    return " ".join(f"w{i}x" for i in range(size))[:size].rsplit(" ", 1)[0]
+
+
+def _start_with_a_long_message(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> tuple[int, Path, str]:
+    """A tab whose next hook gives 3,000 characters of notes and part 1 of an 8,000-character message; part 2 waits."""
+    config = Path(bridge_env.env["BRIDGE_CONFIG"])
+    config.write_text(config.read_text() + "compact_at_tokens = 600000\n")
+    pid = spawn_process()
+    bridge_env.write_session_file(pid, "conv-x")
+    transcript = bridge_env.root / "x.jsonl"
+    transcript.write_text(_assistant(230_000, now_ms() - 60_000))
+    bridge_env.hook(
+        "SessionStart", {"session_id": "conv-x", "transcript_path": str(transcript), "source": "startup"}, pid
+    )
+    words = _words(8_000)
+    with bridge_env.connect() as conn, transaction(conn):
+        save_later_parts(conn, "conv-x", [Part("NOTES " + "n" * 3_000, "your notes")])
+        recipient = resolve_tab(conn, "conv-x", "x")
+        send_message(conn, Party(USER_CONVERSATION, "user"), [recipient], "info", words, now_ms())
+    return pid, transcript, words
+
+
+def _compact(bridge_env: BridgeEnv, pid: int, transcript: Path) -> str:
+    base = {"session_id": "conv-x", "transcript_path": str(transcript)}
+    with transcript.open("a") as f:
+        f.write(_failed("Prompt is too long", now_ms()))
+    bridge_env.hook("Stop", {**base, "last_assistant_message": "Prompt is too long"}, pid)
+    with transcript.open("a") as f:
+        f.write(json.dumps({"type": "system", "subtype": "compact_boundary"}) + "\n")
+    restored = bridge_env.hook("SessionStart", {**base, "source": "compact"}, pid)
+    after = bridge_env.hook("UserPromptSubmit", {**base, "prompt": "continue", "prompt_id": "p9"}, pid)
+    return _context(restored.stdout) + _context(after.stdout)
+
+
+def test_the_tail_of_the_users_long_message_comes_again_when_the_request_carrying_it_failed(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    pid, transcript, words = _start_with_a_long_message(bridge_env, spawn_process)
+    base = {"session_id": "conv-x", "transcript_path": str(transcript)}
+    first = _context(bridge_env.hook("UserPromptSubmit", {**base, "prompt": "go", "prompt_id": "p1"}, pid).stdout)
+    assert "user, part 1 of 2:" in first and "user, part 2 of 2:" not in first
+    time.sleep(0.05)
+    with transcript.open("a") as f:
+        f.write(_assistant(230_000, now_ms()))
+    time.sleep(0.05)
+    second = _context(bridge_env.hook("PostToolUse", {**base, "tool_name": "Bash"}, pid).stdout)
+    assert "user, part 2 of 2:" in second
+
+    given = _compact(bridge_env, pid, transcript)
+
+    tail = words.split()[-50:]
+    assert "user, part 2 of 2:" in given and all(word in given for word in tail), "its request failed: it comes again"
+
+
+def test_a_message_given_again_after_compaction_comes_once_in_order(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    pid, transcript, words = _start_with_a_long_message(bridge_env, spawn_process)
+    base = {"session_id": "conv-x", "transcript_path": str(transcript)}
+    first = _context(bridge_env.hook("UserPromptSubmit", {**base, "prompt": "go", "prompt_id": "p1"}, pid).stdout)
+    assert "user, part 1 of 2:" in first
+
+    given = _compact(bridge_env, pid, transcript)
+
+    numbered = words.split()
+    assert all(given.count(word) == 1 for word in numbered), "part 2 that waited does not come again besides"
+    at = [given.find(word) for word in numbered]
+    assert at == sorted(at)

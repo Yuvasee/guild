@@ -587,7 +587,7 @@ def test_a_reopen_reason_reaches_the_asks_owner_whole_as_the_owners_words(
     assert -1 not in at and at == sorted(at), "every word of the reason, in order"
 
 
-def test_a_reopen_nobody_could_be_told_of_says_so_on_the_page(
+def test_a_reopen_nobody_could_be_told_of_says_so_in_its_answer(
     bridge_env: BridgeEnv, spawn_process: SpawnProcess, dashboard: str
 ) -> None:
     team = make_lead_and_assistant(bridge_env, spawn_process)

@@ -22,6 +22,8 @@ class Part:
     """Made afresh at every session start, so a copy still waiting from before is dropped then."""
     in_order: bool = False
     """Waits while an earlier in_order part waits: the user's messages and their numbered parts keep their order."""
+    message_id: int = 0
+    """The message a part of the user's words belongs to: showing it dates that message's offer."""
 
 
 @dataclass(frozen=True)
@@ -140,8 +142,16 @@ def read_later_parts(conn: sqlite3.Connection, conversation_id: str) -> list[Par
     return _map_json_to_parts(str(row["later_context"]))
 
 
+def drop_later_parts_of(conn: sqlite3.Connection, conversation_id: str, message_ids: set[int]) -> None:
+    """A message given again whole takes the place of its parts still waiting, which would repeat it."""
+    parts = read_later_parts(conn, conversation_id)
+    kept = [p for p in parts if p.message_id not in message_ids]
+    if len(kept) < len(parts):
+        save_later_parts(conn, conversation_id, kept)
+
+
 def save_later_parts(conn: sqlite3.Connection, conversation_id: str, parts: list[Part]) -> None:
-    rows = [[p.text, p.name, p.command, p.rebuilt, p.in_order] for p in parts]
+    rows = [[p.text, p.name, p.command, p.rebuilt, p.in_order, p.message_id] for p in parts]
     text = json.dumps(rows, ensure_ascii=False) if parts else None
     conn.execute("UPDATE conversations SET later_context = ? WHERE conversation_id = ?", (text, conversation_id))
 
@@ -156,14 +166,16 @@ def _map_json_to_parts(text: str) -> list[Part]:
     parts: list[Part] = []
     for item in cast(list[object], raw):
         fields = cast(list[object], item) if isinstance(item, list) else []
-        if len(fields) in (4, 5) and all(isinstance(f, str) for f in fields[:3]):
+        if 4 <= len(fields) <= 6 and all(isinstance(f, str) for f in fields[:3]):
+            message_id = fields[5] if len(fields) == 6 else 0
             parts.append(
                 Part(
                     str(fields[0]),
                     str(fields[1]),
                     str(fields[2]),
                     bool(fields[3]),
-                    len(fields) == 5 and bool(fields[4]),
+                    len(fields) >= 5 and bool(fields[4]),
+                    message_id if isinstance(message_id, int) else 0,
                 )
             )
     return parts
