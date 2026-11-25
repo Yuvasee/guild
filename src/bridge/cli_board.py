@@ -56,6 +56,7 @@ from bridge.leads import find_lead_conversations, find_lead_of, is_conversation_
 from bridge.pages import NO_LINK_FLAG, find_unlinked_page_mention
 from bridge.pins import pin_link_once
 from bridge.registry import reconcile
+from bridge.review_doc_check import find_day_estimates, map_estimates_to_problem
 from bridge.watcher import (
     find_assistant_recipients,
     find_conversation_tab,
@@ -342,6 +343,8 @@ def cmd_post(args: argparse.Namespace, conn: sqlite3.Connection, config: Config)
     urls = [link.url for link in links]
     if problem := find_unlinked_page_mention(conn, shown, urls, bool(args.no_link), in_buttons):
         raise UsageError(problem)
+    if estimates := find_day_estimates("\n".join([shown, *in_buttons])):
+        print(f"warning: {map_estimates_to_problem(estimates)}", file=sys.stderr)
     if to := find_post_route(conn, config, me, str(args.kind), args.ask, bool(args.pin)):
         flags = [*(["urgent"] if args.urgent else []), *(["pin its link"] if args.pin else [])]
         fields = [
@@ -475,6 +478,8 @@ def cmd_tell_user(args: argparse.Namespace, conn: sqlite3.Connection, config: Co
     me = current_party(conn)
     if problem := find_unlinked_page_mention(conn, str(args.text), [], bool(args.no_link)):
         raise UsageError(f'{problem}. tell-user carries no link: use `bridge post {args.kind} "…" --link …`')
+    if estimates := find_day_estimates(str(args.text)):
+        print(f"warning: {map_estimates_to_problem(estimates)}", file=sys.stderr)
     if to := find_post_route(conn, config, me, str(args.kind), None, False):
         return send_draft(conn, config, me, to, str(args.kind), str(args.text), "", [], [])
     try:

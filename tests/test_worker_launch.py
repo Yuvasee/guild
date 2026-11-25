@@ -111,6 +111,7 @@ def test_guild_worker_starts_claude_without_chrome_and_briefs_it_on_the_browser(
     assert "codex exec ... </dev/null" in brief
     assert BROWSER_RULE in brief
     assert "a part headed Reviews" in brief
+    assert "Sizes are in kLOC" in brief
 
 
 @pytest.mark.parametrize(

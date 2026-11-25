@@ -295,7 +295,12 @@ hit it and when.
   and docs) and bridge asks the session that pushed last, or its lead once it has ended, else the PR's owner, to
   update it, once per new head until the owner has reviewed. Still behind an hour after the first ask, the assistant
   is told once; registering the doc again starts this over.
-- Light and dark (`prefers-color-scheme`), an explicit `body` background, and a readable width on a phone with no
-  sideways page scroll: long names in headings and code wrap (`overflow-wrap: anywhere`), wide tables and diagrams
-  scroll inside their own box.
+- Light and dark (`prefers-color-scheme`), an explicit `body` background, and a readable width with no sideways page
+  scroll: text in a ~75ch column inside a centred container of at most 1100 px (the shared style's default: set no
+  width of your own), a wider table or diagram grows to the window's edges and scrolls inside its own box only past
+  them, long names in headings wrap
+  (`overflow-wrap: anywhere`), code wraps only at a space, `/` or `.`. Colour diagrams with the theme
+  (`var(--ds-tint)`, `currentColor`), never a fixed background. `guild review doc` renders the doc light and dark and
+  warns of a full-window column, a diagram off the page's theme and faint diagram text.
+- Sizes are in kLOC, never in days or weeks of someone's time; `guild review doc` refuses '3 engineer-days'.
 - Re-check docs already in the owner's queue when this spec changes.

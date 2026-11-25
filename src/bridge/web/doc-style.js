@@ -9,6 +9,12 @@
   // A script that edits the doc skips diagrams, the viewer's own nav and popovers, and code.
   var SKIP = "svg,script,style,textarea,pre,code,kbd,samp,#bridge-doc-nav,#bdv-pop,.ds-chip,.mark,.tag,[data-ds-skip]";
   var root = document.documentElement;
+  // What <html> carried before this script and the contents bar changed it, so a copy saved from the browser can be
+  // given back as it was written.
+  if (!root.hasAttribute("data-bridge-root")) {
+    root.setAttribute("data-bridge-root", JSON.stringify({ c: root.getAttribute("class"), s: root.getAttribute("style"),
+      t: root.getAttribute("data-theme") }));
+  }
 
   // The reader's theme choice, kept for every page on this origin. It runs before the body is parsed, so the page
   // paints in the chosen theme: data-theme for docs that key on it, and the page's own prefers-color-scheme rules
@@ -76,6 +82,7 @@
     bar.setAttribute("role", "group");
     bar.setAttribute("aria-label", "Theme");
     bar.setAttribute("data-ds-skip", "");
+    bar.setAttribute("data-bridge-added", "switch");
     THEMES.forEach(function (t) {
       var b = document.createElement("button");
       b.type = "button";
@@ -141,37 +148,43 @@
     });
   }
 
-  // Long inline code may wrap after / . _ - and nowhere else; a short one stays on one line.
+  // Long inline code may wrap at a space, after / and after a dot, and nowhere else: never inside a name such as
+  // potential_issues or doc-style. A short one stays on one line.
   var LONG_CODE = 32;
   function codeBreaks() {
     [].forEach.call(document.querySelectorAll("code"), function (c) {
       if (c.closest("pre,svg,[data-ds-skip]") || c.children.length || c.classList.contains("ds-long")) return;
       var t = c.textContent;
-      // A path breaks after / _ -, so a file keeps its extension; a dotted name also after each dot.
-      var at = c.classList.contains("ds-path") || /\//.test(t) ? /(?<=[\/_-])(?=.)/ : /(?<=[._-])(?=.)/;
-      if (t.length <= LONG_CODE || t.split(at).length < 2) return;
+      // A path breaks after / only, so a file keeps its extension; a dotted name after each dot. Each part is a span
+      // that never wraps: wrapping text may otherwise break after any hyphen.
+      var at = c.classList.contains("ds-path") || /\//.test(t) ? /(?<=\/|\s)(?=\S)/ : /(?<=\.|\s)(?=\S)/;
+      var parts = t.split(at);
+      if (t.length <= LONG_CODE || parts.length < 2) return;
       c.textContent = "";
-      t.split(at).forEach(function (part, i) {
+      parts.forEach(function (part, i) {
+        var piece = document.createElement("span");
         // The first part keeps a path's icon on its line.
-        var piece = i ? document.createTextNode(part) : document.createElement("span");
+        piece.className = i ? "ds-seg" : "ds-seg ds-head";
+        piece.textContent = part;
         if (i) c.appendChild(document.createElement("wbr"));
-        else { piece.className = "ds-head"; piece.textContent = part; }
         c.appendChild(piece);
       });
       c.classList.add("ds-long");
     });
   }
 
-  // A table wider than its column scrolls sideways in its own box; one that fits keeps its sticky header.
+  // A table or diagram wider than its column scrolls sideways in its own box; one that fits keeps a table's sticky
+  // header.
   function wideTables() {
-    [].forEach.call(document.querySelectorAll("table"), function (t) {
+    [].forEach.call(document.querySelectorAll("table,svg"), function (t) {
       var box = t.parentElement;
-      if (!box || t.closest("[data-ds-skip],#bridge-doc-nav")) return;
-      var cs = getComputedStyle(box), room = box.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+      if (!box || t.closest("[data-ds-skip],#bridge-doc-nav") || (t.tagName !== "TABLE" && box.closest("svg"))) return;
+      var cs = getComputedStyle(box);
       if (!box.classList.contains("ds-scroll") && !/auto|scroll/.test(cs.overflowX)) {
-        if (t.offsetWidth <= room + 1) return;
+        if (outside(t, box) <= 1) return;
         var wrap = document.createElement("div");
         wrap.className = "ds-scroll";
+        wrap.setAttribute("data-bridge-wrap", "");
         box.insertBefore(wrap, t);
         wrap.appendChild(t);
         box = wrap;
@@ -179,30 +192,46 @@
       widen(box, t);
     });
   }
-  // A table wider than the text column takes all the width to the window's edge and spreads its columns over it, and
-  // scrolls only past that: a doc's narrow column otherwise left a wide empty margin beside a scrolling table.
+  // How far the block reaches past its box's content edge (its padding is not room for it).
+  function outside(t, box) {
+    var cs = getComputedStyle(box);
+    return t.getBoundingClientRect().width - (box.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight));
+  }
+  // A table or diagram wider than its column grows past the container to the window's edges, to the right first, then
+  // to the left, never under the side contents bar; only one wider than the window scrolls, inside its own box. A doc's
+  // narrow column otherwise left empty space beside a scrolling table.
   function widen(box, t) {
-    if (box.hasAttribute("data-ds-widened")) {
-      box.removeAttribute("data-ds-widened");
-      box.style.width = box.style.maxWidth = box.style.boxSizing = t.style.width = "";
-    }
-    var need = t.scrollWidth, have = box.clientWidth;
-    if (need <= have + 1 || getComputedStyle(box).direction === "rtl") return;
-    var left = box.getBoundingClientRect().left + window.scrollX;
-    var edge = document.documentElement.clientWidth - GUTTER;
+    var table = t.tagName === "TABLE";
+    [box, t].forEach(unwiden);
+    var over = outside(t, box);
+    if (over <= 1 || getComputedStyle(box).direction === "rtl") return;
+    var r = box.getBoundingClientRect(), lo = GUTTER, hi = root.clientWidth - GUTTER;
+    var nav = document.getElementById("bridge-doc-nav");
+    if (nav && nav.classList.contains("bdn-side")) lo = Math.max(lo, nav.getBoundingClientRect().right + GUTTER);
     // Never past an ancestor that clips or scrolls: the table would be cut off or scroll twice.
     for (var a = box.parentElement; a && a !== document.body && a !== root; a = a.parentElement) {
       if (getComputedStyle(a).overflowX !== "visible") {
-        edge = Math.min(edge, a.getBoundingClientRect().left + window.scrollX + a.clientWidth);
+        var ar = a.getBoundingClientRect();
+        lo = Math.max(lo, ar.left);
+        hi = Math.min(hi, ar.left + a.clientWidth);
       }
     }
-    var room = edge - left;
-    if (room <= box.offsetWidth + 1) return;
-    box.setAttribute("data-ds-widened", "");
+    var width = Math.min(Math.ceil(r.width + over), Math.floor(hi - Math.min(lo, r.left)));
+    if (width <= r.width + 1) return;
+    var shift = Math.max(0, Math.min(r.left - lo, r.left + width - hi));
+    [box, t].forEach(function (el) { el.setAttribute("data-ds-widened", el.getAttribute("style") || ""); });
     box.style.maxWidth = "none";
     box.style.boxSizing = "border-box";
-    box.style.width = Math.round(room) + "px";
-    t.style.width = "100%";
+    box.style.width = width + "px";
+    if (shift > 0) box.style.marginLeft = (parseFloat(getComputedStyle(box).marginLeft) || 0) - Math.ceil(shift) + "px";
+    if (table) t.style.width = "100%";
+  }
+  // The element's own inline style back, as it was before it was widened.
+  function unwiden(el) {
+    if (!el.hasAttribute("data-ds-widened")) return;
+    var own = el.getAttribute("data-ds-widened");
+    if (own) el.setAttribute("style", own); else el.removeAttribute("style");
+    el.removeAttribute("data-ds-widened");
   }
   var GUTTER = 24;
 
@@ -324,6 +353,7 @@
     s.src = HLJS;
     s.integrity = HLJS_SRI;
     s.crossOrigin = "anonymous";
+    s.setAttribute("data-bridge-added", "highlighter");
     // Offline or blocked: code stays readable, just not coloured.
     s.onload = function () { if (window.hljs) then(window.hljs); };
     document.head.appendChild(s);
@@ -379,11 +409,19 @@
     root.style.setProperty("--ds-sticky-top", top ? nav.offsetHeight + "px" : "0px");
   }
 
+  // A body whose own margins are both zero (a reset) would sit at the window's left edge once the container is
+  // narrower than the window: it is centred. Margins a page set to make room for something are left alone.
+  function centre() {
+    var b = document.body, cs = getComputedStyle(b);
+    if (parseFloat(cs.marginLeft) === 0 && parseFloat(cs.marginRight) === 0 && b.offsetWidth < root.clientWidth - 1)
+      b.classList.add("ds-center");
+  }
+
   function start() {
     if (root.hasAttribute("data-ds-done")) return;
     root.setAttribute("data-ds-done", "");
     applyTheme(chosen);
-    theme(); borders(); ownNumbers(); links(); inlineCode(); codeBreaks(); chips(); callouts(); blocks(); stickyTop();
+    centre(); theme(); borders(); ownNumbers(); links(); inlineCode(); codeBreaks(); chips(); callouts(); blocks(); stickyTop();
     wideTables(); themeSwitch();
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start); else start();

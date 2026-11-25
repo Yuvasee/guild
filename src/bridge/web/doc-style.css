@@ -62,7 +62,16 @@ body{font-size:18px!important}
 table{font-size:.92em!important}
 :is(td,th) table{font-size:1em!important}
 :is(td,th){font-size:inherit!important}
-:where(p,li,dd,blockquote){max-width:76ch}
+:where(p,li,dd,blockquote){max-width:75ch}
+
+/* Reading width: text in a ~75ch column inside a centred container of at most 1100px; a page that gives its body a
+   width of its own keeps it. A wider table or diagram grows to the window's edges (the script), and it and code scroll
+   inside their own box, never the page. */
+:where(body){max-width:1100px;padding-left:16px;padding-right:16px;box-sizing:border-box;margin-left:auto;
+margin-right:auto}
+body.ds-center{margin-left:auto;margin-right:auto}
+:where(img){max-width:100%;height:auto}
+:where(figure,.mermaid){max-width:100%;overflow-x:auto}
 
 /* No lines. The script lifts .ds-measure for a moment to see which boxes had a border and tints them instead. */
 :root:not(.ds-measure) body *:not(.ds-keep,[data-ds-skip],[data-ds-skip] *){border-style:none!important;
@@ -105,14 +114,15 @@ text-decoration:none;vertical-align:.12em}
 /* Inline code, and its two roles: file paths and code identifiers. */
 :where(:not(pre)>code){font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 background:var(--ds-code-bg);padding:.08em .4em;border-radius:6px}
-/* A name never breaks inside: a short one stays on one line, a long one (ds-long, given <wbr> after / . _ - by the
+/* A name never breaks inside: a short one stays on one line, a long one (ds-long, given <wbr> after / . or a space by the
    script) wraps only there. Forced, since many docs set overflow-wrap:anywhere and a larger size on code. */
 :not(pre)>code{font-size:.88em!important;white-space:nowrap!important;overflow-wrap:normal!important;
 word-break:normal!important}
 :not(pre)>code.ds-long{white-space:normal!important;overflow-wrap:break-word!important}
-code.ds-long .ds-head{white-space:nowrap}
+code.ds-long .ds-seg{white-space:nowrap}
 /* A table that scrolls keeps room for its text columns, not one word per line. */
 .ds-scroll{overflow-x:auto;max-width:100%}
+:where(table){width:100%}
 .ds-scroll>table{min-width:40em}
 code.ds-path{color:var(--ds-path);background:color-mix(in srgb,var(--ds-path) 12%,transparent)}
 code.ds-path:not(.ds-long)::before,code.ds-path .ds-head::before{content:"";

@@ -28,7 +28,7 @@ def test_a_served_doc_gets_the_shared_style_once_after_the_viewer() -> None:
     served = convert_doc_to_viewable(DOC).decode()
     assert served.count(f'id="{DOC_STYLE_ID}"') == 1
     assert served.index(f'id="{VIEW_ID}"') < served.index(f'id="{DOC_STYLE_ID}"') < served.index("<h2")
-    assert "</script" not in build_doc_style().removesuffix("</script>").split("<script>", 1)[1]
+    assert "</script" not in build_doc_style().removesuffix("</script>").split('<script data-bridge-added="style">')[1]
     assert not re.search(r"<script[^>]+src=", served), "the highlighter loads from the script, only for code blocks"
 
 
@@ -106,7 +106,10 @@ def test_registering_a_page_inlines_the_style_once(tmp_path: Path) -> None:
     assert page.read_text() == styled and styled.count(f'id="{DOC_STYLE_ID}"') == 1
 
 
-OLD_STYLE = '<style id="bridge-doc-style">td{border-radius:8px}</style><script>var a = 1 < 2;</script>'
+OLD_STYLE = (
+    '<style id="bridge-doc-style">td{border-radius:8px}</style>'
+    "<script>/* Shared doc style: highlights code blocks. */\n(function () { var a = 1 < 2; })();</script>"
+)
 
 
 def test_a_served_page_gets_the_current_style_in_place_of_an_older_copy_or_added() -> None:
@@ -352,7 +355,7 @@ const code = (text, cls) => ({
 });
 const codes = [code("a_really_long_configuration_filename.py", "ds-path"),
   code("services/order_service/handlers/refund.py:120", "ds-path"), code("billing.invoices.render_summary_lines"),
-  code("short_name"), code("x".repeat(40))];
+  code("short_name"), code("x".repeat(40)), code("{agent_id, run_id, potential_issues_count}")];
 globalThis.window = globalThis;
 globalThis.addEventListener = () => {};
 globalThis.location = { href: "http://127.0.0.1/", host: "127.0.0.1" };
@@ -374,13 +377,13 @@ globalThis.document = {
 };
 eval(SCRIPT);
 const got = codes.map((c) => c.parts.join(""));
-const want = ["a_|really_|long_|configuration_|filename.py", "services/|order_|service/|handlers/|refund.py:120",
-  "billing.|invoices.|render_|summary_|lines", "", ""];
+const want = ["", "services/|order_service/|handlers/|refund.py:120", "billing.|invoices.|render_summary_lines", "",
+  "", "{agent_id, |run_id, |potential_issues_count}"];
 if (JSON.stringify(got) !== JSON.stringify(want)) throw new Error(JSON.stringify(got));
 """
 
 
-def test_long_code_wraps_only_after_its_separators_and_a_file_keeps_its_extension(tmp_path: Path) -> None:
+def test_long_code_wraps_only_at_a_space_slash_or_dot_never_inside_a_name(tmp_path: Path) -> None:
     run_node(tmp_path, f"const SCRIPT = {json.dumps((WEB / 'doc-style.js').read_text())};\n{BREAKS}")
 
 
@@ -413,3 +416,102 @@ def test_a_served_page_is_told_the_kept_theme_before_the_shared_style() -> None:
     assert convert_page_to_themed(page, None) == page
     assert convert_page_to_themed(page, '"><script>') == page
     assert convert_page_to_themed(b"<body>no shared style</body>", "dark") == b"<body>no shared style</body>"
+
+
+SAVED = b"<!doctype html><html lang='en'><head><title>t</title></head><body><h2>A</h2><p>x</p><h2>B</h2></body></html>"
+
+
+def test_a_copy_saved_from_a_served_page_or_doc_is_served_like_the_original() -> None:
+    from bridge.doc_nav import convert_page_to_themed
+
+    def page(raw: bytes, theme: str) -> bytes:
+        return convert_page_to_themed(convert_served_page_to_styled(raw), theme)
+
+    def doc(raw: bytes, theme: str) -> bytes:
+        return convert_page_to_themed(convert_doc_to_viewable(raw), theme)
+
+    assert page(page(SAVED, "light"), "dark") == page(SAVED, "dark")
+    with_ids = SAVED.replace(b"<h2>A", b'<h2 id="a">A').replace(b"<h2>B", b'<h2 id="b">B')
+    assert page(doc(SAVED, "light"), "dark") == page(with_ids, "dark"), "a review doc saved and registered as a page"
+    assert doc(doc(SAVED, "light"), "dark") == doc(SAVED, "dark")
+    served = page(SAVED, "dark")
+    for part in (f'id="{DOC_STYLE_ID}"', "window.bridgeTheme=", f'id="{VIEW_ID}"', 'id="bridge-doc-nav"'):
+        assert served.count(part.encode()) == (1 if part in (f'id="{DOC_STYLE_ID}"', "window.bridgeTheme=") else 0)
+
+
+def test_a_copy_saved_from_the_browser_loses_the_marks_that_keep_the_style_from_running() -> None:
+    from bridge.doc_nav import BEHIND_BANNER_STYLE, remove_injected_parts
+
+    live = (
+        '<!doctype html><html data-viewer-terms="" lang="en" class="acme ds-light bdv-light ds-cs" data-theme="light" '
+        f'data-ds-done=""><head></head><body><div style="{BEHIND_BANNER_STYLE}">doc older than code</div><p>x</p>'
+        '<div id="ds-theme" role="group" data-ds-skip=""><button>Light</button></div></body></html>'
+    )
+    bare, found = remove_injected_parts(live)
+    assert bare == '<!doctype html><html lang="en" class="acme"><head></head><body><p>x</p></body></html>'
+    assert found == ["the marks on <html>", "the behind-the-PR line", "the theme switch"]
+    padded = (
+        '<html data-ds-done="" style="padding-left: 268px; box-sizing: border-box; color: red"><body></body></html>'
+    )
+    assert remove_injected_parts(padded)[0] == '<html style="color: red"><body></body></html>', "the bar's gutter goes"
+    own = '<!doctype html><html data-theme="dark"><body><pre>&lt;nav id="bridge-doc-nav"&gt;</pre></body></html>'
+    assert remove_injected_parts(own) == (own, []), "a page's own data-theme, and markup shown as text, stay"
+
+
+def test_only_what_bridge_added_is_removed_never_the_pages_own_markup_or_scripts() -> None:
+    from bridge.doc_nav import remove_injected_parts
+
+    for own in (
+        '<textarea><nav id="bridge-doc-nav">Authored example</nav></textarea>',
+        '<template><div id="ds-theme">An example</div></template>',
+        '<script>var shown = "<nav id=\\"bridge-doc-nav\\">x</nav><div id=\\"ds-theme\\"></div>";</script>',
+        '<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>'
+        "<script>hljs.highlightAll();</script>",
+        "<p>Set <code>window.bridgeTheme</code> to pick one.</p><script>window.bridgeTheme = pick();</script>",
+    ):
+        page = f"<!doctype html><html lang='en'><body>{own}</body></html>"
+        assert remove_injected_parts(page) == (page, []), own
+    added = (
+        '<head><script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js" '
+        'data-bridge-added="highlighter"></script></head><body><div class="ds-scroll" data-bridge-wrap="">'
+        '<table data-ds-widened="" style="width: 100%;"><tr><td><code class="ds-path ds-long"><span class="ds-seg '
+        'ds-head">potential_</span><wbr><span class="ds-seg">issues.py</span></code></td></tr></table></div>'
+        '<p class="lead bdv-in2">x</p></body>'
+    )
+    bare, found = remove_injected_parts(added)
+    assert bare == (
+        '<head></head><body><table><tr><td><code class="ds-path">potential_issues.py</code></td></tr></table>'
+        '<p class="lead">x</p></body>'
+    )
+    assert found == ["the code highlighter", "the scroll boxes", "the widened tables", "the code line breaks",
+        "the layout classes"]  # fmt: skip
+
+
+def test_registering_a_saved_served_copy_keeps_one_current_style_and_says_what_it_removed(tmp_path: Path) -> None:
+    from bridge.doc_nav import convert_page_to_themed
+
+    page = tmp_path / "index.html"
+    page.write_bytes(convert_page_to_themed(convert_doc_to_viewable(SAVED), "dark"))
+    assert add_doc_style_to_page(str(tmp_path)) == (
+        f"updated the shared doc style in {page}; removed what bridge adds when serving it: the marks on <html>, "
+        "the contents bar, the viewer, the theme choice"
+    )
+    assert page.read_bytes() == convert_served_page_to_styled(SAVED).replace(b"<h2>A", b'<h2 id="a">A').replace(
+        b"<h2>B", b'<h2 id="b">B'
+    )
+
+
+def test_old_unmarked_scripts_are_known_by_what_they_hold_never_by_where_they_sit() -> None:
+    from bridge.doc_nav import remove_injected_parts
+
+    style = '<style id="bridge-doc-style">p{}</style>'
+    style_script = "<script>/* Shared doc style: highlights code blocks. */\n(function () {})();</script>"
+    view = f'<style id="{VIEW_ID}">.x{{}}</style>'
+    view_script = "<script>document.documentElement.setAttribute('data-viewer-terms','');(function(){})();</script>"
+    saved = (
+        f"<!doctype html><html data-viewer-terms=\"\" lang='en'><body>{style}\n{style_script}<p>x</p>{view}"
+        f"<script>author()</script>\n{view_script}</body></html>"
+    )
+    bare, found = remove_injected_parts(saved)
+    assert bare == "<!doctype html><html lang='en'><body>\n<p>x</p><script>author()</script>\n</body></html>"
+    assert found == ["the marks on <html>", "the shared doc style", "the viewer"]

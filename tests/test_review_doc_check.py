@@ -579,6 +579,20 @@ def test_a_term_list_written_as_prose_is_refused() -> None:
     ]
 
 
+def test_under_a_glossary_heading_two_term_pairs_already_make_a_list() -> None:
+    one = "<h3>Words used in the tables</h3><p>Run: one pass of the scan. Window: the hour it covers.</p>"
+    assert glossary(one) == [
+        "a paragraph under 'What changes and why' (\"Run: one pass of the scan. …\") is a term list written as "
+        "prose, with 2 'term: meaning' pairs; make it a list (<ul> or <dl>) or a two-column table"
+    ]
+    two = "<h3>Terms</h3><p>Run: one pass.</p><p>Window: the hour.</p>"
+    assert glossary(two) == [
+        "'Terms' defines 2 terms in paragraphs; make it a list (<ul> or <dl>) or a two-column table"
+    ]
+    assert glossary("<h3>Terms</h3><p>Run: one pass of the scan, each hour.</p>") == []
+    assert glossary("<p>Run: one pass of the scan. Window: the hour it covers.</p>") == [], "no glossary heading"
+
+
 def test_a_term_list_as_a_list_or_a_table_and_a_paragraph_with_one_colon_pass() -> None:
     terms = [("Run", "one pass."), ("Window", "the hour."), ("Cursor", "where it stopped.")]
     dl = "<h3>Terms</h3><dl>" + "".join(f"<dt>{term}</dt><dd>{meaning}</dd>" for term, meaning in terms) + "</dl>"

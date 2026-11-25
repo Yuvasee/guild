@@ -452,6 +452,7 @@ Full usage and flags: [docs/commands.md](docs/commands.md), or `<command> --help
 | [`bridge unpin`](docs/commands.md#bridge-unpin) | take a pin off the Pinned page; it is kept, hidden |
 | [`bridge pins`](docs/commands.md#bridge-pins) | the pins on the Pinned page, newest first |
 | [`bridge page add`](docs/commands.md#bridge-page-add) | register a page by its lasting source folder (never /tmp) |
+| [`bridge page check`](docs/commands.md#bridge-page-check) | render pages light and dark in a headless browser and list what reads badly: a full-window column, diagrams off the page's theme, low-contrast diagram text, sizes in days |
 | [`bridge page set-url`](docs/commands.md#bridge-page-set-url) | the page's claude.ai artifact link, after a (re)publish |
 | [`bridge page share`](docs/commands.md#bridge-page-share) | mark the page as shared with colleagues; --off to unmark |
 | [`bridge page archive`](docs/commands.md#bridge-page-archive) | retire the page: /p/<slug> stops redirecting and the plan skips it |

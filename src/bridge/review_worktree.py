@@ -17,7 +17,7 @@ from typing import cast
 from bridge.backport import is_backport_base
 from bridge.config import Config, state_dir
 from bridge.db import now_ms, transaction
-from bridge.doc_nav import convert_doc_to_viewable
+from bridge.doc_nav import ADDED, BEHIND_BANNER_STYLE, convert_doc_to_viewable, remove_injected_parts
 from bridge.leads import REVIEW_DOC_SPEC
 from bridge.review_doc_check import PlainLimits, find_doc_problems, read_doc_head
 from bridge.review_marks import convert_reviews_to_text, map_html_to_reviews
@@ -977,7 +977,8 @@ def register_doc(conn: sqlite3.Connection, config: Config, ref: str, source: Pat
         raise DocError(f"{source} is not an HTML file")
     if source.stat().st_size > DOC_MAX_BYTES:
         raise DocError(f"{source} is over {DOC_MAX_BYTES // 1_000_000} MB")
-    page = source.read_bytes()
+    text, _ = remove_injected_parts(source.read_bytes().decode("utf-8", "surrogateescape"))
+    page = text.encode("utf-8", "surrogateescape")
     commit = read_doc_head(page) or str(row["head_oid"])
     files = list_files_at(Path(str(row["wt_path"])), commit) if row["wt_path"] else None
     limits = PlainLimits(
@@ -1095,10 +1096,7 @@ def map_doc_to_served(conn: sqlite3.Connection, repo: str, number: int) -> bytes
     if current:
         return doc
     words = map_row_to_doc_behind(row)
-    banner = (
-        '<div style="font:14px system-ui,sans-serif;padding:8px 12px;background:#fff3cd;color:#5c4400;'
-        f'border-radius:0 0 10px 10px">{words}</div>'
-    ).encode()
+    banner = f'<div {ADDED}="behind" style="{BEHIND_BANNER_STYLE}">{words}</div>'.encode()
     body = _BODY_TAG_RE.search(doc)
     return doc[: body.end()] + banner + doc[body.end() :] if body else banner + doc
 

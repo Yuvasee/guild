@@ -273,7 +273,14 @@ Keep the source in `<pages folder>/<slug>/`, the folder your role names (never /
 `bridge page add <slug> --title "…" --source <pages folder>/<slug> [--url <claude.ai artifact url>]`, and after
 each publish run `bridge page set-url <slug> <url>`. `page add` writes the shared doc style (a magazine look:
 h1 band, numbered h2s, zebra tables, code highlighting, link, path and evidence roles, no borders) into the page's HTML
-file, and /p/<slug> serves the page with the current one; publish the file after it, or republish. Its opt-in classes
+file, and /p/<slug> serves the page with the current one; publish the file after it, or republish. It also removes
+what bridge adds when serving (contents bar, viewer, theme choice) from a copy saved off a served page, and renders the
+page light and dark in a headless browser (Chrome or Chromium; `BRIDGE_BROWSER` names another, empty turns it off) to
+warn of a main column across the whole window, a diagram whose background is not the page's, faint diagram text, and
+sizes in days instead of kLOC; `bridge page check <slug>|--all|--file <html>` runs the same check again. The style
+keeps text in a ~75ch column inside a centred container of at most 1100 px; a wider table or diagram grows past it to
+the window's edges (never under the contents bar) and scrolls in its own box only when wider than that; code scrolls in
+its own box. Its opt-in classes
 (header band, section headers, callouts, badges, cards, diagrams) are in [page-style.md](page-style.md). In pins (`bridge pin --link`), notes, feed posts and reports
 refer to it as `http://127.0.0.1:8765/p/<slug>`, which redirects to the current artifact. Colleagues get the
 claude.ai link itself; then mark the page `bridge page share <slug>`. `bridge pages` lists them,

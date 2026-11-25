@@ -77,6 +77,8 @@ def pytest_configure(config: pytest.Config) -> None:
     session = Path(tempfile.mkdtemp(prefix="bridge-tests-"))
     os.environ["BRIDGE_STATE_DIR"] = str(session / "state")
     os.environ["BRIDGE_CONFIG"] = str(session / "no-config.toml")
+    # Commands that render a page in a headless browser skip it: a test that renders asks for the browser itself.
+    os.environ["BRIDGE_BROWSER"] = ""
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:

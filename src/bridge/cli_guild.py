@@ -126,6 +126,7 @@ from bridge.leads import (
     write_notes,
 )
 from bridge.linear_cli import add_linear_commands
+from bridge.page_check import check_review_doc
 from bridge.project_owner import find_domain_overlaps, warn_on_taken_issues
 from bridge.refs import map_text_to_ref
 from bridge.registry import (
@@ -209,6 +210,7 @@ WORKER_PAGES_RULE = (
     "Pages are local, never claude.ai: write _pages/<slug>/index.html and run `bridge page add <slug>` (on a worker "
     "host, push the page or tell your lead its path); the Artifact tool is refused."
 )
+WORKER_SIZES_RULE = "Sizes are in kLOC (lines of code added or changed), never in days or weeks of someone's time."
 # Without a terminal on stdin, codex exec waits for more input forever: two reviews hung for hours at 0% CPU.
 WORKER_CODEX_RULE = (
     "Run codex exec with </dev/null and under a timeout (timeout 900 codex exec ... </dev/null); "
@@ -853,7 +855,8 @@ def build_worker_brief(
     place = f"{where}\n" if where else ""
     return (
         f"{constitution}\n\n{place}# Your task\n\n{prompt.strip()}\n\n{rules}\n"
-        f"{WORKER_BROWSER_RULE.format(owner=config.owner_name)}\n{WORKER_PAGES_RULE}\n{WORKER_CODEX_RULE}\n\n{report}\n"
+        f"{WORKER_BROWSER_RULE.format(owner=config.owner_name)}\n{WORKER_PAGES_RULE}\n{WORKER_SIZES_RULE}\n"
+        f"{WORKER_CODEX_RULE}\n\n{report}\n"
     )
 
 
@@ -1464,6 +1467,11 @@ def cmd_review_doc(args: argparse.Namespace, conn: sqlite3.Connection, config: C
     print(f"{ref}: document registered")
     for warning in screen_doc_for_warnings(page, config):
         print(f"warning: {warning}", file=sys.stderr)
+    rendered, skipped = check_review_doc(page)
+    for warning in rendered:
+        print(f"warning: {warning}", file=sys.stderr)
+    if skipped:
+        print(f"note: {skipped}", file=sys.stderr)
     return 0
 
 

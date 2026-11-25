@@ -907,13 +907,13 @@ def test_the_page_serves_registered_docs_only_and_sandboxed(
 
     with urllib.request.urlopen(f"{dashboard}/reviews/Org/app/7/doc", timeout=5) as response:
         served = response.read()
-        assert served.endswith(b"<p>First reader: passed.</p>") and b'<style id="bridge-doc-view">' in served
+        assert served.endswith(b"<p>First reader: passed.</p>") and b'<style id="bridge-doc-view"' in served
         assert response.headers["Content-Security-Policy"] == "sandbox allow-scripts"
         assert response.headers["Cache-Control"] == "no-store"
-        assert b"<script>window.bridgeTheme=" not in served
+        assert b"window.bridgeTheme=" not in served
     (Path(env["BRIDGE_STATE_DIR"]) / "theme").write_text("light\n")
     with urllib.request.urlopen(f"{dashboard}/reviews/Org/app/7/doc", timeout=5) as response:
-        assert b'<script>window.bridgeTheme="light";</script><style id="bridge-doc-style">' in response.read()
+        assert b'window.bridgeTheme="light";</script><style id="bridge-doc-style"' in response.read()
 
 
 def test_a_worktree_gets_a_workspace_beside_it_that_opens_on_its_pr(tmp_path: Path) -> None:

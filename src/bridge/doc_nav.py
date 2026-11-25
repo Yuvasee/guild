@@ -1,9 +1,12 @@
 import html
+import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import cache
 from html.parser import HTMLParser
 from importlib.resources import files
+from typing import cast
 
 NAV_ID = "bridge-doc-nav"
 VIEW_ID = "bridge-doc-view"
@@ -12,9 +15,38 @@ TERMS_FLAG = "data-viewer-terms"
 MIN_HEADINGS = 2
 NAV_MAX_BYTES = 2_000_000
 _HEAD_END_RE = re.compile(r"</head\s*>", re.I)
-_WRITTEN_DOC_STYLE_RE = re.compile(
-    rf'<style id="{DOC_STYLE_ID}">(?:(?!</style>).)*</style><script>(?:(?!</script>).)*</script>', re.S
+ADDED = "data-bridge-added"
+"""Marks every element bridge adds to a page, served or live, so a saved copy loses exactly those."""
+TERMS_ADDED = "data-bridge-terms"
+"""Beside the terms flag when bridge, not the doc, set it."""
+ROOT_RECORD = "data-bridge-root"
+"""The <html> class, style and data-theme as the page had them, before the shared style and the contents bar."""
+BEHIND_BANNER_STYLE = (
+    "font:14px system-ui,sans-serif;padding:8px 12px;background:#fff3cd;color:#5c4400;border-radius:0 0 10px 10px"
 )
+_THEME_SCRIPT_RE = re.compile(rf'<script {ADDED}="theme">window\.bridgeTheme="[a-z]*";</script>'.encode())
+_LEGACY_THEME_RE = re.compile(r'window\.bridgeTheme="[a-z]*";')
+_LEGACY_SCRIPT_RE = re.compile(
+    r"\s*(?:(?P<style>/\* Shared doc style:)"
+    rf"|(?P<viewer>document\.documentElement\.setAttribute\('{TERMS_FLAG}',''\);))"
+)
+"""How each unmarked script bridge added before it marked its parts began, in every version it shipped."""
+_PARTS = {
+    "bar": "the contents bar",
+    "viewer": "the viewer",
+    "style": "the shared doc style",
+    "theme": "the theme choice",
+    "switch": "the theme switch",
+    "popover": "the term popover",
+    "highlighter": "the code highlighter",
+    "behind": "the behind-the-PR line",
+}
+"""What each value of the mark names."""
+_LEGACY_IDS = {NAV_ID: "bar", VIEW_ID: "viewer", DOC_STYLE_ID: "style", "ds-theme": "switch", "bdv-pop": "popover"}
+"""Parts bridge added before it marked them, known by an id only bridge uses."""
+_ATTR_RE = re.compile(r"""\s+([^\s=>/"']+)(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>"']+))?""")
+_SCRIPT_CLASSES = frozenset({"bdv-in2", "bdv-in3", "ds-center"})
+_LEGACY_ROOT_STYLE = ("padding-left", "padding-top", "box-sizing", "--ds-sticky-top")
 _INERT_TAGS = ("template", "textarea")
 _RAW_TAGS = ("script", "style")
 
@@ -189,6 +221,7 @@ if(y+h>vh-8)y=r.top-h-6>=8?r.top-h-6:Math.max(8,vh-h-8);pop.style.left=x+"px";po
 function close(){if(!owner)return;owner.setAttribute("aria-expanded","false");owner.removeAttribute("aria-describedby");
 owner=null;pop.hidden=true}
 function open(t){if(!pop){pop=document.createElement("div");pop.id="bdv-pop";pop.setAttribute("role","tooltip");
+pop.setAttribute("data-bridge-added","popover");
 document.body.appendChild(pop)}close();owner=t;pop.textContent=t.getAttribute("data-def");pop.hidden=false;
 t.setAttribute("aria-expanded","true");t.setAttribute("aria-describedby","bdv-pop");place()}
 function termOf(e){var n=e.target;return n&&n.closest?n.closest(".term[data-def]"):null}
@@ -275,13 +308,245 @@ class _DocScanner(HTMLParser):
             self.after_doctype = self.text.index(">", self.position()) + 1
 
 
+def _build_tag(tag: str, attrs: list[tuple[str, str | None]]) -> str:
+    return f"<{tag}" + "".join(f" {k}" if v is None else f' {k}="{html.escape(v)}"' for k, v in attrs) + ">"
+
+
+def _drop_classes(attrs: list[tuple[str, str | None]], drop: Callable[[str], bool]) -> list[tuple[str, str | None]]:
+    out: list[tuple[str, str | None]] = []
+    for name, value in attrs:
+        if name == "class" and value is not None:
+            value = " ".join(c for c in value.split() if not drop(c))
+            if not value:
+                continue
+        out.append((name, value))
+    return out
+
+
+class _AddedScanner(HTMLParser):
+    """Where a page holds what bridge added, as a browser would parse it: never inside a script, a style, a comment, a
+    textarea or a template. Each edit is (start, end, replacement)."""
+
+    def __init__(self, text: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self.text = text
+        self.line_starts = [0] + [m.end() for m in re.finditer("\n", text)]
+        self.edits: list[tuple[int, int, str]] = []
+        self.found: list[str] = []
+        self.inert = 0
+        self._cut: tuple[str, int, int, str] | None = None
+        """An element being removed: its tag, where it starts, how deep same-named tags nest in it, what it is."""
+        self._root: tuple[list[tuple[str, str | None]], int, int] | None = None
+        """The <html> tag, edited once the whole page is read: a legacy viewer found later decides what is ours."""
+        self._script: tuple[int, list[str]] | None = None
+        self._code: tuple[int, str, list[str], int] | None = None
+        """A long code element being undone: start, its start tag rebuilt, its text, nesting."""
+        self._unwrap: list[tuple[str, int]] = []
+        """Wrappers being unwrapped: tag, nesting of same-named tags."""
+        self.legacy_view = False
+
+    def position(self) -> int:
+        line, column = self.getpos()
+        return self.line_starts[line - 1] + column
+
+    def _tag_end(self, at: int) -> int:
+        return self.text.index(">", at) + 1
+
+    def _note(self, what: str) -> None:
+        if what not in self.found:
+            self.found.append(what)
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self._open(tag, attrs, self.position(), closed=False)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self._open(tag, attrs, self.position(), closed=True)
+
+    def _open(self, tag: str, attrs: list[tuple[str, str | None]], at: int, closed: bool) -> None:
+        end = at + len(self.get_starttag_text() or "")
+        if self._cut is not None:
+            if tag == self._cut[0] and not closed:
+                self._cut = (self._cut[0], self._cut[1], self._cut[2] + 1, self._cut[3])
+            return
+        if self._code is not None:
+            if tag == "code" and not closed:
+                self._code = (*self._code[:3], self._code[3] + 1)
+            return
+        if tag in _INERT_TAGS and not closed:
+            self.inert += 1
+        if self.inert:
+            return
+        named = dict(attrs)
+        own_id = named.get("id") or ""
+        what = (
+            _PARTS.get(named[ADDED] or "", "what bridge added") if ADDED in named
+            else _PARTS[_LEGACY_IDS[own_id]] if tag in ("nav", "style", "div") and own_id in _LEGACY_IDS
+            else _PARTS["behind"] if tag == "div" and attrs == [("style", BEHIND_BANNER_STYLE)]
+            else None
+        )  # fmt: skip
+        if tag == "script" and not attrs and what is None:
+            self._script = (at, [])
+        if what is not None:
+            if own_id == VIEW_ID and ADDED not in named:
+                self.legacy_view = True
+            self._note(what)
+            if closed:
+                self.edits.append((at, end, ""))
+            else:
+                self._cut = (tag, at, 0, what)
+            return
+        if tag == "html":
+            self._root = (attrs, at, end)
+            return
+        if "data-bridge-wrap" in named and not closed:
+            self.edits.append((at, end, ""))
+            self._unwrap.append((tag, 0))
+            self._note("the scroll boxes")
+            return
+        if self._unwrap and tag == self._unwrap[-1][0] and not closed:
+            self._unwrap[-1] = (tag, self._unwrap[-1][1] + 1)
+        classes = (named.get("class") or "").split()
+        if tag == "code" and "ds-long" in classes and not closed:
+            rebuilt = _build_tag(tag, _drop_classes(attrs, lambda c: c == "ds-long"))
+            self._code = (at, rebuilt, [], 0)
+            self._note("the code line breaks")
+            return
+        new = attrs
+        if "data-ds-widened" in named:
+            own = named["data-ds-widened"] or ""
+            new = [(k, v) for k, v in new if k not in ("data-ds-widened", "style")] + ([("style", own)] if own else [])
+            self._note("the widened tables")
+        if any(c in _SCRIPT_CLASSES for c in classes):
+            new = _drop_classes(new, lambda c: c in _SCRIPT_CLASSES)
+            self._note("the layout classes")
+        if new is not attrs:
+            self.edits.append((at, end, _build_tag(tag, new)))
+
+    def _edit_root(self, attrs: list[tuple[str, str | None]], at: int, end: int) -> None:
+        named = dict(attrs)
+        record = named.get(ROOT_RECORD)
+        legacy_done = "data-ds-done" in named and record is None
+        ours = {ROOT_RECORD, "data-ds-done", TERMS_ADDED}
+        if TERMS_ADDED in named or self.legacy_view or "data-ds-done" in named:
+            ours.add(TERMS_FLAG)
+        new = [(k, v) for k, v in attrs if k not in ours]
+        if record is not None:
+            try:
+                loaded: object = json.loads(record)
+            except ValueError:
+                loaded = {}
+            kept = cast("dict[str, object]", loaded) if isinstance(loaded, dict) else {}
+            new = [(k, v) for k, v in new if k not in ("class", "style", "data-theme")]
+            for key, name in (("c", "class"), ("s", "style"), ("t", "data-theme")):
+                if isinstance(value := kept.get(key), str) and value:
+                    new.append((name, value))
+        elif legacy_done:
+            new = _drop_classes(new, lambda c: c.startswith(("ds-", "bdv-")))
+            new = [(k, v) for k, v in new if k != "data-theme"]
+            new = [(k, _drop_declarations(v, _LEGACY_ROOT_STYLE) if k == "style" else v) for k, v in new]
+            new = [(k, v) for k, v in new if not (k == "style" and not v)]
+        if new == attrs:
+            return
+        dropped = {k for k, _ in attrs} - {k for k, _ in new}
+        kept_as_is = all((k, v) in attrs for k, v in new)
+        # Only dropping marks: the rest of the tag stays as the author wrote it.
+        tag_text = self.text[at:end]
+        piece = (
+            _ATTR_RE.sub(lambda m: "" if m.group(1).lower() in dropped else m.group(0), tag_text)
+            if kept_as_is
+            else (_build_tag("html", new))
+        )
+        self.edits.append((at, end, piece))
+        self.found.insert(0, "the marks on <html>")
+
+    def handle_endtag(self, tag: str) -> None:
+        at = self.position()
+        if self._cut is not None:
+            name, start, depth, what = self._cut
+            if tag != name:
+                return
+            if depth:
+                self._cut = (name, start, depth - 1, what)
+                return
+            end = self._tag_end(at)
+            self.edits.append((start, end, ""))
+            self._cut = None
+            return
+        if self._code is not None:
+            start, rebuilt, words, depth = self._code
+            if tag != "code":
+                return
+            if depth:
+                self._code = (start, rebuilt, words, depth - 1)
+                return
+            self.edits.append(
+                (start, self._tag_end(at), rebuilt + html.escape("".join(words), quote=False) + "</code>")
+            )
+            self._code = None
+            return
+        if tag in _INERT_TAGS and self.inert:
+            self.inert -= 1
+            return
+        if tag == "script" and self._script is not None:
+            start, words = self._script
+            self._script = None
+            content = "".join(words)
+            if _LEGACY_THEME_RE.fullmatch(content):
+                self.edits.append((start, self._tag_end(at), ""))
+                self._note("the theme choice")
+            elif legacy := _LEGACY_SCRIPT_RE.match(content):
+                self.edits.append((start, self._tag_end(at), ""))
+                self._note(_PARTS[legacy.lastgroup or "style"])
+                self.legacy_view = self.legacy_view or legacy.lastgroup == "viewer"
+        if self._unwrap and tag == self._unwrap[-1][0]:
+            name, depth = self._unwrap[-1]
+            if depth:
+                self._unwrap[-1] = (name, depth - 1)
+            else:
+                self._unwrap.pop()
+                self.edits.append((at, self._tag_end(at), ""))
+
+    def close(self) -> None:
+        super().close()
+        if self._root is not None:
+            self._edit_root(*self._root)
+
+    def handle_data(self, data: str) -> None:
+        if self._code is not None:
+            self._code[2].append(data)
+        elif self._script is not None:
+            self._script[1].append(data)
+
+
+def _drop_declarations(style: str | None, names: tuple[str, ...]) -> str | None:
+    if style is None:
+        return None
+    kept = [d.strip() for d in style.split(";") if d.strip() and d.split(":", 1)[0].strip().lower() not in names]
+    return "; ".join(kept)
+
+
+def remove_injected_parts(text: str) -> tuple[str, list[str]]:
+    """The page without what bridge added to it, served or live in a browser, and the names of what was there; a page
+    with none of it comes back as it was. Only parts bridge marked as its own, or that carry an id only bridge uses, are
+    removed, and only where a browser would read them as elements."""
+    scanner = _AddedScanner(text)
+    try:
+        scanner.feed(text)
+        scanner.close()
+    except (AssertionError, ValueError):
+        return text, []
+    for start, end, piece in sorted(scanner.edits, key=lambda edit: edit[0], reverse=True):
+        text = text[:start] + piece + text[end:]
+    return text, scanner.found
+
+
 def convert_doc_to_viewable(doc: bytes) -> bytes:
     """The doc with the viewer's styles and term popovers, its <html> flagged so the doc's own fallback stays off, and,
     with two or more h2/h3 headings, ids on them and a contents bar built from them; as is when it already carries
     them or is too large to scan on each request."""
     if len(doc) > NAV_MAX_BYTES:
         return doc
-    text = doc.decode("utf-8", "surrogateescape")
+    text, _ = remove_injected_parts(doc.decode("utf-8", "surrogateescape"))
     scanner = _DocScanner(text)
     try:
         scanner.feed(text)
@@ -292,7 +557,7 @@ def convert_doc_to_viewable(doc: bytes) -> bytes:
         return doc
     edits: list[tuple[int, str]] = []
     if scanner.html_attrs_at is not None and scanner.html_attrs_at >= 0:
-        edits.append((scanner.html_attrs_at, f" {TERMS_FLAG}"))
+        edits.append((scanner.html_attrs_at, f" {TERMS_FLAG} {TERMS_ADDED}"))
     nav = ""
     if len(scanner.headings) >= MIN_HEADINGS:
         taken = set(scanner.ids)
@@ -310,8 +575,10 @@ def convert_doc_to_viewable(doc: bytes) -> bytes:
         (at for at in (scanner.after_body, scanner.after_head, scanner.after_doctype) if at is not None), 0
     )
     view = (
-        f'<style id="{VIEW_ID}">{_VIEW_STYLE}</style>'
-        f"<script>document.documentElement.setAttribute('{TERMS_FLAG}','');{_VIEW_SCRIPT}</script>"
+        f'<style id="{VIEW_ID}" {ADDED}="viewer">{_VIEW_STYLE}</style>'
+        f'<script {ADDED}="viewer">'
+        f"(function(r){{if(!r.hasAttribute('{TERMS_FLAG}'))r.setAttribute('{TERMS_ADDED}','');"
+        f"r.setAttribute('{TERMS_FLAG}','')}})(document.documentElement);{_VIEW_SCRIPT}</script>"
     )
     style = "" if DOC_STYLE_ID in scanner.ids else build_doc_style()
     edits.append((insert_at, nav + view + style))
@@ -321,22 +588,21 @@ def convert_doc_to_viewable(doc: bytes) -> bytes:
 
 
 def convert_page_to_styled(text: str) -> str | None:
-    """The page with the current shared doc style: in place of the older copy an earlier registration wrote, or right
-    after its <body> tag; None when it already has the current one or cannot be read as HTML."""
-    current = build_doc_style()
-    written = _WRITTEN_DOC_STYLE_RE.search(text)
-    if written is not None:
-        return None if written.group() == current else text[: written.start()] + current + text[written.end() :]
-    scanner = _DocScanner(text)
+    """The page with one copy of the current shared doc style, right after its <body> tag, and nothing else bridge adds
+    when serving: a page saved from the browser carries those, and served again it would hold them twice. None when it
+    is already so or cannot be read as HTML."""
+    bare, _ = remove_injected_parts(text)
+    scanner = _DocScanner(bare)
     try:
-        scanner.feed(text)
+        scanner.feed(bare)
         scanner.close()
     except (AssertionError, ValueError):
         return None
     if DOC_STYLE_ID in scanner.ids:
         return None
     at = next((at for at in (scanner.after_body, scanner.after_head, scanner.after_doctype) if at is not None), 0)
-    return text[:at] + current + text[at:]
+    styled = bare[:at] + build_doc_style() + bare[at:]
+    return None if styled == text else styled
 
 
 def convert_served_page_to_styled(page: bytes) -> bytes:
@@ -358,10 +624,12 @@ THEMES = ("light", "dark", "auto")
 def convert_page_to_themed(page: bytes, theme: str | None) -> bytes:
     """A served doc or page told the reader's theme choice, ahead of the shared style that applies it: a review doc is
     sandboxed and cannot keep the choice in the browser itself."""
-    at = page.find(f'<style id="{DOC_STYLE_ID}">'.encode())
-    if theme not in THEMES or at < 0:
+    style = f'<style id="{DOC_STYLE_ID}"'.encode()
+    if theme not in THEMES or page.find(style) < 0:
         return page
-    return page[:at] + f'<script>window.bridgeTheme="{theme}";</script>'.encode() + page[at:]
+    page = _THEME_SCRIPT_RE.sub(b"", page)
+    at = page.find(style)
+    return page[:at] + f'<script {ADDED}="theme">window.bridgeTheme="{theme}";</script>'.encode() + page[at:]
 
 
 @cache
@@ -371,7 +639,7 @@ def build_doc_style() -> str:
     web = files("bridge").joinpath("web")
     css = web.joinpath("doc-style.css").read_text(encoding="utf-8")
     script = web.joinpath("doc-style.js").read_text(encoding="utf-8")
-    return f'<style id="{DOC_STYLE_ID}">{css}</style><script>{script}</script>'
+    return f'<style id="{DOC_STYLE_ID}" {ADDED}="style">{css}</style><script {ADDED}="style">{script}</script>'
 
 
 def _pick_anchor(label: str, taken: set[str]) -> str:
@@ -388,7 +656,7 @@ def _build_nav(entries: list[tuple[int, str, str]]) -> str:
         for level, anchor, label in entries
     )
     return (
-        f'<nav id="{NAV_ID}" aria-label="Contents"><style>{_STYLE}</style>'
+        f'<nav id="{NAV_ID}" {ADDED}="bar" aria-label="Contents"><style>{_STYLE}</style>'
         f'<details><summary><span class="bdn-label">Contents</span><span class="bdn-cur"></span></summary>'
         f"<ol>{items}</ol></details>"
         f"<script>{_SCRIPT}</script></nav>"

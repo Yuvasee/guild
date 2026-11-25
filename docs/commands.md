@@ -405,11 +405,12 @@ options:
 register a page published as a claude.ai artifact under a stable bridge link, /p/<slug>
 
 ```text
-usage: bridge page [-h] {add,set-url,share,archive} ...
+usage: bridge page [-h] {add,check,set-url,share,archive} ...
 
 positional arguments:
-  {add,set-url,share,archive}
+  {add,check,set-url,share,archive}
     add                 register a page by its lasting source folder (never /tmp)
+    check               render pages light and dark in a headless browser and list what reads badly: a full-window column, diagrams off the page's theme, low-contrast diagram text, sizes in days
     set-url             the page's claude.ai artifact link, after a (re)publish
     share               mark the page as shared with colleagues; --off to unmark
     archive             retire the page: /p/<slug> stops redirecting and the plan skips it
@@ -434,6 +435,22 @@ options:
   --source SOURCE  the folder that holds index.html or a single .html file
   --url URL        its claude.ai artifact link, when already published
   --shared         colleagues have the claude.ai link
+```
+
+### bridge page check
+
+render pages light and dark in a headless browser and list what reads badly: a full-window column, diagrams off the page's theme, low-contrast diagram text, sizes in days
+
+```text
+usage: bridge page check [-h] [--all] [--file FILE] [slug ...]
+
+positional arguments:
+  slug         registered pages; none with --all or --file
+
+options:
+  -h, --help   show this help message and exit
+  --all        every live page
+  --file FILE  an HTML file, checked as /p/ would serve it
 ```
 
 ### bridge page set-url

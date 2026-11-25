@@ -10,7 +10,7 @@ from datetime import datetime
 from importlib.resources import files
 from pathlib import Path
 
-from bridge.doc_nav import DOC_STYLE_ID, convert_page_to_styled
+from bridge.doc_nav import DOC_STYLE_ID, convert_page_to_styled, remove_injected_parts
 from bridge.errors import UsageError
 
 DEFAULT_PORT = 8765
@@ -163,6 +163,8 @@ def add_doc_style_to_page(source: str) -> str | None:
     if styled is None:
         return None
     did = "updated the shared doc style in" if DOC_STYLE_ID in text else "added the shared doc style to"
+    extra = [name for name in remove_injected_parts(text)[1] if name != "the shared doc style"]
+    note = f"; removed what bridge adds when serving it: {', '.join(extra)}" if extra else ""
     tmp = html_file.with_name(f".{html_file.name}.{os.getpid()}.tmp")
     try:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
@@ -173,7 +175,7 @@ def add_doc_style_to_page(source: str) -> str | None:
     except OSError as error:
         tmp.unlink(missing_ok=True)
         raise PageError(f"cannot write {html_file}: {error}") from error
-    return f"{did} {html_file}"
+    return f"{did} {html_file}{note}"
 
 
 def set_page_url(conn: sqlite3.Connection, slug: str, artifact_url: str, now: int) -> Page:

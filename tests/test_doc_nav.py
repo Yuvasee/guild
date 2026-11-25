@@ -46,14 +46,14 @@ def test_the_bar_goes_right_after_body_and_only_once() -> None:
 def test_a_doc_with_fewer_than_two_headings_gets_the_view_but_no_bar() -> None:
     for doc in (b"<html><body><p>plain</p></body></html>", b"<html><body><h2>Only</h2><p>x</p></body></html>"):
         served = convert_doc_to_viewable(doc)
-        assert f'<nav id="{NAV_ID}"'.encode() not in served and f'<style id="{VIEW_ID}">'.encode() in served
+        assert f'<nav id="{NAV_ID}"'.encode() not in served and f'<style id="{VIEW_ID}"'.encode() in served
         assert b"<h2>Only</h2>" in served or b"<p>plain</p>" in served
 
 
 def test_the_view_is_injected_once_with_its_term_popover_and_link_colors() -> None:
     served = convert_doc_to_viewable(DOC)
     assert served.count(b"bdv-pop") >= 1 and served.count(b'.closest(".term[data-def]")') == 1
-    assert served.count(f'<style id="{VIEW_ID}">'.encode()) == 1
+    assert served.count(f'<style id="{VIEW_ID}"'.encode()) == 1
     assert b":where(a:link,a:visited){color:var(--bdv-link)" in served
     for mark in (b"observed", b"reproduced", b"from-code", b"decided", b"fixed-here", b"deferred", b"needs-decision"):
         assert b".mark." + mark in served
@@ -62,9 +62,9 @@ def test_the_view_is_injected_once_with_its_term_popover_and_link_colors() -> No
 
 def test_the_html_tag_is_flagged_so_a_docs_own_term_fallback_stays_off() -> None:
     served = convert_doc_to_viewable(b'<!doctype html><HTML lang="en"><body><span class="term" data-def="d">T</span>')
-    assert served.startswith(f'<!doctype html><HTML {TERMS_FLAG} lang="en">'.encode())
+    assert served.startswith(f'<!doctype html><HTML {TERMS_FLAG} data-bridge-terms lang="en">'.encode())
     flagged = b"<html data-viewer-terms><body><h2>A</h2><h2>B</h2></body></html>"
-    assert convert_doc_to_viewable(flagged).count(TERMS_FLAG.encode()) == 2
+    assert convert_doc_to_viewable(flagged).startswith(b"<html data-viewer-terms><body>"), "the doc's own flag stays"
     assert f"setAttribute('{TERMS_FLAG}','')".encode() in convert_doc_to_viewable(b"<p>no html tag</p>")
 
 

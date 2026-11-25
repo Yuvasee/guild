@@ -821,6 +821,8 @@ _TERM_PAIR_RE = re.compile(
 )
 """A 'Term: meaning.' sentence; the labels of a risk's parts and of a story step are not terms."""
 MIN_GLOSSARY_PAIRS = 3
+MIN_TITLED_GLOSSARY_PAIRS = 2
+"""Under a heading such as 'Words used', two pairs already make the list."""
 _LIST_TAGS = frozenset({"ul", "ol", "dl"})
 _BR = "\x00"
 
@@ -997,7 +999,7 @@ class _BlockReader(HTMLParser):
             pairs = sum(
                 bool(_TERM_PAIR_RE.match(sentence)) for line in lines for sentence in split_into_sentences(line)
             )
-            alone = pairs >= MIN_GLOSSARY_PAIRS
+            alone = pairs >= (MIN_TITLED_GLOSSARY_PAIRS if self._terms is not None else MIN_GLOSSARY_PAIRS)
             if alone:
                 self.glossaries.append(
                     f'{self._where("a paragraph")} ("{_shorten(text, 6)}") is a term list written as prose, with '
@@ -1012,7 +1014,7 @@ class _BlockReader(HTMLParser):
     def _end_terms(self) -> None:
         if self._terms is not None:
             heading, pairs, refused = self._terms
-            if pairs >= MIN_GLOSSARY_PAIRS and not refused:
+            if pairs >= MIN_TITLED_GLOSSARY_PAIRS and not refused:
                 self.glossaries.append(
                     f"'{heading}' defines {pairs} terms in paragraphs; make it a list (<ul> or <dl>) or a two-column "
                     "table"
@@ -1043,6 +1045,64 @@ def read_blocks(page: str) -> _BlockReader:
     except (AssertionError, ValueError):
         pass
     return reader
+
+
+_NUMBER = r"(?:\d+(?:[.,]\d+)?|an?|one|two|three|four|five|six|a few|a couple of|several|half an?)"
+_SPAN = rf"{_NUMBER}(?:\s*(?:[-\u2013]|to|or)\s*{_NUMBER})?"
+_UNIT = r"(?:hours?|days?|weeks?|months?|sprints?)"
+_PEOPLE = r"(?:engineers?|devs?|developers?|persons?|people|man|men|programmers?)"
+_LABOR_RE = re.compile(rf"\b(?:{_SPAN}\s+)?(?:engineer|person|man|dev|developer|people|staff)[- ]?{_UNIT}\b", re.I)
+"""A unit of someone's time: always a size, unless the sentence names the rule or tells what happened."""
+_TIME_RE = re.compile(
+    rf"\b{_SPAN}[- ]?{_UNIT}\s+(?:of\s+(?:\w+\s+)?(?:work|effort)\s+)?(?:for|per)\s+(?:{_NUMBER}|each|a single)?\s*"
+    rf"(?:\w+\s+)?{_PEOPLE}\b"
+    rf"|\b{_SPAN}[- ]?{_UNIT}\s+of\s+(?:dev(?:elopment)?\s+|engineering\s+|coding\s+)?(?:work|effort)\b",
+    re.I,
+)
+"""Time for people, which is a size only when the sentence estimates work to do; else a schedule or a fact."""
+_ESTIMATE_CUE_RE = re.compile(
+    r"(?:~|\b(?:estimates?|estimated|est\.|sizing|size|takes?|needs?|requires?|effort|scope|"
+    r"budget|eta|roughly|about|around|approx(?:imately)?|to (?:build|implement|ship|finish|deliver|do|write|fix|port|"
+    r"migrate|add|make|land))\b)",
+    re.I,
+)
+_RULE_WORDS_RE = re.compile(r"\b(?:never|not|no|instead of|rather than|avoid|don'?t)\b[^.,;:\n]{0,25}$", re.I)
+"""Words just before a match that name the rule rather than size work ('in kLOC, never engineer-days')."""
+_PAST_RE = re.compile(
+    r"\b(?:lost|spent|took|wasted|burned|burnt|was|were|had|did|ago|yesterday|last (?:week|month|sprint|quarter))\b",
+    re.I,
+)
+_FUTURE_RE = re.compile(r"\b(?:will|would|'ll|going to)\b", re.I)
+_CLAUSE_END_RE = re.compile(r"(?<=[.!?;])\s+|\n+")
+_PART_RE = re.compile(r"[,;]|\s(?:and|but|then)\s", re.I)
+"""Where one part of a sentence ends: what happened and what will happen are told apart by their own part."""
+SIZE_RULE = "the team sizes work in kLOC, never in days or weeks of someone's time"
+
+
+def find_day_estimates(text: str) -> list[str]:
+    """Each size of work to do written in someone's time ('3 engineer-days', 'would take 2 weeks for one person'), as
+    written; not what happened ('lost 3 days of work'), a schedule ('on call 2 weeks for one engineer') or the rule
+    itself ('in kLOC, never engineer-days')."""
+    found: list[str] = []
+    for sentence in _CLAUSE_END_RE.split(text):
+        for pattern, needs_cue in ((_LABOR_RE, False), (_TIME_RE, True)):
+            for match in pattern.finditer(sentence):
+                if _RULE_WORDS_RE.search(sentence[: match.start()]):
+                    continue
+                starts = [m.end() for m in _PART_RE.finditer(sentence, 0, match.start())]
+                ends = [m.start() for m in _PART_RE.finditer(sentence, match.end())]
+                part = sentence[(starts[-1] if starts else 0) : (ends[0] if ends else len(sentence))]
+                if _PAST_RE.search(part) and not _FUTURE_RE.search(part):
+                    continue
+                if needs_cue and not _ESTIMATE_CUE_RE.search(sentence):
+                    continue
+                found.append(" ".join(match.group(0).split()))
+    return list(dict.fromkeys(found))
+
+
+def map_estimates_to_problem(found: list[str]) -> str:
+    quoted = ", ".join(f"'{estimate}'" for estimate in found[:3])
+    return f"it sizes work in time ({quoted}); {SIZE_RULE}: say how many kLOC it adds or changes"
 
 
 # A PR's head names real code as surely as a branch does: "#12 today", "PR #12 today", "acme/web#12 today".
@@ -1110,6 +1170,8 @@ def find_doc_problems(
     blocks = read_blocks(text)
     problems.extend(find_baseline_problems(blocks, base))
     problems.extend(blocks.glossaries)
+    if estimates := find_day_estimates("\n".join(" ".join(block.text) for block in blocks.blocks)):
+        problems.append(map_estimates_to_problem(estimates))
     since = [index for index, text in enumerate(headings) if _CHANGES_SINCE_RE.search(text)]
     if since and not owner_reviewed:
         problems.append(
