@@ -8,6 +8,8 @@ from types import MappingProxyType
 from typing import cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from bridge.review_doc_check import DEFAULT_LIMITS
+
 HIDDEN_NAME_MARKS = ("🔒", "🔐", "🔏")
 """Tabs or workspaces whose name contains one of these are left out of the dashboard."""
 AUTO_MERGE_MODES = ("off", "dry-run", "on")
@@ -218,13 +220,13 @@ class Config:
     doc_screen: bool = False
     """Sends each visible sentence of a registered review doc to the classifier (shadow_filter_url) and prints the
     sentences it flags as warnings. Needs shadow_filter_key_file."""
-    doc_in_short_max_bullets: int = 5
-    doc_bullet_max_words: int = 25
+    doc_in_short_max_bullets: int = DEFAULT_LIMITS.bullets
+    doc_bullet_max_words: int = DEFAULT_LIMITS.bullet_words
     """For each In short bullet."""
-    doc_sentence_max_words: int = 30
+    doc_sentence_max_words: int = DEFAULT_LIMITS.sentence_words
     """For each sentence of a review doc's visible top: In short, User story if any and What changes and why, folds
     left out."""
-    doc_visible_max_words: int = 900
+    doc_visible_max_words: int = DEFAULT_LIMITS.visible_words
     """For all a review doc shows before anything is opened, Fields left out: fold summaries count, fold bodies,
     diagrams and code blocks do not."""
     auto_merge: str = "off"

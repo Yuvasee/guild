@@ -6,6 +6,7 @@ the trust entry of the worker's own worktree.
 """
 
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -59,10 +60,12 @@ def main() -> None:
 
 
 def run(payload: dict[str, Any]) -> dict[str, Any]:
+    op = payload.get("op")
+    if op == "sync":
+        return sync(payload)
     worker = str(payload.get("worker", ""))
     if not WORKER_RE.fullmatch(worker):
         return {"ok": False, "error": f"bad worker name {worker!r}"}
-    op = payload.get("op")
     if op == "launch":
         return launch(worker, payload)
     if op == "check":
@@ -394,6 +397,7 @@ def sync_rule_files(files: list[Any]) -> tuple[list[str], list[str]]:
     home = os.path.realpath(os.path.expanduser("~"))
     updated: list[str] = []
     warnings: list[str] = []
+    linked: list[tuple[str, str, bytes]] = []
     for entry in files:
         relative, text, mode = str(entry["path"]), str(entry["text"]), int(entry["mode"])
         parts = relative.split("/")
@@ -403,7 +407,7 @@ def sync_rule_files(files: list[Any]) -> tuple[list[str], list[str]]:
         target = os.path.join(home, *parts)
         # Through a symlink the write would land in whatever it points at, such as a checkout of its own.
         if os.path.realpath(target) != target:
-            warnings.append(f"~/{relative} is or sits under a symlink here; left alone")
+            linked.append((relative, target, text.encode("utf-8")))
             continue
         # Reading a FIFO would block the launch until ssh times out.
         if os.path.lexists(target) and not os.path.isfile(target):
@@ -429,7 +433,35 @@ def sync_rule_files(files: list[Any]) -> tuple[list[str], list[str]]:
             warnings.append(f"~/{relative} could not be written ({exc})")
             continue
         updated.append(f"~/{relative}")
+    # Last, so a link to a file written above (the skill's house.md to the overlay's) reads its new text.
+    for relative, target, data in linked:
+        if not (os.path.isfile(target) and read_quietly(target) == data):
+            warnings.append(f"~/{relative} is or sits under a symlink here and differs; left alone")
     return updated, warnings
+
+
+def read_quietly(path: str) -> bytes | None:
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def sync(payload: dict[str, Any]) -> dict[str, Any]:
+    """The rule files alone, as a deploy on the Mac sends them; `hashes` holds each one's sha256 as read here after,
+    or None when it cannot be read, so the Mac can tell a copy left stale."""
+    files: list[Any] = payload.get("rule_files") or []
+    updated, warnings = sync_rule_files(files)
+    home = os.path.expanduser("~")
+    hashes: dict[str, str | None] = {}
+    for entry in files:
+        relative = str(entry["path"])
+        path = os.path.join(home, relative)
+        # Reading a FIFO would block until ssh times out.
+        data = read_quietly(path) if os.path.isfile(path) else None
+        hashes[relative] = hashlib.sha256(data).hexdigest() if data is not None else None
+    return add_sync_outcome({"ok": True, "hashes": hashes}, updated, warnings)
 
 
 def add_sync_outcome(result: dict[str, Any], updated: list[str], warnings: list[str]) -> dict[str, Any]:

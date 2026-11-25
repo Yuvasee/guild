@@ -1,11 +1,14 @@
+import shutil
 import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 from test_review_worktree import NOW, REVIEWS_CONFIG
 from test_reviews import REF, setup_pr
 
+from bridge import review_doc_check
 from bridge.config import Config, map_toml_to_config
 from bridge.db import transaction
 from bridge.review_doc_check import PlainLimits, find_doc_problems
@@ -584,3 +587,51 @@ def test_a_term_list_as_a_list_or_a_table_and_a_paragraph_with_one_colon_pass() 
     assert glossary("<p>The scan has one job: it reads each run. It stops at 12:30. It writes the cursor.</p>") == []
     risk = "<p>Scenario: a scan fails. Who: no one yet. Handling: accepted; the next run retries.</p>"
     assert glossary(risk) == [], "a risk's parts, as Costs and risks asks for them"
+
+
+def run_standalone(tmp_path: Path, page: bytes, *args: str) -> subprocess.CompletedProcess[str]:
+    """As a host without guild runs it: the lone file copied elsewhere, no site-packages, no bridge package."""
+    checker = tmp_path / "skill" / "review_doc_check.py"
+    checker.parent.mkdir(exist_ok=True)
+    shutil.copy(Path(review_doc_check.__file__), checker)
+    doc = tmp_path / "doc.html"
+    doc.write_bytes(page)
+    return subprocess.run(
+        [sys.executable, "-I", "-S", str(checker), str(doc), *args],
+        cwd=tmp_path, capture_output=True, text=True, timeout=60, check=False,
+    )  # fmt: skip
+
+
+def test_the_checks_run_as_a_lone_script_find_what_registration_finds(tmp_path: Path) -> None:
+    repo, _ = make_worktree(tmp_path)
+    git("checkout", "-q", "main", cwd=repo)
+    bare = make_doc(WHERE.replace("src/app/run.py", "run.py"), first="Summary")
+
+    done = run_standalone(tmp_path, bare, "--repo", str(repo))
+
+    assert done.returncode == 1, done.stderr
+    expected = find_doc_problems(bare, False, "the owner", FILES, review_doc_check.DEFAULT_LIMITS, "main")
+    assert len(expected) == 2
+    assert done.stdout.splitlines() == [f"- {problem}" for problem in expected]
+    done = run_standalone(tmp_path, make_doc(), "--repo", str(repo))
+    assert (done.returncode, done.stdout.strip()) == (0, "passes the checks guild review doc runs")
+
+
+def test_the_lone_script_looks_paths_up_at_the_commit_the_doc_names(tmp_path: Path) -> None:
+    repo, second = make_worktree(tmp_path)
+    page = make_doc()
+
+    assert run_standalone(tmp_path, page, "--repo", str(repo)).returncode == 1, "tests/test_run.py is not at HEAD"
+    named = page.replace(b"<html>", f'<html><meta name="pr-head" content="{second}">'.encode())
+    assert run_standalone(tmp_path, named, "--repo", str(repo)).returncode == 0
+
+
+def test_the_lone_script_without_a_checkout_skips_paths_and_says_so(tmp_path: Path) -> None:
+    done = run_standalone(tmp_path, make_doc(WHERE.replace("src/app/run.py", "run.py")), "--repo", str(tmp_path))
+
+    assert done.returncode == 0
+    assert "has no commit HEAD, so Where to look paths were not looked up" in done.stderr
+
+
+def test_the_lone_scripts_limits_are_configs_defaults() -> None:
+    assert LIMITS == review_doc_check.DEFAULT_LIMITS

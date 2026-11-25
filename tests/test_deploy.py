@@ -106,12 +106,36 @@ def test_a_first_deploy_moves_the_entry_points_onto_a_release_and_keeps_uvs_venv
     assert (bridge_env.state_dir / f"backups/bridge-pre-{sha}.db").exists()
     assert (bridge_env.state_dir / f"deploys/{sha}-check-before.txt").exists()
     assert (bridge_env.state_dir / f"deploys/{sha}-check-after.txt").exists()
+    assert (bridge_env.state_dir / f"deploys/{sha}-sync-rules.txt").read_text() == "no remotes configured\n"
     with bridge_env.connect() as conn:
         assert (
             conn.execute("SELECT body FROM messages WHERE board = 1")
             .fetchone()["body"]
             .startswith(f"Deploying bridge {sha}")
         )
+
+
+def test_a_remote_the_rule_sync_cannot_reach_is_a_warning_not_a_failed_deploy(
+    deploy: Deploy, bridge_env: BridgeEnv
+) -> None:
+    config = Path(deploy.env["BRIDGE_CONFIG"])
+    config.write_text(
+        f'{config.read_text() if config.exists() else ""}\n[[remotes]]\nname = "devbox"\nssh = "devbox"\n'
+    )
+    stub_bin = Path(deploy.env["PATH"].split(os.pathsep)[0])
+    (stub_bin / "ssh").write_text(
+        "#!/bin/sh\necho 'ssh: connect to host devbox port 22: Connection refused' >&2\nexit 255\n"
+    )
+    (stub_bin / "ssh").chmod(0o755)
+
+    result = deploy.run()
+
+    assert result.returncode == 0, result.stderr
+    assert "deploy: warning: a remote's skill or overlay is not in step with this Mac" in result.stderr
+    [log] = (bridge_env.state_dir / "deploys").glob("*-sync-rules.txt")
+    assert (
+        "devbox: not synced: ssh to devbox: ssh: connect to host devbox port 22: Connection refused" in log.read_text()
+    )
 
 
 def test_a_second_deploy_installs_the_changed_code_not_uvs_cached_build(deploy: Deploy) -> None:

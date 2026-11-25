@@ -19,7 +19,7 @@ from bridge.config import Config, state_dir
 from bridge.db import now_ms, transaction
 from bridge.doc_nav import convert_doc_to_viewable
 from bridge.leads import REVIEW_DOC_SPEC
-from bridge.review_doc_check import PlainLimits, find_doc_problems
+from bridge.review_doc_check import PlainLimits, find_doc_problems, read_doc_head
 from bridge.review_marks import convert_reviews_to_text, map_html_to_reviews
 
 FRESH_FOR_PREPARING_MS = 14 * 24 * 3_600_000
@@ -59,9 +59,6 @@ _OURS_DIRS = (".venv/", ".vscode/")
 _SAFE_NAME_RE = re.compile(r"[\w.-]+")
 _VERSION_PART_RE = re.compile(r"\s*[<>=!~].*$")
 _REQUIREMENT_NAME_RE = re.compile(r"[A-Za-z0-9][\w.-]*")
-_META_RE = re.compile(rb"<meta\b[^>]*>", re.I)
-_PR_HEAD_NAME_RE = re.compile(rb"""\bname\s*=\s*["']?pr-head\b""", re.I)
-_CONTENT_SHA_RE = re.compile(rb"""\bcontent\s*=\s*["']?([0-9a-fA-F]{7,40})\b""")
 _BODY_TAG_RE = re.compile(rb"<body\b[^>]*>", re.I)
 _SSH_AUTH_FAILED_RE = re.compile(r"Permission denied \(publickey|sign_and_send_pubkey")
 _SSH_REMOTE_RE = re.compile(r"(?:ssh://git@([\w.-]+)(?::\d+)?/|git@([\w.-]+):/*)(.+?)(?:\.git)?/?")
@@ -1033,15 +1030,6 @@ def list_files_at(worktree: Path, commit: str) -> frozenset[str] | None:
     except (OSError, subprocess.SubprocessError):
         return None
     return frozenset(name.decode("utf-8", "replace") for name in listed.split(b"\0") if name)
-
-
-def read_doc_head(html: bytes) -> str:
-    """The commit the doc says it was checked against, from <meta name="pr-head" content="<sha>">; empty without one."""
-    for tag in _META_RE.findall(html):
-        sha = _CONTENT_SHA_RE.search(tag)
-        if _PR_HEAD_NAME_RE.search(tag) and sha:
-            return sha.group(1).decode().lower()
-    return ""
 
 
 def fill_doc_heads(conn: sqlite3.Connection) -> None:

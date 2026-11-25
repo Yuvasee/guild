@@ -220,7 +220,12 @@ A host worker reads them on its host: each start and reopen of one copies the to
 `~/.claude/skills/bridge` and of `overlay_dir` (when it is under your home) to the same paths under the host's home,
 in the ssh call that starts it. Backups (`*.bak*`, `*.orig`, `*.proposed`) and hidden files stay behind; a file is
 written only when its content differs, overlay files as 0600; a file only the host has is kept; one under a symlink
-on the host is left alone and named in the start's output. Over 1 MB in all, nothing is copied and the start says so.
+on the host is left alone, and named in the start's output when what it points at differs. Over 1 MB in all, nothing
+is copied and the start says so. `review_doc_check.py` goes with them into the host's skill folder: the checks
+`guild review doc` runs, as a script with no dependencies (`python3 review_doc_check.py <doc.html>`), for a host
+without guild. `scripts/deploy.sh` runs `bridge sync-rules` after each deploy, which does the same copy to every
+remote in `remotes` and checks each file there by sha256; a remote that cannot be reached or differs is a warning,
+not a failed deploy.
 
 **The people file** (`people_dir`): `people.toml` holds the keys about people, and once `people_dir` is set,
 `config.toml` may not hold them, so a config you share or commit names no one:

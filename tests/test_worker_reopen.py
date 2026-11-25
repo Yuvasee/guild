@@ -448,10 +448,11 @@ def test_a_host_worker_reopens_like_a_fresh_one_with_gbridge_under_its_lead(
     )
     assert sent["claude_flags"].endswith("--model default --effort high") and len(sent["token"]) == 64
     assert "brief" not in sent and host_side.GBRIDGE_MARK in sent["gbridge"]
-    assert sent["rule_files"] == [
+    assert sent["rule_files"][:2] == [
         {"path": ".claude/skills/bridge/review-doc.md", "text": "spec\n", "mode": 0o644},
         {"path": ".team/overlay/reader-profile.md", "text": "reader\n", "mode": 0o600},
     ]
+    assert sent["rule_files"][2]["path"] == ".claude/skills/bridge/review_doc_check.py"
     record = read_record("g-task-ab12")
     assert record is not None
     assert (record.parent, record.name, record.host, record.remote_worktree) == (

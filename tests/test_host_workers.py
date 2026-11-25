@@ -1,3 +1,4 @@
+import hashlib
 import io
 import json
 import os
@@ -37,6 +38,7 @@ from bridge.host_workers import (
     read_host_rule_files,
     read_local_model_flags,
     read_session_state,
+    sync_rules_to_remotes,
     write_record,
 )
 from bridge.procinfo import process_start_ms
@@ -364,8 +366,8 @@ def test_host_rule_files_replace_stale_copies_and_leave_the_rest_alone(
     assert not (elsewhere / "rules.md").exists() and not (tmp_path.parent / "escape.md").exists()
     assert warnings == [
         "~/.team/overlay/pipe.md is not a regular file here; left alone",
-        "~/.linked/rules.md is or sits under a symlink here; left alone",
         "rule file '.team/../../escape.md' is not a plain home-relative path; skipped",
+        "~/.linked/rules.md is or sits under a symlink here and differs; left alone",
     ]
     assert [f for f in tmp_path.rglob("*.tmp")] == []
     assert host_side.sync_rule_files(files)[0] == []
@@ -390,23 +392,195 @@ def test_host_rule_files_are_the_skill_and_overlay_text_files_under_home(
 
     files, notes = read_host_rule_files(config)
 
+    checker = (Path(host_side.__file__).parent / "review_doc_check.py").read_text()
     assert files == [
         {"path": ".claude/skills/bridge/review-doc.md", "text": "spec\n", "mode": 0o644},
         {"path": ".team/overlay/house.md", "text": "house.md", "mode": 0o600},
+        {"path": ".claude/skills/bridge/review_doc_check.py", "text": checker, "mode": 0o644},
     ]
     assert notes == []
     outside = tmp_path.parent / f"{tmp_path.name}-overlay"
     outside.mkdir()
     (outside / "house.md").write_text("x")
     files, notes = read_host_rule_files(Config(overlay_dir=str(outside)))
-    assert [f["path"] for f in files] == [".claude/skills/bridge/review-doc.md"]
+    assert [f["path"] for f in files] == [
+        ".claude/skills/bridge/review-doc.md", ".claude/skills/bridge/review_doc_check.py"
+    ]  # fmt: skip
     assert notes == [f"{outside} is not under {tmp_path}, so it has no path on the host"]
+
+
+def test_a_rule_file_linked_to_one_written_in_the_same_sync_is_left_alone_quietly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    skill = tmp_path / ".claude/skills/bridge"
+    skill.mkdir(parents=True)
+    (tmp_path / ".team/overlay").mkdir(parents=True)
+    (tmp_path / ".team/overlay/skill.md").write_text("old house\n")
+    (skill / "house.md").symlink_to(tmp_path / ".team/overlay/skill.md")
+    files = [
+        {"path": ".claude/skills/bridge/house.md", "text": "new house\n", "mode": 0o644},
+        {"path": ".team/overlay/skill.md", "text": "new house\n", "mode": 0o600},
+    ]
+
+    assert host_side.sync_rule_files(files) == (["~/.team/overlay/skill.md"], [])
+    assert (skill / "house.md").is_symlink()
+
+
+def test_a_sync_on_the_host_reports_each_rule_file_by_its_hash_there(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    skill = tmp_path / ".claude/skills/bridge"
+    skill.mkdir(parents=True)
+    (skill / "review-doc.md").write_text("old spec\n")
+    os.mkfifo(skill / "pipe.md")
+    files = [
+        {"path": ".claude/skills/bridge/review-doc.md", "text": "new spec\n", "mode": 0o644},
+        {"path": ".claude/skills/bridge/pipe.md", "text": "x\n", "mode": 0o644},
+    ]
+
+    result = host_side.run({"op": "sync", "rule_files": files})
+
+    assert result["ok"] and result["updated"] == ["~/.claude/skills/bridge/review-doc.md"]
+    assert result["hashes"] == {
+        ".claude/skills/bridge/review-doc.md": hashlib.sha256(b"new spec\n").hexdigest(),
+        ".claude/skills/bridge/pipe.md": None,
+    }
+    assert result["warning"] == "~/.claude/skills/bridge/pipe.md is not a regular file here; left alone"
+
+
+def _stub_remote_home(monkeypatch: pytest.MonkeyPatch, remote_home: Path) -> list[str]:
+    """run_on_host with the host-side script run here under a home of its own, as ssh would run it there."""
+    reached: list[str] = []
+
+    def run_on_host(remote: Remote, payload: dict[str, Any], timeout_s: int = 0) -> dict[str, Any]:
+        reached.append(remote.name)
+        if remote.name == "asleep":
+            return {"ok": False, "unknown": True, "error": "ssh to asleep timed out after 60s"}
+        with monkeypatch.context() as m:
+            m.setenv("HOME", str(remote_home))
+            return json.loads(json.dumps(host_side.run(payload)))
+
+    monkeypatch.setattr(host_workers, "run_on_host", run_on_host)
+    return reached
+
+
+def test_sync_rules_brings_a_stale_remote_copy_up_to_the_macs_and_checks_it_by_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "mac"
+    monkeypatch.setenv("HOME", str(home))
+    (home / ".claude/skills/bridge").mkdir(parents=True)
+    (home / ".claude/skills/bridge/review-doc.md").write_text("spec of today\n")
+    (home / ".team/overlay").mkdir(parents=True)
+    (home / ".team/overlay/reader-profile.md").write_text("reader\n")
+    remote_home = tmp_path / "devbox"
+    (remote_home / ".claude/skills/bridge").mkdir(parents=True)
+    (remote_home / ".claude/skills/bridge/review-doc.md").write_text("spec of last week\n")
+    reached = _stub_remote_home(monkeypatch, remote_home)
+    config = Config(overlay_dir="~/.team/overlay", remotes=(Remote("devbox", "devbox"),))
+
+    lines, in_step = sync_rules_to_remotes(config)
+
+    assert in_step and reached == ["devbox"]
+    assert (remote_home / ".claude/skills/bridge/review-doc.md").read_text() == "spec of today\n"
+    assert (remote_home / ".team/overlay/reader-profile.md").read_text() == "reader\n"
+    checker = remote_home / ".claude/skills/bridge/review_doc_check.py"
+    assert checker.read_text() == (Path(host_side.__file__).parent / "review_doc_check.py").read_text()
+    assert lines == [
+        "devbox: updated ~/.claude/skills/bridge/review-doc.md",
+        "devbox: updated ~/.team/overlay/reader-profile.md",
+        "devbox: updated ~/.claude/skills/bridge/review_doc_check.py",
+        "devbox: 3 rule files match the Mac by sha256",
+    ]
+    assert sync_rules_to_remotes(config) == (["devbox: 3 rule files match the Mac by sha256"], True)
+
+
+def test_sync_rules_warns_of_a_remote_it_cannot_reach_or_whose_copy_still_differs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "mac"
+    monkeypatch.setenv("HOME", str(home))
+    (home / ".claude/skills/bridge").mkdir(parents=True)
+    (home / ".claude/skills/bridge/review-doc.md").write_text("spec of today\n")
+    remote_home = tmp_path / "devbox"
+    (remote_home / ".claude").mkdir(parents=True)
+    elsewhere = tmp_path / "devbox-checkout"
+    elsewhere.mkdir()
+    (elsewhere / "review-doc.md").write_text("spec of last week\n")
+    (remote_home / ".claude/skills").mkdir()
+    (remote_home / ".claude/skills/bridge").symlink_to(elsewhere)
+    reached = _stub_remote_home(monkeypatch, remote_home)
+    config = Config(remotes=(Remote("asleep", "asleep"), Remote("devbox", "devbox")))
+
+    lines, in_step = sync_rules_to_remotes(config)
+
+    assert not in_step and reached == ["asleep", "devbox"]
+    assert (elsewhere / "review-doc.md").read_text() == "spec of last week\n"
+    assert lines[0] == "asleep: not synced: ssh to asleep timed out after 60s"
+    assert lines[-1] == (
+        "devbox: differs from the Mac after the sync: ~/.claude/skills/bridge/review-doc.md, "
+        "~/.claude/skills/bridge/review_doc_check.py"
+    )
+
+
+def test_sync_rules_still_sends_the_skill_when_the_overlay_is_outside_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "mac"
+    monkeypatch.setenv("HOME", str(home))
+    (home / ".claude/skills/bridge").mkdir(parents=True)
+    (home / ".claude/skills/bridge/review-doc.md").write_text("spec of today\n")
+    outside = tmp_path / "team-overlay"
+    outside.mkdir()
+    (outside / "house.md").write_text("x")
+    remote_home = tmp_path / "devbox"
+    remote_home.mkdir()
+    reached = _stub_remote_home(monkeypatch, remote_home)
+    config = Config(overlay_dir=str(outside), remotes=(Remote("devbox", "devbox"),))
+
+    lines, in_step = sync_rules_to_remotes(config)
+
+    assert in_step and reached == ["devbox"]
+    assert lines[0] == f"rule files: {outside} is not under {home}, so it has no path on the host"
+    assert lines[-1] == "devbox: 2 rule files match the Mac by sha256"
+    assert (remote_home / ".claude/skills/bridge/review-doc.md").read_text() == "spec of today\n"
+
+
+def test_sync_rules_over_the_cap_sends_nothing_and_says_so(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".team/overlay").mkdir(parents=True)
+    (tmp_path / ".team/overlay/a.md").write_text("a" * 1_000_000)
+    reached = _stub_remote_home(monkeypatch, tmp_path / "devbox")
+
+    lines, in_step = sync_rules_to_remotes(Config(overlay_dir="~/.team/overlay", remotes=(Remote("devbox", "devbox"),)))
+
+    assert not in_step and reached == []
+    assert lines == [
+        "rule files: rule files come to over 1000000 bytes, the cap; none was sent",
+        "nothing was sent",
+    ]
+
+
+def test_sync_rules_with_no_remotes_reaches_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    reached = _stub_remote_home(monkeypatch, Path("/nonexistent"))
+
+    assert sync_rules_to_remotes(Config()) == (["no remotes configured"], True)
+    assert reached == []
 
 
 def test_host_rule_files_over_the_cap_send_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     overlay = tmp_path / ".team/overlay"
     overlay.mkdir(parents=True)
+    checker = len((Path(host_side.__file__).parent / "review_doc_check.py").read_bytes())
+    (overlay / "near.md").write_text("n" * (1_000_000 - checker + 1))
+
+    files, notes = read_host_rule_files(Config(overlay_dir="~/.team/overlay"))
+
+    assert (files, notes) == ([], ["rule files come to over 1000000 bytes, the cap; none was sent"]), "checker counts"
+    (overlay / "near.md").unlink()
     (overlay / "a.md").write_text("a" * 600_000)
     (overlay / "b.html").write_text("b" * 600_000)
 
@@ -420,7 +594,7 @@ def test_host_rule_files_over_the_cap_send_none(tmp_path: Path, monkeypatch: pyt
 
     files, notes = read_host_rule_files(Config(overlay_dir="~/.team/overlay"))
 
-    assert [f["path"] for f in files] == [".team/overlay/a.md"]
+    assert [f["path"] for f in files] == [".team/overlay/a.md", ".claude/skills/bridge/review_doc_check.py"]
     assert len(notes) == 1 and notes[0].startswith(f"{overlay / 'locked.md'} could not be read")
 
 

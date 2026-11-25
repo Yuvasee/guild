@@ -48,6 +48,8 @@ CLAUDE_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 BRIDGE_SKILL_DIR = "~/.claude/skills/bridge"
 # Every launch carries them over ssh's stdin; ours come to about 300 KB.
 RULE_FILES_MAX_BYTES = 1_000_000
+REVIEW_DOC_CHECKER = "review_doc_check.py"
+SYNC_TIMEOUT_S = 60
 _SKIPPED_RULE_FILE_RE = re.compile(r"^\.|\.bak|\.proposed$|\.orig$")
 
 
@@ -319,9 +321,11 @@ def read_host_rule_files(config: Config) -> tuple[list[dict[str, Any]], list[str
     folders = [(Path(BRIDGE_SKILL_DIR).expanduser(), 0o644)]
     if config.overlay_dir:
         folders.append((Path(config.overlay_dir).expanduser(), 0o600))
+    # A host has no guild to run `guild review doc`; the skill tells its workers to run this copy of its checks.
+    checker = files("bridge").joinpath(REVIEW_DOC_CHECKER).read_text()
     rule_files: list[dict[str, Any]] = []
     notes: list[str] = []
-    size = 0
+    size = len(checker.encode("utf-8"))
     for folder, mode in folders:
         if not folder.is_dir():
             continue
@@ -351,7 +355,41 @@ def read_host_rule_files(config: Config) -> tuple[list[dict[str, Any]], list[str
                 continue
             relative = folder.relative_to(home) / path.name
             rule_files.append({"path": relative.as_posix(), "text": text, "mode": mode})
+    path = PurePosixPath(BRIDGE_SKILL_DIR.removeprefix("~/"), REVIEW_DOC_CHECKER)
+    rule_files.append({"path": path.as_posix(), "text": checker, "mode": 0o644})
     return rule_files, notes
+
+
+def sync_rules_to_remotes(config: Config) -> tuple[list[str], bool]:
+    """Brings each remote's rule files up to what a host worker started now would get, and checks each by its hash
+    there. Returns lines to print and whether every remote is in step; one that cannot be reached is not. A folder
+    left out (an overlay outside home) is named, as at a start, and the rest still goes."""
+    rule_files, notes = read_host_rule_files(config)
+    lines = [f"rule files: {note}" for note in notes]
+    if not config.remotes:
+        return [*lines, "no remotes configured"], True
+    if not rule_files:
+        return [*lines, "nothing was sent"], False
+    expected = {f["path"]: hashlib.sha256(str(f["text"]).encode("utf-8")).hexdigest() for f in rule_files}
+    in_step = True
+    for remote in config.remotes:
+        done = run_on_host(remote, {"op": "sync", "rule_files": rule_files}, SYNC_TIMEOUT_S)
+        if not done.get("ok"):
+            lines.append(f"{remote.name}: not synced: {done.get('error')}")
+            in_step = False
+            continue
+        for path in cast(list[str], done.get("updated") or []):
+            lines.append(f"{remote.name}: updated {path}")
+        if done.get("warning"):
+            lines.append(f"{remote.name}: {done['warning']}")
+        hashes = cast(dict[str, Any], done.get("hashes") or {})
+        stale = [path for path, digest in expected.items() if hashes.get(path) != digest]
+        if stale:
+            lines.append(f"{remote.name}: differs from the Mac after the sync: {', '.join(f'~/{p}' for p in stale)}")
+            in_step = False
+        else:
+            lines.append(f"{remote.name}: {len(expected)} rule files match the Mac by sha256")
+    return lines, in_step
 
 
 def run_on_host(remote: Remote, payload: dict[str, Any], timeout_s: int = SETUP_TIMEOUT_S) -> dict[str, Any]:

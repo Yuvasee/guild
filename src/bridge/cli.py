@@ -65,7 +65,7 @@ from bridge.feed import (
     spawn_typed_delivery,
     tell_assistant_of_draft,
 )
-from bridge.host_workers import HOST_KIND_PREFIX, run_tab_loop
+from bridge.host_workers import HOST_KIND_PREFIX, run_tab_loop, sync_rules_to_remotes
 from bridge.identity import ensure_current_instance
 from bridge.inject import measure_chars
 from bridge.install import find_hook_executable, install_hooks, uninstall_hooks
@@ -212,6 +212,13 @@ def build_parser(config: Config) -> argparse.ArgumentParser:
         "throwaway Claude through the rewake waiter; run before and after a deploy, exit 1 if either does not work",
     )
     p.set_defaults(func=cmd_deploy_check)
+
+    p = sub.add_parser(
+        "sync-rules",
+        help="copy the bridge skill and overlay files to each configured remote, as a host worker's start does, and "
+        "check each there by sha256; exit 1 if a remote cannot be reached or differs",
+    )
+    p.set_defaults(func=cmd_sync_rules)
 
     p = sub.add_parser("_compact-drive", help=argparse.SUPPRESS)
     p.add_argument("phase", choices=("compact", "continue"))
@@ -424,6 +431,13 @@ def cmd_restart_service(args: argparse.Namespace, conn: sqlite3.Connection, conf
     restart_service()
     print("dashboard service restarted")
     return 0
+
+
+def cmd_sync_rules(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
+    lines, in_step = sync_rules_to_remotes(config)
+    for line in lines:
+        print(line)
+    return 0 if in_step else 1
 
 
 def cmd_deploy_check(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:

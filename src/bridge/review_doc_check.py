@@ -1,4 +1,10 @@
+"""The checks `guild review doc` runs on a review doc. Standard library only: a host without guild runs this file
+as it is, `python3 review_doc_check.py <doc.html>`, from the copy bridge puts in its bridge skill folder."""
+
+import argparse
 import re
+import subprocess
+import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
@@ -734,6 +740,9 @@ class PlainLimits:
     visible_words: int
 
 
+DEFAULT_LIMITS = PlainLimits(bullets=5, bullet_words=25, sentence_words=30, visible_words=900)
+
+
 def find_plainness_problems(top: VisibleTop, limits: PlainLimits) -> list[str]:
     problems: list[str] = []
     if len(top.bullets) > limits.bullets:
@@ -1124,3 +1133,67 @@ def find_doc_problems(
                 "write the full path from the repo root"
             )
     return problems
+
+
+_META_RE = re.compile(rb"<meta\b[^>]*>", re.I)
+_PR_HEAD_NAME_RE = re.compile(rb"""\bname\s*=\s*["']?pr-head\b""", re.I)
+_CONTENT_SHA_RE = re.compile(rb"""\bcontent\s*=\s*["']?([0-9a-fA-F]{7,40})\b""")
+
+
+def read_doc_head(html: bytes) -> str:
+    """The commit the doc says it was checked against, from <meta name="pr-head" content="<sha>">; empty without one."""
+    for tag in _META_RE.findall(html):
+        sha = _CONTENT_SHA_RE.search(tag)
+        if _PR_HEAD_NAME_RE.search(tag) and sha:
+            return sha.group(1).decode().lower()
+    return ""
+
+
+def list_files_at(repo: str, commit: str) -> frozenset[str] | None:
+    try:
+        listed = subprocess.run(
+            ["git", "-C", repo, "ls-tree", "-r", "-t", "--name-only", "-z", commit],
+            capture_output=True, stdin=subprocess.DEVNULL, timeout=60, check=False,
+        )  # fmt: skip
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if listed.returncode != 0:
+        return None
+    return frozenset(name for name in listed.stdout.decode("utf-8", "replace").split("\0") if name)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Check a review doc as `guild review doc` does, with its default limits; exit 1 on any problem."
+    )
+    parser.add_argument("file", help="the review doc, an HTML file")
+    parser.add_argument("--base", default="main", help="the PR's base branch (default: main)")
+    parser.add_argument(
+        "--repo", default=".", help="a checkout that has the PR's commits, for Where to look paths (default: .)"
+    )
+    parser.add_argument(
+        "--owner-reviewed", action="store_true", help="the owner has reviewed the PR: allows the Changes since section"
+    )
+    args = parser.parse_args(argv)
+    try:
+        with open(args.file, "rb") as f:
+            page = f.read()
+    except OSError as exc:
+        print(f"cannot read {args.file}: {exc}", file=sys.stderr)
+        return 2
+    # As registration does: the paths at the commit the doc names, else at the PR's head, here the checkout's.
+    commit = read_doc_head(page) or "HEAD"
+    files = list_files_at(args.repo, commit)
+    problems = find_doc_problems(page, args.owner_reviewed, "the owner", files, DEFAULT_LIMITS, args.base)
+    for problem in problems:
+        print(f"- {problem}")
+    if files is None:
+        print(f"note: {args.repo} has no commit {commit}, so Where to look paths were not looked up", file=sys.stderr)
+    if problems:
+        return 1
+    print("passes the checks guild review doc runs")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

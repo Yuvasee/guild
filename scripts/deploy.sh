@@ -152,6 +152,11 @@ restart_and_hook
 step="deploy-check after"
 bridge "$check" >"$logs/$sha-check-after.txt" 2>&1 || fail $? "see $logs/$sha-check-after.txt"
 
+# A host worker reads the skill and overlay from its host's copy, which otherwise changes only when one starts there.
+step="sync rules to remotes"
+bridge sync-rules >"$logs/$sha-sync-rules.txt" 2>&1 \
+  || echo "deploy: warning: a remote's skill or overlay is not in step with this Mac: see $logs/$sha-sync-rules.txt" >&2
+
 step="prune old releases"
 keep_now=$(dirname "$(readlink "$current")")
 keep_prev=$(dirname "$(readlink "$previous")")
