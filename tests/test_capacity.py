@@ -356,3 +356,18 @@ def test_a_leads_focus_line_six_hours_old_with_turns_since_is_told_once_per_focu
     assert nudge(now + HOUR) == [], "once per focus line"
     conn.execute("UPDATE conversations SET focus = 'PROJ-9', focus_at = ?", (now - 6 * HOUR - 1,))
     assert len(nudge(now + HOUR)) == 1, "a new focus line that goes stale is told again"
+
+
+def test_the_owners_own_message_after_the_night_word_means_on(conn: sqlite3.Connection) -> None:
+    config = Config(owner_name="the owner", user_alias="owner", assistant_handle="aide", work_timezone="UTC")
+    record_owner_off(conn, "guild dream --wait-all", WORKDAY_NOON - 10 * HOUR)
+    insert = (
+        "INSERT INTO messages (created_at, from_conversation, from_handle, kind, body) VALUES (?, ?, ?, 'info', 'x')"
+    )
+    conn.execute(insert, (WORKDAY_NOON - HOUR, "c1", "lead-x"))
+    assert read_owner_presence(conn, config, WORKDAY_NOON).off, "a session's message is not the owner's"
+    conn.execute(insert, (WORKDAY_NOON - 2 * HOUR, "dash", "owner"))
+    presence = read_owner_presence(conn, config, WORKDAY_NOON)
+    assert not presence.off and "after the night word" in presence.why
+    record_owner_off(conn, "guild dream --wait-all", WORKDAY_NOON - HOUR // 2)
+    assert read_owner_presence(conn, config, WORKDAY_NOON).off, "a night word after the message wins"

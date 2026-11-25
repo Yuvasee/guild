@@ -117,6 +117,12 @@ def read_owner_presence(conn: sqlite3.Connection, config: Config, now: int) -> P
     latest = max((at for at in (off_at, on_at) if at is not None), default=None)
     if row is not None and latest is not None and now - latest <= PRESENCE_FRESH_MS:
         if off_at is not None and (on_at is None or off_at > on_at):
+            # The owner may start the day by writing, with no morning word: a message of theirs after the night word.
+            wrote = conn.execute(
+                "SELECT max(created_at) FROM messages WHERE from_handle = ?", (config.user_alias or "user",)
+            ).fetchone()[0]
+            if wrote is not None and wrote > off_at:
+                return Presence(False, f"on: wrote at {_stamp(int(wrote))}, after the night word")
             return Presence(True, f"off since {_stamp(off_at)} ({row['owner_off_by']})")
         return Presence(False, f"on since {_stamp(cast(int, on_at))} ({row['owner_on_by']})")
     if is_working_time(now, config):
