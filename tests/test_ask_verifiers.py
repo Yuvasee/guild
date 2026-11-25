@@ -139,6 +139,9 @@ def test_the_configured_verifier_lead_goes_first_while_it_fits(team: sqlite3.Con
     ask_id = claim(team, "alex", ALEX)
     team.execute("UPDATE asks SET verifier = 'cleo' WHERE id = ?", (claim(team, "boris", ALEX),))
     assert pick(team, ask_id, config) == "cleo"
+    _, sent = assign_verifiers(team, config, [get_ask(team, ask_id)], 0)
+    (body,) = bodies_to(team, sent, "cleo")
+    assert "bridge picked you as the configured verifier." in body and "fewest" not in body
     assert pick(team, claim(team, "cleo", ALEX), config) == "boris"
     assert pick(team, claim(team, "alex", Actor("cleo", "conv-cleo", "lead")), config) == "boris"
     end_session(team, "cleo")

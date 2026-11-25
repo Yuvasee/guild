@@ -76,7 +76,8 @@ ROLE_TEMPLATE = "\n".join(
         "`guild work done` at end.",
         "- Typing in your tab is {owner}: answer there; send {assistant} one line per decision.",
         "- {owner}'s asks (typed here or relayed): `guild ask add` at once, verbatim; to verified with evidence of "
-        "what {owner} sees. After a batch of verifies, one `guild ask summary` tells {owner}.",
+        "what {owner} sees. After a batch of verifies, one `guild ask summary` tells {assistant}, who picks what "
+        "reaches {owner}.",
         "- No PR review request as a decision: the page lists open PRs. For {owner}: essence "
         f"visible, details folded. A PR doc follows {REVIEW_DOC_SPEC}; reasons OBSERVED, REPRODUCED or FROM CODE.",
         "- Bridge says two open PRs change the same files: stack one on the other, or give each body a line "

@@ -152,6 +152,7 @@ def test_a_worker_starts_on_this_mac_while_the_hosts_claude_watcher_reads_failed
 
 def test_lead_role_and_skill_say_no_browser_unless_the_task_says_so() -> None:
     assert "No browser (Chrome, Playwright) unless the task says so, then a hidden tab group" in ROLE_TEMPLATE
+    assert "one `guild ask summary` tells {assistant}, who picks what reaches {owner}." in ROLE_TEMPLATE
     assert " ".join(BROWSER_RULE.split()) in " ".join(SKILL.read_text().split())
 
 

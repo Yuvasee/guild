@@ -19,6 +19,8 @@ def is_artifact_publish(payload: dict[str, object]) -> bool:
     tool_input = payload.get("tool_input")
     action = cast(dict[str, object], tool_input).get("action") if isinstance(tool_input, dict) else None
     return action not in ARTIFACT_READ_ACTIONS
+
+
 _LEADING_PREFIX_RE = re.compile(rf"^\s*{ROBOT}(?:\s*Claude\s*:)?\s*")
 
 

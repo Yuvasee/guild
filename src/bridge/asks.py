@@ -31,7 +31,8 @@ ASK_STALE_HOURS = 4
 again after 1, 2, 4… periods, a day at most. Held while the owner is off, sent once the owner is back."""
 ASK_VERIFY_HOURS = 1
 """A claimed-done ask unverified this long nags the same way."""
-ASK_AUTOCLOSE_HOURS = 24
+# Verify closes an ask at once; one verified before that rule closes at the next sweep.
+ASK_AUTOCLOSE_HOURS = 0
 """A verified ask from before verification closed it at once closes by itself this long after."""
 ASK_CHECK_DAYS = 3
 """An open or in-progress ask with no update this long, waiting on someone or not, asks its owner once a day whether it
@@ -876,10 +877,16 @@ def assign_verifiers(
     untold: set[int] = set()
     for lead, owned in by_lead.values():
         count = "a claim" if len(owned) == 1 else f"{len(owned)} claims"
-        head = (
-            f"You verify {count} on {config.owner_name}'s asks: bridge picked you, a live lead other than each ask's "
-            "owner, its claimer and the claimer's lead, with the fewest open verifications."
+        why = (
+            "the configured verifier"
+            if lead.name == config.verifier_lead
+            else "a live lead other than each ask's owner, its claimer and the claimer's lead, with the fewest open "
+            "verifications (the configured verifier is not live)"
+            if config.verifier_lead
+            else "a live lead other than each ask's owner, its claimer and the claimer's lead, with the fewest open "
+            "verifications"
         )
+        head = f"You verify {count} on {config.owner_name}'s asks: bridge picked you as {why}."
         out, told = send_to_verifier(conn, config, lead, owned, head, now)
         sent += out
         for ask in owned:
@@ -1197,7 +1204,8 @@ def close_settled_asks(conn: sqlite3.Connection, now: int, autoclose_ms: int, de
         )
     ]
     cited = f" ({decision})" if decision else ""
-    note = f"closed automatically {autoclose_ms // 3_600_000} h after verification, by the owner's standing rule{cited}"
+    after = f" {autoclose_ms // 3_600_000} h" if autoclose_ms >= 3_600_000 else ""
+    note = f"closed automatically{after} after verification, by the owner's standing rule{cited}"
     for ask_id in ids:
         close_ask(conn, ask_id, "auto", "bridge", now, note=note)
     return ids

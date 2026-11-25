@@ -10,6 +10,7 @@ from conftest import BridgeEnv, SpawnProcess, http_request
 from test_leads import Team
 
 from bridge.asks import (
+    ASK_AUTOCLOSE_HOURS,
     TOLD_TO_VERIFY,
     Actor,
     AskError,
@@ -334,6 +335,15 @@ def test_older_verified_asks_close_by_themselves_after_the_window(conn: sqlite3.
     assert (ask.state, ask.closed_how) == ("closed", "auto")
     assert list_ask_events(conn, ask_id)[-1]["note"] == (
         "closed automatically 24 h after verification, by the owner's standing rule (Q#7)"
+    )
+
+
+def test_the_service_sweep_closes_an_older_verified_ask_at_once(conn: sqlite3.Connection) -> None:
+    ask_id = claimed(conn)
+    verified_before_close_at_once(conn, ask_id)
+    assert close_settled_asks(conn, 4000, ASK_AUTOCLOSE_HOURS * HOUR, "Q#7") == [ask_id]
+    assert list_ask_events(conn, ask_id)[-1]["note"] == (
+        "closed automatically after verification, by the owner's standing rule (Q#7)"
     )
 
 
