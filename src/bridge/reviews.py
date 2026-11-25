@@ -1157,7 +1157,8 @@ def _find_session_owner(
         return Owner(str(row["handle"]), str(row["conversation_id"]), row["surface"], display, via)
 
     claimed = _find_owner_from_claim(conn, config, ref)
-    if claimed is not None:
+    side_task_lead = _find_lead_over_side_task(conn, config, claimed[0], repo, head) if claimed else None
+    if claimed is not None and side_task_lead is None:
         return from_session(*claimed)
     declared = _find_lead_from_work(conn, config, ref, head, by_issue=False)
     if declared is not None:
@@ -1182,6 +1183,8 @@ def _find_session_owner(
     on_it = [r for r in writers if r["branch"] == head and _is_writer_in_repo(config, r["own_repo"], repo)]
     if writers:
         return from_session((on_it or writers)[0], "branch")
+    if side_task_lead is not None:
+        return side_task_lead
     ended = _find_lead_of_ended_writer(conn, config, ref, repo, head, wrote=True)
     if ended is not None or owned_only:
         return ended
@@ -1428,6 +1431,27 @@ def _find_owner_from_claim(conn: sqlite3.Connection, config: Config, ref: str) -
         if _may_own(conn, config, row):
             return row, "claim"
     return None
+
+
+def _find_lead_over_side_task(
+    conn: sqlite3.Connection, config: Config, holder: sqlite3.Row, repo: str, head: str
+) -> Owner | None:
+    """The live lead above a worker that holds the PR's claim but never wrote to its branch: such a claim is for a
+    side task (a sandbox, a dry run), and the PR's notices must reach someone who acts on them."""
+    display, lead_surface = find_lead_of(conn, holder["surface"])
+    if lead_surface is None or lead_surface == holder["surface"]:
+        return None
+    writes = conn.execute(
+        """
+        SELECT coalesce(nullif(w.repo, ''), i.repo) AS repo FROM review_branch_writes w
+        LEFT JOIN instances i ON i.conversation_id = w.conversation_id
+        WHERE w.conversation_id = ? AND w.branch = ?
+        """,
+        (holder["conversation_id"], head),
+    )
+    if any(_is_writer_in_repo(config, row["repo"], repo) for row in writes):
+        return None
+    return map_lead_to_owner(conn, config, lead_surface, display)
 
 
 def _find_lead_from_work(conn: sqlite3.Connection, config: Config, ref: str, head: str, by_issue: bool) -> Owner | None:

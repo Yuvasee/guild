@@ -543,6 +543,32 @@ def test_the_session_holding_the_prs_claim_owns_it_before_a_lead_its_branch_name
     assert owner is not None and owner.handle == "quinn"
 
 
+def test_a_worker_holding_the_prs_claim_for_a_side_task_leaves_its_notices_to_the_lead(tmp_path: Path) -> None:
+    """A sandbox worker claimed the PR, and the owner's approval reached it, not the lead waiting for it."""
+    conn = setup_pr(tmp_path)
+    with transaction(conn):
+        add_lead(conn, "Alex", "s-alex")
+        add_session(conn, "c-lead", "alex", surface="s-alex", session="tab-alex")
+        add_session(conn, "sb", "sandboxer", session="tab-sb")
+        conn.execute("INSERT INTO tab_parents (agterm_session, parent_session) VALUES ('tab-sb', 'tab-alex')")
+        conn.execute(
+            "INSERT INTO claims (resource, token, holder_conversation, holder_handle, acquired_at, renewed_at,"
+            " expires_at) VALUES (?, 't', 'sb', 'sandboxer', 1, 2, 9999999999999)",
+            (REF.lower(),),
+        )
+    side_task = find_owner(conn, CONFIG, REF, "Org/app", "dev/x")
+    with transaction(conn):
+        conn.execute("INSERT INTO review_branch_writes VALUES ('sb', 'dev/x', 1, 'Org/other')")
+    other_repo = find_owner(conn, CONFIG, REF, "Org/app", "dev/x")
+    with transaction(conn):
+        conn.execute("INSERT INTO review_branch_writes VALUES ('sb', 'dev/x', 2, '')")
+    implementer = find_owner(conn, CONFIG, REF, "Org/app", "dev/x")
+
+    assert side_task is not None and side_task.handle == "alex"
+    assert other_repo is not None and other_repo.handle == "alex", "a same-named branch of another repo is no write"
+    assert implementer is not None and (implementer.handle, implementer.via) == ("sandboxer", "claim")
+
+
 def test_a_leads_declared_work_comes_before_the_session_that_pushed_the_branch(tmp_path: Path) -> None:
     conn = setup_pr(tmp_path)
     with transaction(conn):
