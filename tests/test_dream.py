@@ -19,7 +19,6 @@ from bridge import dream
 from bridge.board import BODY_MAX_CHARS
 from bridge.config import map_toml_to_config
 from bridge.dream import (
-    DREAM_FRAME,
     DREAM_MAX_CHARS,
     TRANSCRIPT_CUT_MARK,
     DreamCut,
@@ -167,10 +166,8 @@ def test_a_night_dreams_from_the_day_and_the_dream_reaches_only_the_lead(
     with bridge_env.connect() as conn:
         assert not conn.execute("SELECT 1 FROM messages WHERE from_handle = 'bridge'").fetchall()
 
-    assert DREAM_FRAME in started
-    assert "a merge button glowing" in started
-    assert started.index("You are Alex") < started.index(DREAM_FRAME)
-    assert "glowing" not in assistant_start
+    # The dream waits for the weekly review: no start carries it, as each turn would pay for it again.
+    assert "glowing" not in started and "glowing" not in assistant_start
 
 
 def test_the_next_night_starts_where_the_last_good_dream_ended(
@@ -230,45 +227,6 @@ def test_no_lead_named_is_not_an_error(bridge_env: BridgeEnv, spawn_process: Spa
     nobody = night.team.guild("dream")
 
     assert nobody.returncode == 0 and "no lead to dream" in nobody.stdout
-
-
-def test_a_dream_that_does_not_fit_the_start_comes_with_the_next_prompt(
-    bridge_env: BridgeEnv, spawn_process: SpawnProcess
-) -> None:
-    night = Night(bridge_env, spawn_process)
-    night.answer("d" * 2900)
-    assert night.dream().returncode == 0
-    keep = subprocess.run(
-        [str(Path(sys.executable).parent / "bridge"), "keep"],
-        input="k" * 5200,
-        env={**bridge_env.env, "CLAUDE_PID": str(night.team.a)},
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert keep.returncode == 0, keep.stderr
-
-    started = night.team.start(night.team.a, "conv-a", "compact")
-    following = night.team.prompt(night.team.a, "conv-a", "go on")
-
-    assert "k" * 5200 in started and len(started) <= 10_000
-    assert DREAM_FRAME not in started
-    assert DREAM_FRAME in following and "d" * 2900 in following and len(following) <= 10_000
-
-
-def test_an_old_dream_names_its_night(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("BRIDGE_STATE_DIR", str(tmp_path))
-    path = tmp_path / "leads" / "alex" / "dream.md"
-    path.parent.mkdir(parents=True)
-    path.write_text("old fog\n")
-    written = int(path.stat().st_mtime * 1000)
-
-    fresh = dream.convert_dream_to_context(path.parent, written + 3600_000)
-    stale = dream.convert_dream_to_context(path.parent, written + 3 * 24 * 3600_000)
-
-    assert fresh == f"[guild] {DREAM_FRAME}\nold fog"
-    assert stale is not None and "from last night" not in stale and "Your dream from the night of " in stale
-    assert dream.convert_dream_to_context(tmp_path / "leads" / "boris") is None
 
 
 def test_a_claude_that_runs_too_long_is_stopped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -385,7 +343,7 @@ def test_the_assistant_dreams_its_own_tab_and_wakes_with_it_below_its_role(
     assert (assistant_dir / "dream.md").read_text().startswith("a switchboard humming")
     [run] = night.runs(assistant_dir)
     assert run["lead"] == "aide" and run["outcome"] == "ok"
-    assert DREAM_FRAME in started and started.index("Right Hand") < started.index("a switchboard humming")
+    assert "Right Hand" in started and "switchboard" not in started
     assert "switchboard" not in lead_start
 
 

@@ -63,12 +63,7 @@ def map_packed_to_keep_status(keep: Part | None, packed: Packed | None) -> str:
 def convert_lead_to_parts(lead: Lead, config: Config) -> list[Part]:
     parts = [read_constitution_part(), Part(convert_lead_to_role(lead, config), "your lead role", rebuilt=True)]
     notes = convert_notes_to_lead_section(read_notes(lead_dir(lead.name)))
-    # Notes before the dream: with the constitution and the role they still fit one message; the dream can wait.
     parts.append(Part(notes, "your notes", "guild notes", True))
-    from bridge.dream import read_dream  # only a lead's or the assistant's start reads it
-
-    if dream := read_dream(lead_dir(lead.name)):
-        parts.append(Part(dream, "your dream from last night", rebuilt=True))
     return parts
 
 
@@ -77,18 +72,13 @@ def convert_assistant_to_parts(conn: sqlite3.Connection, config: Config) -> list
     parts = [read_constitution_part(), Part(role, "your role", rebuilt=True)]
     if (notes := read_notes(assistant_dir())).strip():
         parts.append(Part(convert_notes_to_section(notes), "your notes", "guild notes", True))
-    from bridge.dream import read_dream  # only a lead's or the assistant's start reads it
-
-    if dream := read_dream(assistant_dir()):
-        parts.append(Part(dream, "your dream from last night", rebuilt=True))
     return parts
 
 
 def read_start_parts(
     conn: sqlite3.Connection, config: Config, surface: str | None, conversation_id: str, source: str, at_ms: int
 ) -> list[Part]:
-    """What a session start gives, by reads alone, in the order the hook packs it: keep, constitution, role, notes,
-    dream."""
+    """What a session start gives, by reads alone, in the order the hook packs it: keep, constitution, role, notes."""
     if is_conversation_locked(conn, config, conversation_id):
         return []
     parts: list[Part] = []

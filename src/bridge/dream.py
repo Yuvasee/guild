@@ -55,14 +55,12 @@ INPUT_MAX_CHARS = 400_000
 """About 190k tokens at the trial's 0.48 tokens per character; the busiest lead-day seen was 328k characters."""
 MAX_BUDGET_USD = 5.0
 FIRST_WINDOW_MS = 24 * 3600 * 1000
-STALE_AFTER_MS = 36 * 3600 * 1000
 TOOL_CHARS = 200
 TEXT_BLOCK_CHARS = 3000
 NOTES_MAX_CHARS = 30_000
 MESSAGE_MAX_CHARS = 1500
 MESSAGES_MAX_CHARS = 80_000
 FEED_MAX_CHARS = 20_000
-DREAM_FRAME = "Your dream from last night: impressions, not facts. Check the source before acting on anything in it."
 TRANSCRIPT_CUT_MARK = "[… the earlier part of the day is cut for size]"
 NIGHT_MARK = "dream.night"
 """The id of the night whose dream is in dream.md, so a lost run's night can tell whether it was stored."""
@@ -168,28 +166,6 @@ def dream_path(directory: Path) -> Path:
 
 def runs_path(directory: Path) -> Path:
     return directory / "dream-runs.jsonl"
-
-
-def read_dream(directory: Path) -> str | None:
-    """The dream from last night in this lead's or the assistant's directory, as its own message part."""
-    return convert_dream_to_context(directory)
-
-
-def convert_dream_to_context(directory: Path, at_ms: int | None = None) -> str | None:
-    """The block a lead or the assistant gets below its role at each start and compaction, or None without a dream."""
-    path = dream_path(directory)
-    try:
-        text = path.read_text().strip()
-        written_ms = int(path.stat().st_mtime * 1000)
-    except OSError:
-        return None
-    if not text:
-        return None
-    frame = DREAM_FRAME
-    if (at_ms if at_ms is not None else now_ms()) - written_ms > STALE_AFTER_MS:
-        night = datetime.fromtimestamp(written_ms / 1000).strftime("%Y-%m-%d")
-        frame = DREAM_FRAME.replace("from last night", f"from the night of {night}")
-    return f"[guild] {frame}\n{text[:DREAM_MAX_CHARS]}"
 
 
 DREAMS_PLACEHOLDER = "<!--DREAMS-->"
