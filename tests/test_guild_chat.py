@@ -1314,6 +1314,7 @@ def test_guild_worker_stores_the_parent_link_before_any_reconcile(
     assert "not Boris, Aide, worker, lead, Guild, bridge." in brief
     assert "through Aide" in brief and "never a sub-issue" in brief
     assert "No browser use" in brief
+    assert "Pages are local, never claude.ai" in brief and "bridge page add <slug>" in brief
     assert "OBSERVED (it happened to a real user" in brief and "say who would hit it and when" in brief
     assert "review doc follows ~/.claude/skills/bridge/review-doc.md" in brief
     assert brief.startswith("# The Guild constitution") and "## 4. Signal hygiene" in brief
