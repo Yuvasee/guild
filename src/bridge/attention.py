@@ -276,6 +276,10 @@ def map_page_to_ranked_page(
         [_map_need_to_question(need) for need in needs if _is_open_question(need)], queued, projects
     )
     place = {item.key: index for index, item in enumerate(ranking)}
+    leads = [
+        _map_lead_to_ranked_holds(lead, place, _map_projects_to_positions(projects), queued)
+        for lead in cast(list[dict[str, object]], guild.get("leads", []))
+    ]
     ordered = convert_items_to_parent_order(
         sorted(prs, key=lambda pr: place.get(str(pr["ref"]), len(place))),
         lambda pr: str(pr["ref"]),
@@ -283,6 +287,7 @@ def map_page_to_ranked_page(
     )
     return {
         **guild,
+        **({"leads": leads} if "leads" in guild else {}),
         "needs": sorted(needs, key=lambda need: _map_need_to_place(need, place)),
         "reviews": {**reviews, "prs": ordered},
         "attention": {
@@ -291,6 +296,32 @@ def map_page_to_ranked_page(
             "estimate_rule": ESTIMATE_RULE,
         },
     }
+
+
+def _map_lead_to_ranked_holds(
+    lead: dict[str, object], place: dict[str, int], position: dict[str, int], queued: list[QueuedPr]
+) -> dict[str, object]:
+    """What the lead and each worker hold, top priority first: the page's numbered order, then the project an
+    issue key places it in; the rest keep their order."""
+    # A claim stores its repo in lower case; GitHub's refs keep the repo's own.
+    keys_of = {pr.ref.lower(): pr.issue_keys for pr in queued}
+    place_of = {ref.lower(): index for ref, index in place.items()}
+
+    def priority(hold: dict[str, object]) -> tuple[int, int]:
+        ref = str(hold.get("ref", "")).lower()
+        if ref in place_of:
+            return 0, place_of[ref]
+        kind, _, value = ref.partition(":")
+        keys = (value,) if kind == "issue" else keys_of.get(ref, ())
+        return 1, min((position.get(key.upper(), _NO_PROJECT) for key in keys), default=_NO_PROJECT)
+
+    def rank(holds: object) -> list[dict[str, object]]:
+        return sorted(cast(list[dict[str, object]], holds or []), key=priority)
+
+    workers = [
+        {**worker, "holds": rank(worker.get("holds"))} for worker in cast(list[dict[str, object]], lead["workers"])
+    ]
+    return {**lead, "holds": rank(lead.get("holds")), "workers": workers}
 
 
 def _is_open_question(need: dict[str, object]) -> bool:

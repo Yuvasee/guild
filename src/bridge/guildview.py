@@ -105,7 +105,9 @@ def map_db_to_guild(
     holds_of: dict[str, list[dict[str, object]]] = {}
     for conversation_id, claim in _load_active_claims_by_holder(conn, config, now, url_of):
         if claim["kind"] in WORKER_HOLDS_KINDS:
-            holds_of.setdefault(conversation_id, []).append({"label": claim["label"], "url": claim["url"]})
+            holds_of.setdefault(conversation_id, []).append(
+                {"ref": claim["resource"], "label": claim["label"], "url": claim["url"]}
+            )
     enrichment = load_enrichment(conn, now)
     leads: list[dict[str, object]] = []
     needs: list[dict[str, object]] = _map_open_posts_to_needs(conn, config, now, url_of)
@@ -185,6 +187,7 @@ def map_db_to_guild(
                 "tint": _find_tint_of_lead(lead, tree, tab_id),
                 "surface": lead.surface,
                 **map_states_to_rollup(own, workers),
+                "holds": holds_of.get(conversation, []) if conversation else [],
                 "workers": workers,
                 "worker_count": worker_count,
                 "worker_cap": WORKER_CAP,

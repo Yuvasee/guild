@@ -175,6 +175,25 @@ def test_past_review_a_child_s_threads_stay_ranked_after_its_unranked_parent() -
     assert [item["key"] for item in cast(Any, page["attention"])["ranking"]] == ["child"]
 
 
+def test_what_a_lead_and_its_workers_hold_runs_by_the_pages_order_then_the_projects() -> None:
+    ranked = queued("pr:Acme/Web#2", loc=5)
+    unready = {**asdict(queued("pr:Acme/Web#3", issue_keys=("PROJ-39",))), "reviews_gap": True}
+    holds = [
+        {"ref": ref, "label": ref, "url": ""}
+        for ref in ("pr:acme/web#1", "issue:PROJ-27", "pr:acme/web#3", "env:staging", "pr:acme/web#2")
+    ]
+    lead = {"name": "alex", "holds": holds, "workers": [{"task": "fix", "holds": list(reversed(holds))}]}
+
+    page = map_page_to_ranked_page(
+        {"needs": [], "leads": [lead]}, {"prs": [asdict(ranked), unready]}, [ONBOARDING, EXPORT]
+    )
+
+    [shown] = cast(list[dict[str, Any]], page["leads"])
+    expected = ["pr:acme/web#2", "pr:acme/web#3", "issue:PROJ-27", "pr:acme/web#1", "env:staging"]
+    assert [hold["ref"] for hold in shown["holds"]] == expected
+    assert [hold["ref"] for hold in shown["workers"][0]["holds"]] == [*expected[:3], "env:staging", "pr:acme/web#1"]
+
+
 def test_a_parent_in_another_group_or_off_the_list_leaves_the_order_alone() -> None:
     draft = queued("draft", group="drafts", state="draft")
     docs = queued("docs", loc=1, depends_on="draft")

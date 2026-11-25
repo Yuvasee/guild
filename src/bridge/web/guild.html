@@ -216,6 +216,8 @@ header .end { margin-left: auto; }
 .lead .worker .task { display: flex; align-items: center; gap: 6px; flex: none; color: var(--ink); }
 .lead .worker .task:hover { text-decoration: underline; text-underline-offset: 2px; text-decoration-color: var(--faint); }
 .lead .worker .refs { display: flex; gap: 0 8px; flex: none; }
+.lead .who .refs { display: flex; gap: 0 8px; font-size: 12px; }
+.lead .who .ref a { font-weight: 500; }
 .lead .worker .ref a { font-weight: 500; }
 .lead .worker .focus { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .lead .worker + .chunk, .lead .worker + .quiet { margin-top: 4px; }
@@ -1125,6 +1127,7 @@ function renderLeadRow(lead) {
     words.title = lead.why || word;
     who.append(words);
   }
+  if (lead.holds && lead.holds.length) who.append(renderRefs(lead.holds));
   if (lead.asks) who.append(renderLeadAsks(lead.asks));
   if (lead.worker_count) {
     const full = lead.worker_count >= lead.worker_cap;

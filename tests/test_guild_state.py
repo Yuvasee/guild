@@ -443,7 +443,7 @@ def test_resources_list_environments_before_branches_and_prs(
     assert [(c["kind"], c["label"]) for c in claims] == [("env", "staging"), ("branch", "feat-x"), ("pr", "web#9")]
 
 
-def test_a_worker_shows_its_focus_and_the_prs_and_issues_it_holds_but_not_its_leads(
+def test_a_worker_shows_its_focus_and_the_prs_and_issues_it_holds_and_its_lead_shows_its_own(
     bridge_env: BridgeEnv, spawn_process: SpawnProcess
 ) -> None:
     team = Team(bridge_env, spawn_process)
@@ -458,12 +458,14 @@ def test_a_worker_shows_its_focus_and_the_prs_and_issues_it_holds_but_not_its_le
     with bridge_env.connect() as conn:
         guild = map_db_to_guild(conn, Config(), now, lambda ref: f"https://example.test/{ref}", tree, now, {}, now)
 
-    [worker] = cast(list[dict[str, Any]], guild["leads"])[0]["workers"]
+    [lead] = cast(list[dict[str, Any]], guild["leads"])
+    [worker] = lead["workers"]
     assert (worker["task"], worker["focus"]) == ("Review fixes", "fixing review comments on web#3141")
     assert worker["holds"] == [
-        {"label": "web#3141", "url": "https://example.test/pr:acme/web#3141"},
-        {"label": "ACME-12", "url": "https://example.test/issue:ACME-12"},
+        {"ref": "pr:acme/web#3141", "label": "web#3141", "url": "https://example.test/pr:acme/web#3141"},
+        {"ref": "issue:ACME-12", "label": "ACME-12", "url": "https://example.test/issue:ACME-12"},
     ]
+    assert lead["holds"] == [{"ref": "pr:acme/web#9", "label": "web#9", "url": "https://example.test/pr:acme/web#9"}]
 
 
 def test_page_has_a_favicon_no_external_loads_and_never_says_idle() -> None:

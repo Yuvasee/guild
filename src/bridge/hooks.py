@@ -94,6 +94,7 @@ from bridge.inject import (
     take_later_parts,
 )
 from bridge.leads import (
+    find_lead_conversations,
     find_lead_of,
     find_lead_on_surface,
     forget_assistant_role,
@@ -106,7 +107,7 @@ from bridge.leads import (
     take_lead_role,
 )
 from bridge.procinfo import process_age_us, process_args, process_start_ms
-from bridge.refs import extract_refs
+from bridge.refs import extract_branch_refs, extract_refs
 from bridge.registry import (
     Observation,
     ObserveResult,
@@ -1497,7 +1498,19 @@ def handle_hook(
                 )
                 add_refs(conn, conversation_id, refs, "prompt", at_ms)
                 add_branch_refs(conn, conversation_id, git.branch if git else None, config, at_ms)
-                nudge = take_focus_nudge(conn, conversation_id, at_ms) if observed.current else None
+                nudge = (
+                    take_focus_nudge(
+                        conn,
+                        conversation_id,
+                        at_ms,
+                        lead=conversation_id in find_lead_conversations(conn),
+                        branch_refs=extract_branch_refs(git.branch, config.issue_prefixes)
+                        if git and git.branch
+                        else (),
+                    )
+                    if observed.current
+                    else None
+                )
                 if nudge:
                     contexts.append(nudge)
         elif event == "Stop":

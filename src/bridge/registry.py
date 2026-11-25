@@ -2,7 +2,7 @@ import json
 import re
 import sqlite3
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, replace
 
 from bridge.claude import ClaudeSessionFile, list_session_files
@@ -23,6 +23,9 @@ STALE_AFTER_S = 900
 FOCUS_STALE_AFTER_S = 7200
 FOCUS_NUDGE_EVERY_S = 1800
 FOCUS_NUDGE_MIN_TURNS = 2
+LEAD_FOCUS_STALE_AFTER_S = 1800
+LEAD_FOCUS_REF_TURNS = 3
+LEAD_FOCUS_REFS_SHOWN = 3
 """last_turn of a PR link that was never mentioned in a turn: no session is young enough to count it as recent."""
 
 
@@ -329,6 +332,35 @@ def add_branch_refs(
         add_refs(conn, conversation_id, extract_branch_refs(branch, config.issue_prefixes), "branch", at_ms)
 
 
+def _find_refs_outside_focus(
+    conn: sqlite3.Connection, conversation_id: str, focus: str, focus_at: int, turns: int, branch_refs: Collection[str]
+) -> list[str]:
+    """PRs and issues the last turns named since the focus line was set that it does not name. Those of the tab's
+    branch are left out: each prompt records them again, and they say where the tab sits, not what it is on."""
+    rows = conn.execute(
+        """
+        SELECT ref FROM refs WHERE conversation_id = ? AND last_seen_at > ? AND last_turn > ?
+        ORDER BY last_seen_at DESC
+        """,
+        (conversation_id, focus_at, turns - LEAD_FOCUS_REF_TURNS),
+    )
+    others = [
+        name
+        for (ref,) in rows
+        if ref not in branch_refs
+        and (name := str(ref).partition(":")[2])
+        and not _names_ref(focus, str(ref).partition(":")[0], name)
+    ]
+    return others[:LEAD_FOCUS_REFS_SHOWN]
+
+
+def _names_ref(focus: str, kind: str, name: str) -> bool:
+    if kind == "issue":
+        return re.search(rf"(?<![A-Za-z0-9]){re.escape(name)}(?!\d)", focus, re.IGNORECASE) is not None
+    number = name.rpartition("#")[2]
+    return re.search(rf"(?<!\d){re.escape(number)}(?!\d)", focus) is not None
+
+
 def set_focus(conn: sqlite3.Connection, conversation_id: str, focus: str | None, at_ms: int) -> None:
     conn.execute(
         "UPDATE conversations SET focus = ?, focus_at = ? WHERE conversation_id = ?",
@@ -336,8 +368,11 @@ def set_focus(conn: sqlite3.Connection, conversation_id: str, focus: str | None,
     )
 
 
-def take_focus_nudge(conn: sqlite3.Connection, conversation_id: str, at_ms: int) -> str | None:
-    """Returns a reminder to refresh focus when it is missing or old, at most once per nudge interval."""
+def take_focus_nudge(
+    conn: sqlite3.Connection, conversation_id: str, at_ms: int, lead: bool = False, branch_refs: Collection[str] = ()
+) -> str | None:
+    """Returns a reminder to refresh focus when it is missing or old, at most once per nudge interval. A lead's goes
+    sooner, once its last turns are about refs its focus line does not name: its card is where the owner looks."""
     row = conn.execute(
         "SELECT focus, focus_at, focus_nudged_at, turns FROM conversations WHERE conversation_id = ?",
         (conversation_id,),
@@ -353,6 +388,17 @@ def take_focus_nudge(conn: sqlite3.Connection, conversation_id: str, at_ms: int)
     elif at_ms - int(row["focus_at"]) > FOCUS_STALE_AFTER_S * 1000:
         hours = (at_ms - int(row["focus_at"])) / 3_600_000
         state = f'is {hours:.1f}h old: "{focus}"'
+    elif (
+        lead
+        and at_ms - int(row["focus_at"]) > LEAD_FOCUS_STALE_AFTER_S * 1000
+        and (
+            others := _find_refs_outside_focus(
+                conn, conversation_id, str(focus), int(row["focus_at"]), int(row["turns"]), branch_refs
+            )
+        )
+    ):
+        minutes = (at_ms - int(row["focus_at"])) // 60_000
+        state = f'is {minutes} min old: "{focus}", and your last turns were about {", ".join(others)}'
     else:
         return None
     conn.execute("UPDATE conversations SET focus_nudged_at = ? WHERE conversation_id = ?", (at_ms, conversation_id))

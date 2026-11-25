@@ -11,11 +11,13 @@ from pathlib import Path
 
 import pytest
 from conftest import VENV_BIN, BridgeEnv, SpawnProcess, wait_for
+from test_leads import Team
 
 from bridge import db
 from bridge.config import load_config
 from bridge.hooks import handle_hook
 from bridge.procinfo import process_age_us, process_start_ms
+from bridge.registry import add_refs, take_focus_nudge
 from bridge.start_context import (
     PendingStart,
     finish_taken_start,
@@ -85,6 +87,74 @@ def test_focus_nudge_after_min_turns_then_throttled(bridge_env: BridgeEnv, spawn
     assert bridge_env.cli("focus", "bridge phase 1", pid=pid).returncode == 0
     with bridge_env.connect() as conn:
         assert conn.execute("SELECT focus FROM conversations").fetchone()["focus"] == "bridge phase 1"
+
+
+def test_a_leads_half_hour_old_focus_is_nudged_once_its_last_turns_name_refs_it_does_not(
+    bridge_env: BridgeEnv,
+) -> None:
+    now = 2_000_000_000_000
+    focus_at = now - 31 * 60_000
+    with bridge_env.connect() as conn:
+        conn.execute(
+            "INSERT INTO conversations (conversation_id, focus, focus_at, turns, first_seen_at, last_seen_at) "
+            "VALUES ('c', 'reviewing web#12 and ACME-3', ?, 9, 0, 0)",
+            (focus_at,),
+        )
+        add_refs(conn, "c", ["pr:acme/web#2071"], "prompt", focus_at - 1)
+        add_refs(conn, "c", ["pr:acme/web#12", "issue:acme-3"], "prompt", now)
+        add_refs(conn, "c", ["issue:ACME-5"], "reply", focus_at - 1)
+        add_refs(conn, "c", ["issue:ACME-5"], "branch", now)
+        named_only = take_focus_nudge(conn, "c", now, lead=True, branch_refs=["issue:ACME-5"])
+        add_refs(conn, "c", ["issue:ACME-77"], "branch", focus_at - 1)
+        add_refs(conn, "c", ["issue:ACME-77"], "reply", now - 1)
+        spoken = take_focus_nudge(conn, "c", now, lead=True, branch_refs=["issue:ACME-5"])
+        conn.execute("UPDATE conversations SET focus_nudged_at = NULL")
+        add_refs(conn, "c", ["pr:acme/web#120"], "reply", now)
+        not_a_lead = take_focus_nudge(conn, "c", now, lead=False)
+        nudge = take_focus_nudge(conn, "c", now, lead=True, branch_refs=["issue:ACME-5"])
+        again = take_focus_nudge(conn, "c", now + 60_000, lead=True)
+
+    assert (named_only, not_a_lead, again) == (None, None, None)
+    assert spoken is not None and "were about ACME-77." in spoken, "first seen on an old branch, said since"
+    assert nudge is not None
+    assert 'is 31 min old: "reviewing web#12 and ACME-3", and your last turns were about acme/web#120, ACME-77.' in (
+        nudge
+    )
+
+
+def test_a_focus_on_a_longer_issue_key_does_not_name_a_shorter_one(bridge_env: BridgeEnv) -> None:
+    now = 2_000_000_000_000
+    with bridge_env.connect() as conn:
+        conn.execute(
+            "INSERT INTO conversations (conversation_id, focus, focus_at, turns, first_seen_at, last_seen_at) "
+            "VALUES ('c', 'reviewing ACME-50', ?, 9, 0, 0)",
+            (now - 31 * 60_000,),
+        )
+        add_refs(conn, "c", ["issue:ACME-50"], "prompt", now)
+        named = take_focus_nudge(conn, "c", now, lead=True)
+        add_refs(conn, "c", ["issue:acme-5"], "reply", now)
+        nudge = take_focus_nudge(conn, "c", now, lead=True)
+
+    assert named is None
+    assert nudge is not None and "were about acme-5." in nudge
+
+
+def test_only_a_lead_hears_of_refs_its_half_hour_old_focus_leaves_out(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    team = Team(bridge_env, spawn_process)
+    assert team.enroll().returncode == 0
+    for pid in (team.a, team.b):
+        assert bridge_env.cli("focus", "export PROJ-8", pid=pid).returncode == 0
+    with bridge_env.connect() as conn:
+        conn.execute("UPDATE conversations SET focus_at = focus_at - 31 * 60000, turns = 5")
+
+    told = {
+        conv: team.prompt(pid, conv, "check acme/web#555") for pid, conv in ((team.a, "conv-a"), (team.b, "conv-b"))
+    }
+
+    assert "your last turns were about acme/web#555" in told["conv-a"]
+    assert "focus line" not in told["conv-b"]
 
 
 def test_out_of_order_event_does_not_regress_status(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:
