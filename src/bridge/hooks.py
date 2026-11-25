@@ -57,19 +57,23 @@ from bridge.gitinfo import GitInfo, read_git_info, read_repo_facts
 from bridge.guard import (
     CLOSE,
     MERGE,
+    MERGE_CHECK_BUDGET_S,
     PUSH,
     SHELL_KEYWORDS,
     SSH_VALUE_OPTIONS,
     WRAPPED,
     HostRepoReader,
+    SandboxMerge,
     Unreadable,
     add_merge_base_targets,
     find_conflicts,
     find_held_writes,
     find_merge_blocks,
+    find_sandbox_merges,
     map_command_to_targets,
     map_held_writes_to_lines,
     map_merge_blocks_to_lines,
+    map_sandbox_merges_to_lines,
     segment_command,
 )
 from bridge.inject import (
@@ -858,13 +862,18 @@ def _check_pre_tool_use(
     conflicts = find_conflicts(conn, all_targets, _str(payload, "session_id"))
     held = find_held_writes(conn, all_targets)
     waived: list[str] = []
+    heads: dict[str, str] = {}
     now = time.time_ns() // 1_000_000
-    blocks = find_merge_blocks(conn, config, targets, now, waived)
+    merge_deadline = time.monotonic() + MERGE_CHECK_BUDGET_S
+    blocks = find_merge_blocks(conn, config, targets, now, waived, heads)
     # The Mac sees a host only through the facts of the checkouts its gbridge reported: a push or merge it cannot
     # read could be to any branch or PR. On the Mac only a merge or close whose text hides its PR is refused, and a
     # push or merge written so the guard cannot read it (bash -c or -s, eval, xargs, sudo, find -exec, a url, -c).
     unnamed = unreadable if host_checkout is not None else [u for u in unreadable if u.refused_on_mac]
     if not conflicts and not blocks and not unnamed and not held:
+        if sandboxes := find_sandbox_merges(conn, targets, now, _str(payload, "session_id") or "", heads):
+            _record_sandbox_warnings(conn, sandboxes, now, merge_deadline)
+            return _deny("\n".join(map_sandbox_merges_to_lines(sandboxes)))
         conversation_id = _str(payload, "session_id")
         pushed = [
             (parts[1], parts[2])
@@ -908,6 +917,27 @@ def map_unclaimed_pr_to_note(ref: str, on_host: bool) -> str:
     if on_host:
         return f"bridge: no claim held on {ref}: ask your lead to claim it first; this note comes once per PR."
     return f"bridge: no claim held on {ref}: bridge claim it first (`bridge claim {ref}`); this note comes once per PR."
+
+
+def _record_sandbox_warnings(conn: sqlite3.Connection, merges: list[SandboxMerge], now: int, deadline: float) -> None:
+    """Waits on a busy database only until the merge check's deadline, as a hook that times out lets the merge
+    through; unrecorded, the next merge is refused with the warning again, never let through."""
+    wait_ms = min(HOOK_BUSY_TIMEOUT_MS, int((deadline - time.monotonic()) * 1000))
+    if wait_ms <= 0:
+        log_error("hook PreToolUse", "sandbox warning not recorded: no time left")
+        return
+    own = int(conn.execute("PRAGMA busy_timeout").fetchone()[0])
+    conn.execute(f"PRAGMA busy_timeout = {min(own, wait_ms)}")
+    try:
+        with transaction(conn):
+            conn.executemany(
+                "UPDATE review_prs SET sandbox_warned_at = ?, sandbox_warned_for = ? WHERE ref = ?",
+                [(now, m.warned_for, m.row["ref"]) for m in merges],
+            )
+    except sqlite3.OperationalError:
+        log_error("hook PreToolUse", f"sandbox warning not recorded: {traceback.format_exc(limit=1)}")
+    finally:
+        conn.execute(f"PRAGMA busy_timeout = {own}")
 
 
 def _record_nudges(conn: sqlite3.Connection, conversation_id: str, refs: list[str]) -> list[str]:

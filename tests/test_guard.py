@@ -209,6 +209,114 @@ def test_a_merge_waits_for_approval_owners_comments_and_green_ci_by_number_and_b
     assert not (bridge_env.state_dir / "claims-active").exists()
 
 
+def test_a_merge_that_deletes_a_kept_sandbox_is_refused_once_per_session_and_head_and_passes_when_run_again(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    from test_reviews import make_pr
+
+    from bridge.reviews import store_open_prs
+
+    pair = Pair(bridge_env, spawn_process)
+    web = repo(bridge_env.root / "web")
+    now = time.time_ns() // 1_000_000
+    ready = {"repo": "Acme/Web", "head_oid": "c1", "approved_by": ("mira",)}
+    with bridge_env.connect() as conn, transaction(conn):
+        store_open_prs(
+            conn,
+            [
+                make_pr(ref="pr:Acme/Web#12", number=12, head="feat/x", persist_sandbox=True, **ready),
+                make_pr(ref="pr:Acme/Web#13", number=13, head="feat/y", **ready),
+            ],
+            500,
+        )
+        conn.execute("UPDATE review_prs SET reviewed_at = 600, merge_state = 'CLEAN', merge_block = NULL")
+        conn.execute("INSERT OR REPLACE INTO review_poll (id, ok_at) VALUES (1, ?)", (now,))
+        with mock.patch.dict(os.environ, {"BRIDGE_STATE_DIR": str(bridge_env.state_dir)}):
+            sync_claims_flag(conn)
+
+    def denied(command: str, pid: int = pair.b, conversation: str = "conv-b") -> bool:
+        out = _run_guard(bridge_env, pid, conversation, command, web)
+        return bool(out) and json.loads(out)["hookSpecificOutput"].get("permissionDecision") == "deny"
+
+    def update(sql: str, *args: object) -> None:
+        with bridge_env.connect() as conn, transaction(conn):
+            conn.execute(sql, args)
+
+    assert not denied("gh pr merge 12 --disable-auto")
+    assert not denied("gh pr merge 12 --help")
+    first = json.loads(_run_guard(bridge_env, pair.b, "conv-b", "gh api -X PUT repos/Acme/Web/pulls/12/merge", web))
+    reason = first["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "Acme/Web#12 asks in its body to keep its persistent sandbox (PERSIST_SANDBOX)" in reason
+    assert "deletes sandbox pr-12" in reason and "run the same merge again within 10 minutes" in reason
+    assert denied("gh pr merge 12", pair.a, "conv-a")
+    assert not denied("gh pr merge 12", pair.a, "conv-a")
+    assert not denied("gh pr merge 13")
+    update("UPDATE review_prs SET head_oid = 'c2'")
+    assert denied("gh pr merge 12", pair.a, "conv-a")
+    assert not denied("gh pr merge 12", pair.a, "conv-a")
+    update("UPDATE review_prs SET sandbox_warned_at = ?", now - 11 * 60_000)
+    assert denied("gh pr merge 12", pair.a, "conv-a")
+    update("UPDATE review_prs SET sandbox_warned_for = NULL, merge_ok_oid = 'c2'")
+    assert not denied("gh pr merge 12")
+
+
+def test_an_owner_merge_ok_skips_the_sandbox_warning_only_for_the_head_github_says_is_merged(tmp_path: Path) -> None:
+    from test_reviews import CONFIG, make_pr
+
+    from bridge.db import connect
+    from bridge.guard import find_sandbox_merges
+    from bridge.reviews import store_open_prs
+
+    web = repo(tmp_path / "web")
+    conn = connect(tmp_path / "t.db")
+    with transaction(conn):
+        store_open_prs(
+            conn,
+            [make_pr(ref="pr:Acme/Web#12", repo="Acme/Web", number=12, head="feat/x", persist_sandbox=True)],
+            500,
+        )
+        conn.execute("""UPDATE review_prs SET approved_by = '["mira"]', reviewed_at = 600, merge_ok_oid = 'a1'""")
+        conn.execute("INSERT OR REPLACE INTO review_poll (id, ok_at) VALUES (1, 1000)")
+    targets = map_command_to_targets("gh pr merge 12", str(web))
+    now = 1000 + GITHUB_STALE_S * 1000 + 1
+    heads: dict[str, str] = {}
+    with mock.patch(
+        "bridge.review_github.fetch_merge_facts", return_value=(False, True, None, "CLEAN", 0, "b2", (), ())
+    ):
+        assert find_merge_blocks(conn, CONFIG, targets, now, heads=heads) == []
+    assert heads == {"pr:Acme/Web#12": "b2"}
+    [warned] = find_sandbox_merges(conn, targets, now, "conv-b", heads)
+    assert warned.warned_for == "conv-b b2"
+    assert find_sandbox_merges(conn, targets, now, "conv-b", {"pr:Acme/Web#12": "a1"}) == []
+
+
+def test_recording_a_sandbox_warning_waits_on_a_busy_database_only_until_the_merge_checks_deadline(
+    tmp_path: Path,
+) -> None:
+    from test_reviews import make_pr
+
+    from bridge.db import connect
+    from bridge.guard import SandboxMerge
+    from bridge.hooks import _record_sandbox_warnings  # pyright: ignore[reportPrivateUsage]
+    from bridge.reviews import store_open_prs
+
+    conn = connect(tmp_path / "t.db")
+    with transaction(conn):
+        store_open_prs(conn, [make_pr(ref="pr:Acme/Web#12", repo="Acme/Web", number=12, persist_sandbox=True)], 500)
+    row = conn.execute("SELECT * FROM review_prs").fetchone()
+    other = connect(tmp_path / "t.db")
+    other.execute("BEGIN IMMEDIATE")
+    started = time.monotonic()
+    _record_sandbox_warnings(conn, [SandboxMerge(row, "conv-b a1")], 700, started + 0.1)
+    assert time.monotonic() - started < 1
+    other.rollback()
+    _record_sandbox_warnings(conn, [SandboxMerge(row, "conv-b a1")], 700, time.monotonic() + 1)
+    assert tuple(conn.execute("SELECT sandbox_warned_at, sandbox_warned_for FROM review_prs").fetchone()) == (
+        700,
+        "conv-b a1",
+    )
+
+
 def test_a_stale_queue_reads_github_once_and_an_unreadable_pr_is_refused(tmp_path: Path) -> None:
     from test_reviews import CONFIG, make_pr
 

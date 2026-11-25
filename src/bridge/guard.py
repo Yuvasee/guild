@@ -147,6 +147,11 @@ MERGE_CHECK_BUDGET_S = 3.8
 MERGE_FACTS_TIMEOUT_S = 3.0
 MERGE_FACTS_MIN_S = 0.3
 BODY_READ_TIMEOUT_S = 1.5
+SANDBOX_CONFIRM_MS = 10 * 60_000
+"""How long after the guard's sandbox warning the same session's merge of the same head passes as its confirm."""
+NO_MERGE = "gh pr merge (merges nothing)"
+"""Beside a `gh pr merge` target that only shows help or turns auto-merge off."""
+_NO_MERGE_FLAGS = frozenset({"--disable-auto", "--help", "-h"})
 READY = "ready"
 HELD = "held"
 DRAFT = "a draft"
@@ -374,6 +379,8 @@ def map_command_to_targets(
                 if not named or unsure or (strict and rewritten):
                     note(kind, tokens, refused_on_mac=unsure and kind == MERGE)
                 targets.extend(named)
+                if kind == MERGE and _NO_MERGE_FLAGS.intersection(tokens[3:]):
+                    targets.extend(Target(t.key, NO_MERGE) for t in named)
                 if kind == CLOSE and any(a in ("-d", "--delete-branch") for a in tokens[3:]):
                     targets.extend(Target(t.key, "gh pr close --delete-branch") for t in named)
             elif tokens[0] == "gh" and tokens[1:2] == ["pr"] and tokens[2:3] == ["update-branch"]:
@@ -1187,20 +1194,13 @@ def find_lead_wait_alone(row: sqlite3.Row, live: Mapping[str, Sequence[str]] | N
     return ", ".join(waits) if waits else None
 
 
-def find_merge_blocks(
-    conn: sqlite3.Connection, config: Config, targets: list[Target], now: int, waived: list[str] | None = None
-) -> list[MergeRefusal]:
-    """Merges the owner's rule forbids. A PR the queue's fresh cache finds ready passes on that; any other is read
-    from GitHub once before it is refused, and a PR whose state cannot be read is refused. A merge not mapped to a
-    queued PR passes: this guard only knows the owner's PRs. A backport (base in `backport_bases`) whose diff equals
-    the merged default-branch PRs it names needs no approval; `waived` gets a line for each one that passes so."""
-    from bridge.backport import check_backport, is_backport_base
-    from bridge.review_github import GitHubError, fetch_merge_facts
-
-    deadline = time.monotonic() + MERGE_CHECK_BUDGET_S
+def load_merged_rows(
+    conn: sqlite3.Connection, targets: list[Target], action: str = "gh pr merge"
+) -> dict[str, sqlite3.Row]:
+    """The open queued PRs these targets of `action` name, by ref."""
     rows: dict[str, sqlite3.Row] = {}
     for target in targets:
-        if target.action != "gh pr merge":
+        if target.action != action:
             continue
         if target.key.startswith("pr:"):
             found = conn.execute(
@@ -1213,6 +1213,66 @@ def find_merge_blocks(
                 (repo.lower(), head),
             ).fetchall()
         rows.update({str(r["ref"]): r for r in found})
+    return rows
+
+
+@dataclass(frozen=True)
+class SandboxMerge:
+    row: sqlite3.Row
+    warned_for: str
+    """`<conversation> <head>`: what a merge must match to pass as the confirm."""
+
+
+def find_sandbox_merges(
+    conn: sqlite3.Connection, targets: list[Target], now: int, conversation: str, heads: Mapping[str, str]
+) -> list[SandboxMerge]:
+    """Merges that would delete a sandbox the PR's body asks to keep (PERSIST_SANDBOX, as the queue last read it).
+    The head merged is the one the merge check judged (`heads`, read live when it read GitHub); the owner's Merge
+    press for that head passes, as its confirm already named the sandbox, and so does a merge by the session warned
+    for that head within SANDBOX_CONFIRM_MS. Any other is refused with the warning once."""
+    idle = load_merged_rows(conn, targets, NO_MERGE)
+    found: list[SandboxMerge] = []
+    for ref, row in load_merged_rows(conn, targets).items():
+        head = heads.get(ref) or str(row["head_oid"])
+        warned_for = f"{conversation} {head}"
+        if not row["persist_sandbox"] or ref in idle or row["merge_ok_oid"] == head:
+            continue
+        warned_at = row["sandbox_warned_at"]
+        if row["sandbox_warned_for"] == warned_for and warned_at is not None and now - warned_at <= SANDBOX_CONFIRM_MS:
+            continue
+        found.append(SandboxMerge(row, warned_for))
+    return found
+
+
+def map_sandbox_merges_to_lines(merges: list[SandboxMerge]) -> list[str]:
+    return [
+        f"bridge: {str(row['ref']).removeprefix('pr:')} asks in its body to keep its persistent sandbox "
+        f"(PERSIST_SANDBOX): merging closes it and deletes sandbox pr-{row['number']}. To keep the sandbox, do not "
+        "merge yet; to merge anyway, run the same merge again within "
+        f"{SANDBOX_CONFIRM_MS // 60_000} minutes, and dispatch the sandbox again from main afterwards if it is still "
+        "needed."
+        for row in (m.row for m in merges)
+    ]
+
+
+def find_merge_blocks(
+    conn: sqlite3.Connection,
+    config: Config,
+    targets: list[Target],
+    now: int,
+    waived: list[str] | None = None,
+    heads: dict[str, str] | None = None,
+) -> list[MergeRefusal]:
+    """Merges the owner's rule forbids. A PR the queue's fresh cache finds ready passes on that; any other is read
+    from GitHub once before it is refused, and a PR whose state cannot be read is refused. A merge not mapped to a
+    queued PR passes: this guard only knows the owner's PRs. A backport (base in `backport_bases`) whose diff equals
+    the merged default-branch PRs it names needs no approval; `waived` gets a line for each one that passes so.
+    `heads` gets, by ref, the head each PR was judged at: GitHub's when it was read, else the queue's."""
+    from bridge.backport import check_backport, is_backport_base
+    from bridge.review_github import GitHubError, fetch_merge_facts
+
+    deadline = time.monotonic() + MERGE_CHECK_BUDGET_S
+    rows = load_merged_rows(conn, targets)
     if not rows:
         return []
     poll = conn.execute("SELECT ok_at FROM review_poll WHERE id = 1").fetchone()
@@ -1262,6 +1322,8 @@ def find_merge_blocks(
                 waits_on=facts.waits_on,
                 colleague_block=map_row_to_colleague_block(row, (threads, comments)),
             )
+        if heads is not None and head_oid:
+            heads[ref] = head_oid
         waits = list_merge_waits(facts)
         if restricted := find_live_restricted_block(conn, config, row, deadline):
             waits = (*waits, restricted)

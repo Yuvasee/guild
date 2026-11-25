@@ -1967,7 +1967,7 @@ function queueMergeOkButton(pr) {
   // A new head polled in while armed must be confirmed again, or the second click would OK a commit never shown.
   const key = pr.ref + "@" + pr.head_oid + " merge-ok";
   // Merging closes the PR, and closing deletes a sandbox its body asked to keep: the second click says so.
-  const sure = pr.persist_sandbox ? "Really? Deletes sandbox" : "Really OK?";
+  const sure = pr.persist_sandbox ? "Really? Deletes sandbox pr-" + pr.number : "Really OK?";
   const button = el("button", "act merge", queueArmed === key ? sure : "Merge");
   button.title = "OK its merge at " + pr.pr_at + ": " + (pr.owner ? pr.merge_ok_to + " is told to merge it now" : "no session owns it, so " + pr.merge_ok_to + " is asked to find its lead") +
     (pr.persist_sandbox ? ". Its body asks to keep its persistent sandbox (PERSIST_SANDBOX): merging deletes sandbox pr-" + pr.number : "");

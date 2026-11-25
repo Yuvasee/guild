@@ -957,6 +957,12 @@ MIGRATIONS: tuple[str, ...] = (
     ALTER TABLE asks ADD COLUMN evidence_conversation TEXT;
     ALTER TABLE asks ADD COLUMN wait_conversation TEXT;
     """,
+    # When the guard last refused a merge of this PR for deleting the sandbox its body asks to keep, and to which
+    # conversation for which head ('<conversation> <head>'): that session's merge of that head soon after confirms.
+    """
+    ALTER TABLE review_prs ADD COLUMN sandbox_warned_at INTEGER;
+    ALTER TABLE review_prs ADD COLUMN sandbox_warned_for TEXT;
+    """,
 )
 
 HOOK_BUSY_TIMEOUT_MS = 200

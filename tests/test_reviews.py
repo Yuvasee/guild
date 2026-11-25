@@ -1781,6 +1781,27 @@ def test_merge_cell_shows_the_disabled_button_with_its_reason_unless_an_ok_was_s
     assert done.returncode == 0, done.stderr
 
 
+def test_the_armed_merge_button_names_the_sandbox_it_deletes(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    assert node, "node is required to check the page script"
+    page = (Path(__file__).parent.parent / "src/bridge/web/guild.html").read_text()
+    script = re.search(r"<script>(.*)</script>", page, re.S)
+    assert script is not None
+    checks = """
+    globalThis.document = { createElement: (tag) => ({ tag }) };
+    const eq = (a, b) => { if (a !== b) throw new Error(JSON.stringify(a) + " !== " + JSON.stringify(b)); };
+    const pr = { ref: "pr:Org/app#7", number: 7, head_oid: "a1", pr_at: "a1", owner: "w", merge_ok_to: "w",
+                 persist_sandbox: true };
+    queueArmed = "pr:Org/app#7@a1 merge-ok";
+    eq(queueMergeOkButton(pr).textContent, "Really? Deletes sandbox pr-7");
+    eq(queueMergeOkButton({ ...pr, persist_sandbox: false }).textContent, "Really OK?");
+    """
+    path = tmp_path / "guild.js"
+    path.write_text(STUBS + script.group(1) + checks)
+    done = subprocess.run([node, str(path)], capture_output=True, text=True, timeout=20, check=False)
+    assert done.returncode == 0, done.stderr
+
+
 def test_a_reply_under_owners_account_before_the_prefix_counts_by_its_verdict(tmp_path: Path) -> None:
     conn = setup_pr(tmp_path)
     store(conn, comment("p19", at=1500, body="Renamed it."))
