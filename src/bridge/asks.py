@@ -225,6 +225,11 @@ def claim_ask_done(conn: sqlite3.Connection, ask_id: int, by: Actor, claim: str,
     claim = claim.strip()
     if len(claim) < CLAIM_MIN_CHARS:
         raise AskError(f"the claim says what was done, where it lives (PR, URL, deploy): {CLAIM_MIN_CHARS}+ characters")
+    if ask.reopened_at is not None and _is_claimed_before(conn, ask_id, claim):
+        raise AskError(
+            f"#{ask_id} was claimed done with these very words and reopened since: {ask.reopen_why}. "
+            "Claim what changed for that reason."
+        )
     conn.execute(
         f"""
         UPDATE asks SET state = 'done_claimed', claim = ?, claim_by = ?, claim_conversation = ?, claim_role = ?,
@@ -235,6 +240,12 @@ def claim_ask_done(conn: sqlite3.Connection, ask_id: int, by: Actor, claim: str,
     )
     _log(conn, ask_id, at_ms, by.handle, "done_claimed", claim)
     return get_ask(conn, ask_id)
+
+
+def _is_claimed_before(conn: sqlite3.Connection, ask_id: int, claim: str) -> bool:
+    words = " ".join(claim.split())
+    earlier = conn.execute("SELECT note FROM ask_events WHERE ask_id = ? AND state = 'done_claimed'", (ask_id,))
+    return any(" ".join(str(row["note"] or "").split()) == words for row in earlier)
 
 
 def verify_ask(

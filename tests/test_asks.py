@@ -167,6 +167,19 @@ def test_reopen_clears_the_claim_and_keeps_history(conn: sqlite3.Connection) -> 
     assert notes[-1] == "reopened: The status page still shows the old copy"
 
 
+def test_a_reopened_ask_refuses_its_earlier_claim_word_for_word_and_quotes_the_last_reopen(
+    conn: sqlite3.Connection,
+) -> None:
+    ask_id = claimed(conn)
+    reopen_ask(conn, ask_id, "you", "The banner still shows on mobile", 4000)
+
+    with pytest.raises(AskError, match="reopened since: The banner still shows on mobile"):
+        claim_ask_done(conn, ask_id, WORKER, "  Deployed PR 1 to   the status page ", 5000)
+    again = claim_ask_done(conn, ask_id, WORKER, "Deployed PR 2: the banner is gone on mobile too", 6000)
+
+    assert again.state == "done_claimed"
+
+
 def test_dropped_closes_an_unfinished_ask_only_with_a_reason(conn: sqlite3.Connection) -> None:
     ask = add_ask(conn, "alex", "aide", "words", "tab", [], 1)
     with pytest.raises(AskError, match="why"):
