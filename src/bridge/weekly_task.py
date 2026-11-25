@@ -3,8 +3,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from bridge.asks import send_bodies_from_bridge
-from bridge.board import AddressError, MessageStateError, Recipient
+from bridge.asks import AskError, add_ask, send_bodies_from_bridge
+from bridge.board import AddressError, MessageStateError, Recipient, resolve_handle
 from bridge.config import Config
 from bridge.review_post import WORK_HOURS
 
@@ -19,9 +19,9 @@ class WeeklyTaskRefused(Exception):
 def send_weekly_task(
     conn: sqlite3.Connection, config: Config, now: int
 ) -> tuple[str, list[tuple[int, Recipient]]] | None:
-    """The week's task to its lead, once per week, from its weekday's morning or the next day's; a line saying what
-    was sent and the messages, or None. A text bridge refuses, or an unknown lead, raises WeeklyTaskRefused with
-    the reason and nothing is sent."""
+    """The week's task to its lead, once per week, from its weekday's morning or the next day's, recorded as an ask
+    of that lead; a line saying what was sent and the messages, or None. A text bridge refuses, or an unknown lead,
+    raises WeeklyTaskRefused with the reason and nothing is sent; the caller's rollback takes the ask back."""
     if config.weekly_task_day is None or not config.weekly_task_to or not config.weekly_task_file:
         return None
     zone = ZoneInfo(config.work_timezone) if config.work_timezone else None
@@ -38,15 +38,23 @@ def send_weekly_task(
         return None
     year, week, _ = due.isocalendar()
     text = Path(config.weekly_task_file).expanduser().read_text().replace("{week}", f"{year}-w{week:02d}").strip()
+    refused = f"weekly task for {year}-w{week:02d} from {config.weekly_task_file} not sent to {config.weekly_task_to}"
+    # An ask, not a bare message: it closes only on another session's verification, or a drop the assistant is told of.
+    try:
+        owner = resolve_handle(conn, config.weekly_task_to).handle
+        ask = add_ask(conn, owner, "bridge", text, f"weekly task {year}-w{week:02d}", [], now)
+    except (AddressError, AskError) as exc:
+        raise WeeklyTaskRefused(f"{refused}: {exc}") from exc
+    text += (
+        f"\n\nThis is ask #{ask.id}: `guild ask done {ask.id} --claim '…'` with what you made, and another session "
+        f"verifies it; a week with nothing to do is `guild ask drop {ask.id} '…'` with why."
+    )
     try:
         bodies = send_bodies_from_bridge(conn, config, config.weekly_task_to, text, now, refused_raises=True)
     except (AddressError, MessageStateError) as exc:
-        raise WeeklyTaskRefused(
-            f"weekly task for {year}-w{week:02d} from {config.weekly_task_file} not sent to "
-            f"{config.weekly_task_to}: {exc}"
-        ) from exc
+        raise WeeklyTaskRefused(f"{refused}: {exc}") from exc
     sent = [(message_id, recipient) for _, message_id, recipient in bodies]
     if not sent:
         return None
     conn.execute("INSERT INTO signal_posts (key, message_id, posted_at) VALUES (?, ?, ?)", (key, sent[0][0], now))
-    return f"weekly task for {year}-w{week:02d} sent to {config.weekly_task_to}", sent
+    return f"weekly task for {year}-w{week:02d} sent to {config.weekly_task_to} as ask #{ask.id}", sent

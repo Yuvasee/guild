@@ -1584,7 +1584,7 @@ def cmd_dream(args: argparse.Namespace, conn: sqlite3.Connection, config: Config
     for dreamer in dreamers:
         run = run_dream(conn, config, dreamer.handle)
         failed += run.outcome != OK
-        detail = run.why or f"{run.dream_chars} chars, {run.rules} rules, {run.seconds} s"
+        detail = run.why or f"{run.dream_chars} chars, {run.seconds} s"
         print(f"{dreamer.display}: {run.outcome}: {detail}")
     return 1 if failed else 0
 

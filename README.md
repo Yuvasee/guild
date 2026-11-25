@@ -290,9 +290,10 @@ last dream back; workers get the constitution.
 **Why:** notes keep facts. They don't keep what the day felt like: what nagged, what went wrong, what you cared about.
 
 **How:** when you say good night, Right Hand starts the dreams: each team lead's day (conversation, messages, notes,
-work) goes to `claude -p`, which writes a short dream that comes back beside the role at the next start, and proposes
-up to seven durable rules with their sources. The rules go to Right Hand as proposals; nothing is adopted by itself.
-Each run is capped at $5.
+work) goes to `claude -p`, which writes a short dream that comes back beside the role at the next start. A dream is
+only a dream: after the night, the verification lead (`verifier_lead`) gets the list of new dreams with each one's
+transcripts and window, extracts candidate rules, checks each against its source, and sends Right Hand one short list;
+nothing is adopted by itself. Each run is capped at $5.
 </details>
 
 <details>

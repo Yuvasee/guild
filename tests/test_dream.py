@@ -24,7 +24,6 @@ from bridge.dream import (
     TRANSCRIPT_CUT_MARK,
     DreamCut,
     Dreamer,
-    Rule,
     cut_dream,
     fit_transcript,
     map_dreamers_to_page,
@@ -63,13 +62,13 @@ class Night:
         self.project.mkdir(parents=True)
         self.lead_dir = bridge_env.state_dir / "leads" / "alex"
 
-    def answer(self, dream_text: str, rules: list[dict[str, str]] | None = None, **extra: object) -> None:
+    def answer(self, dream_text: str, **extra: object) -> None:
         result = {
             "type": "result",
             "subtype": "success",
             "is_error": False,
             "result": "",
-            "structured_output": {"dream": dream_text, "rules": rules or []},
+            "structured_output": {"dream": dream_text},
             "usage": {
                 "input_tokens": 3,
                 "cache_creation_input_tokens": 1200,
@@ -125,10 +124,7 @@ def test_a_night_dreams_from_the_day_and_the_dream_reaches_only_the_lead(
     (night.project / "memory" / "MEMORY.md").write_text("- Explainers are HTML\n")
     assert night.team.guild("notes", "--write", pid=night.team.a, stdin="Owns PROJ-33.\n").returncode == 0
     assert bridge_env.cli("send", "alex", "the deploy waits for the owner", pid=night.team.b).returncode == 0
-    night.answer(
-        "a merge button glowing behind a closed door; the owner's voice: not yet",
-        [{"rule": "Never merge while a thread of the owner's is open.", "source": "2026-11-03 08:22 aaaaaaaa"}],
-    )
+    night.answer("a merge button glowing behind a closed door; the owner's voice: not yet")
 
     done = night.dream()
     started = night.team.start(night.team.a, "conv-a", "compact")
@@ -142,7 +138,10 @@ def test_a_night_dreams_from_the_day_and_the_dream_reaches_only_the_lead(
         assert flag in args
     assert args[args.index("--tools") + 1] == ""
     assert json.loads(args[args.index("--settings") + 1]) == {"disableAllHooks": True}
-    assert "Dream it. Not a report" in args[args.index("--system-prompt") + 1]
+    system = args[args.index("--system-prompt") + 1]
+    assert "Dream it. Not a report" in system
+    assert "rule" not in system.lower(), "a dream is only a dream: the sleeper proposes no rules"
+    assert json.loads(args[args.index("--json-schema") + 1])["required"] == ["dream"]
     env = json.loads((night.fake / "env.json").read_text())
     assert not [k for k in env if k.startswith(("CLAUDE", "AGTERM_"))]
     material = night.stdin()
@@ -152,26 +151,21 @@ def test_a_night_dreams_from_the_day_and_the_dream_reaches_only_the_lead(
     assert "outside the window" not in material
     assert "the deploy waits for the owner" in material
     assert "Owns PROJ-33." in material
-    assert "Explainers are HTML" in material
+    assert "Explainers are HTML" not in material, "the memory index was there only for the rules"
     assert "You are Alex, a team lead" in material
     assert "Your notes are empty" not in material
 
     assert (night.lead_dir / "dream.md").read_text().startswith("a merge button glowing")
-    assert len(list((night.lead_dir / "dreams").glob("*.md"))) == 1
+    [archived] = (night.lead_dir / "dreams").glob("*.md")
     [run] = night.runs()
-    assert run["outcome"] == "ok" and run["rules"] == 1 and run["dream_cut_from"] is None
+    assert run["outcome"] == "ok" and run["dream_cut_from"] is None and "rules" not in run
+    assert run["dream_file"] == str(archived)
+    assert run["transcripts"] == [str(night.project / "conv-a.jsonl")]
     assert run["tokens"] == {"input": 3, "cache_creation_input": 1200, "cache_read_input": 40, "output": 500}
     assert run["cost_usd"] == 0.42 and isinstance(run["seconds"], float)
 
     with bridge_env.connect() as conn:
-        rows = conn.execute(
-            "SELECT m.body, r.handle FROM messages m JOIN message_recipients r ON r.message_id = m.id "
-            "WHERE m.from_handle = 'bridge' AND m.body LIKE 'Proposed durable rules%'"
-        ).fetchall()
-    assert [r["handle"] for r in rows] == ["aide"]
-    rule = "1. Never merge while a thread of the owner's is open. (source: 2026-11-03 08:22 aaaaaaaa)"
-    assert rule in rows[0]["body"]
-    assert "glowing" not in rows[0]["body"]
+        assert not conn.execute("SELECT 1 FROM messages WHERE from_handle = 'bridge'").fetchall()
 
     assert DREAM_FRAME in started
     assert "a merge button glowing" in started
@@ -230,17 +224,11 @@ def test_a_long_dream_is_cut_under_the_cap_and_the_log_says_so(
     assert run["dream_cut_from"] == len((("The corridor folds again. " * 60 + "\n\n") * 4).strip())
 
 
-def test_no_rules_sends_nothing_and_no_lead_named_is_not_an_error(
-    bridge_env: BridgeEnv, spawn_process: SpawnProcess
-) -> None:
+def test_no_lead_named_is_not_an_error(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:
     night = Night(bridge_env, spawn_process)
-    night.answer("quiet night")
 
-    assert night.dream().returncode == 0
     nobody = night.team.guild("dream")
 
-    with bridge_env.connect() as conn:
-        assert not conn.execute("SELECT 1 FROM messages WHERE body LIKE 'Proposed durable rules%'").fetchall()
     assert nobody.returncode == 0 and "no lead to dream" in nobody.stdout
 
 
@@ -350,15 +338,6 @@ def test_a_flood_of_board_posts_leaves_room_for_the_conversation(
     assert "post 299 " in material and "post 0 " not in material
 
 
-def test_seven_rules_at_full_length_all_reach_the_assistant() -> None:
-    longest = Rule(dream._clip("r" * 999, dream.RULE_MAX_CHARS), dream._clip("s" * 999, dream.RULE_SOURCE_MAX_CHARS))  # pyright: ignore[reportPrivateUsage]
-    rules = [longest] * dream.RULES_MAX
-
-    body = dream.convert_rules_to_message("Alex", rules, 0)
-
-    assert body.count("\n") == dream.RULES_MAX and len(body) <= BODY_MAX_CHARS
-
-
 def test_all_is_every_lead_not_retired_and_the_assistant(
     bridge_env: BridgeEnv, spawn_process: SpawnProcess, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -430,6 +409,68 @@ def test_wait_all_dreams_in_parallel_and_prints_time_and_tokens(
     assert len(starts) == 2 and max(starts) < min(ends)
     with bridge_env.connect() as conn:
         assert not conn.execute("SELECT 1 FROM messages WHERE body LIKE 'No dream tonight%'").fetchall()
+        assert not conn.execute("SELECT 1 FROM messages WHERE body LIKE 'Tonight''s new dreams%'").fetchall(), (
+            "no verifier lead configured: nobody gets the dreams"
+        )
+
+
+def test_after_the_night_the_verifier_lead_gets_every_new_dream_with_its_sources(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    night = Night(bridge_env, spawn_process)
+    night.write_transcript([_entry("user", "the owner: hold the merge", 30, "x1")])
+    night.configure('verifier_lead = "Alex"\n')
+    night.answer("a door that will not shut")
+
+    done = night.team.guild("dream", "alex", "aide", "--wait-all")
+
+    assert done.returncode == 0, done.stderr
+    alex_dream = night.runs()[-1]["dream_file"]
+    aide_dream = night.runs(bridge_env.state_dir / "assistant")[-1]["dream_file"]
+    with bridge_env.connect() as conn:
+        [row] = conn.execute(
+            "SELECT m.body, r.handle FROM messages m JOIN message_recipients r ON r.message_id = m.id "
+            "WHERE m.from_handle = 'bridge' AND m.body LIKE 'Tonight''s new dreams%'"
+        ).fetchall()
+    body = str(row["body"])
+    assert row["handle"] == "alex"
+    for asked in ("Extract candidate durable rules", "the owner's own words", "constitution", "a mechanism", "aide"):
+        assert asked in body
+    assert f"- Alex: {alex_dream}; day " in body and f"transcripts:\n  {night.project / 'conv-a.jsonl'}" in body
+    assert f"- Aide: {aide_dream}; day " in body
+    assert "a door that will not shut" not in body, "the list points at the dreams, it does not copy them"
+
+
+def test_only_new_dreams_reach_the_verifier_and_a_long_list_goes_on_in_a_second_message(tmp_path: Path) -> None:
+    config = map_toml_to_config({"owner_name": "Sam", "assistant_handle": "aide"})
+    many = tuple(f"{tmp_path}/projects/-a-long-project-folder-name/{n:036d}.jsonl" for n in range(25))
+
+    def run(handle: str, outcome: str) -> dream.NightRun:
+        dreamer = Dreamer(handle, handle.capitalize(), tmp_path / handle, None, None)
+        return dream.NightRun(dreamer, outcome, None, 1.0, None, f"{tmp_path}/{handle}/dreams/n.md", 0, 1, many)
+
+    text = dream.convert_night_to_verifier_task(config, [run(h, "ok") for h in "abc"] + [run("g", "cut")])
+    assert dream.convert_night_to_verifier_task(config, [run("g", "cut"), run("h", "failed")]) is None
+
+    assert text is not None and "- G:" not in text and text.count("\n- ") == 3
+    bodies = dream.split_text_to_bodies(text, BODY_MAX_CHARS)
+    assert len(bodies) > 1 and all(len(b) <= BODY_MAX_CHARS for b in bodies)
+    assert "\n".join(bodies) == text, "nothing cut"
+    assert sum(b.count(".jsonl") for b in bodies) == 3 * 25, "every transcript of every dreamer survives the split"
+
+
+def test_a_verifier_lead_that_is_unknown_is_logged_not_raised(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    Night(bridge_env, spawn_process)
+    monkeypatch.setenv("BRIDGE_STATE_DIR", str(bridge_env.state_dir))
+    config = map_toml_to_config({"verifier_lead": "nobody"})
+    dreamer = Dreamer("alex", "Alex", bridge_env.state_dir / "leads" / "alex", None, None)
+
+    with bridge_env.connect() as conn:
+        dream.send_dreams_to_verifier(conn, config, [dream.NightRun(dreamer, "ok", None, 1.0, None)])
+
+    assert "dreams to verify not sent to nobody" in (bridge_env.state_dir / "errors.log").read_text()
 
 
 def test_a_dream_over_the_limit_is_cut_keeps_the_last_one_and_the_assistant_hears_of_it(
@@ -550,6 +591,36 @@ def test_a_term_while_the_dream_is_stored_waits_for_the_night_mark(
     finally:
         signal.signal(signal.SIGTERM, signal.SIG_DFL)
         monkeypatch.setattr(dream, "_term_pending", None)
+
+
+def test_a_term_while_the_dream_is_stored_still_logs_its_file_and_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dreamer = Dreamer("alex", "Alex", tmp_path / "alex", "s-alex", None)
+    transcript = tmp_path / "conv-a.jsonl"
+    store = dream.store_dream
+
+    def store_with_a_term(directory: Path, text: str, at_ms: int) -> Path:
+        os.kill(os.getpid(), signal.SIGTERM)
+        return store(directory, text, at_ms)
+
+    monkeypatch.setattr(dream, "resolve_dreamer", lambda *_a: dreamer)  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    monkeypatch.setattr(dream, "gather_day", lambda *_a: dream.DayMaterial("day", None, [], [transcript]))  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    monkeypatch.setattr(dream, "call_claude", lambda *_a: {"subtype": "success", "structured_output": {"dream": "x"}})  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    monkeypatch.setattr(dream, "store_dream", store_with_a_term)
+    monkeypatch.setattr(dream, "_claude_group", None)
+    dream.stop_claude_on_term()
+    try:
+        with pytest.raises(SystemExit):
+            dream.run_dream(cast(sqlite3.Connection, None), map_toml_to_config({}), "alex", night="n1")
+    finally:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        monkeypatch.setattr(dream, "_term_pending", None)
+
+    run = dream.read_night_run(dreamer, "n1")
+    assert run is not None and run.outcome == "ok", "the log line is written before the held TERM ends the process"
+    [archived] = (dreamer.directory / "dreams").glob("*.md")
+    assert run.dream_file == str(archived) and run.transcripts == (str(transcript),) and run.until_ms > 0
 
 
 def test_dreams_page_shows_each_latest_dream_newest_first_escaped(tmp_path: Path) -> None:

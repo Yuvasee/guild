@@ -159,7 +159,7 @@ class Config:
     """The weekday (Monday is 0) the weekly task is sent on, from 09:00, by bridge serve or `guild day`, or the next
     day when that one sent none; None sends nothing."""
     weekly_task_to: str = ""
-    """The lead or the assistant the weekly task goes to."""
+    """The lead or the assistant the weekly task goes to, as an ask of theirs."""
     weekly_task_file: str = ""
     """The task's text; '{week}' in it becomes the week, e.g. 2026-w47."""
     review_bot_name: str = "ReviewBot"
@@ -215,6 +215,8 @@ class Config:
     """A message to a lead containing one of these (any case) announces a new refusal or rule and goes at once."""
     ask_autoclose_decision: str = ""
     """The owner's decision that verified asks close by themselves (e.g. "Q#12"), cited in each automatic close."""
+    verifier_lead: str = ""
+    """The lead that gets each night's new dreams to find candidate rules in; empty sends them to nobody."""
     asks_panel_max: int = 10
     """Asks the page's Asks panel lists as needing attention; past it, the panel says how many more."""
     doc_screen: bool = False
@@ -404,6 +406,7 @@ def map_toml_to_config(raw: dict[str, object]) -> Config:
             raw, "shadow_filter_refusal_phrases", defaults.shadow_filter_refusal_phrases
         ),
         ask_autoclose_decision=_str(raw, "ask_autoclose_decision", defaults.ask_autoclose_decision),
+        verifier_lead=_str(raw, "verifier_lead", defaults.verifier_lead).strip().lower(),
         asks_panel_max=_positive(raw, "asks_panel_max", defaults.asks_panel_max),
         doc_screen=_bool(raw, "doc_screen", defaults.doc_screen),
         doc_in_short_max_bullets=_positive(raw, "doc_in_short_max_bullets", defaults.doc_in_short_max_bullets),
