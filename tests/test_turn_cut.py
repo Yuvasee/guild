@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,6 +12,7 @@ from test_leads import Team
 from test_typing import NBSP, PROMPT, RULE, FakeClaudeBox
 
 from bridge.board import Recipient
+from bridge.compaction import TrailingFailure, read_trailing_failure
 from bridge.config import Config
 from bridge.feed import (
     TURN_CUT,
@@ -22,6 +24,7 @@ from bridge.feed import (
 )
 from bridge.hooks import HOOK_EVENTS, handle_hook
 from bridge.tabinput import TypeResult, type_when_idle
+from bridge.turncut import sweep_turn_cuts
 
 SLEEP_TEXT = "API Error: Your computer went to sleep mid-response. The response above may be incomplete."
 BASE_NS = 1_800_000_000_000 * 1_000_000
@@ -300,3 +303,122 @@ def test_after_a_cut_a_real_draft_gets_no_typing(cut: Cut) -> None:
     assert result == "draft"
     assert fake.typed == [".", "\x7f"]
     assert fake.boxes["TAB-A"] == "my own words"
+
+
+def _prompt(t_s: int, text: str = "go on") -> dict[str, object]:
+    return {"type": "user", "timestamp": _at(t_s), "isSidechain": False, "message": {"role": "user", "content": text}}
+
+
+def _write_idle_transcript(cut: Cut, written_s: int, *entries: dict[str, object]) -> None:
+    _write_transcript(cut.transcript, *entries)
+    at = BASE_NS // 1_000_000_000 + written_s
+    os.utime(cut.transcript, (at, at))
+
+
+def _sweep(cut: Cut, t_s: int, inspected: dict[str, tuple[int, int]] | None = None) -> list[str]:
+    with cut.env.connect() as conn:
+        sent = sweep_turn_cuts(conn, CONFIG, BASE_NS // 1_000_000 + t_s * 1000, {} if inspected is None else inspected)
+    return [r.handle for _, r in sent]
+
+
+def _cut_unseen_by_hooks(cut: Cut) -> None:
+    cut.hook("UserPromptSubmit", 0, prompt="go on", prompt_id="p1")
+    after: dict[str, object] = {"type": "system", "timestamp": _at(11), "isSidechain": False, "content": "hook"}
+    _write_idle_transcript(cut, 11, _answer(-300), _prompt(0), _failure(10), after)
+
+
+def test_a_tab_idle_on_a_cut_no_hook_took_is_told_to_the_assistant_once_and_not_resumed(cut: Cut) -> None:
+    _cut_unseen_by_hooks(cut)
+    inspected: dict[str, tuple[int, int]] = {}
+
+    early = _sweep(cut, 60, inspected)
+    first = _sweep(cut, 200, inspected)
+    again = _sweep(cut, 400, inspected)
+    after_restart = _sweep(cut, 600)
+
+    alerts = cut.messages("to-assistant")
+    assert (early, first, again, after_restart) == ([], ["old-b"], [], [])
+    assert cut.messages(TURN_CUT) == [] and len(alerts) == 1
+    clock = datetime.fromtimestamp(BASE_NS // 1_000_000_000 + 10).astimezone().strftime("%H:%M")
+    assert alerts[0]["body"].startswith(f"alex's tab (Old A) has been idle since Mac sleep cut its turn at {clock},")
+    assert "agtermctl session text --target TAB-A --pane-id PANE-A" in alerts[0]["body"]
+    assert 'bridge send alex "continue where you left off"' in alerts[0]["body"]
+
+
+def test_a_hook_that_takes_the_cut_after_the_sweep_resumes_it_as_a_first_cut(cut: Cut) -> None:
+    _cut_unseen_by_hooks(cut)
+    _sweep(cut, 200)
+    cut.fail(210)
+
+    resumes = cut.messages(TURN_CUT)
+    assert len(resumes) == 1 and resumes[0]["cancelled_at"] is None
+    assert len(cut.messages("to-assistant")) == 1
+    assert _sweep(cut, 400) == []
+
+
+def test_the_sweep_leaves_a_cut_a_hook_already_resumed(cut: Cut) -> None:
+    cut.hook("UserPromptSubmit", 0, prompt="go on", prompt_id="p1")
+    _write_idle_transcript(cut, 10, _answer(-300), _prompt(0), _failure(10))
+    cut.fail(11)
+
+    assert _sweep(cut, 300) == []
+    assert len(cut.messages()) == 1
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        pytest.param((_answer(-300), _prompt(0), _answer(10)), id="last-turn-answered"),
+        pytest.param((_answer(-300), _failure(10), _prompt(20, "try again")), id="prompted-after-the-cut"),
+    ],
+)
+def test_the_sweep_leaves_a_tab_not_idle_on_a_cut(cut: Cut, entries: tuple[dict[str, object], ...]) -> None:
+    cut.hook("UserPromptSubmit", 0, prompt="go on", prompt_id="p1")
+    _write_idle_transcript(cut, 20, *entries)
+
+    assert _sweep(cut, 600) == []
+    assert cut.messages() == []
+
+
+def _count_reads(reads: list[Path]) -> Any:
+    def read(path: Path) -> TrailingFailure | None:
+        reads.append(path)
+        return read_trailing_failure(path)
+
+    return mock.patch("bridge.turncut.read_trailing_failure", read)
+
+
+def test_the_sweep_reads_an_unchanged_transcript_once_and_never_one_of_a_tab_it_could_not_resume(cut: Cut) -> None:
+    cut.hook("UserPromptSubmit", 0, prompt="go on", prompt_id="p1")
+    _write_idle_transcript(cut, 20, _answer(-300), _prompt(0), _answer(10))
+    inspected: dict[str, tuple[int, int]] = {}
+    reads: list[Path] = []
+
+    with _count_reads(reads):
+        for t_s in (200, 400, 600):
+            _sweep(cut, t_s, inspected)
+        answered = len(reads)
+        with cut.env.connect() as conn:
+            conn.execute("UPDATE leads SET retired_at = 1")
+        _write_idle_transcript(cut, 30, _answer(-300), _prompt(0), _failure(10))
+        told = _sweep(cut, 800, inspected)
+
+    assert (answered, len(reads), told) == (1, 1, [])
+
+
+def test_a_transcript_written_during_the_sweep_is_not_told_of(cut: Cut) -> None:
+    _cut_unseen_by_hooks(cut)
+    inspected: dict[str, tuple[int, int]] = {}
+
+    def read_then_prompt(path: Path) -> TrailingFailure | None:
+        failure = read_trailing_failure(path)
+        with path.open("a") as f:
+            f.write(json.dumps(_prompt(190, "still there?")) + "\n")
+        return failure
+
+    with mock.patch("bridge.turncut.read_trailing_failure", read_then_prompt):
+        during = _sweep(cut, 200, inspected)
+    after = _sweep(cut, 400, inspected)
+
+    assert (during, after) == ([], [])
+    assert cut.messages() == []

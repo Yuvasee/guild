@@ -187,6 +187,8 @@ from bridge.signals import SessionRefs, find_signals, map_enrichment_to_status, 
 from bridge.stall_guard import tell_of_stalls
 from bridge.status_watchers import alert_watchers, read_watchers
 from bridge.tabinput import map_tree_to_pane_session, run_agterm
+from bridge.turncut import SWEEP_EVERY_S as TURN_CUT_SWEEP_EVERY_S
+from bridge.turncut import sweep_turn_cuts
 from bridge.wake import WakeWatch
 from bridge.watcher import (
     map_tree_to_blocked_tabs,
@@ -252,6 +254,7 @@ def serve(config: Config, port: int) -> None:
     state.start_loop(state.post_signals_forever)
     state.start_loop(state.watch_blocked_tabs_forever)
     state.start_loop(state.watch_context_forever)
+    state.start_loop(state.sweep_turn_cuts_forever)
     state.start_loop(state.read_tree_forever)
     state.start_loop(state.read_activity_forever)
     state.start_loop(state.scan_transcripts_forever)
@@ -294,6 +297,7 @@ LOOP_STALL_AFTER_MIN = {
     "maintain_forever": 10,
     "post_signals_forever": 10,
     "watch_blocked_tabs_forever": 10,
+    "sweep_turn_cuts_forever": 10,
     "read_tree_forever": 10,
     "read_activity_forever": 10,
     "notify_urgent_forever": 10,
@@ -345,6 +349,7 @@ class DashboardState:
         self._github_spell = FailureSpell()
         self._projects_retry_at = 0
         self._unpublished_told: dict[str, int] = {}
+        self._inspected_transcripts: dict[str, tuple[int, int]] = {}
         self._weekly_failure: str | None = None
         self._github: Callable[[list[str]], str] = run_gh
 
@@ -592,6 +597,21 @@ class DashboardState:
             except (sqlite3.Error, OSError, TypeError, ValueError, KeyError) as exc:
                 print(f"blocked tab watch failed: {exc}", flush=True)
             self._rest("watch_blocked_tabs_forever", WATCH_EVERY_S)
+
+    def sweep_turn_cuts_forever(self) -> None:
+        """A cut whose StopFailure hook never ran, or failed, is told to the assistant."""
+        while True:
+            try:
+                with self._connection() as conn:
+                    sent = sweep_turn_cuts(conn, self.config, now_ms(), self._inspected_transcripts)
+                for message_id, recipient in sent:
+                    if recipient.pid:
+                        write_hint(recipient.pid, HINT_SENT)
+                    spawn_typed_delivery(message_id, [recipient])
+            except Exception:
+                # Any failure: an escaped exception would end the sweep until restart.
+                log_error("turn cut sweep", traceback.format_exc())
+            self._rest("sweep_turn_cuts_forever", TURN_CUT_SWEEP_EVERY_S)
 
     def watch_context_forever(self) -> None:
         """Slower than the blocked watch: a screen read per tab, and agterm is slow under load."""

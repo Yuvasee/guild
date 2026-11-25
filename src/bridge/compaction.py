@@ -42,6 +42,7 @@ UNREAD_NOTE = (
     "your notes, so some may repeat."
 )
 _TAIL_MAX = 4 * 1024 * 1024
+_TRAILING_TAIL_MAX = 256 * 1024
 PHASE_REQUESTED = "requested"
 PHASE_COMPACTING = "compacting"
 PHASE_CONTINUE = "continue"
@@ -135,6 +136,48 @@ def read_transcript_tail(path: Path) -> TranscriptTail | None:
         if reading is not None:
             break
     return TranscriptTail(reading, FailedTurns(count, too_long, first_at, refused) if count else None)
+
+
+@dataclass(frozen=True)
+class TrailingFailure:
+    error: str | None
+    text: str
+    at_ms: int
+
+
+def read_trailing_failure(path: Path) -> TrailingFailure | None:
+    """The main thread's last message, when it is Claude Code's stand-in for a failed request: no prompt since.
+
+    One small tail read: the stand-in is short, and what follows it until the next prompt is too.
+    """
+    try:
+        with path.open("rb") as f:
+            f.seek(0, 2)
+            start = max(0, f.tell() - _TRAILING_TAIL_MAX)
+            f.seek(start)
+            lines = f.read().split(b"\n")
+    except OSError:
+        return None
+    for raw in reversed(lines[1:] if start > 0 else lines):
+        if b'"user"' not in raw and b'"assistant"' not in raw:
+            continue
+        try:
+            entry: object = json.loads(raw)
+        except ValueError:
+            continue
+        data = cast(dict[str, object], entry) if isinstance(entry, dict) else {}
+        if data.get("type") not in ("user", "assistant") or data.get("isSidechain"):
+            continue
+        at_ms = _map_timestamp_to_ms(data.get("timestamp"))
+        if data.get("type") == "user" or data.get("isApiErrorMessage") is not True or at_ms is None:
+            return None
+        message = data.get("message")
+        content = cast(dict[str, object], message).get("content") if isinstance(message, dict) else None
+        blocks = cast(list[object], content) if isinstance(content, list) else []
+        text = " ".join(str(cast(dict[str, object], b).get("text") or "") for b in blocks if isinstance(b, dict))
+        error = data.get("error")
+        return TrailingFailure(error if isinstance(error, str) else None, text, at_ms)
+    return None
 
 
 def map_failed_to_death(failed: FailedTurns | None) -> str | None:

@@ -963,6 +963,10 @@ MIGRATIONS: tuple[str, ...] = (
     ALTER TABLE review_prs ADD COLUMN sandbox_warned_at INTEGER;
     ALTER TABLE review_prs ADD COLUMN sandbox_warned_for TEXT;
     """,
+    # The failure time of the newest cut serve's sweep told the assistant of: one notice per cut, across restarts.
+    """
+    ALTER TABLE conversations ADD COLUMN cut_told_at INTEGER;
+    """,
 )
 
 HOOK_BUSY_TIMEOUT_MS = 200
