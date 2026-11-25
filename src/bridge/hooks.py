@@ -1,3 +1,4 @@
+import fnmatch
 import json
 import os
 import re
@@ -73,11 +74,14 @@ from bridge.guard import (
     find_held_writes,
     find_merge_blocks,
     find_sandbox_merges,
+    find_substitution_end,
     map_command_to_targets,
     map_held_writes_to_lines,
     map_merge_blocks_to_lines,
     map_sandbox_merges_to_lines,
+    read_short_cluster,
     segment_command,
+    strip_prefixes,
 )
 from bridge.inject import (
     Packed,
@@ -400,7 +404,17 @@ _CLUSTER_VALUE_OPTIONS = frozenset({
     "--password", "--profile", "--profile-output", "--log-file", "--log-dir", "--kube-apiserver", "--kube-token",
     "--kube-as-user", "--kube-as-group", "--kube-ca-file", "--kube-tls-server-name", "--registry-config",
     "--repository-config", "--repository-cache", "--burst-limit", "--qps", "-c", "--command", "-l", "--logLevel",
-    "--logFile", "-r", "--refresh",
+    "--logFile", "-r", "--refresh", "-o", "--output", "--template", "--sort-by", "--field-selector", "--selector",
+    "-L", "--label-columns", "--chunk-size", "--timeout", "--set", "--set-string", "--set-file", "--set-json",
+    "--set-literal", "--values", "--raw",
+})  # fmt: skip
+_CLUSTER_VALUE_LETTERS = frozenset("nsvclroL")
+# Root booleans of kubectl, helm and k9s: before the verb, any other flag written without = takes the next word, as
+# cobra reads it (kubectl -f web.yaml apply).
+_CLUSTER_ROOT_BOOLEANS = frozenset({
+    "-h", "--help", "--insecure-skip-tls-verify", "--match-server-version", "--warnings-as-errors",
+    "--disable-compression", "--debug", "-A", "--all-namespaces", "--headless", "--logoless", "--crumbsless",
+    "--splashless", "--readonly", "--write",
 })  # fmt: skip
 # kubectl explain is not here: it reads the resource schema from the cluster's API server.
 _KUBECTL_LOCAL = frozenset({"config", "completion", "kustomize", "help", "options", "plugin"})
@@ -411,31 +425,65 @@ _HELM_LOCAL = frozenset({
 _K9S_LOCAL = frozenset({"version", "help", "info", "completion"})
 
 
-def find_unnamed_cluster_refusal(command: str, depth: int = 0) -> str | None:
+def find_unnamed_cluster_refusal(command: str) -> str | None:
     """A kubectl, helm or k9s command that names no context runs against the machine's default one, which differs per
-    machine and changes; a command that changes that default changes it for every session. Read like the kill guard:
-    quoted text, heredoc bodies and comments are data; ssh, a shell's -c, a heredoc fed to a shell and a command
-    substitution in double quotes or backticks are read too."""
+    machine and changes; a command that changes that default changes it for every session."""
+    for line, _ in _list_command_lines(command):
+        for words, _ in line:
+            program = os.path.basename(words[0]) if words else ""
+            if refusal := _map_cluster_command_to_refusal(program, words[1:]):
+                return refusal
+    return None
+
+
+def _list_command_lines(
+    command: str, depth: int = 0, chained_outside: bool = False
+) -> Generator[tuple[list[tuple[list[str], str]], bool]]:
+    """The command line, then each one it runs through ssh, a shell's -c, a heredoc fed to a shell and a command
+    substitution in double quotes or backticks: segments of words with the operator before each, and whether the line
+    or one around it joins more than one step by ;, &&, ||, & or a newline. Read like the kill guard: quoted text,
+    heredoc bodies and comments are data; redirections (2>/dev/null, > out) are not words of the command."""
     bodies: list[tuple[int, str]] = []
+    expanding: list[tuple[int, str]] = []
     substitutions: list[str] = []
-    segments = segment_command(command, heredoc_bodies=bodies, substitutions=substitutions)
+    segments = [
+        (_drop_command_prefix(tokens), joined_by)
+        for tokens, joined_by in segment_command(
+            command, heredoc_bodies=bodies, substitutions=substitutions, redirections=[], expanding_bodies=expanding
+        )
+    ]
+    steps = sum(1 for words, joined_by in segments if words and joined_by not in ("|", "|&"))
+    chained = chained_outside or steps > 1
+    yield segments, chained
+    if depth >= 2:
+        return
     bodies_by_owner: dict[int, list[str]] = {}
     for owner, body in bodies:
         bodies_by_owner.setdefault(owner, []).append(body)
-    inner: list[str] = list(substitutions)
-    for index, (tokens, _) in enumerate(segments):
-        words = _drop_command_prefix(tokens)
+    inner: list[str] = [*substitutions, *(s for _, body in expanding for s in _list_substitutions(body))]
+    for index, (words, _) in enumerate(segments):
         program = os.path.basename(words[0]) if words else ""
-        if refusal := _map_cluster_command_to_refusal(program, words[1:]):
-            return refusal
         inner += _list_inner_commands(program, words)
         if index in bodies_by_owner and _reads_script_on_stdin(program, words):
             inner += bodies_by_owner[index]
-    if depth < 2:
-        for text in inner:
-            if refusal := find_unnamed_cluster_refusal(text, depth + 1):
-                return refusal
-    return None
+    for text in inner:
+        yield from _list_command_lines(text, depth + 1, chained)
+
+
+def _list_substitutions(body: str) -> list[str]:
+    """The $( ) and backtick commands the shell runs while expanding an unquoted heredoc's body."""
+    found: list[str] = []
+    at = 0
+    while (start := body.find("$(", at)) >= 0:
+        if start and body[start - 1] == "\\":
+            at = start + 2
+            continue
+        end = find_substitution_end(body, start + 2)
+        if end < 0:
+            break
+        found.append(body[start + 2 : end])
+        at = end + 1
+    return [*found, *body.split("`")[1:-1:2]]
 
 
 def _map_cluster_command_to_refusal(program: str, all_args: list[str]) -> str | None:
@@ -472,12 +520,253 @@ def _map_cluster_command_to_refusal(program: str, all_args: list[str]) -> str | 
     return _UNNAMED_CLUSTER
 
 
-def _list_positionals(args: list[str]) -> list[str]:
+_SECRET_VALUES = (
+    "bridge: this prints secret values (kubectl get secret with -o json, yaml, jsonpath, go-template or "
+    "custom-columns). Never read secret values, even filtered. Key names only: kubectl describe secret <name>."
+)
+_CLAUDE_LOGIN = (
+    "bridge: never log out of Claude or touch its keychain entry: one login serves every session on this Mac. "
+    "This command would {what}."
+)
+_PERMISSION_PROBE = (
+    "bridge: read-only AWS excludes permission probes (aws iam simulate-*): they raise security alerts. Stop at the "
+    "first AccessDenied and report it."
+)
+_CHAINED_APPLY = (
+    "bridge: {what} runs alone, not chained with other steps by ;, &&, || or a newline: a step that fails or does "
+    "something else must not run with it unseen. Run it as its own command and read its result first."
+)
+_PROD_VERB = (
+    "bridge: {context} is a production context, and {program} {verb} there is refused for every session. Read it "
+    "with get, describe, logs or top. Anything else needs the owner's OK, asked through {assistant}; this guard has "
+    "no waiver, so the owner runs the approved command."
+)
+_UNREAD_CONTEXT = (
+    "bridge: the context of this {program} {verb} is {context}, which the shell fills in, so the guard cannot tell "
+    "whether it is production. Name the context literally."
+)
+_SAFE_OUTPUTS = frozenset({"", "name", "wide"})
+# What a production context allows; every other verb is refused, and with no verb kubectl and helm print help.
+_PROD_KUBECTL_READS = frozenset({
+    "", "get", "describe", "logs", "top", "explain", "api-resources", "api-versions", "version", "cluster-info",
+    "diff", "events", "wait", *_KUBECTL_LOCAL,
+})  # fmt: skip
+_PROD_KUBECTL_SUBCOMMAND_READS = (["auth", "can-i"], ["auth", "whoami"], ["rollout", "status"], ["rollout", "history"])
+_PROD_HELM_READS = frozenset({
+    "", "list", "ls", "status", "history", "hist", "get", "show", "template", "search", "version", "diff",
+    *_HELM_LOCAL,
+})  # fmt: skip
+# kubectl verbs whose words after -- are a command run in a container: read as a command line of their own.
+_KUBECTL_CONTAINER_RUNS = frozenset({"exec", "debug", "run"})
+_CLAUDE_VALUE_OPTIONS = frozenset({
+    "--add-dir", "--agent", "--agents", "--allowedTools", "--allowed-tools", "--append-system-prompt",
+    "--append-system-prompt-file", "--autocompact", "--betas", "--debug-file", "--disallowedTools",
+    "--disallowed-tools", "--effort", "--environment", "--fallback-model", "--file", "--input-format", "--json-schema",
+    "--max-budget-usd", "--max-turns", "--mcp-config", "--model", "-n", "--name", "--output-format",
+    "--permission-mode", "--permission-prompts", "--plugin-dir", "--plugin-url", "--session-id", "--setting-sources",
+    "--settings", "--system-prompt", "--system-prompt-file", "--system-prompt-snapshot", "--tools",
+})  # fmt: skip
+# Options whose value is optional: commander takes the next word as it unless that starts with -.
+_CLAUDE_OPTIONAL_VALUE_OPTIONS = frozenset({
+    "-d", "--debug", "-r", "--resume", "-w", "--worktree", "--cloud", "--from-pr", "--prompt-suggestions",
+    "--remote-control", "--teleport",
+})  # fmt: skip
+_AWS_BOOLEANS = frozenset({
+    "--debug", "--no-verify-ssl", "--no-paginate", "--no-sign-request", "--no-cli-pager", "--cli-auto-prompt",
+    "--no-cli-auto-prompt",
+})  # fmt: skip
+_TMUX_SEND_VALUE_OPTIONS = frozenset({"-t", "-N", "-c"})
+_AGTERM_VALUE_OPTIONS = frozenset({"--pane", "--target", "--socket", "--window", "--pane-id"})
+
+
+def find_rule_refusal(command: str, config: Config, depth: int = 0, chained_outside: bool = False) -> str | None:
+    """Prod and secrets rules, said in the refusal rather than in every session's context: no secret values read, no
+    Claude logout, no AWS permission probe, a secret or cluster apply run alone, and on a production context only
+    reads. Read through ssh, a shell's -c and the rest as the cluster check reads them, and a command kubectl exec
+    runs in a container too. An alias defined in the command itself (k=kubectl) is not followed: that is evasion."""
+    for line, chained in _list_command_lines(command, chained_outside=chained_outside):
+        for words, _ in line:
+            program = os.path.basename(words[0]) if words else ""
+            if _asks_help(program, words[1:]):
+                continue
+            if refusal := _map_command_to_rule_refusal(program, words[1:], config):
+                return refusal
+            if chained and (applied := _name_apply(program, words[1:])):
+                return _CHAINED_APPLY.format(what=applied)
+            inside = _map_container_run_to_command(program, words[1:]) if depth < 2 else None
+            if inside and (refusal := find_rule_refusal(inside, config, depth + 1, chained)):
+                return refusal
+    return None
+
+
+def _asks_help(program: str, all_args: list[str]) -> bool:
+    """--help or -h before any --, or aws's own help word: the command prints help and runs nothing."""
+    args = all_args[: all_args.index("--")] if "--" in all_args else all_args
+    return "--help" in args or "-h" in args or (program == "aws" and "help" in args)
+
+
+def _map_command_to_rule_refusal(program: str, all_args: list[str], config: Config) -> str | None:
+    if program in ("kubectl", "helm"):
+        split = all_args.index("--") if "--" in all_args else len(all_args)
+        args = all_args[:split]
+        positional = _list_positionals(args, limit=None)
+        first = positional[0] if positional else ""
+        if program == "kubectl" and first == "get":
+            # After --, kubectl get reads resources, not a command.
+            resources = [*positional[1:], *all_args[split + 1 :]]
+            values = _read_output_format(args).split("=", 1)[0] not in _SAFE_OUTPUTS
+            if (values and _names_secret(resources)) or _is_secrets_path(_option_value(args, "--raw") or ""):
+                return _SECRET_VALUES
+        reads = _PROD_KUBECTL_READS if program == "kubectl" else _PROD_HELM_READS
+        is_read = first in reads or (program == "kubectl" and positional[:2] in _PROD_KUBECTL_SUBCOMMAND_READS)
+        if is_read or not config.prod_kube_contexts:
+            return None
+        context = _option_value(args, "--kube-context" if program == "helm" else "--context") or ""
+        if "$" in context or "`" in context:
+            return _UNREAD_CONTEXT.format(program=program, verb=first, context=context)
+        if any(fnmatch.fnmatchcase(context, pattern) for pattern in config.prod_kube_contexts):
+            return _PROD_VERB.format(context=context, program=program, verb=first, assistant=config.assistant_handle)
+        return None
+    if program == "claude":
+        positional = _list_claude_positionals(all_args)
+        if positional[:1] == ["logout"] or positional[:2] == ["auth", "logout"]:
+            return _CLAUDE_LOGIN.format(what="log Claude out")
+    if program == "security":
+        subcommand = next((a for a in all_args if not a.startswith("-")), "")
+        if "password" in subcommand and any("claude" in a.lower() for a in all_args):
+            return _CLAUDE_LOGIN.format(what="read or change Claude's keychain entry")
+    if _types_logout(program, all_args):
+        return _CLAUDE_LOGIN.format(what="type /logout into a tab")
+    if program == "aws":
+        operation = _list_aws_positionals(all_args)
+        if operation[:1] == ["iam"] and operation[1:2] and operation[1].startswith("simulate-"):
+            return _PERMISSION_PROBE
+    return None
+
+
+def _list_aws_positionals(args: list[str]) -> list[str]:
+    """aws's service and operation: its global options take a value, but for these flags."""
     found: list[str] = []
     at = 0
-    while at < len(args) and len(found) < 3:
+    while at < len(args) and len(found) < 2:
         if args[at].startswith("-"):
-            at += 2 if args[at] in _CLUSTER_VALUE_OPTIONS else 1
+            at += 1 if args[at] in _AWS_BOOLEANS or "=" in args[at] else 2
+        else:
+            found.append(args[at])
+            at += 1
+    return found
+
+
+def _is_secrets_path(path: str) -> bool:
+    """An API path that lists or reads Secrets: a segment secrets that is a resource, not a namespace's name."""
+    segments = path.split("?", 1)[0].strip("/").split("/")
+    return any(seg == "secrets" and (at == 0 or segments[at - 1] != "namespaces") for at, seg in enumerate(segments))
+
+
+def _list_claude_positionals(args: list[str]) -> list[str]:
+    """Claude's subcommand words; none with -p, where the word is a prompt."""
+    found: list[str] = []
+    at = 0
+    while at < len(args):
+        arg = args[at]
+        if arg in ("-p", "--print"):
+            return []
+        if arg.startswith("-"):
+            optional = arg in _CLAUDE_OPTIONAL_VALUE_OPTIONS and at + 1 < len(args) and not args[at + 1].startswith("-")
+            at += 2 if arg in _CLAUDE_VALUE_OPTIONS or optional else 1
+        else:
+            found.append(arg)
+            at += 1
+    return found
+
+
+def _types_logout(program: str, args: list[str]) -> bool:
+    """agtermctl or tmux send-keys typing text that starts with /logout, its words joined as the tab gets them."""
+    if program == "agtermctl":
+        value_options = _AGTERM_VALUE_OPTIONS
+    elif program == "tmux" and {"send-keys", "send"} & set(args):
+        value_options = _TMUX_SEND_VALUE_OPTIONS
+    else:
+        return False
+    typed: list[str] = []
+    at = 0
+    while at < len(args):
+        if args[at].startswith("-") and args[at] != "-":
+            at += 2 if args[at] in value_options else 1
+        else:
+            typed.append(args[at])
+            at += 1
+    return any("".join(typed[start:]).lstrip().startswith("/logout") for start in range(len(typed)))
+
+
+def _map_container_run_to_command(program: str, all_args: list[str]) -> str | None:
+    """The command line kubectl exec, debug or run starts in a container after --, quoted back for the shell."""
+    if program != "kubectl" or "--" not in all_args:
+        return None
+    split = all_args.index("--")
+    positional = _list_positionals(all_args[:split], limit=1)
+    if positional[:1] != [] and positional[0] in _KUBECTL_CONTAINER_RUNS and all_args[split + 1 :]:
+        return " ".join("'" + word.replace("'", "'\\''") + "'" for word in all_args[split + 1 :])
+    return None
+
+
+def _name_apply(program: str, all_args: list[str]) -> str | None:
+    """A command that creates a secret or applies to a cluster, as the refusal names it; None for any other."""
+    if program not in ("kubectl", "helm"):
+        return None
+    args = all_args[: all_args.index("--")] if "--" in all_args else all_args
+    positional = _list_positionals(args)
+    if program == "kubectl" and (positional[:1] == ["apply"] or positional[:2] == ["create", "secret"]):
+        return f"kubectl {' '.join(positional[:2]) if positional[0] == 'create' else 'apply'}"
+    if program == "helm" and positional[:1] in (["upgrade"], ["install"]):
+        return f"helm {positional[0]}"
+    return None
+
+
+def _names_secret(positional: list[str]) -> bool:
+    """The resource type kubectl get reads: secret, secrets.v1, configmap,secret, or a type/name such as secret/web
+    anywhere; a resource merely named secret is not one."""
+    if not positional:
+        return False
+    items = [*positional[0].split(","), *(word for word in positional[1:] if "/" in word)]
+    return any(item.split("/", 1)[0].split(".", 1)[0].lower() in ("secret", "secrets") for item in items)
+
+
+def _read_output_format(args: list[str]) -> str:
+    """The last -o/--output value in any of its spellings (-o yaml, -oyaml, -o=yaml, -Aoyaml, --output=yaml); a
+    --template alone prints as go-template."""
+    found = ""
+    at = 0
+    while at < len(args):
+        arg = args[at]
+        letter, attached = read_short_cluster(arg, _CLUSTER_VALUE_LETTERS)
+        if arg == "--output" or (letter == "o" and attached is None):
+            found = args[at + 1] if at + 1 < len(args) else ""
+        elif letter == "o" and attached is not None:
+            found = attached
+        elif arg.startswith("--output="):
+            found = arg.removeprefix("--output=")
+        elif (arg == "--template" or arg.startswith("--template=")) and not found:
+            found = "go-template"
+        at += 2 if arg in _CLUSTER_VALUE_OPTIONS or (letter is not None and attached is None) else 1
+    return found
+
+
+def _list_positionals(args: list[str], limit: int | None = 3) -> list[str]:
+    found: list[str] = []
+    at = 0
+    while at < len(args) and (limit is None or len(found) < limit):
+        arg = args[at]
+        if arg.startswith("-"):
+            before_verb = (
+                not found
+                and "=" not in arg
+                and arg not in _CLUSTER_ROOT_BOOLEANS
+                and (arg.startswith("--") or len(arg) == 2)
+            )
+            letter, attached = read_short_cluster(arg, _CLUSTER_VALUE_LETTERS)
+            takes = arg in _CLUSTER_VALUE_OPTIONS or before_verb or (letter is not None and attached is None)
+            at += 2 if takes else 1
         else:
             found.append(args[at])
             at += 1
@@ -522,7 +811,7 @@ def _drop_command_prefix(tokens: list[str]) -> list[str]:
         at += 1
         while at < len(tokens) and tokens[at].startswith("-"):
             at += 2 if tokens[at] in _SUDO_VALUE_OPTIONS else 1
-    return tokens[at:]
+    return strip_prefixes(tokens[at:]) if at else tokens
 
 
 def _program_of(tokens: list[str]) -> str:
@@ -822,7 +1111,8 @@ def _check_pre_tool_use(
 ) -> str:
     """Denies a robot-prefixed title, a change to the owner's label, a PR that would name no issue or change another
     team's restricted path without a why and the assistant's OK, an answer to a colleague's comment no call handles
-    yet, or a shell command that would mutate a resource another live session has claimed.
+    yet, a shell command a prod or secrets rule refuses, or one that would mutate a resource another live session has
+    claimed.
 
     host_checkout is set for a host worker: git facts come from its report, and a merge it names no PR for is refused.
     """
@@ -856,6 +1146,8 @@ def _check_pre_tool_use(
         return ""
     if kill := find_kill_by_name_refusal(command):
         return _deny(kill)
+    if rule := find_rule_refusal(command, config):
+        return _deny(rule)
     if unnamed_cluster := find_unnamed_cluster_refusal(command):
         return _deny(unnamed_cluster)
     titles = find_prefixed_titles(command)

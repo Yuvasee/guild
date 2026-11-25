@@ -58,7 +58,13 @@ _HARMLESS_ENV_RE = re.compile(
     r"|VISUAL|GIT_PAGER|GH_PAGER|PAGER)=[\w./-]*$"
 )
 _QUOTING_RE = re.compile(r"[\"'\\]")
-_WRAPPERS = frozenset({"command", "env", "time", "nohup", "exec"})
+_WRAPPERS = frozenset({"command", "env", "time", "nohup", "exec", "nice"})
+# Wrapper options that take the next word, so it is not read as the program.
+_WRAPPER_VALUE_OPTIONS = {
+    "env": re.compile(r"-[i0v]*[uC]|--(?:unset|chdir)"),
+    "nice": re.compile(r"-n|--adjustment"),
+    "exec": re.compile(r"-[cl]*a"),
+}
 SSH_VALUE_OPTIONS = frozenset(
     {"-B", "-b", "-c", "-D", "-E", "-e", "-F", "-I", "-i", "-J", "-L", "-l", "-m", "-O", "-o", "-p", "-Q", "-R",
      "-S", "-W", "-w"}
@@ -81,6 +87,8 @@ SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
 # env -S and its forms, with env already stripped: the string it splits into a command.
 _ENV_SPLIT_RE = re.compile(r"(?:-[a-zA-Z0-9]*S|--split-string=?)(.*)", re.DOTALL)
 # Programs that run the command in their words, after their options; each option matched takes the next word.
+# Wrapper options after which no plain command follows: env -S splits a string, command -v only names the program.
+_WRAPPER_STOPS = {"env": _ENV_SPLIT_RE, "command": re.compile(r"-[p]*[vV].*")}
 _COMMAND_RUNNERS = {
     "xargs": re.compile(r"-[0oprtx]*[nIJLPRSsdEa]"),
     "sudo": re.compile(
@@ -525,7 +533,7 @@ def _runs_hidden_push(tokens: list[str], stdin: Sequence[str] = ()) -> bool:
     for run in runs:
         while run and run[0] in SHELL_KEYWORDS:
             run = run[1:]
-        run = _strip_prefixes(run)
+        run = strip_prefixes(run)
         run = [PurePosixPath(run[0]).name, *run[1:]] if run else run
         if run and (
             _classify(_move_gh_repo_option_last(run) if run[0] == "gh" else run)
@@ -661,7 +669,7 @@ def _move_gh_repo_option_last(tokens: list[str]) -> list[str]:
                 i += 1
             i += 1
             continue
-        letter, value = _read_short_cluster(arg, _GH_VALUE_SHORTS)
+        letter, value = read_short_cluster(arg, _GH_VALUE_SHORTS)
         if letter is None:
             kept.append(arg)
             i += 1
@@ -680,7 +688,7 @@ def _move_gh_repo_option_last(tokens: list[str]) -> list[str]:
     return kept + repo
 
 
-def _read_short_cluster(arg: str, value_letters: frozenset[str]) -> tuple[str | None, str | None]:
+def read_short_cluster(arg: str, value_letters: frozenset[str]) -> tuple[str | None, str | None]:
     """A pflag cluster such as -iXPUT or -f=x: its first letter that takes a value, and that value when it is inside
     the word (None: it is the next word). (None, None) for a word with no such letter."""
     if not arg.startswith("-") or arg.startswith("--") or len(arg) < 2:
@@ -972,7 +980,7 @@ def _parse_gh_api_args(args: list[str]) -> tuple[str, list[tuple[bool, str]], st
                     value = args[i + 1] if i + 1 < len(args) else ""
                     i += 1
         elif arg.startswith("-") and len(arg) > 1:
-            letter, attached = _read_short_cluster(arg, _GH_API_VALUE_SHORTS)
+            letter, attached = read_short_cluster(arg, _GH_API_VALUE_SHORTS)
             if letter is not None:
                 option = "-" + letter
                 value = attached if attached is not None else (args[i + 1] if i + 1 < len(args) else "")
@@ -1683,7 +1691,7 @@ def _gh_pr_targets(
         if arg in _GH_MERGE_VALUE_OPTIONS:
             j += 2
             continue
-        letter, attached = _read_short_cluster(arg, _GH_VALUE_SHORTS)
+        letter, attached = read_short_cluster(arg, _GH_VALUE_SHORTS)
         if letter is not None:
             j += 1 if attached is not None else 2
             continue
@@ -1753,6 +1761,8 @@ def segment_command(
     quoted_start = False
     # Any quoting in a heredoc's delimiter makes its body plain data; otherwise the shell expands it.
     word_quoted = False
+    # How much of the word came before its first quoting: 2>"$LOG" is a redirection, '2>x' and 2\>x are not.
+    unquoted_len = 0
     pending_operator: str | None = None
     redirected: list[str] = []
     target_pending = False
@@ -1767,7 +1777,9 @@ def segment_command(
         nonlocal in_word, quoted_start, pending_operator, word_quoted, target_pending
         if in_word:
             text = "".join(word)
-            redirection = None if word_quoted else _REDIRECTION_RE.fullmatch(text)
+            redirection = _REDIRECTION_RE.fullmatch(text)
+            if redirection is not None and word_quoted and redirection.start(1) > unquoted_len:
+                redirection = None
             if redirections is not None and (target_pending or (redirection and not text.startswith("<<"))):
                 redirected.append(text)
                 target_pending = not target_pending and redirection is not None and not redirection.group(1)
@@ -1794,10 +1806,16 @@ def segment_command(
             quoted_start = False
             word_quoted = False
 
+    def mark_quoted() -> None:
+        nonlocal word_quoted, unquoted_len
+        if not word_quoted:
+            unquoted_len = sum(len(part) for part in word)
+            word_quoted = True
+
     def end_segment(operator: str) -> None:
         nonlocal words, joined_by, redirected, target_pending
         end_word()
-        stripped = _strip_prefixes(words)
+        stripped = strip_prefixes(words)
         if prefixes is not None:
             prefixes.append(words[: len(words) - len(stripped)])
         if redirections is not None:
@@ -1811,7 +1829,7 @@ def segment_command(
         if ch == "$" and command.startswith("$'", i):
             # ANSI-C quoting: a backslash escapes the next character, \' included.
             quoted_start = quoted_start or not in_word
-            word_quoted = True
+            mark_quoted()
             j = i + 2
             while j < n and command[j] != "'":
                 if command[j] == "\\" and j + 1 < n:
@@ -1826,27 +1844,27 @@ def segment_command(
             i = j + 1
         elif ch == "\\" and i + 1 < n:
             if command[i + 1] != "\n":
+                mark_quoted()
                 word.append(command[i + 1])
                 in_word = True
-                word_quoted = True
             i += 2
         elif ch == "'":
             close = command.find("'", i + 1)
             if close < 0:
                 return []
             quoted_start = quoted_start or not in_word
-            word_quoted = True
+            mark_quoted()
             word.append(command[i + 1 : close])
             in_word = True
             i = close + 1
         elif ch == '"':
             quoted_start = quoted_start or not in_word
-            word_quoted = True
+            mark_quoted()
             j = i + 1
             while j < n and command[j] != '"':
                 if command.startswith("$(", j) and not unbalanced:
                     # A substitution's own quotes do not end the string: "$(kubectl -n "shop" get pods)".
-                    end = _find_substitution_end(command, j + 2)
+                    end = find_substitution_end(command, j + 2)
                     if end >= 0:
                         if substitutions is not None:
                             substitutions.append(command[j + 2 : end])
@@ -1916,7 +1934,7 @@ def segment_command(
     return segments
 
 
-def _find_substitution_end(command: str, at: int, depth: int = 0) -> int:
+def find_substitution_end(command: str, at: int, depth: int = 0) -> int:
     """The index of the ) that closes a $( whose body starts at `at`, reading the quotes inside it; -1 if none."""
     n = len(command)
     open_parens = 1
@@ -1935,7 +1953,7 @@ def _find_substitution_end(command: str, at: int, depth: int = 0) -> int:
             at += 1
             while at < n and command[at] != '"':
                 if command.startswith("$(", at):
-                    end = _find_substitution_end(command, at + 2, depth + 1) if depth < 8 else -1
+                    end = find_substitution_end(command, at + 2, depth + 1) if depth < 8 else -1
                     if end < 0:
                         return -1
                     at = end
@@ -1952,15 +1970,40 @@ def _find_substitution_end(command: str, at: int, depth: int = 0) -> int:
     return -1
 
 
-def _strip_prefixes(tokens: list[str]) -> list[str]:
+def strip_prefixes(tokens: list[str]) -> list[str]:
+    """Leading assignments and wrappers (env, /usr/bin/env, command, nice, timeout ...) with their options."""
     while tokens:
-        if _ENV_ASSIGNMENT_RE.match(tokens[0]) or tokens[0] in _WRAPPERS:
+        name = PurePosixPath(tokens[0]).name
+        if _ENV_ASSIGNMENT_RE.match(tokens[0]):
             tokens = tokens[1:]
-        elif tokens[0] == "timeout" and (rest := _skip_timeout(tokens[1:])) is not None:
+        elif name in _WRAPPERS:
+            tokens = _skip_wrapper_options(name, tokens[1:])
+        elif name == "timeout" and (rest := _skip_timeout(tokens[1:])) is not None:
             tokens = rest
         else:
             break
     return tokens
+
+
+def _skip_wrapper_options(wrapper: str, args: list[str]) -> list[str]:
+    """The words after a wrapper's options (env -u NAME -i, nice -n 5); all its words when an option means no plain
+    command follows, as env -S and command -v do."""
+    value_option = _WRAPPER_VALUE_OPTIONS.get(wrapper)
+    stop = _WRAPPER_STOPS.get(wrapper)
+    at = 0
+    while at < len(args) and args[at].startswith("-"):
+        arg = args[at]
+        if arg == "--":
+            return args[at + 1 :]
+        taken = value_option.match(arg) if value_option is not None else None
+        if taken is not None:
+            # -uNAME and --unset=NAME carry their value; -u NAME takes the next word.
+            at += 1 if taken.end() < len(arg) else 2
+            continue
+        if stop is not None and stop.fullmatch(arg):
+            return args
+        at += 1
+    return args[at:]
 
 
 def _skip_timeout(args: list[str]) -> list[str] | None:

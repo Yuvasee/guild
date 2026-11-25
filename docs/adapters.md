@@ -148,6 +148,16 @@ the project; npm, pnpm or yarn test or build; uv sync; docker build; make with n
 test) gets a note before it runs: the load, and the one line to run it on `worker_host` instead, detached. It is never
 refused. Each note is a line in slow.log, `load note: <handle> <job> at load <n>`. 0 turns the note off.
 
+`prod_kube_contexts = ["acme-prod", "*-production"]` names production kube contexts (fnmatch patterns): there the
+guard lets kubectl and helm only read there (kubectl get, describe, logs, top, explain, api-resources, api-versions,
+version, cluster-info, auth can-i, diff, events, wait; helm list, status, history, get, show, template, search, version,
+diff) and refuses every other verb, for every session on this Mac and on worker hosts. A write whose context the shell
+fills in ($CTX) is refused too. Empty, the default, marks
+no context as production. Whatever the config, the guard also refuses printing secret values (kubectl get secret
+-o json, yaml, jsonpath, go-template, custom-columns), logging Claude out or touching its keychain entry, typing
+/logout into a tab, `aws iam simulate-*`, and a kubectl apply, kubectl create secret, helm upgrade or install chained
+with other steps.
+
 ## Team rules: defaults you can change
 
 Some rules are a way of working rather than a mechanism. They ship as defaults, written into the lead role and the

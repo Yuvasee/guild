@@ -39,6 +39,11 @@ _PR_ANSWER_GLOBS = ("*gh*pr*comment*", "*gh*pr*review*", "*gh*api*comments*", "*
 _KILL_GLOBS = ("*pkill*", "*killall*", "*pgrep*")
 # So is a kubectl, helm or k9s command that names no cluster, and one that changes the machine's default cluster.
 _CLUSTER_GLOBS = ("*kubectl*", "*kubectx*", "*kubens*", "*helm*", "*k9s*")
+# Claude's login (logout, its keychain entry, /logout typed into a tab) and AWS permission probes are refused too.
+# Each names its program; "claude" must not be followed by / or -, as in the payload's transcript path.
+_LOGIN_PROBE_GLOBS = (
+    "*claude[!/-]*logout*", "*security*-password*laude*", "*agtermctl*logout*", "*tmux*send*logout*", "*aws*simulate-*",
+)  # fmt: skip
 # A checker piped into a filter loses its exit code; the hook adds a note, it never refuses.
 _PIPE_GLOBS = (
     "*pre-commit*", "*pytest*", "*ruff*", "*mypy*", "*pyright*", "*git*commit*", "*npm*", "*pnpm*", "*yarn*",
@@ -47,7 +52,8 @@ _PIPE_GLOBS = (
 _HEAVY_GLOBS = ("*uv*sync*", "*docker*build*")
 """Heavy jobs the pipe globs miss; only the Mac's gate has them, since a host's own load is not the Mac's."""
 _PYTHON_GLOBS = (
-    *_LABEL_GLOBS, *_PR_ISSUE_GLOBS, *_PR_ANSWER_GLOBS, *_KILL_GLOBS, *_CLUSTER_GLOBS, *_PIPE_GLOBS, *_HEAVY_GLOBS,
+    *_LABEL_GLOBS, *_PR_ISSUE_GLOBS, *_PR_ANSWER_GLOBS, *_KILL_GLOBS, *_CLUSTER_GLOBS, *_LOGIN_PROBE_GLOBS,
+    *_PIPE_GLOBS, *_HEAVY_GLOBS,
 )  # fmt: skip
 # A publish to claude.ai, matched by the tool's own field so a command that names the tool does not start Python; not a
 # host glob, since gbridge sends every Artifact call to the Mac.
@@ -136,7 +142,8 @@ def convert_event_to_command(executable: str, event: str) -> str:
 
 def list_guard_globs() -> list[str]:
     """The shell guard's gate: a command matching none of these cannot push, merge, set a robot-prefixed title, change
-    a label, open or edit a PR, comment on one, kill processes by name, or reach a Kubernetes cluster."""
+    a label, open or edit a PR, comment on one, kill processes by name, reach a Kubernetes cluster, touch Claude's login
+    or probe AWS permissions."""
     # The host's gate matches a literal pipe, so a checker run without one is not sent to the Mac.
     plain = [glob for glob in _PYTHON_GLOBS if glob not in _PIPE_GLOBS and glob not in _HEAVY_GLOBS]
     return [
