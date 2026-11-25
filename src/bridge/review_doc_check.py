@@ -1045,6 +1045,10 @@ def read_blocks(page: str) -> _BlockReader:
     return reader
 
 
+# A PR's head names real code as surely as a branch does: "#12 today", "PR #12 today", "acme/web#12 today".
+_PR_TODAY_RE = re.compile(r"(?<![\w/])(?:PR\s*)?(?:[\w.-]+/[\w.-]+)?#\d+`? today\b", re.I)
+
+
 def find_baseline_problems(reader: _BlockReader, base: str) -> list[str]:
     """Every Before says what it is: the base branch today, a named branch, or a hypothetical. A design alternative
     shown as Before reads as today's code. Its block, or the block just before or after it (the paragraph that
@@ -1060,11 +1064,12 @@ def find_baseline_problems(reader: _BlockReader, base: str) -> list[str]:
         if not block.before:
             continue
         near = " ".join(" ".join("".join(part.text).split()) for part in blocks[max(0, index - 1) : index + 2])
-        if any(pattern.search(near) for pattern in (today, _BRANCH_RE, _COMMIT_RE, _HYPOTHETICAL_RE)):
+        if any(pattern.search(near) for pattern in (today, _PR_TODAY_RE, _BRANCH_RE, _COMMIT_RE, _HYPOTHETICAL_RE)):
             continue
         problems.append(
             f"{block.before} shows a Before without saying what it is; say it there or in the paragraph or caption "
-            f"next to it: '{base or 'main'} today', 'branch <name>' (the name in code), or 'hypothetical'"
+            f"next to it: '{base or 'main'} today', 'PR #N today', 'branch <name>' (the name in code), or "
+            "'hypothetical'"
         )
     return list(dict.fromkeys(problems))
 

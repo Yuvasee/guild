@@ -511,7 +511,7 @@ def baseline(changes: str, base: str = "main") -> list[str]:
 def test_a_before_with_no_baseline_near_it_is_refused() -> None:
     assert baseline(f"<p>The retry loop.</p>{TABLE}<p>Three tries now.</p>") == [
         "a table under 'What changes and why' shows a Before without saying what it is; say it there or in the "
-        "paragraph or caption next to it: 'main today', 'branch <name>' (the name in code), or "
+        "paragraph or caption next to it: 'main today', 'PR #N today', 'branch <name>' (the name in code), or "
         "'hypothetical'"
     ]
     assert len(baseline(f"<figure>{SVG}<figcaption>Retries.</figcaption></figure>")) == 1, "an svg label"
@@ -546,6 +546,10 @@ def test_a_before_that_names_main_today_a_branch_or_a_hypothetical_passes() -> N
     assert baseline(f"<figure>{SVG}<figcaption>main today</figcaption></figure>") == []
     assert baseline("<p>Before and after: it fails on <code>origin/main</code> and passes here.</p>") == []
     assert baseline("<p>Before: <code>31e1f06e8</code>. After: <code>16b443814</code>.</p>") == []
+    assert baseline(TABLE.replace("<th>Before</th>", "<th>Before (#12 today)</th>")) == [], "the PR it builds on"
+    assert baseline(f"<p>Before is PR #12 today.</p>{TABLE}") == []
+    assert baseline(f"<p>Before is acme/web#12 today.</p>{TABLE}") == []
+    assert baseline("<p>Before: see #12, one try.</p>") != [], "a PR number alone names no state"
 
 
 def test_a_doc_without_a_before_passes() -> None:

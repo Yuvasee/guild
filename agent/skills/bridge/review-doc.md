@@ -95,8 +95,8 @@ sharp but has never seen this code.
 - **One concrete scenario per change.** Who does what, what they see before and after. The main one is the
   **User story** when the doc has one; without it, and for a change the story does not reach, the scenario goes in
   **What changes and why**.
-- **Every Before names its baseline:** main today, a named branch, or hypothetical; a design alternative is never
-  shown as Before.
+- **Every Before names its baseline:** main today, a PR it builds on (`Before (#12 today)`), a named branch
+  (`Before (branch dev/x today)`), or hypothetical; a design alternative is never shown as Before.
 - **A term list is a list.** Three or more terms with their meanings go in a `<ul>`, a `<dl>` or a two-column table,
   never in a paragraph of `Term: meaning.` sentences.
 - **A changed model shows its fields.** A PR that adds or changes a model, a schema, an API or event contract, or a
