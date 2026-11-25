@@ -979,6 +979,11 @@ MIGRATIONS: tuple[str, ...] = (
     ALTER TABLE asks DROP COLUMN wait_on;
     ALTER TABLE asks RENAME COLUMN wait_on_kind TO wait_on;
     """,
+    # When a prompt or reply last named a ref; a branch's ref is recorded at every prompt and says nothing of a turn.
+    """
+    ALTER TABLE refs ADD COLUMN spoken_at INTEGER;
+    ALTER TABLE refs ADD COLUMN spoken_turn INTEGER;
+    """,
 )
 
 HOOK_BUSY_TIMEOUT_MS = 200

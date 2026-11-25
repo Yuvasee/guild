@@ -2,7 +2,7 @@ import json
 import re
 import sqlite3
 import subprocess
-from collections.abc import Collection, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 
 from bridge.claude import ClaudeSessionFile, list_session_files
@@ -314,14 +314,17 @@ def add_refs(conn: sqlite3.Connection, conversation_id: str, refs: list[str], so
         return
     turns_row = conn.execute("SELECT turns FROM conversations WHERE conversation_id = ?", (conversation_id,)).fetchone()
     turn = int(turns_row["turns"]) if turns_row else 0
+    spoken_at, spoken_turn = (None, None) if source == "branch" else (at_ms, turn)
     conn.executemany(
         """
-        INSERT INTO refs (conversation_id, ref, source, first_seen_at, last_seen_at, last_turn)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO refs (conversation_id, ref, source, first_seen_at, last_seen_at, last_turn, spoken_at, spoken_turn)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (conversation_id, ref) DO UPDATE SET
-            last_seen_at = excluded.last_seen_at, last_turn = excluded.last_turn, hits = hits + 1
+            last_seen_at = excluded.last_seen_at, last_turn = excluded.last_turn, hits = hits + 1,
+            spoken_at = coalesce(excluded.spoken_at, spoken_at),
+            spoken_turn = coalesce(excluded.spoken_turn, spoken_turn)
         """,
-        [(conversation_id, ref, source, at_ms, at_ms, turn) for ref in refs],
+        [(conversation_id, ref, source, at_ms, at_ms, turn, spoken_at, spoken_turn) for ref in refs],
     )
 
 
@@ -333,23 +336,20 @@ def add_branch_refs(
 
 
 def _find_refs_outside_focus(
-    conn: sqlite3.Connection, conversation_id: str, focus: str, focus_at: int, turns: int, branch_refs: Collection[str]
+    conn: sqlite3.Connection, conversation_id: str, focus: str, focus_at: int, turns: int
 ) -> list[str]:
-    """PRs and issues the last turns named since the focus line was set that it does not name. Those of the tab's
-    branch are left out: each prompt records them again, and they say where the tab sits, not what it is on."""
+    """PRs and issues a prompt or reply of the last turns named since the focus line was set that it does not name."""
     rows = conn.execute(
         """
-        SELECT ref FROM refs WHERE conversation_id = ? AND last_seen_at > ? AND last_turn > ?
-        ORDER BY last_seen_at DESC
+        SELECT ref FROM refs WHERE conversation_id = ? AND spoken_at > ? AND spoken_turn > ?
+        ORDER BY spoken_at DESC
         """,
         (conversation_id, focus_at, turns - LEAD_FOCUS_REF_TURNS),
     )
     others = [
         name
         for (ref,) in rows
-        if ref not in branch_refs
-        and (name := str(ref).partition(":")[2])
-        and not _names_ref(focus, str(ref).partition(":")[0], name)
+        if (name := str(ref).partition(":")[2]) and not _names_ref(focus, str(ref).partition(":")[0], name)
     ]
     return others[:LEAD_FOCUS_REFS_SHOWN]
 
@@ -368,9 +368,7 @@ def set_focus(conn: sqlite3.Connection, conversation_id: str, focus: str | None,
     )
 
 
-def take_focus_nudge(
-    conn: sqlite3.Connection, conversation_id: str, at_ms: int, lead: bool = False, branch_refs: Collection[str] = ()
-) -> str | None:
+def take_focus_nudge(conn: sqlite3.Connection, conversation_id: str, at_ms: int, lead: bool = False) -> str | None:
     """Returns a reminder to refresh focus when it is missing or old, at most once per nudge interval. A lead's goes
     sooner, once its last turns are about refs its focus line does not name: its card is where the owner looks."""
     row = conn.execute(
@@ -393,7 +391,7 @@ def take_focus_nudge(
         and at_ms - int(row["focus_at"]) > LEAD_FOCUS_STALE_AFTER_S * 1000
         and (
             others := _find_refs_outside_focus(
-                conn, conversation_id, str(focus), int(row["focus_at"]), int(row["turns"]), branch_refs
+                conn, conversation_id, str(focus), int(row["focus_at"]), int(row["turns"])
             )
         )
     ):

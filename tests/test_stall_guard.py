@@ -127,7 +127,7 @@ def test_an_owner_known_only_from_the_last_mention_alerts_after_fifteen_minutes(
     conn = guarded(tmp_path)
     with transaction(conn):
         add_session(conn, "mention-c", "passerby")
-        conn.execute("INSERT INTO refs VALUES ('mention-c', ?, 'prompt', 0, 9, 0, 1)", (REF,))
+        conn.execute("INSERT INTO refs VALUES ('mention-c', ?, 'prompt', 0, 9, 0, 1, NULL, NULL)", (REF,))
     assert alert(conn, 1000) == []
     assert alert(conn, 1000 + OWNER_STALL_AFTER_MS - 1) == []
     assert len(alert(conn, 1000 + OWNER_STALL_AFTER_MS)) == 2
@@ -231,7 +231,7 @@ def test_replay_a_pr_listed_under_a_lead_that_only_mentioned_it(tmp_path: Path) 
     conn = guarded(tmp_path, head="feature/export")
     with transaction(conn):
         add_session(conn, "other-lead-c", "other-lead")
-        conn.execute("INSERT INTO refs VALUES ('other-lead-c', ?, 'pr-link', 0, 9, 0, 1)", (REF,))
+        conn.execute("INSERT INTO refs VALUES ('other-lead-c', ?, 'pr-link', 0, 9, 0, 1, NULL, NULL)", (REF,))
     assert alert(conn, 0) == []
     assert len(alert(conn, OWNER_STALL_AFTER_MS)) == 2
     assert "its notices go to other-lead only because" in last_body(conn)
@@ -243,7 +243,7 @@ def test_replay_a_post_waiting_for_a_description_asked_of_the_wrong_owner(tmp_pa
     conn = guarded(tmp_path)
     with transaction(conn):
         add_session(conn, "other-lead-c", "other-lead")
-        conn.execute("INSERT INTO refs VALUES ('other-lead-c', ?, 'prompt', 0, 9, 0, 1)", (REF,))
+        conn.execute("INSERT INTO refs VALUES ('other-lead-c', ?, 'prompt', 0, 9, 0, 1, NULL, NULL)", (REF,))
         record_publish(conn, REF, "owner-x", 1000)
         advance_posts(conn, GUARDED, 1000)
     assert conn.execute("SELECT post_state FROM review_prs").fetchone()[0] == WAITING_SENTENCE

@@ -107,7 +107,7 @@ from bridge.leads import (
     take_lead_role,
 )
 from bridge.procinfo import process_age_us, process_args, process_start_ms
-from bridge.refs import extract_branch_refs, extract_refs
+from bridge.refs import extract_refs
 from bridge.registry import (
     Observation,
     ObserveResult,
@@ -1509,9 +1509,6 @@ def handle_hook(
                         conversation_id,
                         at_ms,
                         lead=conversation_id in find_lead_conversations(conn),
-                        branch_refs=extract_branch_refs(git.branch, config.issue_prefixes)
-                        if git and git.branch
-                        else (),
                     )
                     if observed.current
                     else None

@@ -495,7 +495,7 @@ def test_owner_prefers_the_live_session_on_the_branch(tmp_path: Path) -> None:
     conn = setup_pr(tmp_path)
     with transaction(conn):
         add_session(conn, "c1", "mentions")
-        conn.execute("INSERT INTO refs VALUES ('c1', ?, 'prompt', 0, 9, 0, 1)", (REF,))
+        conn.execute("INSERT INTO refs VALUES ('c1', ?, 'prompt', 0, 9, 0, 1, NULL, NULL)", (REF,))
         add_session(conn, "c2", "onbranch", branch="dev/x")
     owner = find_owner(conn, CONFIG, REF, "Org/app", "dev/x")
     assert owner is not None and (owner.handle, owner.via) == ("onbranch", "branch")
@@ -506,7 +506,7 @@ def test_a_session_that_only_reads_the_pr_or_checks_out_its_branch_owns_nothing_
     conn = setup_pr(tmp_path)
     with transaction(conn):
         add_session(conn, "reader", "proj-34-worker", branch="dev/x", wrote=False)
-        conn.execute("INSERT INTO refs VALUES ('reader', ?, 'pr-link', 0, 9, 0, 1)", (REF,))
+        conn.execute("INSERT INTO refs VALUES ('reader', ?, 'pr-link', 0, 9, 0, 1, NULL, NULL)", (REF,))
         add_session(conn, "lead-c", "quinn")
         add_lead(conn, "Quinn", "s-quinn")
         add_work(conn, "quinn", REF)
@@ -594,7 +594,7 @@ def test_an_issue_two_leads_work_names_guesses_no_owner_and_a_later_signal_decid
     assert find_owner(conn, CONFIG, REF, "Org/app", "theo/proj-7-tests") is None, "no guess beats a wrong one"
     with transaction(conn):
         add_session(conn, "kai-c", "kai")
-        conn.execute("INSERT INTO refs VALUES ('kai-c', ?, 'prompt', 0, 9, 0, 1)", (REF,))
+        conn.execute("INSERT INTO refs VALUES ('kai-c', ?, 'prompt', 0, 9, 0, 1, NULL, NULL)", (REF,))
     owner = find_owner(conn, CONFIG, REF, "Org/app", "theo/proj-7-tests")
     assert owner is not None and (owner.handle, owner.via) == ("kai", "ref")
     with transaction(conn):
@@ -834,9 +834,9 @@ def test_an_issue_a_lead_only_named_has_no_owner_and_neither_have_its_prs_mentio
         add_session(conn, "eli-c", "eli")
         add_lead(conn, "Eli", "s-eli")
         add_session(conn, "xavi-c", "xavi")
-        conn.execute("INSERT INTO refs VALUES ('eli-c', 'issue:PROJ-77', 'prompt', 0, 9, 0, 1)")
-        conn.execute("INSERT INTO refs VALUES ('eli-c', ?, 'prompt', 0, 9, 0, 1)", (closing,))
-        conn.execute("INSERT INTO refs VALUES ('xavi-c', ?, 'prompt', 0, 9, 0, 1)", (closing,))
+        conn.execute("INSERT INTO refs VALUES ('eli-c', 'issue:PROJ-77', 'prompt', 0, 9, 0, 1, NULL, NULL)")
+        conn.execute("INSERT INTO refs VALUES ('eli-c', ?, 'prompt', 0, 9, 0, 1, NULL, NULL)", (closing,))
+        conn.execute("INSERT INTO refs VALUES ('xavi-c', ?, 'prompt', 0, 9, 0, 1, NULL, NULL)", (closing,))
     assert find_owner_of_ref(conn, assistant, closing, "") is not None, "a PR's own notices still find a mentioner"
     assert find_issue_lead(conn, assistant, "issue:PROJ-77", [closing], [closing], {}) is None
 
@@ -944,8 +944,8 @@ def test_owner_is_the_most_recent_session_with_the_ref_when_none_is_on_the_branc
     with transaction(conn):
         add_session(conn, "c1", "older")
         add_session(conn, "c2", "newer")
-        conn.execute("INSERT INTO refs VALUES ('c1', ?, 'prompt', 0, 5, 0, 1)", (REF,))
-        conn.execute("INSERT INTO refs VALUES ('c2', ?, 'prompt', 0, 9, 0, 1)", (REF,))
+        conn.execute("INSERT INTO refs VALUES ('c1', ?, 'prompt', 0, 5, 0, 1, NULL, NULL)", (REF,))
+        conn.execute("INSERT INTO refs VALUES ('c2', ?, 'prompt', 0, 9, 0, 1, NULL, NULL)", (REF,))
     owner = find_owner(conn, CONFIG, REF, "Org/app", "dev/x")
     assert owner is not None and owner.handle == "newer"
 
@@ -1020,7 +1020,7 @@ def test_a_closed_workers_pr_stays_with_its_lead_after_its_tab_leaves_the_tree(t
         conn.execute("UPDATE instances SET ended_at = 99 WHERE conversation_id = 'w-c'")
         sync_tab_parents(conn, {"s-alex": AgtermTab("Alex", "W", session_id="tab-lead")})
         add_session(conn, "asker-c", "charlie")
-        conn.execute("INSERT INTO refs VALUES ('asker-c', ?, 'prompt', 0, 9, 0, 1)", (REF,))
+        conn.execute("INSERT INTO refs VALUES ('asker-c', ?, 'prompt', 0, 9, 0, 1, NULL, NULL)", (REF,))
     owner = find_owner(conn, CONFIG, REF, "Org/app", "dev/x")
     assert owner is not None and (owner.handle, owner.lead, owner.via) == ("alex", "Alex", "lead")
 
@@ -1031,13 +1031,13 @@ def test_a_closed_workers_lead_owns_its_pr_before_a_live_session_that_only_menti
         add_session(conn, "lead-c", "alex", session="tab-lead")
         add_lead(conn, "Alex", "s-alex")
         add_session(conn, "w-c", "worker", branch="dev/x", ended=99, session="tab-worker", wrote=False)
-        conn.execute("INSERT INTO refs VALUES ('w-c', ?, 'prompt', 0, 5, 0, 1)", (REF,))
+        conn.execute("INSERT INTO refs VALUES ('w-c', ?, 'prompt', 0, 5, 0, 1, NULL, NULL)", (REF,))
         conn.execute(
             "INSERT INTO closed_workers (conversation_id, tab_name, parent_handle, resume_command, closed_at,"
             " parent_lead) VALUES ('w-c', 'worker', 'alex', 'claude --resume w-c', 99, 'alex')"
         )
         add_session(conn, "asker-c", "charlie")
-        conn.execute("INSERT INTO refs VALUES ('asker-c', ?, 'prompt', 0, 9, 0, 1)", (REF,))
+        conn.execute("INSERT INTO refs VALUES ('asker-c', ?, 'prompt', 0, 9, 0, 1, NULL, NULL)", (REF,))
     owner = find_owner(conn, CONFIG, REF, "Org/app", "dev/x")
     assert owner is not None and (owner.handle, owner.via) == ("alex", "lead")
 
@@ -1927,7 +1927,7 @@ def test_a_locked_worker_does_not_route_work_to_its_lead(tmp_path: Path) -> None
         add_session(conn, "w-c", "worker", session="tab-worker")
         conn.execute("INSERT INTO tab_parents (agterm_session, parent_session) VALUES ('tab-worker', 'tab-lead')")
         conn.execute("UPDATE surfaces SET tab_name = '🔒 w' WHERE handle = 'worker'")
-        conn.execute("INSERT INTO refs VALUES ('w-c', ?, 'prompt', 0, 9, 0, 1)", (REF,))
+        conn.execute("INSERT INTO refs VALUES ('w-c', ?, 'prompt', 0, 9, 0, 1, NULL, NULL)", (REF,))
     assert find_owner(conn, CONFIG, REF, "Org/app", "dev/x") is None
 
 
@@ -1999,7 +1999,7 @@ def test_the_assistant_owns_no_pr_however_often_it_mentions_one(tmp_path: Path) 
     assistant = Config(assistant_handle="zed", review_org="Org", review_author="me")
     with transaction(conn):
         add_session(conn, "z", "zed", branch="dev/x")
-        conn.execute("INSERT INTO refs VALUES ('z', ?, 'prompt', 0, 9, 0, 1)", (REF,))
+        conn.execute("INSERT INTO refs VALUES ('z', ?, 'prompt', 0, 9, 0, 1, NULL, NULL)", (REF,))
     assert find_owner(conn, assistant, REF, "Org/app", "dev/x") is None
 
 
@@ -2010,7 +2010,7 @@ def test_a_leads_declared_work_comes_before_session_refs(tmp_path: Path) -> None
         add_lead(conn, "Alex", "s-alex")
         add_work(conn, "alex", REF)
         add_session(conn, "c1", "mentions")
-        conn.execute("INSERT INTO refs VALUES ('c1', ?, 'prompt', 0, 9, 0, 1)", (REF,))
+        conn.execute("INSERT INTO refs VALUES ('c1', ?, 'prompt', 0, 9, 0, 1, NULL, NULL)", (REF,))
     owner = find_owner(conn, CONFIG, REF, "Org/app", "dev/x")
     assert owner is not None and (owner.handle, owner.lead, owner.via) == ("alex", "Alex", "lead")
 
@@ -2409,7 +2409,7 @@ def setup_shared_issue_pr(tmp_path: Path) -> Any:
         # A host worker's checkout is detached: its branch reads as a commit.
         add_session(conn, "w-c", "worker", branch="0a1b2c3d4e5f", session="tab-worker", wrote=False)
         conn.execute("INSERT INTO tab_parents (agterm_session, parent_session) VALUES ('tab-worker', 'tab-alex')")
-        conn.execute("INSERT INTO refs VALUES ('charlie-c', ?, 'prompt', 0, 9, 0, 1)", (REF,))
+        conn.execute("INSERT INTO refs VALUES ('charlie-c', ?, 'prompt', 0, 9, 0, 1, NULL, NULL)", (REF,))
     return conn
 
 
@@ -2571,9 +2571,9 @@ def test_an_ended_reader_on_the_branch_yields_to_the_issues_lead_but_beats_a_liv
         add_lead(conn, "Boris", "s-boris")
         add_session(conn, "r-c", "reviewer", branch="theo/proj-7-fix", ended=99, session="tab-r", wrote=False)
         conn.execute("INSERT INTO tab_parents (agterm_session, parent_session) VALUES ('tab-r', 'tab-boris')")
-        conn.execute("INSERT INTO refs VALUES ('r-c', ?, 'prompt', 0, 5, 0, 1)", (REF,))
+        conn.execute("INSERT INTO refs VALUES ('r-c', ?, 'prompt', 0, 5, 0, 1, NULL, NULL)", (REF,))
         add_session(conn, "asker-c", "charlie")
-        conn.execute("INSERT INTO refs VALUES ('asker-c', ?, 'prompt', 0, 9, 0, 1)", (REF,))
+        conn.execute("INSERT INTO refs VALUES ('asker-c', ?, 'prompt', 0, 9, 0, 1, NULL, NULL)", (REF,))
     owner = find_owner(conn, CONFIG, REF, "Org/app", "theo/proj-7-fix")
     assert owner is not None and owner.handle == "boris"
     with transaction(conn):
