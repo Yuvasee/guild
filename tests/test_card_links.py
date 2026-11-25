@@ -3,7 +3,9 @@ import re
 import sqlite3
 from collections.abc import Generator
 from contextlib import closing
+from dataclasses import replace
 from pathlib import Path
+from types import MappingProxyType
 from typing import cast
 
 import pytest
@@ -286,3 +288,15 @@ def test_a_page_path_inside_another_sites_url_is_theirs(conn: sqlite3.Connection
     ):
         assert find_unlinked_page_mention(conn, f"Their notes: {url}", [url], False) is None, url
     assert find_unlinked_page_mention(conn, "see http://127.0.0.1:8765/p/lambda-jobs", [], False) is not None
+
+
+def test_a_short_repo_name_from_config_links_its_pr_and_an_unknown_one_stays_text(conn: sqlite3.Connection) -> None:
+    add_item(conn, "done", "Merged web#12 after lib#4", "also see notweb#5 and x/web#6", [])
+    config = replace(CONFIG, pr_short_names=MappingProxyType({"web": "acme/web"}))
+
+    refs = cast(list[dict[str, str]], guild(conn, config)["answers"][0]["refs"])
+    plain = cast(list[dict[str, str]], guild(conn, CONFIG)["answers"][0]["refs"])
+
+    assert {"text": "web#12", "url": "https://github.com/acme/web/pull/12"} in refs
+    assert not any(r["text"] in ("lib#4", "notweb#5") for r in refs), "only configured names, whole words"
+    assert not any(r["text"] == "web#12" for r in plain)

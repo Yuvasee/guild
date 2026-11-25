@@ -66,6 +66,8 @@ class Config:
     remotes: tuple[Remote, ...] = ()
     """Template for issue links, e.g. https://linear.app/acme/issue/{key}."""
     pr_repo_aliases: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
+    pr_short_names: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
+    """Short names sessions write for a repo, as in web#12: the page links them to that owner/repo's PR."""
     assistant_handle: str = "aide"
     """The one session that may relay the user's answers to posts (`guild answer`)."""
     owner_name: str = "the owner"
@@ -341,6 +343,7 @@ def map_toml_to_config(raw: dict[str, object]) -> Config:
         linear_api_key_file=_str(raw, "linear_api_key_file", defaults.linear_api_key_file),
         remotes=tuple(map_table_to_remote(t) for t in _tables(raw, "remotes")),
         pr_repo_aliases=MappingProxyType(_str_table(raw, "pr_repo_aliases")),
+        pr_short_names=MappingProxyType(_str_table(raw, "pr_short_names")),
         assistant_handle=_str(raw, "assistant_handle", defaults.assistant_handle),
         owner_name=_str(raw, "owner_name", defaults.owner_name),
         night_words=_str_list(raw, "night_words", defaults.night_words),

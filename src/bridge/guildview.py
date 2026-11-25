@@ -827,7 +827,8 @@ def find_text_links(
     config: Config, url_of: Callable[[str], str], titles: dict[str, str], text: str
 ) -> list[dict[str, str]]:
     """The PR, issue and /p/<slug> refs in a card's text that have a URL, as written; one without stays text."""
-    found = [{"text": words, "url": url_of(ref)} for words, ref in find_ref_spans(text, config.issue_prefixes)]
+    spans = find_ref_spans(text, config.issue_prefixes, config.pr_short_names)
+    found = [{"text": words, "url": url_of(ref)} for words, ref in spans]
     for words, slug in find_bare_page_refs(text):
         if slug in titles:
             found.append({"text": words, "url": words})
