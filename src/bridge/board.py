@@ -15,7 +15,7 @@ USER_BODY_MAX_CHARS = USER_WORDS_MAX_CHARS + 2000
 """A message sent as the owner: their words plus the lines that say what they answer, such as a lead's plan."""
 USER_PART_MAX_CHARS = 4000
 """Two parts carry the longest words; each fits beside a hook's other context."""
-PREVIEW_MAX_CHARS = 200
+DELIVERED_BODY_MAX_CHARS = 2000
 USER_ITEM_MAX_CHARS = 140
 INJECT_BUDGET_BYTES = 1500
 DEFAULT_RESPOND_WITHIN_S = 900
@@ -597,8 +597,10 @@ def next_hint_epoch(leftover: bool) -> int:
 
 
 def convert_message_to_line(row: sqlite3.Row, at_ms: int) -> str:
-    preview = convert_text_to_preview(str(row["body"]), PREVIEW_MAX_CHARS)
     message_id = int(row["id"])
+    preview = convert_text_to_preview(
+        str(row["body"]), DELIVERED_BODY_MAX_CHARS, f"… (full text: bridge show {message_id})"
+    )
     if row["kind"] == "request":
         due = ""
         if row["respond_by"] is not None:
@@ -612,9 +614,9 @@ def convert_message_to_line(row: sqlite3.Row, at_ms: int) -> str:
     return f'#{message_id} {label} from {row["from_handle"]}: "{preview}"'
 
 
-def convert_text_to_preview(text: str, limit: int) -> str:
+def convert_text_to_preview(text: str, limit: int, cut_mark: str = "…") -> str:
     collapsed = " ".join(text.split())
-    return collapsed if len(collapsed) <= limit else collapsed[: limit - 1] + "…"
+    return collapsed if len(collapsed) <= limit else collapsed[: limit - len(cut_mark)] + cut_mark
 
 
 def _is_due(offered_at: int | None, offer_count: int, at_ms: int) -> bool:

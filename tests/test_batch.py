@@ -7,7 +7,15 @@ from unittest import mock
 
 import pytest
 
-from bridge.board import USER_CONVERSATION, Party, Recipient, flag_overdue, send_message, take_delivery
+from bridge.board import (
+    DELIVERED_BODY_MAX_CHARS,
+    USER_CONVERSATION,
+    Party,
+    Recipient,
+    flag_overdue,
+    send_message,
+    take_delivery,
+)
 from bridge.cli import build_parser, cmd_deliver
 from bridge.cli_board import print_wake_lines, spawn_when_ripe
 from bridge.config import HIDDEN_NAME_MARKS, Config
@@ -212,6 +220,39 @@ def test_a_busy_tabs_hook_gets_each_message_as_it_comes(conn: sqlite3.Connection
     context = take_delivery(conn, "conv-ana", T, False).context or ""
 
     assert [int(n) for n in re.findall(r"^#(\d+) ", context, re.MULTILINE)] == [message]
+
+
+def test_a_240_char_info_message_reaches_the_hook_whole(conn: sqlite3.Connection) -> None:
+    body = "word " * 47 + "ends."
+    message = send_message(conn, WORKER, [ANA], "info", body, T).message_id
+
+    context = take_delivery(conn, "conv-ana", T, False).context or ""
+
+    assert len(body) == 240
+    assert f'#{message} info from fix-login: "{body}"' in context
+    assert "full text" not in context
+
+
+def test_a_3000_char_message_is_cut_with_the_hint_to_read_the_rest(conn: sqlite3.Connection) -> None:
+    message = send_message(conn, WORKER, [ANA], "info", "x", T).message_id
+    conn.execute("UPDATE messages SET body = ? WHERE id = ?", ("x" * 3000, message))
+
+    context = take_delivery(conn, "conv-ana", T, False, budget_bytes=10_000).context or ""
+
+    hint = f"… (full text: bridge show {message})"
+    assert f'{hint}"' in context
+    assert [len(k) for k in re.findall(r"x{100,}", context)] == [DELIVERED_BODY_MAX_CHARS - len(hint)]
+
+
+def test_whole_bodies_still_leave_the_rest_waiting_when_the_budget_is_full(conn: sqlite3.Connection) -> None:
+    ids = [send_message(conn, WORKER, [ANA], "info", f"m{i} " + "y" * 1500, T + i).message_id for i in range(3)]
+
+    first = take_delivery(conn, "conv-ana", T + 10, False)
+    later = take_delivery(conn, "conv-ana", T + 10 + 3_600_000, False)
+
+    assert first.leftover
+    assert f"#{ids[0]} " in (first.context or "") and f"#{ids[2]} " not in (first.context or "")
+    assert f"#{ids[2]} " in (later.context or "") or later.leftover
 
 
 def test_batching_off_wakes_for_each_message(conn: sqlite3.Connection) -> None:
