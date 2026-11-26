@@ -2,6 +2,7 @@ import fnmatch
 import json
 import os
 import re
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -83,6 +84,7 @@ from bridge.guard import (
     find_merge_blocks,
     find_sandbox_merges,
     find_substitution_end,
+    list_wrapped_runs,
     map_command_to_targets,
     map_held_writes_to_lines,
     map_merge_blocks_to_lines,
@@ -488,6 +490,8 @@ def _list_command_lines(
     for index, (words, _) in enumerate(segments):
         program = os.path.basename(words[0]) if words else ""
         inner += _list_inner_commands(program, words)
+        if words and program not in _SHELLS:
+            inner += [shlex.join(run) for run in list_wrapped_runs(words) if run]
         if index in bodies_by_owner and _reads_script_on_stdin(program, words):
             inner += bodies_by_owner[index]
     for text in inner:

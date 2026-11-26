@@ -59,12 +59,16 @@ _HARMLESS_ENV_RE = re.compile(
     r"|VISUAL|GIT_PAGER|GH_PAGER|PAGER)=[\w./-]*$"
 )
 _QUOTING_RE = re.compile(r"[\"'\\]")
-_WRAPPERS = frozenset({"command", "env", "time", "nohup", "exec", "nice"})
+_WRAPPERS = frozenset({"command", "env", "time", "nohup", "exec", "nice", "stdbuf", "caffeinate", "watch", "parallel"})
 # Wrapper options that take the next word, so it is not read as the program.
 _WRAPPER_VALUE_OPTIONS = {
     "env": re.compile(r"-[i0v]*[uC]|--(?:unset|chdir)"),
     "nice": re.compile(r"-n|--adjustment"),
     "exec": re.compile(r"-[cl]*a"),
+    "stdbuf": re.compile(r"-[ioe]"),
+    "caffeinate": re.compile(r"-[dimsu]*[tw]"),
+    "watch": re.compile(r"-[bcdeghptx]*[nq]|--(?:interval|equexit)"),
+    "parallel": re.compile(r"-[jSNLI]|--(?:jobs|sshlogin|max-args|max-lines|replace)"),
 }
 SSH_VALUE_OPTIONS = frozenset(
     {"-B", "-b", "-c", "-D", "-E", "-e", "-F", "-I", "-i", "-J", "-L", "-l", "-m", "-O", "-o", "-p", "-Q", "-R",
@@ -97,6 +101,7 @@ _COMMAND_RUNNERS = {
     ),
 }
 _FIND_EXECS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
+_SCRIPT_VALUE_OPTIONS = frozenset({"-c", "--command", "-t", "-T", "-F", "-B", "-I", "-O", "-E", "-m"})
 # A remote named by url: scheme://, or scp-like host:path, which a remote name never is.
 _URL_RE = re.compile(r"[a-z][a-z+]*://|[^/:]+:", re.IGNORECASE)
 _GIT_REPO_OPTIONS = frozenset({"--git-dir", "--work-tree", "--namespace", "--exec-path", "--bare", "--super-prefix"})
@@ -506,8 +511,8 @@ def _is_expanded(word: str) -> bool:
     return "$" in word or "`" in word or bool(_BRACE_EXPANSION_RE.search(word))
 
 
-def _runs_hidden_push(tokens: list[str], stdin: Sequence[str] = ()) -> bool:
-    """A shell -c or -s, eval, xargs, sudo, find -exec or env -S that runs a push or merge the guard judges.
+def list_wrapped_runs(tokens: list[str], stdin: Sequence[str] = ()) -> list[list[str]]:
+    """The commands a shell -c or -s, eval, xargs, sudo, find -exec, script or env -S runs.
 
     stdin is the text fed to the command by a heredoc or a pipe, which a shell runs as its script.
     """
@@ -523,6 +528,13 @@ def _runs_hidden_push(tokens: list[str], stdin: Sequence[str] = ()) -> bool:
         runs += [words[k + 1 :] for k, word in enumerate(words) if word in _FIND_EXECS]
     elif head == "eval":
         scripts.append(" ".join(words))
+    elif head == "script":
+        # Linux runs -c's string; macOS runs the words after the log file.
+        while words and words[0].startswith("-"):
+            if words[0] in ("-c", "--command") and len(words) > 1:
+                scripts.append(words[1])
+            words = words[2:] if words[0] in _SCRIPT_VALUE_OPTIONS else words[1:]
+        runs += [words[1:]] if len(words) > 1 else []
     elif head in SHELLS:
         scripts += [script for flag, script in pairwise(words) if re.fullmatch(r"-[a-zA-Z]*c[a-zA-Z]*", flag)]
         here_strings = [w.removeprefix("<<<") or after for w, after in pairwise([*words, ""]) if w.startswith("<<<")]
@@ -532,8 +544,13 @@ def _runs_hidden_push(tokens: list[str], stdin: Sequence[str] = ()) -> bool:
         for k, word in enumerate(tokens[: next((k for k, w in enumerate(tokens) if not w.startswith("-")), None)]):
             if split := _ENV_SPLIT_RE.fullmatch(word):
                 scripts.append(split.group(1) or (tokens[k + 1] if k + 1 < len(tokens) else ""))
-    runs += [segment for script in scripts for segment, _ in segment_command(script)]
-    for run in runs:
+    return [*runs, *(segment for script in scripts for segment, _ in segment_command(script))]
+
+
+def _runs_hidden_push(tokens: list[str], stdin: Sequence[str] = ()) -> bool:
+    """A wrapped command (list_wrapped_runs) that pushes or merges in a way the guard judges."""
+    head = PurePosixPath(tokens[0]).name
+    for run in list_wrapped_runs(tokens, stdin):
         while run and run[0] in SHELL_KEYWORDS:
             run = run[1:]
         run = strip_prefixes(run)
@@ -1986,7 +2003,7 @@ def strip_prefixes(tokens: list[str]) -> list[str]:
             tokens = tokens[1:]
         elif name in _WRAPPERS:
             tokens = _skip_wrapper_options(name, tokens[1:])
-        elif name == "timeout" and (rest := _skip_timeout(tokens[1:])) is not None:
+        elif name in ("timeout", "gtimeout") and (rest := _skip_timeout(tokens[1:])) is not None:
             tokens = rest
         else:
             break

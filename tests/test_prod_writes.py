@@ -277,3 +277,35 @@ def test_reading_cards_or_naming_the_routes_passes(tmp_path: Path, command: str)
     conn = connect(tmp_path / "b.db")
 
     assert _decide(conn, command) == "allow"
+
+
+EXEC = "kubectl --context acme-prod exec web-0 -- env"
+WRAPPED_EXECS = [
+    "kubectl --context acme-prod get pods -o name | xargs -I{} kubectl --context acme-prod exec {} -- env",
+    f"xargs -n1 {EXEC}",
+    f"find . -name pods -exec {EXEC} \\;",
+    f"watch -n 5 {EXEC}",
+    f"parallel -j2 {EXEC} ::: a b",
+    f"eval {EXEC}",
+    f"stdbuf -oL {EXEC}",
+    f"script -q /dev/null {EXEC}",
+    f"script -q -c '{EXEC}' /dev/null",
+    f"gtimeout 5 {EXEC}",
+    f"caffeinate -i {EXEC}",
+]
+
+
+@pytest.mark.parametrize("command", [*WRAPPED_EXECS, "xargs kubectl exec web-0 -- env"])
+def test_a_wrapped_production_write_or_unnamed_context_is_refused(tmp_path: Path, command: str) -> None:
+    assert _decide(connect(tmp_path / "b.db"), command) == "deny"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "kubectl --context acme-prod get pods -o name | xargs kubectl --context acme-prod get",
+        "xargs kubectl --context dev exec web-0 -- env",
+    ],
+)
+def test_a_wrapped_read_or_non_production_write_passes(tmp_path: Path, command: str) -> None:
+    assert _decide(connect(tmp_path / "b.db"), command) == "allow"
