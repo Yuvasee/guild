@@ -2377,6 +2377,9 @@ def map_db_to_reviews(conn: sqlite3.Connection, config: Config, now: int) -> dic
     poll = conn.execute("SELECT ok_at, error, error_at FROM review_poll WHERE id = 1").fetchone()
     rows = conn.execute("SELECT * FROM review_prs WHERE closed_at IS NULL ORDER BY updated_at DESC").fetchall()
     overlaps = map_rows_to_overlaps(rows, config)
+    from bridge.asks import map_asks_to_waited_prs  # asks loads pages, which the guard's modules must not
+
+    waited = map_asks_to_waited_prs(conn)
     return {
         "enabled": bool(config.review_org),
         "ok_at": poll["ok_at"] if poll else None,
@@ -2436,9 +2439,18 @@ def map_db_to_reviews(conn: sqlite3.Connection, config: Config, now: int) -> dic
             "on the other: each owner is told once, and each is ready for you once its description has a line "
             "'Related: #N — stacked | independent because …' naming the other; drafts are not checked. A Related "
             "line saying independent does not make it wait for that PR's merge.",
+            "A PR that an open task waits on (waiting on you or an approval, with the PR's link in its refs or wait "
+            "reason) is marked 'task #N waits on this' and keeps its place in the list.",
         ],
         "prs": sorted(
-            (map_row_to_review(conn, config, row, now, overlaps) for row in rows), key=map_review_to_sort_key
+            (
+                {
+                    **map_row_to_review(conn, config, row, now, overlaps),
+                    "waiting_asks": waited.get(row["ref"].lower(), []),
+                }
+                for row in rows
+            ),
+            key=map_review_to_sort_key,
         ),
     }
 

@@ -1,4 +1,5 @@
 import json
+import re
 import sqlite3
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -6,9 +7,12 @@ from typing import Any, cast
 from unittest import mock
 
 from conftest import BridgeEnv, SpawnProcess, http_request, wait_for
+from test_doc_style import run_node
 from test_leads import Team
 from test_reviews import CONFIG, REF, add_lead, add_session, comment, make_pr
+from test_status_watchers import STUBS
 
+from bridge.asks import Actor, add_ask, drop_ask, wait_ask
 from bridge.attention import (
     ESTIMATE_RULE,
     PriorityError,
@@ -749,3 +753,48 @@ def test_send_to_a_tab_opened_moments_ago_syncs_once_and_finds_it(
     assert "new-task" in sent.stdout
     assert missing.returncode != 0
     assert "no live session" in missing.stderr
+
+
+def test_a_pr_an_open_ask_waits_on_is_marked_with_the_ask_and_keeps_its_place(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "w.db")
+    url = "https://github.com/Org/app/pull/{}".format
+    prs = [
+        make_pr(ref=f"pr:Org/app#{n}", number=n, url=url(n), loc=n, bot_cleared=True, head_oid=f"h{n}")
+        for n in range(1, 31)
+    ]
+    store_open_prs(conn, prs, 1)
+    lead = Actor("alex", "conv-l", "lead")
+
+    def waiting(refs: list[str], on: str, why: str) -> int:
+        ask = add_ask(conn, "alex", "aide", "Ship the part", "tab", refs, 1)
+        wait_ask(conn, ask.id, lead, on, why, 2)
+        return ask.id
+
+    fifth = waiting([url(5)], "approval", "in review queue")
+    last = waiting([], "owner", f"in review queue: {url(30)}")
+    also_last = waiting([url(30)], "approval", "in review queue")
+    dropped = waiting([url(7)], "approval", "in review queue")
+    drop_ask(conn, dropped, lead, "Superseded by the part in the other PR", 3)
+    waiting([url(8)], "colleague", "kai reviews it first")
+
+    page = map_page_to_ranked_page({"needs": []}, map_db_to_reviews(conn, CONFIG, 4), [])
+
+    ranking = [item["key"] for item in cast(Any, page["attention"])["ranking"]]
+    listed = cast(Any, page["reviews"])["prs"]
+    assert ranking == [pr["ref"] for pr in listed] == [f"pr:Org/app#{n}" for n in range(1, 31)], "no PR moves"
+    asks = {pr["ref"]: pr["waiting_asks"] for pr in listed if pr["waiting_asks"]}
+    assert asks == {"pr:Org/app#5": [fifth], "pr:Org/app#30": [last, also_last]}, "a closed ask adds nothing"
+
+
+def test_the_asked_mark_names_each_task_that_waits_on_the_pr(tmp_path: Path) -> None:
+    checks = """
+    globalThis.document = { createElement: (tag) => ({ tag }) };
+    const eq = (a, b) => { if (a !== b) throw new Error(JSON.stringify(a) + " !== " + JSON.stringify(b)); };
+    eq(queueAskedMark({ waiting_asks: [385] }).textContent, "task #385 waits on this");
+    eq(queueAskedMark({ waiting_asks: [206, 346] }).textContent, "tasks #206, #346 wait on this");
+    eq(queueAskedMark({ waiting_asks: [] }), null);
+    """
+    page = (Path(__file__).parent.parent / "src/bridge/web/guild.html").read_text()
+    script = re.search(r"<script>(.*)</script>", page, re.S)
+    assert script is not None
+    run_node(tmp_path, STUBS + script.group(1) + checks)

@@ -1075,6 +1075,21 @@ def find_asks_without_card(conn: sqlite3.Connection, config: Config, now: int) -
     return [ask for ask in asks if ask.id not in carded | named]
 
 
+def map_asks_to_waited_prs(conn: sqlite3.Connection) -> dict[str, list[int]]:
+    """Per PR ref in lower case, the asks still open that wait on the owner or an approval and name that PR in their
+    refs or wait reason, as is_review_queued reads them."""
+    waited: dict[str, list[int]] = {}
+    for row in conn.execute(
+        f"SELECT id, refs, wait_why FROM asks WHERE wait_on IN ('owner', 'approval') "
+        f"AND state IN ({','.join('?' * len(WAITABLE))}) ORDER BY id",
+        WAITABLE,
+    ):
+        text = " ".join([*json.loads(row["refs"]), row["wait_why"] or ""])
+        for ref in sorted({f"pr:{repo.lower()}#{number}" for repo, number in _PR_URL.findall(text)}):
+            waited.setdefault(ref, []).append(int(row["id"]))
+    return waited
+
+
 def is_review_queued(conn: sqlite3.Connection, ask: Ask) -> bool:
     """It waits on the owner's review of PRs (named in its refs or wait reason) that are all open in the review
     queue, the owner's other stream: no card needed."""

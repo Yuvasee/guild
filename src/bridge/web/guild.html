@@ -264,6 +264,7 @@ table.pipeline { width: 100%; min-width: 1120px; table-layout: fixed; border-col
 .pipeline td.pr .ref { font-weight: 600; color: var(--ink); }
 .pipeline td.pr .title { color: var(--soft); }
 .pipeline td.pr .mark { margin-left: 6px; color: var(--faint); }
+.pipeline td.pr .mark.asked { color: var(--you); font-weight: 600; }
 .pipeline td.num { text-align: right; font-variant-numeric: tabular-nums; padding-right: 14px; }
 .pipeline td.none { color: var(--faint); }
 .pipeline td.stuck { color: var(--stuck); font-weight: 600; }
@@ -2335,6 +2336,15 @@ function renderQueueSlackCell(pr) {
   return action;
 }
 
+function queueAskedMark(pr) {
+  const asks = pr.waiting_asks || [];
+  if (!asks.length) return null;
+  const ids = asks.map((id) => "#" + id).join(", ");
+  const mark = el("span", "mark asked", (asks.length > 1 ? "tasks " + ids + " wait" : "task " + ids + " waits") + " on this");
+  mark.title = "Waiting on you or an approval, with this PR's link in its refs or wait reason; see the Asks tab";
+  return mark;
+}
+
 function renderQueueTableRow(pr) {
   const row = el("tr", "prrow" + (pr.group === "drafts" ? " drafts" : ""));
   const rank = rankOf(pr.ref);
@@ -2343,6 +2353,8 @@ function renderQueueTableRow(pr) {
   row.append(rankCell);
   const name = el("td", "pr");
   name.append(linkTo(pr.url, pr.label, "ref"));
+  const asked = queueAskedMark(pr);
+  if (asked) name.append(asked);
   // Ahead of the title, which the cell cuts; among the drafts the group's header already says it.
   if (pr.draft && pr.group !== "drafts") {
     const mark = el("span", "mark", "draft");
