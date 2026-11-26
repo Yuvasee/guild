@@ -398,7 +398,9 @@ def test_a_stored_theme_applies_before_the_page_paints(tmp_path: Path) -> None:
 def test_names_in_code_never_break_inside_and_text_reads_large() -> None:
     css = re.sub(r"/\*.*?\*/", "", (WEB / "doc-style.css").read_text(), flags=re.S)
     nav = (Path(__file__).parent.parent / "src/bridge/doc_nav.py").read_text()
-    assert not re.search(r"overflow-wrap:\s*anywhere|word-break:\s*break-all", css)
+    assert not re.search(r"word-break:\s*break-all", css)
+    anywhere = [m.strip() for m in re.findall(r"([^{}]*)\{[^}]*overflow-wrap:\s*anywhere", css)]
+    assert anywhere == ["code.ds-long .ds-seg"]
     assert ":not(pre)>code{overflow-wrap:anywhere}" not in nav and "code{overflow-wrap:anywhere}" not in nav
     code = ":not(pre)>code{font-size:.88em!important;white-space:nowrap!important;overflow-wrap:normal!important;"
     assert code in css

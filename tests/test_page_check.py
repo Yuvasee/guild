@@ -278,7 +278,7 @@ window.addEventListener("load", function () { setTimeout(function () {
 
 def test_long_code_in_a_narrow_column_breaks_only_after_a_slash_dot_or_space(browser: str) -> None:
     cells = "".join(
-        f'<tr><td style="width:150px"><code>{code}</code></td><td>{LONG}</td></tr>'
+        f'<tr><td style="width:220px"><code>{code}</code></td><td>{LONG}</td></tr>'
         for code in (
             "targetgroup/eks-prod-staging-tg/3f9a1c7e2b4d6a80",
             "services/order_service/potential_issues.py",
@@ -287,6 +287,32 @@ def test_long_code_in_a_narrow_column_breaks_only_after_a_slash_dot_or_space(bro
     )
     got = render_reading(convert_served_page_to_styled(page(f"<table>{cells}</table>")), None, browser, MEASURE_BREAKS)
     assert got["after"] and set(got["after"]) <= {"/", ".", " "}, got
+
+
+MEASURE_PAGE = """
+window.addEventListener("load", function () { setTimeout(function () {
+  var s = document.createElement("script"); s.type = "application/json"; s.id = "bridge-probe-out";
+  s.textContent = JSON.stringify({ page: document.documentElement.scrollWidth,
+    window: document.documentElement.clientWidth });
+  document.body.appendChild(s); }, 300); });
+"""
+
+NARROW_NAMES = (
+    "<p>The file <code>tests/test_issue_discovery_potential_issue_store_transactions.py</code> and the name "
+    "<code>target_status_band_attempts_score_conversation</code> and <code>user_management_service.py:274-296</code>"
+    " are read here.</p>"
+)
+
+
+def test_long_code_never_stretches_a_narrow_page(browser: str) -> None:
+    got = render_reading(convert_served_page_to_styled(page(NARROW_NAMES)), None, browser, MEASURE_PAGE, (390, 800))
+    assert got["page"] == got["window"], got
+
+
+def test_long_code_does_not_break_inside_a_name_on_a_wide_page(browser: str) -> None:
+    raw = page(NARROW_NAMES)
+    got = render_reading(convert_served_page_to_styled(raw), None, browser, MEASURE_BREAKS, (1440, 900))
+    assert set(got["after"]) <= {"/", ".", " "}, got
 
 
 MEASURE_WIDE = """
