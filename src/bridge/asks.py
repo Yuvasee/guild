@@ -1042,6 +1042,7 @@ def list_unassigned_claims(conn: sqlite3.Connection) -> list[Ask]:
 _CARD_ASK = re.compile(r"\bask #(\d+)\b", re.IGNORECASE)
 _WAIT_CARD = re.compile(r"\bQ#(\d+)\b", re.IGNORECASE)
 _PR_URL = re.compile(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)")
+_SHORT_PR = re.compile(r"(?<![\w./#-])(?:([\w.-]+/[\w.-]+)|([\w.-]+))?#(\d+)\b")
 
 
 def is_waiting_on_owner(ask: Ask, owner_name: str) -> bool:
@@ -1098,9 +1099,15 @@ def find_asks_without_card(conn: sqlite3.Connection, config: Config, now: int) -
     return [ask for ask in asks if ask.id not in carded | named]
 
 
-def map_asks_to_waited_prs(conn: sqlite3.Connection) -> dict[str, list[int]]:
+def map_asks_to_waited_prs(conn: sqlite3.Connection, config: Config) -> dict[str, list[int]]:
     """Per PR ref in lower case, the asks still open that wait on the owner or an approval and name that PR in their
-    refs or wait reason, as is_review_queued reads them."""
+    refs or wait reason: by URL, as owner/repo#N, repo#N (repo in the review org) or a bare #N that only one open
+    review PR carries. A short ref counts only when it is an open review PR; `ask #N` and `Q#N` never do."""
+    open_prs = [str(r[0]).lower() for r in conn.execute("SELECT ref FROM review_prs WHERE closed_at IS NULL")]
+    by_number: dict[str, list[str]] = {}
+    for ref in open_prs:
+        by_number.setdefault(ref.rpartition("#")[2], []).append(ref)
+    org = config.review_org.lower()
     waited: dict[str, list[int]] = {}
     for row in conn.execute(
         f"SELECT id, refs, wait_why FROM asks WHERE wait_on IN ('owner', 'approval') "
@@ -1108,7 +1115,14 @@ def map_asks_to_waited_prs(conn: sqlite3.Connection) -> dict[str, list[int]]:
         WAITABLE,
     ):
         text = " ".join([*json.loads(row["refs"]), row["wait_why"] or ""])
-        for ref in sorted({f"pr:{repo.lower()}#{number}" for repo, number in _PR_URL.findall(text)}):
+        found = {f"pr:{repo.lower()}#{number}" for repo, number in _PR_URL.findall(text)}
+        for owner_repo, name, number in _SHORT_PR.findall(_CARD_ASK.sub("", _WAIT_CARD.sub("", text))):
+            if name or owner_repo:
+                ref = f"pr:{owner_repo or f'{org}/{name}'}#{number}".lower()
+                found.update(r for r in open_prs if r == ref)
+            elif len(by_number.get(number, [])) == 1:
+                found.add(by_number[number][0])
+        for ref in sorted(found):
             waited.setdefault(ref, []).append(int(row["id"]))
     return waited
 

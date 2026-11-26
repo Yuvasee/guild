@@ -2379,7 +2379,7 @@ def map_db_to_reviews(conn: sqlite3.Connection, config: Config, now: int) -> dic
     overlaps = map_rows_to_overlaps(rows, config)
     from bridge.asks import map_asks_to_waited_prs  # asks loads pages, which the guard's modules must not
 
-    waited = map_asks_to_waited_prs(conn)
+    waited = map_asks_to_waited_prs(conn, config)
     return {
         "enabled": bool(config.review_org),
         "ok_at": poll["ok_at"] if poll else None,

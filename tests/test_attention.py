@@ -786,6 +786,40 @@ def test_a_pr_an_open_ask_waits_on_is_marked_with_the_ask_and_keeps_its_place(tm
     assert asks == {"pr:Org/app#5": [fifth], "pr:Org/app#30": [last, also_last]}, "a closed ask adds nothing"
 
 
+def test_a_pr_named_by_a_short_ref_is_marked_but_an_ask_number_is_not(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "w.db")
+    url = "https://github.com/Org/{}/pull/{}".format
+    prs = [
+        make_pr(ref=f"pr:Org/{r}#{n}", number=n, url=url(r, n), head_oid=f"h{r}{n}")
+        for r, n in (("app", 7), ("infra", 51), ("docs", 26), ("app", 2241), ("app", 420))
+    ]
+    store_open_prs(conn, prs, 1)
+    lead = Actor("alex", "conv-l", "lead")
+
+    def waiting(refs: list[str], on: str, why: str) -> int:
+        ask = add_ask(conn, "alex", "aide", "Ship the part", "tab", refs, 1)
+        wait_ask(conn, ask.id, lead, on, why, 2)
+        return ask.id
+
+    owner_repo = waiting([], "owner", "needs Org/app#7")
+    bare_repo = waiting([], "approval", "in review queue: infra#51 (draft)")
+    bare_number = waiting([], "approval", "goes in after #2241 is approved")
+    in_refs = waiting(["docs#26"], "approval", "in review queue")
+    by_url = waiting([url("app", 7)], "owner", "full link")
+    waiting([], "owner", "see ask #420 and Q#26, not a PR")
+    waiting([], "owner", "other org's other/docs#26 and unknown#51")
+
+    waited = map_db_to_reviews(conn, CONFIG, 3)["prs"]
+    asks = {pr["ref"]: pr["waiting_asks"] for pr in cast(Any, waited) if pr["waiting_asks"]}
+
+    assert asks == {
+        "pr:Org/app#7": [owner_repo, by_url],
+        "pr:Org/infra#51": [bare_repo],
+        "pr:Org/app#2241": [bare_number],
+        "pr:Org/docs#26": [in_refs],
+    }
+
+
 def test_the_asked_mark_names_each_task_that_waits_on_the_pr(tmp_path: Path) -> None:
     checks = """
     globalThis.document = { createElement: (tag) => ({ tag }) };
