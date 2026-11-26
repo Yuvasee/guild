@@ -2,6 +2,8 @@ import fcntl
 import json
 import os
 import subprocess
+import sys
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -14,6 +16,8 @@ from bridge.gbridge import may_need_guard
 from bridge.guard import make_host_repo_reader
 from bridge.hooks import handle_pre_tool_use
 from bridge.install import convert_event_to_command, list_guard_globs
+
+CODEX_SLOT = Path(__file__).parent.parent / "scripts" / "codex-slot.py"
 
 
 @pytest.fixture
@@ -124,3 +128,25 @@ def test_only_the_macs_gate_starts_the_hook_for_it(tmp_path: Path, command: str)
 
     assert done.stdout.strip() == "started"
     assert not may_need_guard(list_guard_globs(), command), "a host's worktrees are not read by the Mac's Codex"
+
+
+def test_the_record_codex_slot_writes_names_the_directory_codex_reads(home: Path) -> None:
+    stop = home / "stop"
+    fake = home / "fake-codex"
+    fake.write_text(f"#!/bin/sh\nwhile [ ! -f '{stop}' ]; do sleep 0.05; done\n")
+    fake.chmod(0o755)
+    env = {**os.environ, "HOME": str(home), "CODEX_SLOT_REAL": str(fake)}
+    run = subprocess.Popen(
+        [sys.executable, str(CODEX_SLOT), "exec", "-C", str(home / "read"), "review this"], cwd=home / "other", env=env
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not list_codex_reads() and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+        assert find_codex_read_refusal("git -C ../read reset --hard", str(home / "other")) is not None
+        assert find_codex_read_refusal("git reset --hard", str(home / "other")) is None
+    finally:
+        stop.touch()
+        run.wait(10)
+    assert list_codex_reads() == []
