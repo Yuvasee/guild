@@ -176,6 +176,26 @@ def test_faint_diagram_text_is_flagged(browser: str) -> None:
     assert len(problems) == 1 and "'Checkout'" in problems[0] and "hard to read" in problems[0], problems
 
 
+def haloed_label(stroke_width: float) -> bytes:
+    """A chart's last-value label as a weight log draws it: over a bar, ringed in the card's colour."""
+    return page(
+        '<h2>Trend</h2><svg viewBox="0 0 600 200" width="600" height="200" aria-label="Weight">'
+        '<rect x="0" y="0" width="600" height="200" fill="#ffffff"/>'
+        '<rect x="200" y="40" width="160" height="160" fill="#0b8a6e"/>'
+        '<text x="280" y="80" text-anchor="middle" font-size="13" font-weight="600" fill="#c34f33" stroke="#ffffff" '
+        f'stroke-width="{stroke_width}" paint-order="stroke">94,0</text></svg>'
+    )
+
+
+def test_text_ringed_by_a_wide_stroke_is_read_against_the_stroke(browser: str) -> None:
+    assert find_render_problems(read(haloed_label(3.5), browser, "light"), "light") == []
+
+
+def test_text_with_a_thin_stroke_is_still_read_against_what_lies_under_it(browser: str) -> None:
+    problems = find_render_problems(read(haloed_label(1), browser, "light"), "light")
+    assert len(problems) == 1 and "'94,0'" in problems[0] and "hard to read" in problems[0], problems
+
+
 MEASURE_TABLE = """
 var box = document.querySelector(".wrap"), t = box.querySelector("table"), cs = getComputedStyle(box);
 window.addEventListener("load", function () { setTimeout(function () {

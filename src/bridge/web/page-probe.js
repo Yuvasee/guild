@@ -8,6 +8,8 @@
   var OURS = "#bridge-doc-nav,#ds-theme,#bdv-pop,#bridge-probe-out";
   var TEXTISH = /^(text|tspan|textPath|line|polyline|g|defs|marker|title|desc)$/;
   var MAX_TEXTS = 400, MIN_CONTRAST = window.bridgeProbeMinContrast || 3;
+  // A stroke this wide on screen, and at least this share of the font size, rings each glyph: 2 px at 13 px.
+  var HALO_MIN_PX = 2, HALO_FONT_SHARE = 0.15;
 
   // Any CSS colour as [r, g, b, a 0..1]; null when it is not one (a gradient, a url()).
   function rgba(c) {
@@ -133,6 +135,17 @@
     return found;
   }
 
+  // Text drawn over its own wide stroke (paint-order: stroke) is read against that stroke, not what lies under it.
+  function halo(el, cs) {
+    if (!/^stroke/.test(cs.paintOrder)) return null;
+    var c = rgba(cs.stroke);
+    if (!c) return null;
+    c[3] *= parseFloat(cs.strokeOpacity);
+    var m = el.getScreenCTM(), scale = m ? Math.sqrt(Math.abs(m.a * m.d - m.b * m.c)) : 1;
+    var width = parseFloat(cs.strokeWidth) * scale, size = parseFloat(cs.fontSize) * scale;
+    return c[3] > 0 && width >= Math.max(HALO_MIN_PX, size * HALO_FONT_SHARE) ? c : null;
+  }
+
   var counted = 0;
   function texts(area, item) {
     var svg = area.tagName.toLowerCase() === "svg";
@@ -151,6 +164,8 @@
         return TEXTISH.test(n.tagName);
       } : null);
       if (!bg || fg[3] === 0) return;
+      var ring = svg ? halo(el, cs) : null;
+      if (ring) bg = over(ring, bg);
       var seen = over(fg, bg), contrast = ratio(seen, bg);
       if (contrast < MIN_CONTRAST) {
         item.texts.push({ text: el.textContent.replace(/\s+/g, " ").trim().slice(0, 40), ratio: Math.round(contrast * 100) / 100,
