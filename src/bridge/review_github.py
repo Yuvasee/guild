@@ -34,6 +34,8 @@ query($q: String!, $after: String) {
       repository { nameWithOwner }
       baseRef { associatedPullRequests(states: OPEN, first: 1) { nodes { number } } }
       commits(last: 100) { nodes { commit { oid committedDate statusCheckRollup { state } } } }
+      headStatuses: commits(last: 1) { nodes { commit { statusCheckRollup {
+        contexts(first: 100) { nodes { ... on StatusContext { context state } } } } } } }
       files(first: 100) { pageInfo { hasNextPage } nodes { path additions deletions } }
       reviewRequests(first: 20) { nodes { requestedReviewer {
         __typename ... on User { login } ... on Team { slug } ... on Bot { login } } } }
@@ -61,7 +63,8 @@ _MERGE_FACTS_QUERY = """
 query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) { defaultBranchRef { name } pullRequest(number: $number) {
     isDraft mergeStateStatus baseRefName headRefName title body
-    commits(last: 1) { nodes { commit { oid statusCheckRollup { state } } } }
+    commits(last: 1) { nodes { commit { oid statusCheckRollup { state contexts(first: 100) { nodes {
+      ... on StatusContext { context state } } } } } } }
     reviews(last: 100) { nodes { state body submittedAt commit { oid } author { __typename login } } }
     comments(last: 100) { nodes { body createdAt author { __typename login } } }
     reviewThreads(first: 100) { nodes { isResolved comments(first: 1) { nodes { author { __typename login } } }
@@ -386,7 +389,9 @@ def map_node_to_open_pr(node: Any, config: Config, known: KnownHeads | None = No
         requested=count_real_review_requests(node["reviewRequests"]["nodes"], config),
         approved_by=map_reviews_to_approvers(node["reviews"]["nodes"], config),
         bot_approved=is_approved_by_review_bot(node["reviews"]["nodes"], config),
-        bot_cleared=is_cleared_by_review_bot(node["reviews"]["nodes"], head_oid, config),
+        bot_cleared=is_cleared_by_review_bot(
+            node["reviews"]["nodes"], head_oid, config, map_commits_to_status_contexts(node.get("headStatuses"))
+        ),
         bot_rounds=count_review_bot_rounds(node["reviews"]["nodes"], config),
         body_reviews=map_markdown_to_reviews(str(node.get("body") or ""), config.review_names),
         usage_missing=find_missing_usage_section(strip_agent_prefix(str(node["title"])), str(node.get("body") or "")),
@@ -546,7 +551,7 @@ def read_live_merge_facts(
         reviews: list[Any] = pr["reviews"]["nodes"]
         author = config.review_author.casefold()
         head_oid = str(head.get("oid") or "")
-        bot_cleared = is_cleared_by_review_bot(reviews, head_oid, config)
+        bot_cleared = is_cleared_by_review_bot(reviews, head_oid, config, map_rollup_to_status_contexts(rollup))
         threads: list[Any] = pr["reviewThreads"]["nodes"]
         default: Any = repository.get("defaultBranchRef") or {}
         return LiveMergeFacts(
@@ -938,18 +943,37 @@ def is_approved_by_review_bot(nodes: list[Any], config: Config) -> bool:
     return APPROVED_STATE in verdicts.values()
 
 
-def is_cleared_by_review_bot(nodes: list[Any], head_oid: str, config: Config) -> bool:
-    """Whether a review bot's latest review, of any kind, is of the head commit and does not request changes."""
+def map_rollup_to_status_contexts(rollup: Any) -> list[Any]:
+    nodes: list[Any] = []
+    if rollup and rollup.get("contexts"):
+        nodes = rollup["contexts"].get("nodes") or []
+    return [n for n in nodes if n and n.get("context")]
+
+
+def map_commits_to_status_contexts(commits: Any) -> list[Any]:
+    nodes: list[Any] = []
+    if commits:
+        nodes = commits.get("nodes") or []
+    if not nodes or not nodes[-1].get("commit"):
+        return []
+    return map_rollup_to_status_contexts(nodes[-1]["commit"].get("statusCheckRollup"))
+
+
+def is_cleared_by_review_bot(nodes: list[Any], head_oid: str, config: Config, statuses: Sequence[Any] = ()) -> bool:
+    """Whether the review bot cleared the head: its latest review, of any kind, is of the head and does not request
+    changes; or, with no review of the head, the head's status named like the bot is success."""
     bots = {login.casefold() for login in config.review_bot_logins}
     latest: Any = None
     for node in nodes:
         author: Any = node.get("author") or {}
         if str(author.get("login") or "").casefold() in bots:
             latest = node
-    if latest is None:
-        return False
-    commit: Any = latest.get("commit") or {}
-    return commit.get("oid") == head_oid and latest.get("state") != "CHANGES_REQUESTED"
+    if latest is not None:
+        commit: Any = latest.get("commit") or {}
+        if commit.get("oid") == head_oid:
+            return latest.get("state") != "CHANGES_REQUESTED"
+    name = config.review_bot_name.casefold()
+    return any(str(s.get("context") or "").casefold() == name and s.get("state") == "SUCCESS" for s in statuses)
 
 
 def count_review_bot_rounds(nodes: list[Any], config: Config) -> int:

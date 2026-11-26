@@ -2221,6 +2221,34 @@ def test_the_review_bot_clears_a_head_it_reviewed_without_asking_for_changes() -
     assert not is_cleared_by_review_bot([], "a1", CONFIG)
 
 
+def test_the_review_bot_clears_a_head_whose_status_named_like_it_is_success() -> None:
+    def review(state: str, oid: str) -> dict[str, object]:
+        return {"state": state, "commit": {"oid": oid}, "author": {"__typename": "Bot", "login": "bot"}}
+
+    name = CONFIG.review_bot_name
+    passed = [{"context": name.upper(), "state": "SUCCESS"}]
+    assert is_cleared_by_review_bot([], "a1", CONFIG, passed)
+    assert is_cleared_by_review_bot([review("CHANGES_REQUESTED", "z9")], "a1", CONFIG, passed)
+    assert not is_cleared_by_review_bot([review("CHANGES_REQUESTED", "a1")], "a1", CONFIG, passed)
+    assert not is_cleared_by_review_bot([], "a1", CONFIG, [{"context": name, "state": "PENDING"}])
+    assert not is_cleared_by_review_bot([], "a1", CONFIG, [{"context": f"{name} / Linear issue", "state": "SUCCESS"}])
+
+
+def test_an_open_pr_is_cleared_by_the_status_in_the_search_answer_with_no_extra_call() -> None:
+    node: dict[str, Any] = {
+        "repository": {"nameWithOwner": "Org/app"}, "number": 1, "headRefOid": "h1", "baseRefName": "main",
+        "files": {"pageInfo": {"hasNextPage": False}, "nodes": []}, "additions": 0, "deletions": 0,
+        "commits": {"nodes": []}, "reviewRequests": {"nodes": []}, "reviews": {"nodes": []},
+        "latestReviews": {"nodes": []}, "title": "t", "url": "u", "isDraft": False, "updatedAt": "U",
+        "headRefName": "x",
+        "headStatuses": {"nodes": [{"commit": {"statusCheckRollup": {"contexts": {"nodes": [
+            {}, {"context": CONFIG.review_bot_name, "state": "SUCCESS"}]}}}}]},
+    }  # fmt: skip
+
+    assert map_node_to_open_pr(node, CONFIG).bot_cleared
+    assert not map_node_to_open_pr({**node, "headStatuses": {"nodes": []}}, CONFIG).bot_cleared
+
+
 def test_the_guards_live_read_counts_the_review_bots_approval_only_at_the_head() -> None:
     def answer(review_oid: str) -> str:
         pr: dict[str, object] = {
