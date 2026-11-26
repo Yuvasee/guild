@@ -1202,7 +1202,8 @@ def test_the_gates_send_api_closes_and_continued_lines_to_the_guard() -> None:
         CLOSE_MUTATION,
     ):
         assert gbridge.may_need_guard(globs, command), command
-    assert not gbridge.may_need_guard(globs, "gh api user")
+    assert gbridge.may_need_guard(globs, "gh api user"), "it spends core quota"
+    assert not gbridge.may_need_guard(globs, "gh auth status")
 
 
 def test_gbridge_reads_includes_rewrites_and_extra_config_files_as_the_mac_does(

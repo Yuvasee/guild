@@ -131,6 +131,9 @@ class Config:
     heavy_job_load_per_core: float = 3.0
     """Load average per core over which a heavy check started on this Mac (a full test run, a build) gets a note to
     run it on worker_host; 0 turns the note off."""
+    gh_quota_reserve: int = 1500
+    """Core GitHub quota a worker's gh call must leave: below it the call is refused until the reset; 0 turns the
+    guard off. Leads, the assistant and bridge's own polling keep this reserve for themselves."""
     review_post_dry_run: bool = True
     """Writes the Slack post to a log instead of sending it."""
     review_channel_id: str = ""
@@ -380,6 +383,7 @@ def map_toml_to_config(raw: dict[str, object]) -> Config:
         worker_host_watcher=_str(raw, "worker_host_watcher", defaults.worker_host_watcher),
         worker_trust_roots=_str_list(raw, "worker_trust_roots", defaults.worker_trust_roots),
         heavy_job_load_per_core=_non_negative(raw, "heavy_job_load_per_core", defaults.heavy_job_load_per_core),
+        gh_quota_reserve=int(_non_negative(raw, "gh_quota_reserve", defaults.gh_quota_reserve)),
         review_post_dry_run=_bool(raw, "review_post_dry_run", defaults.review_post_dry_run),
         review_ignored_posts=_str_list(raw, "review_ignored_posts", defaults.review_ignored_posts),
         agent_prefix_from_ms=_int(raw, "agent_prefix_from_ms", defaults.agent_prefix_from_ms),

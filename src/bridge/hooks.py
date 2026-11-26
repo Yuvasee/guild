@@ -64,6 +64,7 @@ from bridge.feed import (
     spawn_typed_delivery,
     take_command_waiver,
 )
+from bridge.gh_quota import find_quota_refusal, is_quota_spending
 from bridge.gitinfo import GitInfo, read_git_info, read_repo_facts
 from bridge.guard import (
     CLOSE,
@@ -1315,6 +1316,36 @@ def is_team_conversation(conn: sqlite3.Connection, config: Config, conversation_
     )
 
 
+def _spends_gh_quota(command: str) -> bool:
+    return any(
+        is_quota_spending([os.path.basename(words[0]), *words[1:]] if words else [])
+        for line, _ in _list_command_lines(command)
+        for words, _ in line
+    )
+
+
+def _is_worker(
+    conn: sqlite3.Connection,
+    config: Config,
+    conversation_id: str,
+    host_checkout: HostRepoReader | None,
+    env: Mapping[str, str] | None,
+) -> bool:
+    """A host worker, or a tab with a lead above it that is not the lead's own and not locked: leads, the assistant and
+    the owner's own sessions are not."""
+    if host_checkout is not None:
+        return True
+    row = conn.execute(
+        "SELECT surface FROM instances WHERE conversation_id = ? AND ended_at IS NULL ORDER BY first_seen_at DESC",
+        (conversation_id,),
+    ).fetchone()
+    surface = (row["surface"] if row else None) or (env or {}).get("AGTERM_PANE_ID")
+    if surface is None or is_surface_locked(conn, config, surface):
+        return False
+    lead_surface = find_lead_of(conn, surface)[1]
+    return lead_surface is not None and lead_surface != surface
+
+
 def _check_pre_tool_use(
     conn: sqlite3.Connection,
     payload: dict[str, object],
@@ -1372,6 +1403,13 @@ def _check_pre_tool_use(
         return _deny(unnamed_cluster)
     if host_checkout is None and (codex := find_codex_read_refusal(command, _str(payload, "cwd") or os.getcwd())):
         return _deny(codex)
+    if (
+        config.gh_quota_reserve
+        and _spends_gh_quota(command)
+        and _is_worker(conn, config, str(payload.get("session_id") or ""), host_checkout, env)
+        and (low_quota := find_quota_refusal(config.gh_quota_reserve))
+    ):
+        return _deny(low_quota)
     titles = find_prefixed_titles(command)
     if titles:
         return _deny(map_titles_to_denial(titles))

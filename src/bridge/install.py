@@ -35,6 +35,8 @@ _LABEL_GLOBS = ("*gh*label*", "*gh*create*-*l*", "*gh*new*-*l*")
 _PR_ISSUE_GLOBS = ("*gh*pr*create*", "*gh*pr*new*", "*gh*pr*edit*")
 # A comment, review or thread reply on a PR: it may answer a colleague's comment no call handles yet.
 _PR_ANSWER_GLOBS = ("*gh*pr*comment*", "*gh*pr*review*", "*gh*api*comments*", "*gh*api*reviews*")
+# A gh call that spends core quota: a worker's is refused when the shared quota is low.
+_GH_QUOTA_GLOBS = tuple(f"*gh*{sub}*" for sub in ("api", "run", "pr", "issue", "repo", "release", "search"))
 # Killing processes by name or pattern is refused whether or not a claim exists.
 _KILL_GLOBS = ("*pkill*", "*killall*", "*pgrep*")
 # So is a kubectl, helm or k9s command that names no cluster, and one that changes the machine's default cluster.
@@ -60,8 +62,8 @@ _HEAVY_GLOBS = ("*uv*sync*", "*docker*build*")
 _CODEX_READ_GLOBS = ("*git*rebase*", "*git*reset*", "*git*checkout*", "*git*switch*", "*git*pull*")
 """Moves of a worktree's files, refused while Codex reads it; only the Mac's gate has them, as Codex runs there."""
 _PYTHON_GLOBS = (
-    *_LABEL_GLOBS, *_PR_ISSUE_GLOBS, *_PR_ANSWER_GLOBS, *_KILL_GLOBS, *_CLUSTER_GLOBS, *_LOGIN_PROBE_GLOBS,
-    *_ADMIN_GLOBS, *_RUN_WATCH_GLOBS, *_PIPE_GLOBS, *_HEAVY_GLOBS, *_CODEX_READ_GLOBS,
+    *_LABEL_GLOBS, *_PR_ISSUE_GLOBS, *_PR_ANSWER_GLOBS, *_GH_QUOTA_GLOBS, *_KILL_GLOBS, *_CLUSTER_GLOBS,
+    *_LOGIN_PROBE_GLOBS, *_ADMIN_GLOBS, *_RUN_WATCH_GLOBS, *_PIPE_GLOBS, *_HEAVY_GLOBS, *_CODEX_READ_GLOBS,
 )  # fmt: skip
 # A publish to claude.ai, matched by the tool's own field so a command that names the tool does not start Python; not a
 # host glob, since gbridge sends every Artifact call to the Mac.
