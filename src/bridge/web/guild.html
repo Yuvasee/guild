@@ -2576,10 +2576,13 @@ function renderQueue() {
   const priority = document.getElementById("priority");
   priority.textContent = attention.priority.length ? "Priority: " + attention.priority.map((p) => p.name).join(", then ") : "";
   priority.title = attention.priority.map((p) => p.name + ": " + p.issue_keys.join(", ")).join("\n");
-  if (!on || !changed("queue", { prs: queue.prs, error: queue.error, dry_run: queue.dry_run, ranking: attention.ranking, sort: queueSort, form: queueForm })) return;
+  if (!on || !changed("queue", { prs: queue.prs, error: queue.error, dry_run: queue.dry_run, ranking: attention.ranking, unranked: attention.unranked, sort: queueSort, form: queueForm })) return;
   const previous = box.querySelector(".tablewrap");
   const scrolled = previous ? previous.scrollLeft : 0;
   box.replaceChildren();
+  for (const item of attention.unranked || []) {
+    box.append(el("div", "quiet", "Not ranked: " + item.label + " (" + item.project + "): " + item.why));
+  }
   if (queue.prs.length) {
     const table = el("table", "pipeline");
     const head = el("tr");

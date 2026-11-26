@@ -276,6 +276,7 @@ def map_page_to_ranked_page(
         [_map_need_to_question(need) for need in needs if _is_open_question(need)], queued, projects
     )
     place = {item.key: index for index, item in enumerate(ranking)}
+    unranked = _list_unranked_priority_prs(prs, queued, projects, set(place))
     leads = [
         _map_lead_to_ranked_holds(lead, place, _map_projects_to_positions(projects), queued)
         for lead in cast(list[dict[str, object]], guild.get("leads", []))
@@ -293,9 +294,33 @@ def map_page_to_ranked_page(
         "attention": {
             "ranking": [asdict(item) for item in ranking],
             "priority": [asdict(project) for project in projects],
+            "unranked": unranked,
             "estimate_rule": ESTIMATE_RULE,
         },
     }
+
+
+def _list_unranked_priority_prs(
+    prs: list[dict[str, object]], queued: list[QueuedPr], projects: list[Project], ranked: set[str]
+) -> list[dict[str, str]]:
+    """Every PR of a priority project waiting for the owner that has no place in the ranking, with its reason."""
+    position = _map_projects_to_positions(projects)
+    parents = map_prs_to_parents(queued)
+    by_ref = {pr.ref: pr for pr in queued}
+    listed: list[dict[str, str]] = []
+    for raw, pr in zip(prs, queued, strict=True):
+        index = _find_project_position(pr, position)
+        if index == _NO_PROJECT or pr.group != WAITING_FOR_YOU or pr.ref in ranked:
+            continue
+        parent = by_ref.get(parents.get(pr.ref, ""))
+        why = (
+            raw.get("review_wait")
+            or raw.get("reviews_gap")
+            or (f"follows {parent.label}, which is not ranked" if parent and parent.ref not in ranked else None)
+            or f"waits on the lead that owns it ({pr.state})"
+        )
+        listed.append({"ref": pr.ref, "label": pr.label, "project": projects[index].name, "why": str(why)})
+    return listed
 
 
 def _map_lead_to_ranked_holds(

@@ -268,6 +268,28 @@ def test_the_page_puts_an_unranked_pr_right_after_its_parent_within_its_group() 
     assert [item["key"] for item in attention["ranking"]] == ["parent", "other"]
 
 
+def test_a_priority_project_pr_left_out_of_the_ranking_is_listed_with_its_reason() -> None:
+    def review(ref: str, **extra: Any) -> dict[str, Any]:
+        return {**asdict(queued(ref, issue_keys=("PROJ-39",))), "issue_keys": ["PROJ-39"], **extra}
+
+    prs: list[dict[str, Any]] = [
+        review("parent", review_wait="ReviewBot has not reviewed the newest commit"),
+        review("child", stack_parent="parent"),
+        review("ranked", loc=1),
+        {**review("elsewhere"), "issue_keys": []},
+    ]
+
+    page = map_page_to_ranked_page({"needs": []}, {"prs": prs}, [ONBOARDING])
+
+    attention: Any = page["attention"]
+    assert [item["key"] for item in attention["ranking"]] == ["ranked", "elsewhere"]
+    assert attention["unranked"] == [
+        {"ref": "parent", "label": "parent", "project": "onboarding",
+         "why": "ReviewBot has not reviewed the newest commit"},
+        {"ref": "child", "label": "child", "project": "onboarding", "why": "follows parent, which is not ranked"},
+    ]  # fmt: skip
+
+
 def test_estimates_are_rough_and_size_only_and_a_fix_has_none_since_its_size_is_unknown() -> None:
     ranking = map_streams_to_ranking(
         [question(1, 1)],
