@@ -294,7 +294,8 @@ def test_a_production_context_allows_only_reads(command: str, verb: str) -> None
     refusal = find_rule_refusal(command, PROD)
 
     assert refusal is not None and "production context" in refusal and f" {verb} there" in refusal
-    assert "get, describe, logs or top" in refusal and "owner's OK, asked through aide" in refusal
+    assert "get, describe, logs or top" in refusal and "send aide the exact command" in refusal
+    assert "types it after '!' in a tab" in refusal
     assert may_need_guard(list_guard_globs(), command)
 
 

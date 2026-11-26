@@ -539,8 +539,8 @@ _CHAINED_APPLY = (
 )
 _PROD_VERB = (
     "bridge: {context} is a production context, and {program} {verb} there is refused for every session. Read it "
-    "with get, describe, logs or top. Anything else needs the owner's OK, asked through {assistant}; this guard has "
-    "no waiver, so the owner runs the approved command."
+    "with get, describe, logs or top. Anything else is the owner's to run: send {assistant} the exact command for a "
+    "card; the owner types it after '!' in a tab, which no hook sees, so this guard has no waiver for agents."
 )
 _UNREAD_CONTEXT = (
     "bridge: the context of this {program} {verb} is {context}, which the shell fills in, so the guard cannot tell "
