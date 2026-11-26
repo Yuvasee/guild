@@ -104,6 +104,16 @@ def _no_claude_config_dir(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _first_reader_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Registering a doc reads the first reader's recorded rounds; tests of other things have one clean round."""
+
+    def one_clean_round(doc: str) -> list[tuple[int, list[str]]]:
+        return [(1, [])]
+
+    monkeypatch.setattr("bridge.review_worktree.read_reader_rounds", one_clean_round)
+
+
 STUB_AGTERMCTL = """#!/bin/sh
 pane=none
 prev=

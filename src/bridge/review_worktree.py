@@ -19,7 +19,7 @@ from bridge.config import Config, state_dir
 from bridge.db import now_ms, transaction
 from bridge.doc_nav import ADDED, BEHIND_BANNER_STYLE, convert_doc_to_viewable, remove_injected_parts
 from bridge.leads import REVIEW_DOC_SPEC
-from bridge.review_doc_check import PlainLimits, find_doc_problems, read_doc_head
+from bridge.review_doc_check import PlainLimits, find_doc_problems, read_doc_head, read_reader_rounds
 from bridge.review_marks import convert_reviews_to_text, map_html_to_reviews
 
 FRESH_FOR_PREPARING_MS = 14 * 24 * 3_600_000
@@ -987,7 +987,15 @@ def register_doc(conn: sqlite3.Connection, config: Config, ref: str, source: Pat
         config.doc_sentence_max_words,
         config.doc_visible_max_words,
     )
-    problems = find_doc_problems(page, has_owner_reviewed(row), config.owner_name, files, limits, str(row["base"]))
+    problems = find_doc_problems(
+        page,
+        has_owner_reviewed(row),
+        config.owner_name,
+        files,
+        limits,
+        str(row["base"]),
+        read_reader_rounds(str(source)),
+    )
     if problems:
         listed = "".join(f"\n- {problem}" for problem in problems)
         raise DocError(f"{ref}: the doc was not registered, as {REVIEW_DOC_SPEC} asks:{listed}")

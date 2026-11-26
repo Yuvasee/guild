@@ -28,7 +28,10 @@ the full version, so change it here first.
    passes once a reader's explain-back is right and every term it flagged is explained or gone. At most three readers:
    if the third still gets it wrong, the doc's structure is the problem, so rework the top rather than polish sentences.
    Say under **Checks** (its Verified part) that the first reader passed, in which round, and any flagged point you
-   kept with why (`guild review doc` refuses the doc without that line).
+   kept with why (`guild review doc` refuses the doc without that line). After each reader, record its round beside
+   the doc: `python3 ~/.claude/skills/bridge/review_doc_check.py <doc> --reader-round N --term T ...` (one `--term` per
+   term it flagged, none when it flagged none). `guild review doc` accepts that line only when the last recorded round
+   has no terms.
 
 ## The PR description
 

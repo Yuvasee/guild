@@ -2,6 +2,7 @@
 as it is, `python3 review_doc_check.py <doc.html>`, from the copy bridge puts in its bridge skill folder."""
 
 import argparse
+import json
 import re
 import subprocess
 import sys
@@ -880,8 +881,45 @@ def find_decision_problems(page: str, blocks: "list[_Block]", owner: str) -> lis
     return problems
 
 
-def find_first_reader_problems(verified: str) -> list[str]:
+ROUNDS_SUFFIX = ".reader-rounds"
+"""A review doc's first-reader rounds sit beside it, one JSON line per round: {"round": 2, "terms": ["..."]}."""
+
+
+def read_reader_rounds(doc: str) -> list[tuple[int, list[str]]]:
+    """The recorded rounds of the first reader for the doc at this path, oldest first; none when nothing is recorded."""
+    try:
+        with open(doc + ROUNDS_SUFFIX, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return []
+    rounds: list[tuple[int, list[str]]] = []
+    for line in lines:
+        try:
+            entry = json.loads(line)
+            rounds.append((int(entry["round"]), [str(term) for term in entry["terms"]]))
+        except (ValueError, KeyError, TypeError):
+            continue
+    return rounds
+
+
+def record_reader_round(doc: str, number: int, terms: list[str]) -> None:
+    with open(doc + ROUNDS_SUFFIX, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"round": number, "terms": terms}) + "\n")
+
+
+def find_first_reader_problems(verified: str, rounds: list[tuple[int, list[str]]]) -> list[str]:
     if _FIRST_READER_PASSED_RE.search(verified):
+        if not rounds:
+            return [
+                f"{CHECKS} says the first reader passed, but no round is recorded: after each reader, run "
+                "review_doc_check.py <doc> --reader-round N [--term T ...] with every term it flagged"
+            ]
+        number, terms = rounds[-1]
+        if terms:
+            return [
+                f"{CHECKS} says the first reader passed, but round {number} still has {len(terms)} flagged "
+                f"terms ({', '.join(terms[:3])}): explain or drop them, ask a new reader and record its round"
+            ]
         return []
     return [
         f"{CHECKS} does not say the first reader (with the reader profile) passed: before registering, a fresh reader "
@@ -1239,6 +1277,7 @@ def find_doc_problems(
     files: frozenset[str] | None,
     limits: PlainLimits,
     base: str,
+    rounds: list[tuple[int, list[str]]],
 ) -> list[str]:
     """What breaks the spec's order, plainness and Where to look rules, one plain line each. `files` holds every file
     and directory of the commit the doc describes; None when that commit cannot be read, so paths are not looked up."""
@@ -1263,7 +1302,7 @@ def find_doc_problems(
     problems.extend(find_section_problems(body, headings))
     top, verified = read_visible_top(page)
     problems.extend(find_story_problems(headings, top.story_steps))
-    problems.extend(find_first_reader_problems(verified))
+    problems.extend(find_first_reader_problems(verified, rounds))
     problems.extend(find_field_table_problems(text))
     blocks = read_blocks(text)
     problems.extend(find_baseline_problems(blocks, base))
@@ -1340,7 +1379,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--owner-reviewed", action="store_true", help="the owner has reviewed the PR: allows the Changes since section"
     )
+    parser.add_argument("--reader-round", type=int, metavar="N", help="record first reader round N and exit")
+    parser.add_argument("--term", action="append", default=[], help="a term that round flagged (repeat per term)")
     args = parser.parse_args(argv)
+    if args.reader_round is not None:
+        record_reader_round(args.file, args.reader_round, args.term)
+        print(f"recorded round {args.reader_round}: {len(args.term)} flagged terms")
+        return 0
     try:
         with open(args.file, "rb") as f:
             page = f.read()
@@ -1350,7 +1395,9 @@ def main(argv: list[str] | None = None) -> int:
     # As registration does: the paths at the commit the doc names, else at the PR's head, here the checkout's.
     commit = read_doc_head(page) or "HEAD"
     files = list_files_at(args.repo, commit)
-    problems = find_doc_problems(page, args.owner_reviewed, "the owner", files, DEFAULT_LIMITS, args.base)
+    problems = find_doc_problems(
+        page, args.owner_reviewed, "the owner", files, DEFAULT_LIMITS, args.base, read_reader_rounds(args.file)
+    )
     for problem in problems:
         print(f"- {problem}")
     if files is None:

@@ -11,7 +11,7 @@ from test_reviews import REF, setup_pr
 from bridge import review_doc_check
 from bridge.config import Config, map_toml_to_config
 from bridge.db import transaction
-from bridge.review_doc_check import PlainLimits, find_doc_problems
+from bridge.review_doc_check import PlainLimits, find_doc_problems, read_reader_rounds, record_reader_round
 from bridge.review_worktree import DocError, read_registered_doc, register_doc
 
 WHERE = """
@@ -56,6 +56,7 @@ def make_doc(where: str = WHERE, first: str = "In short", last: str = "", kind: 
     return f"<html><body>{strip(kind)}{body}{CLOSE}{where}{CHECKS}{last}</body></html>".encode()
 
 
+CLEAN_ROUND: list[tuple[int, list[str]]] = [(1, [])]
 DEFAULTS = Config()
 LIMITS = PlainLimits(
     DEFAULTS.doc_in_short_max_bullets,
@@ -66,7 +67,7 @@ LIMITS = PlainLimits(
 
 
 def problems(page: bytes, reviewed: bool = False, files: frozenset[str] | None = None) -> list[str]:
-    return find_doc_problems(page, reviewed, "Sam", files, LIMITS, "main")
+    return find_doc_problems(page, reviewed, "Sam", files, LIMITS, "main", CLEAN_ROUND)
 
 
 FILES = frozenset({"src", "src/app", "src/app/run.py", "src/app/store.py", "tests", "tests/test_run.py"})
@@ -169,6 +170,8 @@ def make_worktree(root: Path) -> tuple[Path, str]:
 def register(conn: sqlite3.Connection, tmp_path: Path, page: bytes) -> None:
     source = tmp_path / "doc.html"
     source.write_bytes(page)
+    if not source.with_name("doc.html" + review_doc_check.ROUNDS_SUFFIX).exists():
+        record_reader_round(str(source), 1, [])
     with transaction(conn):
         register_doc(conn, REVIEWS_CONFIG, REF, source, NOW)
 
@@ -291,7 +294,8 @@ def test_the_limits_come_from_config() -> None:
     assert problems(page) == []
     strict = PlainLimits(bullets=2, bullet_words=7, sentence_words=10, visible_words=150)
     assert [
-        line.split(";")[0].split(",")[0] for line in find_doc_problems(page, False, "Sam", None, strict, "main")
+        line.split(";")[0].split(",")[0]
+        for line in find_doc_problems(page, False, "Sam", None, strict, "main", CLEAN_ROUND)
     ] == [
         "In short has 3 bullets",
         "an In short bullet has 8 words",
@@ -505,7 +509,7 @@ SVG = "<svg><text>Before</text><text>After</text></svg>"
 
 def baseline(changes: str, base: str = "main") -> list[str]:
     page = make_top("<p>Fine.</p>", changes)
-    return find_doc_problems(page, False, "Sam", None, LIMITS, base)
+    return find_doc_problems(page, False, "Sam", None, LIMITS, base, CLEAN_ROUND)
 
 
 def test_a_before_with_no_baseline_near_it_is_refused() -> None:
@@ -614,6 +618,10 @@ def run_standalone(tmp_path: Path, page: bytes, *args: str) -> subprocess.Comple
     shutil.copy(Path(review_doc_check.__file__), checker)
     doc = tmp_path / "doc.html"
     doc.write_bytes(page)
+    if "--no-rounds" in args:
+        args = tuple(arg for arg in args if arg != "--no-rounds")
+    else:
+        record_reader_round(str(doc), 1, [])
     return subprocess.run(
         [sys.executable, "-I", "-S", str(checker), str(doc), *args],
         cwd=tmp_path, capture_output=True, text=True, timeout=60, check=False,
@@ -628,7 +636,7 @@ def test_the_checks_run_as_a_lone_script_find_what_registration_finds(tmp_path: 
     done = run_standalone(tmp_path, bare, "--repo", str(repo))
 
     assert done.returncode == 1, done.stderr
-    expected = find_doc_problems(bare, False, "the owner", FILES, review_doc_check.DEFAULT_LIMITS, "main")
+    expected = find_doc_problems(bare, False, "the owner", FILES, review_doc_check.DEFAULT_LIMITS, "main", CLEAN_ROUND)
     assert len(expected) == 2
     assert done.stdout.splitlines() == [f"- {problem}" for problem in expected]
     done = run_standalone(tmp_path, make_doc(), "--repo", str(repo))
@@ -686,3 +694,46 @@ def test_a_product_decisions_line_without_the_owners_words_is_refused_unless_it_
     assert "Product decisions line 'only admins manage keys.' has no Q#N" in refused
     assert line("Product decisions: only admins manage keys (Q#882).") == []
     assert line("Product decisions: none.") == []
+
+
+def test_passed_in_the_checks_line_needs_a_recorded_round_whose_term_list_is_empty() -> None:
+    page = make_doc()
+
+    def refused(rounds: list[tuple[int, list[str]]]) -> list[str]:
+        return find_doc_problems(page, False, "Sam", None, LIMITS, "main", rounds)
+
+    assert refused([(3, [])]) == []
+    assert refused([(1, ["term"]), (2, [])]) == []
+    (none,) = refused([])
+    assert "says the first reader passed, but no round is recorded" in none
+    (open_terms,) = refused([(1, []), (3, ["Singleton", "fold", "mark", "strip"])])
+    assert "round 3 still has 4 flagged terms (Singleton, fold, mark)" in open_terms
+
+
+def test_a_round_is_recorded_beside_the_doc_by_the_lone_script_and_the_last_one_counts(tmp_path: Path) -> None:
+    doc = tmp_path / "doc.html"
+    assert read_reader_rounds(str(doc)) == []
+    record_reader_round(str(doc), 1, ["Singleton"])
+    record_reader_round(str(doc), 2, [])
+    with (tmp_path / "doc.html.reader-rounds").open("a") as f:
+        f.write("not json\n")
+    assert read_reader_rounds(str(doc)) == [(1, ["Singleton"]), (2, [])]
+    (tmp_path / "doc.html.reader-rounds").unlink()
+    page = make_doc()
+    done = run_standalone(tmp_path, page, "--no-rounds")
+    assert done.returncode == 1 and "no round is recorded" in done.stdout
+    said = run_standalone(tmp_path, page, "--no-rounds", "--reader-round", "1", "--term", "fold")
+    assert said.stdout.strip() == "recorded round 1: 1 flagged terms"
+    assert "round 1 still has 1 flagged terms (fold)" in run_standalone(tmp_path, page, "--no-rounds").stdout
+
+
+def test_registration_reads_the_rounds_beside_the_source_doc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("bridge.review_worktree.read_reader_rounds", read_reader_rounds)
+    conn = setup_pr(tmp_path)
+    source = tmp_path / "doc.html"
+    source.write_bytes(make_doc())
+    with pytest.raises(DocError, match="no round is recorded"), transaction(conn):
+        register_doc(conn, REVIEWS_CONFIG, REF, source, NOW)
+    record_reader_round(str(source), 1, [])
+    with transaction(conn):
+        register_doc(conn, REVIEWS_CONFIG, REF, source, NOW)
