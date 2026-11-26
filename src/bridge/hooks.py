@@ -1646,10 +1646,17 @@ def handle_hook(
             # A request to save notes and end the turn died with it; the next prompt asks again.
             if read_phase(conn, conversation_id) == PHASE_REQUESTED:
                 give_up_driving(conn, conversation_id)
-            if caller is None and not nested:
+            if not nested:
                 answered_at = tail.reading.at_ms if tail and tail.reading else None
                 error = _str(payload, "error")
                 cut_mail = take_turn_cut(conn, config, conversation_id, surface, error, text, answered_at, at_ms)
+                if caller is not None:
+                    # On the host the worker types gbridge.
+                    for message_id, _ in cut_mail:
+                        conn.execute(
+                            "UPDATE messages SET body = replace(body, 'bridge inbox', 'gbridge inbox') WHERE id = ?",
+                            (message_id,),
+                        )
         elif event == "Notification":
             if observed.current:
                 set_attention(conn, instance_id, "permission", event_ns)

@@ -1131,3 +1131,32 @@ def test_a_configured_host_sync_dir_goes_with_its_subfolders(tmp_path: Path, mon
     assert not any(".git" in p or "icon.jpeg" in p for p in paths), "hidden folders and binaries stay"
     assert notes == []
     assert ".claude/skills/slides/SKILL.md" not in [f["path"] for f in read_host_rule_files(Config())[0]]
+
+
+def test_a_turn_cut_on_a_host_worker_is_resumed_with_gbridge_wording(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for key, value in bridge_env.env.items():
+        monkeypatch.setenv(key, value)
+    loop = spawn_process()
+    start = process_start_ms(loop)
+    assert start is not None
+    caller = HookCaller(loop, start, Surface("PANE-H", "TAB-H", "WS"), "host:devbox", None)
+    payload: dict[str, object] = {"session_id": "conv-h", "cwd": "/home/dev/app"}
+    conn = connect(bridge_env.db)
+    now = time.time_ns()
+    handle_hook(conn, "SessionStart", {**payload, "source": "startup"}, {}, load_config(), now, caller=caller)
+    conn.execute("UPDATE surfaces SET handle = 'w' WHERE surface = 'PANE-H'")
+    conn.execute("INSERT INTO tab_parents (agterm_session, parent_session) VALUES ('TAB-H', 'TAB-LEAD')")
+    conn.commit()
+    handle_hook(
+        conn,
+        "StopFailure",
+        {**payload, "error": "unknown", "last_assistant_message": "API Error: Connection lost"},
+        {},
+        load_config(),
+        now + 1_000_000_000,
+        caller=caller,
+    )
+    body = conn.execute("SELECT body FROM messages WHERE post_type = 'turn-cut'").fetchone()[0]
+    assert "cut by an API error (unknown)" in body and "Read gbridge inbox" in body

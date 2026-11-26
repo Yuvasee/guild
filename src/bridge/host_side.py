@@ -27,7 +27,7 @@ HELPER_MARKS = ("mcp", "caffeinate")
 SUBAGENT_QUIET_S = 120
 HOOK_EVENTS = (
     "SessionStart", "UserPromptSubmit", "Stop", "SessionEnd", "PostToolUse", "PostToolUseFailure", "Notification",
-    "PreToolUse",
+    "PreToolUse", "StopFailure",
 )  # fmt: skip
 # bridge.agent_prefix.LINEAR_ISSUE_TOOLS go to the Mac's title check with Bash; gbridge refuses Artifact itself.
 HOOK_MATCHERS = {"Notification": "permission_prompt", "PreToolUse": "Bash|Artifact|mcp__claude_ai_Linear__save_issue"}

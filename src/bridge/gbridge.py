@@ -29,7 +29,7 @@ TEXT_MAX_CHARS = 65_536
 # Only what the Mac's hook handler reads; a tool result can be megabytes and the tunnel is slow.
 HOOK_FIELDS = (
     "session_id", "cwd", "prompt", "last_assistant_message", "agent_id", "prompt_id", "source", "reason",
-    "hook_event_name", "notification_type", "message",
+    "hook_event_name", "notification_type", "message", "error",
 )  # fmt: skip
 GATED_EVENTS = ("PostToolUse", "PostToolUseFailure")
 # Only states that carry no mail: a replayed prompt hook would take messages whose text nobody reads.
