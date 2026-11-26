@@ -588,10 +588,10 @@ _AGTERM_VALUE_OPTIONS = frozenset({"--pane", "--target", "--socket", "--window",
 
 def find_rule_refusal(command: str, config: Config, depth: int = 0, chained_outside: bool = False) -> str | None:
     """Prod and secrets rules, said in the refusal rather than in every session's context: no secret values read, no
-    Claude logout, no AWS permission probe, no admin rights on GitHub, a secret or cluster apply run alone, and on a
-    production context only reads. Read through ssh, a shell's -c and the rest as the cluster check reads them, and a
-    command kubectl exec runs in a container too. An alias defined in the command itself (k=kubectl) is not followed:
-    that is evasion."""
+    Claude logout, no AWS permission probe, no admin rights on GitHub, no fast gh run watch, a secret or cluster apply
+    run alone, and on a production context only reads. Read through ssh, a shell's -c and the rest as the cluster
+    check reads them, and a command kubectl exec runs in a container too. An alias defined in the command itself
+    (k=kubectl) is not followed: that is evasion."""
     for line, chained in _list_command_lines(command, chained_outside=chained_outside):
         for words, _ in line:
             program = os.path.basename(words[0]) if words else ""
@@ -650,7 +650,7 @@ def _map_command_to_rule_refusal(program: str, all_args: list[str], config: Conf
         if operation[:1] == ["iam"] and operation[1:2] and operation[1].startswith("simulate-"):
             return _PERMISSION_PROBE
     if program == "gh":
-        return _map_gh_to_admin_refusal(all_args, config)
+        return _map_gh_to_refusal(all_args, config)
     return None
 
 
@@ -666,9 +666,15 @@ _API_RULES_RE = re.compile(
 _GRAPHQL_ADMIN_RE = re.compile(r"mergePullRequest|(?:create|update|delete)\w*(?:Ruleset|BranchProtectionRule)", re.I)
 
 
-def _map_gh_to_admin_refusal(args: list[str], config: Config) -> str | None:
-    """gh pr merge --admin, a merge through the API (which an admin token gets past the rules with, as --admin does)
-    and a ruleset or branch protection write."""
+_RUN_WATCH = (
+    "bridge: gh run watch asks GitHub every 3 s unless told otherwise, and every session on the account shares the "
+    "API's hourly limit. Pass --interval 60 or more, or check `gh pr checks <number>` every 5 minutes."
+)
+
+
+def _map_gh_to_refusal(args: list[str], config: Config) -> str | None:
+    """gh pr merge --admin, a merge through the API (which an admin token gets past the rules with, as --admin does),
+    a ruleset or branch protection write, and gh run watch polling faster than once a minute."""
     positional: list[tuple[int, str]] = []
     at = 0
     while at < len(args) and len(positional) < 2:
@@ -678,6 +684,9 @@ def _map_gh_to_admin_refusal(args: list[str], config: Config) -> str | None:
             positional.append((at, args[at]))
         at += 1
     words = [word for _, word in positional]
+    if words == ["run", "watch"]:
+        interval = _read_interval(args[positional[1][0] + 1 :])
+        return None if interval is not None and interval >= 60 else _RUN_WATCH
     what = None
     if words == ["pr", "merge"] and any(_is_admin_flag(a) for a in args[positional[1][0] + 1 :]):
         what = "gh pr merge --admin"
@@ -690,6 +699,19 @@ def _map_gh_to_admin_refusal(args: list[str], config: Config) -> str | None:
         elif method not in ("GET", "HEAD") and _API_RULES_RE.search(path):
             what = "a ruleset or branch protection change"
     return _ADMIN_RIGHTS.format(what=what, assistant=config.assistant_handle) if what else None
+
+
+def _read_interval(args: list[str]) -> int | None:
+    """gh run watch's -i or --interval, as gh reads it; None when absent or not a number."""
+    found: str | None = None
+    for at, arg in enumerate(args):
+        name, eq, value = arg.partition("=")
+        letter, attached = read_short_cluster(arg, frozenset("i"))
+        if name == "--interval":
+            found = value if eq else (args[at + 1] if at + 1 < len(args) else "")
+        elif letter is not None:
+            found = attached if attached is not None else (args[at + 1] if at + 1 < len(args) else "")
+    return int(found) if found is not None and found.isdigit() else None
 
 
 def _is_admin_flag(arg: str) -> bool:
