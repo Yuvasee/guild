@@ -318,9 +318,9 @@ def _write_idle_transcript(cut: Cut, written_s: int, *entries: dict[str, object]
     os.utime(cut.transcript, (at, at))
 
 
-def _sweep(cut: Cut, t_s: int, inspected: Inspected | None = None) -> list[str]:
+def _sweep(cut: Cut, t_s: int, inspected: Inspected | None = None, config: Config = CONFIG) -> list[str]:
     with cut.env.connect() as conn:
-        sent = sweep_turn_cuts(conn, CONFIG, BASE_NS // 1_000_000 + t_s * 1000, {} if inspected is None else inspected)
+        sent = sweep_turn_cuts(conn, config, BASE_NS // 1_000_000 + t_s * 1000, {} if inspected is None else inspected)
     return [r.handle for _, r in sent]
 
 
@@ -549,3 +549,40 @@ def test_a_draft_alert_that_reached_nobody_does_not_stand_for_the_resume(cut: Cu
 
     assert draft is None
     assert _sweep(cut, 400) == ["old-b"]
+
+
+def test_a_failed_resume_the_sweep_found_with_the_assistant_away_is_told_once_it_is_back(cut: Cut) -> None:
+    resume = _cut_resumed_by_hook(cut)
+    _want_typed(cut, resume)
+    _fail_typing(cut, resume, 60)
+
+    away = _sweep(cut, 200, config=Config(assistant_handle="away"))
+    with cut.env.connect() as conn:
+        page_items = conn.execute("SELECT count(*) FROM user_items").fetchone()[0]
+    back = _undelivered_alerts(cut, 400)
+
+    assert (away, page_items, back) == ([], 1, 1)
+    assert _sweep(cut, 600) == [] and _undelivered_alerts(cut, 1000) == 0
+    alerts = cut.messages("to-assistant")
+    assert len(alerts) == 1 and "Its last turn was cut by Mac sleep at " in alerts[0]["body"]
+
+
+def test_a_resume_the_sweep_tells_of_while_the_undelivered_alert_reads_the_screen_is_told_once(cut: Cut) -> None:
+    resume = _cut_resumed_by_hook(cut, older_mail=True)
+    with cut.env.connect() as conn:
+        older = int(conn.execute("SELECT id FROM messages WHERE body = 'older'").fetchone()[0])
+        conn.execute("UPDATE messages SET created_at = ? WHERE id = ?", (_ms(-600), older))
+    _want_typed(cut, older)
+    _want_typed(cut, resume)
+    _fail_typing(cut, resume, 60)
+    with cut.env.connect() as conn:
+        tabs = take_new_undelivered_tabs(conn, CONFIG, _ms(400))
+    swept = _sweep(cut, 400)
+    with cut.env.connect() as conn:
+        told = tell_of_undelivered_tab(conn, CONFIG, tabs[0], _screen(""), _ms(401))
+
+    assert tabs[0].cut is not None and swept == ["old-b"] and told is not None
+    alerts = cut.messages("to-assistant")
+    assert len(alerts) == 2 and f"resume #{resume} could not be typed" in alerts[0]["body"]
+    assert alerts[1]["body"].startswith(f"alex's tab (Old A) has not received #{older} for ")
+    assert "cut" not in alerts[1]["body"] and f"#{resume}" not in alerts[1]["body"]

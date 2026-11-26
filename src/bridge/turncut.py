@@ -165,8 +165,6 @@ def sweep_turn_cuts(
                 "UPDATE conversations SET cut_told_at = ? WHERE conversation_id = ?", (cut_at, conversation_id)
             )
             failed = _find_failed_resume(conn, conversation_id, cut_at)
-            if failed is not None:
-                conn.execute("UPDATE messages SET resume_told_at = ? WHERE id = ?", (at_ms, failed))
             sent += _tell_of_untaken_cut(conn, config, conversation_id, surface, cut_at, cause, failed, at_ms)
         # Each one is a StopFailure or a typer that did not do its job: errors.log keeps them for finding why.
         why = f"its resume #{failed} not typed" if failed else "taken by no hook"
@@ -253,6 +251,9 @@ def _tell_of_untaken_cut(
     # As asks.send_from_bridge sends it; importing that module would load page code into every hook.
     result = send_message(conn, bridge, [assistant], "info", body, at_ms)
     conn.execute("UPDATE messages SET post_type = ? WHERE id = ?", (TO_ASSISTANT, result.message_id))
+    if failed_resume is not None:
+        # Only a message the assistant gets: a page item alone leaves the undelivered alert to tell it once back.
+        conn.execute("UPDATE messages SET resume_told_at = ? WHERE id = ?", (at_ms, failed_resume))
     return [(result.message_id, assistant)]
 
 

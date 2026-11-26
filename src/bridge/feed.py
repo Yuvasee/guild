@@ -1503,18 +1503,35 @@ def tell_of_undelivered_tab(
     None, and the episode stays untold, when the mail arrived while the screen was read, the box holds unproven text
     or the assistant is away.
     """
-    reason = convert_screen_to_hold_reason(tab, screen, unread_reason)
-    if reason is None:
-        return None
-    still_pending = conn.execute(
+    # Read again in the transaction: the cut sweep may have told of the resume while the screen was read.
+    pending = conn.execute(
         f"""
-        SELECT 1 FROM message_recipients r JOIN messages m ON m.id = r.message_id
+        SELECT MIN(m.id) AS oldest, MIN(m.created_at) AS oldest_at, COUNT(*) AS waiting,
+               MAX(CASE WHEN m.post_type = ? THEN m.body END) AS cut_body
+        FROM message_recipients r JOIN messages m ON m.id = r.message_id
         WHERE r.conversation_id = ? AND max(m.created_at, ?) + {_UNDELIVERED_AFTER_SQL} <= ? AND {_PENDING_SQL}
           AND {_RESUME_UNTOLD_SQL}
         """,
-        (tab.conversation_id, tab.counted_from, batch_grace_ms(config), at_ms),
+        (TURN_CUT, tab.conversation_id, tab.counted_from, batch_grace_ms(config), at_ms),
     ).fetchone()
-    if still_pending is None:
+    if not pending["waiting"]:
+        return None
+    cut = _CUT_RE.search(str(pending["cut_body"] or ""))
+    tab = replace(
+        tab,
+        oldest_message_id=int(pending["oldest"]),
+        oldest_at=int(pending["oldest_at"]),
+        waiting=int(pending["waiting"]),
+        cut=cut.group(0) if cut else None,
+    )
+    if (
+        tab.cut is None
+        and tab.handle != config.assistant_handle
+        and tab.conversation_id not in find_lead_conversations(conn)
+    ):
+        return None
+    reason = convert_screen_to_hold_reason(tab, screen, unread_reason)
+    if reason is None:
         return None
     assistant: Recipient | None = None
     if tab.handle != config.assistant_handle:
