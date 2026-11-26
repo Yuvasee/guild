@@ -89,6 +89,13 @@ NOT_WRITABLE = [
     "helm --kube-context acme-prod --namespace staging uninstall web",
     "helm upgrade web ./chart --kube-context acme-prod",
     "helm upgrade web ./chart --kube-context acme-prod -n shop",
+    "kubectl --context acme-prod -n staging delete pod $(echo web-0 -n app)",
+    "kubectl --context acme-prod -n staging delete pod $(echo web-0 --namespace=app)",
+    "kubectl --context acme-prod -n staging rollout restart deploy $NAMES",
+    "kubectl --context acme-prod -n staging delete pod $PODS",
+    "kubectl --context acme-prod -n staging set image deploy/web app=registry.io/web:${TAG}",
+    "helm --kube-context acme-prod -n staging upgrade web ./chart $EXTRA",
+    "sh -c \"kubectl --context acme-prod -n staging delete pod \\$0\" '-napp'",
 ]
 
 
@@ -103,7 +110,7 @@ def test_a_write_without_a_literal_writable_namespace_or_on_a_cluster_wide_kind_
     refusal = find_rule_refusal(command, PROD)
 
     assert refusal is not None and "production context" in refusal
-    assert "matches staging, pr-*, a deploy passes" in refusal and "send aide the exact command" in refusal
+    assert "matches staging, pr-*, with no word the shell" in refusal and "send aide the exact command" in refusal
 
 
 def test_writable_namespaces_come_from_config() -> None:

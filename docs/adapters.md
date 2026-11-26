@@ -157,7 +157,7 @@ no context as production. `prod_kube_writable_namespaces = ["staging", "pr-*"]` 
 pass when the command names its namespace literally (`-n staging`, `--namespace=pr-12`), it matches, and the
 command is a deploy: `kubectl apply -f` without `--prune`, `kubectl delete pod <names>`, `kubectl rollout
 restart|undo|status`, `scale` or `set image|env|resources` on deployments, statefulsets or daemonsets (`.apps` the only
-group), or `helm upgrade|install|rollback`. With no namespace, `-A`, a namespace the shell fills in, `--raw`, `-k` or
+group), or `helm upgrade|install|rollback`. With no namespace, `-A`, any word the shell fills in (`$`, a backtick), `--raw`, `-k` or
 any other verb or kind, it is still refused. A manifest file or chart is not read, so a cluster-wide object inside one
 is not seen. For one other write, an agent posts a card with
 the exact command (`bridge post decision "…" --command "<exact command>"`), whose options are then Run it and Don't

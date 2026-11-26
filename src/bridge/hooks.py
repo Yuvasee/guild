@@ -567,9 +567,9 @@ _PROD_VERB = (
     "Typing it into a tab is refused too."
 )
 _PROD_WRITABLE = (
-    " In a namespace named literally with -n that matches {namespaces}, a deploy passes: kubectl apply -f without "
-    "--prune, delete pod, rollout, scale or set image/env/resources on deployments, statefulsets or daemonsets, and "
-    "helm upgrade, install or rollback."
+    " In a namespace named literally with -n that matches {namespaces}, with no word the shell fills in ($ or a "
+    "backtick), a deploy passes: kubectl apply -f without --prune, delete pod, rollout, scale or set "
+    "image/env/resources on deployments, statefulsets or daemonsets, and helm upgrade, install or rollback."
 )
 _TYPED_SHELL = (
     "bridge: an agent may not type a '!' shell command into a tab. Run it with the Bash tool; what this guard refuses "
@@ -684,9 +684,11 @@ def _map_command_to_rule_refusal(program: str, all_args: list[str], config: Conf
         tail = all_args[split + 1 :] if first not in _KUBECTL_CONTAINER_RUNS else []
         if program == "kubectl":
             positional = _list_positionals(args, limit=None, value_options=_KUBECTL_DEPLOY_VALUE_OPTIONS)
-        if _is_writable_namespace(program, [*positional, *tail], args, config.prod_kube_writable_namespaces):
-            return None
+        # A word the shell fills in can carry its own -n, and kubectl and helm keep the last one.
+        filled = any("$" in word or "`" in word for word in all_args)
         writable = config.prod_kube_writable_namespaces
+        if not filled and _is_writable_namespace(program, [*positional, *tail], args, writable):
+            return None
         return _PROD_VERB.format(
             context=context,
             program=program,
