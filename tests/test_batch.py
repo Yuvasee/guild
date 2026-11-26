@@ -304,7 +304,7 @@ def test_the_sender_is_told_a_held_message_waits_for_the_batch(
         mock.patch("bridge.cli_board.spawn_typed_delivery") as spawn,
         mock.patch("bridge.cli_board.now_ms", return_value=T),
     ):
-        print_wake_lines(conn, BATCHED, WORKER, message, [ANA], [])
+        print_wake_lines(conn, BATCHED, WORKER, message, [ANA])
 
     assert capsys.readouterr().out == "ana gets this with its next batch (10 waiting or 5 min).\n"
     assert not spawn.called

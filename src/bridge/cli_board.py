@@ -12,7 +12,6 @@ from bridge.board import (
     HINT_SENT,
     MAX_AGENT_HOPS,
     SYSTEM_CONVERSATION,
-    USER_CONVERSATION,
     AddressError,
     MessageStateError,
     Party,
@@ -209,7 +208,7 @@ def cmd_send(args: argparse.Namespace, conn: sqlite3.Connection, config: Config)
         raise UsageError(str(exc)) from exc
     nudge_recipients(recipients)
     print(f"#{result.message_id} {kind} → {', '.join(r.handle for r in recipients)}")
-    print_wake_lines(conn, config, me, result.message_id, recipients, result.wake)
+    print_wake_lines(conn, config, me, result.message_id, recipients)
     return 0
 
 
@@ -242,7 +241,7 @@ def cmd_reply(args: argparse.Namespace, conn: sqlite3.Connection, config: Config
         raise UsageError(str(exc)) from exc
     nudge_recipients([original_sender])
     print(f"#{result.message_id} reply → {original_sender.handle}" + (f" (closed #{args.id})" if args.done else ""))
-    print_wake_lines(conn, config, me, result.message_id, result.recipients, result.wake)
+    print_wake_lines(conn, config, me, result.message_id, result.recipients)
     return 0
 
 
@@ -550,7 +549,6 @@ def print_wake_lines(
     sender: Party,
     message_id: int,
     recipients: list[Recipient],
-    wake: list[Recipient],
 ) -> None:
     # A locked tab is out of the team: its message waits for the next hook, and it is told of no way to wake anyone.
     if is_conversation_locked(conn, config, sender.conversation_id):
@@ -565,10 +563,6 @@ def print_wake_lines(
                 )
             else:
                 print(f"{recipient.handle} is {role}: this is typed into its tab as soon as it is idle.")
-    typed = [*leads, *workers, *assistants]
-    hinted = [r for r in wake if r not in typed and not is_conversation_locked(conn, config, r.conversation_id)]
-    for line in map_wake_to_lines(hinted):
-        print(line)
 
 
 def wake_typed_recipients(
@@ -622,21 +616,6 @@ def nudge_recipients(recipients: list[Recipient]) -> None:
             write_hint(recipient.pid, HINT_SENT)
         except OSError as exc:
             print(f"warning: could not flag {recipient.handle} for mid-turn delivery: {exc}", file=sys.stderr)
-
-
-def map_wake_to_lines(wake: list[Recipient]) -> list[str]:
-    lines: list[str] = []
-    for recipient in wake:
-        if recipient.conversation_id == USER_CONVERSATION:
-            continue
-        if recipient.peer_messaging and recipient.peer_name:
-            lines.append(
-                f"{recipient.handle} gets this on its next prompt or tool call. To wake it now, use the SendMessage "
-                f'tool: to "{recipient.peer_name}", message "You have bridge messages: run `bridge inbox`".'
-            )
-        else:
-            lines.append(f"{recipient.handle} cannot be woken (no peer messaging); it gets this on its next turn.")
-    return lines
 
 
 def map_message_to_text(row: sqlite3.Row, show_recipients: bool = False) -> str:

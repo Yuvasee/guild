@@ -65,7 +65,6 @@ class Recipient:
 class SendResult:
     message_id: int
     recipients: list[Recipient]
-    wake: list[Recipient]
     paused: bool = False
 
 
@@ -171,15 +170,12 @@ def send_message(
     if thread_id is None:
         conn.execute("UPDATE messages SET thread_id = ? WHERE id = ?", (message_id, message_id))
     conn.execute("UPDATE messages SET agent_hops = ?, paused = ? WHERE id = ?", (hops, int(paused), message_id))
-    wake: list[Recipient] = []
     for recipient in recipients:
-        if not has_open_messages(conn, recipient.conversation_id):
-            wake.append(recipient)
         conn.execute(
             "INSERT OR IGNORE INTO message_recipients (message_id, conversation_id, handle) VALUES (?, ?, ?)",
             (message_id, recipient.conversation_id, recipient.handle),
         )
-    return SendResult(message_id=message_id, recipients=recipients, wake=wake, paused=paused)
+    return SendResult(message_id=message_id, recipients=recipients, paused=paused)
 
 
 def _next_agent_hops(conn: sqlite3.Connection, thread_id: int | None, sender: Party) -> int:
@@ -230,19 +226,6 @@ def add_ack(conn: sqlite3.Connection, me: Party, lead_name: str, message_id: int
         (at_ms, message_id, me.conversation_id),
     )
     return int(cursor.lastrowid or 0)
-
-
-def has_open_messages(conn: sqlite3.Connection, conversation_id: str) -> bool:
-    row = conn.execute(
-        """
-        SELECT 1 FROM message_recipients r JOIN messages m ON m.id = r.message_id
-        WHERE r.conversation_id = ? AND m.cancelled_at IS NULL
-          AND r.acked_at IS NULL AND r.done_at IS NULL AND r.declined_at IS NULL
-        LIMIT 1
-        """,
-        (conversation_id,),
-    ).fetchone()
-    return row is not None
 
 
 def respond(conn: sqlite3.Connection, me: Party, message_id: int, action: str, at_ms: int) -> None:

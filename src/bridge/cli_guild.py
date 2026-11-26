@@ -41,7 +41,7 @@ from bridge.capacity import (
     record_owner_on,
 )
 from bridge.cli_asks import add_ask_commands, map_local_time_arg_to_ms
-from bridge.cli_board import map_wake_to_lines, nudge_recipients, spawn_when_ripe
+from bridge.cli_board import nudge_recipients, spawn_when_ripe
 from bridge.colleague_comments import (
     list_open_calls,
     map_arg_to_comment_key,
@@ -1260,7 +1260,7 @@ def _tell_handover_lead(
     try:
         with transaction(conn):
             recipient = resolve_handle(conn, to.name)
-            result = send_message(conn, me, [recipient], "info", body, now_ms())
+            send_message(conn, me, [recipient], "info", body, now_ms())
     except (AddressError, MessageStateError) as exc:
         print(
             f"warning: {tab_name} is {to.display_name}'s now, but {to.display_name} was not told: {exc}",
@@ -1269,8 +1269,6 @@ def _tell_handover_lead(
         return
     print(f"handed to {to.display_name}, who was told how to reopen it")
     nudge_recipients([recipient])
-    for line in map_wake_to_lines(result.wake):
-        print(line)
 
 
 def _read_child_tab(conn: sqlite3.Connection, config: Config, parent: str, wanted: str) -> ChildTab:
@@ -1499,9 +1497,6 @@ def cmd_answer(args: argparse.Namespace, conn: sqlite3.Connection, config: Confi
     nudge_recipients(result.recipients)
     spawn_when_ripe(conn, config, result.message_id, result.recipients)
     print(f"answered #{args.id}; typing it into {', '.join(r.handle for r in result.recipients) or 'nobody'}")
-    # A native peer message wakes the tab even if typing cannot get in; the answer also waits in its inbox.
-    for line in map_wake_to_lines(result.recipients):
-        print(line)
     return 0
 
 
@@ -1861,13 +1856,11 @@ def cmd_handover(args: argparse.Namespace, conn: sqlite3.Connection, config: Con
     try:
         with transaction(conn):
             recipient = resolve_handle(conn, lead.name)
-            result = send_message(conn, me, [recipient], "info", body, now_ms())
+            send_message(conn, me, [recipient], "info", body, now_ms())
     except (AddressError, MessageStateError) as exc:
         print(f"warning: the note is saved, but {lead.display_name} was not told: {exc}", file=sys.stderr)
         return 0
     nudge_recipients([recipient])
-    for line in map_wake_to_lines(result.wake):
-        print(line)
     return 0
 
 

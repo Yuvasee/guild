@@ -47,6 +47,7 @@ def test_request_reply_round_trip(bridge_env: BridgeEnv, spawn_process: SpawnPro
 
     assert sent.returncode == 0, sent.stderr
     assert sent.stdout.startswith("#1 request → b")
+    assert "wake" not in sent.stdout and "SendMessage" not in sent.stdout
     assert "#1 REQUEST from a, respond within 14m" in delivered or "#1 REQUEST from a, respond within 15m" in delivered
     assert "not from the user" in delivered
     assert redelivered == "", "a just-offered request is not re-offered before its backoff"
