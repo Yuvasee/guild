@@ -8,6 +8,7 @@ import sqlite3
 import sys
 import time
 import uuid
+from collections.abc import Sequence
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, cast
@@ -843,7 +844,11 @@ def cmd_worker(args: argparse.Namespace, conn: sqlite3.Connection, config: Confi
     brief.parent.mkdir(parents=True, exist_ok=True)
     brief.write_text(build_worker_brief(conn, config, prompt, f"bridge send {me.handle}"))
     first_prompt = f"Your brief is in {brief}. Read it and do it."
-    command = "zsh -lc " + shlex.quote(build_worker_claude_command(cwd, first_prompt, model))
+    command = "zsh -lc " + shlex.quote(
+        build_worker_claude_command(
+            cwd, first_prompt, model, config.worker_denied_mcp_servers, config.worker_denied_tools
+        )
+    )
     busy = count_busy_agents(conn)
     if config.laptop_agent_cap and busy >= config.laptop_agent_cap:
         launch = {"parent": parent, "name": tab_name, "cwd": str(cwd), "command": command, "requested_by": me.handle}
@@ -962,6 +967,8 @@ def _launch_host_worker(
             "op": "launch", "worker": record.worker, "gbridge": read_gbridge_source(),
             "claude_flags": f"{WORKER_CLAUDE_FLAGS} {record.model_flags}",
             "disabled_plugins": [*WORKER_DISABLED_PLUGINS, *config.host_worker_disabled_plugins],
+            "denied_mcp_servers": list(config.worker_denied_mcp_servers),
+            "denied_tools": list(config.worker_denied_tools),
             "globs": list_guard_globs(), "rule_files": rule_files, **payload,
         },
     )  # fmt: skip
@@ -1026,8 +1033,14 @@ def _await_host_worker_start(conn: sqlite3.Connection, config: Config, session_i
     return 1
 
 
-def build_worker_claude_command(cwd: Path, first_prompt: str, model: str = "") -> str:
-    settings = write_worker_settings_file(map_cwd_to_worker_settings(cwd))
+def build_worker_claude_command(
+    cwd: Path,
+    first_prompt: str,
+    model: str = "",
+    denied_mcp_servers: Sequence[str] = (),
+    denied_tools: Sequence[str] = (),
+) -> str:
+    settings = write_worker_settings_file(map_cwd_to_worker_settings(cwd, denied_mcp_servers, denied_tools))
     flags = f"{WORKER_CLAUDE_FLAGS} --model {shlex.quote(model)}" if model else WORKER_CLAUDE_FLAGS
     return f"claude {flags} --settings {shlex.quote(settings)} {shlex.quote(first_prompt)}"
 
@@ -1045,12 +1058,19 @@ def write_worker_settings_file(settings_json: str) -> str:
     return str(path)
 
 
-def map_cwd_to_worker_settings(cwd: Path) -> str:
+def map_cwd_to_worker_settings(
+    cwd: Path, denied_mcp_servers: Sequence[str] = (), denied_tools: Sequence[str] = ()
+) -> str:
     """Rejecting the project's .mcp.json servers by name skips their approval dialog and keeps claude.ai connectors."""
     settings: dict[str, Any] = {"enabledPlugins": dict.fromkeys(WORKER_DISABLED_PLUGINS, False)}
+    if denied_mcp_servers:
+        settings["deniedMcpServers"] = [{"serverName": name} for name in denied_mcp_servers]
     if servers := list_project_mcp_servers(cwd):
         settings["disabledMcpjsonServers"] = servers
     settings.update(read_ancestor_restrictions(cwd))
+    if denied_tools:
+        deny = settings.setdefault("permissions", {}).setdefault("deny", [])
+        deny.extend(tool for tool in denied_tools if tool not in deny)
     return json.dumps(settings, separators=(",", ":"))
 
 

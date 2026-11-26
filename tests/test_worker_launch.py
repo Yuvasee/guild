@@ -138,6 +138,25 @@ def test_worker_settings_with_many_skill_switches_go_in_a_file_and_the_command_s
     assert build_worker_claude_command(tmp_path, "Your brief is in x", "claude-opus-5-5") == command
 
 
+def test_worker_settings_deny_the_configured_mcp_servers(tmp_path: Path) -> None:
+    argv = shlex.split(build_worker_claude_command(tmp_path, "x", "", ("claude.ai Gmail", "claude.ai Wispr Flow")))
+
+    assert _read_settings_arg(argv)["deniedMcpServers"] == [
+        {"serverName": "claude.ai Gmail"},
+        {"serverName": "claude.ai Wispr Flow"},
+    ]
+    assert "deniedMcpServers" not in _read_settings_arg(shlex.split(build_worker_claude_command(tmp_path, "x")))
+
+
+def test_worker_settings_deny_tools_outside_any_project_and_merge_with_project_denies(tmp_path: Path) -> None:
+    argv = shlex.split(build_worker_claude_command(tmp_path, "x", "", (), ("Artifact", "Workflow")))
+    assert _read_settings_arg(argv)["permissions"] == {"deny": ["Artifact", "Workflow"]}
+
+    _write_claude_settings(tmp_path, "settings.json", {"permissions": {"deny": ["Bash(rm:*)", "Artifact"]}})
+    argv = shlex.split(build_worker_claude_command(tmp_path, "x", "", (), ("Artifact", "Workflow")))
+    assert _read_settings_arg(argv)["permissions"] == {"deny": ["Bash(rm:*)", "Artifact", "Workflow"]}
+
+
 def test_worker_resume_line_keeps_its_settings_model_and_no_chrome(tmp_path: Path) -> None:
     _write_mcp(tmp_path, "linear-server")
     command = build_worker_claude_command(tmp_path, "Your brief is in x", "claude-haiku-5-5")

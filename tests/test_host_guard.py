@@ -659,7 +659,7 @@ def test_gbridge_refuses_a_commit_in_a_worktree_whose_branch_another_checkout_mo
 
 
 def test_host_settings_send_bash_artifact_and_linear_issue_saves_to_the_guard() -> None:
-    settings = host_side.build_settings("/nonexistent", [])
+    settings = host_side.build_settings("/nonexistent", [], [], [])
 
     group = settings["hooks"]["PreToolUse"][0]
     assert group["matcher"] == "|".join(("Bash", "Artifact", *LINEAR_ISSUE_TOOLS))

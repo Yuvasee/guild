@@ -83,8 +83,12 @@ def test_the_installs_review_and_worker_keys_default_off() -> None:
             "review_ignored_posts": ["1700000000.000001"],
             "agent_prefix_from_ms": 1_700_000_000_000,
             "host_worker_disabled_plugins": ["chat@plugins"],
+            "worker_denied_mcp_servers": ["claude.ai Gmail"],
+            "worker_denied_tools": ["Artifact"],
         }
     )
     assert config.review_ignored_posts == ("1700000000.000001",)
     assert config.agent_prefix_from_ms == 1_700_000_000_000
     assert config.host_worker_disabled_plugins == ("chat@plugins",)
+    assert (Config().worker_denied_tools, config.worker_denied_tools) == ((), ("Artifact",))
+    assert (Config().worker_denied_mcp_servers, config.worker_denied_mcp_servers) == ((), ("claude.ai Gmail",))

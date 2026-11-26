@@ -109,6 +109,10 @@ class Config:
     account from before it, with neither the prefix nor a mark, stays unclear; 0: the prefix always decides."""
     host_worker_disabled_plugins: tuple[str, ...] = ()
     """Claude plugins turned off for host workers besides the defaults, e.g. one that must have a single poller."""
+    worker_denied_mcp_servers: tuple[str, ...] = ()
+    """MCP server names (e.g. "claude.ai Gmail") no worker, local or on a host, may use."""
+    worker_denied_tools: tuple[str, ...] = ()
+    """Tool names (e.g. "Artifact") no worker may use, local or on a host, wherever it starts."""
     review_excluded_repos: tuple[str, ...] = ()
     """owner/repo whose PRs never enter the review queue: no owner queue, no approval gate, no Slack post."""
     pr_issue_exempt_repos: tuple[str, ...] = ()
@@ -393,6 +397,8 @@ def map_toml_to_config(raw: dict[str, object]) -> Config:
         host_worker_disabled_plugins=_str_list(
             raw, "host_worker_disabled_plugins", defaults.host_worker_disabled_plugins
         ),
+        worker_denied_mcp_servers=_str_list(raw, "worker_denied_mcp_servers", defaults.worker_denied_mcp_servers),
+        worker_denied_tools=_str_list(raw, "worker_denied_tools", defaults.worker_denied_tools),
         review_channel_id=_str(raw, "review_channel_id", defaults.review_channel_id),
         review_mention_people=map_table_to_mention_people(_str_table(raw, "review_mention_people")),
         review_checkouts_dir=_str(raw, "review_checkouts_dir", defaults.review_checkouts_dir),

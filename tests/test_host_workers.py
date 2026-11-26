@@ -282,7 +282,7 @@ def test_host_settings_report_through_gbridge(tmp_path: Path) -> None:
     (tmp_path / ".mcp.json").write_text(json.dumps({"mcpServers": {"pw": {}}}))
     (tmp_path / "sub").mkdir()
 
-    settings = host_side.build_settings(str(tmp_path / "sub"), ["playwright@x"])
+    settings = host_side.build_settings(str(tmp_path / "sub"), ["playwright@x"], ["claude.ai Gmail"], ["Artifact"])
 
     assert set(settings["hooks"]) == set(host_side.HOOK_EVENTS)
     assert settings["hooks"]["Notification"][0]["matcher"] == "permission_prompt"
@@ -290,6 +290,8 @@ def test_host_settings_report_through_gbridge(tmp_path: Path) -> None:
     assert command.endswith("/.local/bin/gbridge hook Stop")
     assert settings["enabledPlugins"] == {"playwright@x": False}
     assert settings["disabledMcpjsonServers"] == ["pw"]
+    assert settings["deniedMcpServers"] == [{"serverName": "claude.ai Gmail"}]
+    assert settings["permissions"] == {"deny": ["Artifact"]}
 
 
 def test_run_script_waits_for_the_tunnel_and_sets_path() -> None:

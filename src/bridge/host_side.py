@@ -240,7 +240,12 @@ def start_session(worker: str, directory: str, cwd: str, payload: dict[str, Any]
     # As bridge.host_workers.list_readable_roots names them; every answer from the Mac renews them.
     roots = [str(r) for r in (payload.get("mapped_root"), worktree_dir(worker)) if r]
     write(os.path.join(directory, ROOTS_FILE), json.dumps(roots), 0o600)
-    settings = build_settings(cwd, list(payload.get("disabled_plugins") or []))
+    settings = build_settings(
+        cwd,
+        list(payload.get("disabled_plugins") or []),
+        list(payload.get("denied_mcp_servers") or []),
+        list(payload.get("denied_tools") or []),
+    )
     write(os.path.join(directory, "settings.json"), json.dumps(settings, indent=1), 0o600)
     run_script = build_run_script(directory, cwd, str(payload["claude_flags"]), str(payload.get("resume") or ""))
     write(os.path.join(directory, "run.sh"), run_script, 0o700)
@@ -483,7 +488,9 @@ def write(path: str, text: str, mode: int) -> None:
     os.replace(tmp, path)
 
 
-def build_settings(cwd: str, disabled_plugins: list[str]) -> dict[str, Any]:
+def build_settings(
+    cwd: str, disabled_plugins: list[str], denied_mcp_servers: list[str], denied_tools: list[str]
+) -> dict[str, Any]:
     gbridge = os.path.expanduser("~/.local/bin/gbridge")
     hooks: dict[str, Any] = {}
     for event in HOOK_EVENTS:
@@ -494,6 +501,10 @@ def build_settings(cwd: str, disabled_plugins: list[str]) -> dict[str, Any]:
             group["matcher"] = HOOK_MATCHERS[event]
         hooks[event] = [group]
     settings: dict[str, Any] = {"hooks": hooks, "enabledPlugins": dict.fromkeys(disabled_plugins, False)}
+    if denied_mcp_servers:
+        settings["deniedMcpServers"] = [{"serverName": name} for name in denied_mcp_servers]
+    if denied_tools:
+        settings["permissions"] = {"deny": denied_tools}
     servers = list_project_mcp_servers(cwd)
     if servers:
         # Rejected by name: no approval dialog, and claude.ai connectors stay.
