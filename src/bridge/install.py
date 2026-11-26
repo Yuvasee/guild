@@ -11,7 +11,7 @@ from bridge.agent_prefix import LINEAR_ISSUE_TOOLS, ROBOT
 from bridge.artifacts import ARTIFACT_TOOL, DRIVE_CREATE_TOOL
 from bridge.config import state_dir
 from bridge.guard import DEFAULT_TRIGGERS, PUSH_TRIGGER, convert_trigger_to_glob
-from bridge.hooks import ARTIFACT_HOOK, HOOK_EVENTS, SKILL_TOOL
+from bridge.hooks import ARTIFACT_HOOK, HOOK_EVENTS, SEND_MESSAGE_TOOL, SKILL_TOOL
 from bridge.rewake_marks import WAITER_SCRIPT
 
 HOOK_TIMEOUT_S = 5
@@ -26,7 +26,7 @@ _OURS_RE = re.compile(
 _GUARDED_EVENTS = frozenset({"PostToolUse", "PostToolUseFailure"})
 _MATCHERS = {
     "Notification": "permission_prompt",
-    "PreToolUse": "|".join(("Bash", ARTIFACT_TOOL, SKILL_TOOL, *LINEAR_ISSUE_TOOLS)),
+    "PreToolUse": "|".join(("Bash", ARTIFACT_TOOL, SKILL_TOOL, SEND_MESSAGE_TOOL, *LINEAR_ISSUE_TOOLS)),
 }
 # A robot-prefixed title reaches Python with no claim; a payload may carry the robot raw or JSON-escaped.
 _ROBOT_GLOBS = f"*{ROBOT}*|*\\\\ud83e\\\\udd16*"
@@ -72,6 +72,7 @@ _PYTHON_GLOBS = (
 # host glob, since gbridge sends every Artifact call to the Mac.
 _ARTIFACT_GLOBS = f"""*'"tool_name":"{ARTIFACT_TOOL}"'*|*'"tool_name": "{ARTIFACT_TOOL}"'*"""
 _SKILL_GLOBS = f"""*'"tool_name":"{SKILL_TOOL}"'*|*'"tool_name": "{SKILL_TOOL}"'*"""
+_SEND_MESSAGE_GLOBS = f"""*'"tool_name":"{SEND_MESSAGE_TOOL}"'*|*'"tool_name": "{SEND_MESSAGE_TOOL}"'*"""
 
 type JsonObject = dict[str, object]
 
@@ -138,7 +139,7 @@ def convert_event_to_command(executable: str, event: str) -> str:
         # exec in a pipeline replaces only its subshell, so exit before the claims gate runs the hook again.
         run = f"printf '%s' \"$p\" | {direct}; exit 0;;"
         push = convert_trigger_to_glob(PUSH_TRIGGER)
-        always = "|".join([_ROBOT_GLOBS, _ARTIFACT_GLOBS, _SKILL_GLOBS, push, *_PYTHON_GLOBS])
+        always = "|".join([_ROBOT_GLOBS, _ARTIFACT_GLOBS, _SKILL_GLOBS, _SEND_MESSAGE_GLOBS, push, *_PYTHON_GLOBS])
         return (
             f'p=$(cat); case "$p" in {always}) {run} esac; '
             '[ -f "${BRIDGE_STATE_DIR:-$HOME/.local/state/bridge}/claims-active" ] || exit 0; '

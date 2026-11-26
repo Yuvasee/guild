@@ -1288,6 +1288,10 @@ HOST_ARTIFACT_REFUSAL = (
 
 
 SKILL_TOOL = "Skill"
+SEND_MESSAGE_TOOL = "SendMessage"
+PEER_WAKE_REFUSAL = (
+    "bridge: agents don't wake each other (owner's rule); use bridge send, it arrives with the next batch."
+)
 
 
 def find_lead_skill_refusal(conn: sqlite3.Connection, config: Config, payload: dict[str, object]) -> str | None:
@@ -1307,6 +1311,22 @@ def find_lead_skill_refusal(conn: sqlite3.Connection, config: Config, payload: d
     return (
         "Leads and the assistant route and review: give this to a worker (guild worker). "
         f"Allowed here: {', '.join(config.lead_skills)}."
+    )
+
+
+def is_message_to_another_session(conn: sqlite3.Connection, payload: dict[str, object]) -> bool:
+    """SendMessage's `to` is a name; only the name a live session registered is told apart from a subagent's, so any
+    other form (a subagent's name, a socket address) passes."""
+    tool_input = payload.get("tool_input")
+    to = cast(dict[str, object], tool_input).get("to") if isinstance(tool_input, dict) else None
+    if not isinstance(to, str) or not to:
+        return False
+    return (
+        conn.execute(
+            "SELECT 1 FROM instances WHERE peer_name = ? AND ended_at IS NULL AND conversation_id != ? LIMIT 1",
+            (to, str(payload.get("session_id") or "")),
+        ).fetchone()
+        is not None
     )
 
 
@@ -1399,6 +1419,8 @@ def _check_pre_tool_use(
     if payload.get("tool_name") == SKILL_TOOL:
         refusal = find_lead_skill_refusal(conn, config, payload)
         return _deny(refusal) if refusal else ""
+    if payload.get("tool_name") == SEND_MESSAGE_TOOL:
+        return _deny(PEER_WAKE_REFUSAL) if is_message_to_another_session(conn, payload) else ""
     from bridge.title_guard import (  # it loads the review modules, which other hooks never use
         find_colleague_reply_refusal,
         find_missing_issue_refusal,

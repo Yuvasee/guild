@@ -152,7 +152,7 @@ def test_install_hooks_matches_the_linear_issue_tool_and_artifact(tmp_path: Path
     settings = tmp_path / "settings.json"
     install_hooks(settings, "/home/u/.local/bin/bridge-hook")
     group = json.loads(settings.read_text())["hooks"]["PreToolUse"][0]
-    assert group["matcher"] == "Bash|Artifact|Skill|mcp__claude_ai_Linear__save_issue"
+    assert group["matcher"] == "Bash|Artifact|Skill|SendMessage|mcp__claude_ai_Linear__save_issue"
 
 
 @pytest.mark.parametrize(
