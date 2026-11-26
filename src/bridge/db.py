@@ -987,6 +987,11 @@ MIGRATIONS: tuple[str, ...] = (
     # When the assistant was told that a turn-cut resume did not go in, by the cut sweep or the undelivered alert:
     # each reads it, so one cut is told of once whichever path tells first.
     "ALTER TABLE messages ADD COLUMN resume_told_at INTEGER;",
+    # A production command a card asks the owner to approve: its first option lets that exact text run once, soon.
+    """
+    ALTER TABLE user_items ADD COLUMN command TEXT;
+    ALTER TABLE user_items ADD COLUMN command_run_at INTEGER;
+    """,
 )
 
 HOOK_BUSY_TIMEOUT_MS = 200

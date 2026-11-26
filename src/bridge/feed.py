@@ -172,9 +172,15 @@ def add_post(
     at_ms: int,
     urgent: bool = False,
     ask_id: int | None = None,
+    command: str = "",
 ) -> int:
     if kind not in FEED_KINDS:
         raise MessageStateError(f"kind must be one of {', '.join(FEED_KINDS)}")
+    command = convert_command_to_waiver_text(command)
+    if command and (kind not in OPEN_KINDS or [o.strip() for o in options] != list(COMMAND_OPTIONS)):
+        raise MessageStateError(
+            f"a command is for a blocked or decision post with the options {' and '.join(COMMAND_OPTIONS)}"
+        )
     title = " ".join(title.split())
     if not title:
         raise MessageStateError("empty title")
@@ -204,8 +210,8 @@ def add_post(
     cursor = conn.execute(
         """
         INSERT INTO user_items (created_at, from_conversation, from_handle, severity, text, source, kind, body, links,
-                                options, urgent, ask_id)
-        VALUES (?, ?, ?, ?, ?, 'agent', ?, ?, ?, ?, ?, ?)
+                                options, urgent, ask_id, command)
+        VALUES (?, ?, ?, ?, ?, 'agent', ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             at_ms,
@@ -219,9 +225,45 @@ def add_post(
             json.dumps([o.strip() for o in options]) if options else None,
             int(urgent),
             ask_id,
+            command or None,
         ),
     )
     return int(cursor.lastrowid or 0)
+
+
+WAIVER_MS = 15 * 60_000
+COMMAND_OPTIONS = ("Run it", "Don't run")
+"""A card carrying a command has these options, and only the first, the owner's own click, lets the command run."""
+# ?1 is the spend time, which only the UPDATE uses.
+_WAIVER_SQL = """
+    SELECT id FROM user_items
+    WHERE command = ?2 AND command_run_at IS NULL AND answered_by IS NULL AND answered_at > ?3 AND answer = ?4
+    ORDER BY answered_at DESC LIMIT 1
+"""
+
+
+def convert_command_to_waiver_text(command: str) -> str:
+    return " ".join(command.split())
+
+
+def find_command_waiver(conn: sqlite3.Connection, command: str, at_ms: int) -> bool:
+    """An unused waiver under WAIVER_MS old for this exact command; a relayed answer is an agent's and gives none."""
+    params = (at_ms, convert_command_to_waiver_text(command), at_ms - WAIVER_MS, COMMAND_OPTIONS[0])
+    return conn.execute(_WAIVER_SQL, params).fetchone() is not None
+
+
+def take_command_waiver(conn: sqlite3.Connection, command: str, at_ms: int) -> bool:
+    """Spends that waiver in one statement, so two sessions cannot both spend it."""
+    params = (at_ms, convert_command_to_waiver_text(command), at_ms - WAIVER_MS, COMMAND_OPTIONS[0])
+    try:
+        cursor = conn.execute(
+            f"UPDATE user_items SET command_run_at = ?1 WHERE command_run_at IS NULL AND id = ({_WAIVER_SQL})", params
+        )
+    except sqlite3.OperationalError as exc:
+        if not is_lock_error(exc):
+            raise
+        return False
+    return cursor.rowcount > 0
 
 
 def answer_post(

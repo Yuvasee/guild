@@ -54,10 +54,16 @@ from bridge.compaction import (
     take_phase,
 )
 from bridge.config import Config, db_path, load_config
-from bridge.db import HOOK_BUSY_TIMEOUT_MS, HOOK_RETRY_BUSY_TIMEOUT_MS, connect, transaction
+from bridge.db import HOOK_BUSY_TIMEOUT_MS, HOOK_RETRY_BUSY_TIMEOUT_MS, connect, now_ms, transaction
 from bridge.entry import import_modules
 from bridge.errlog import log_error, log_slow
-from bridge.feed import find_cut_user_parts, release_dead_typing_claims, spawn_typed_delivery
+from bridge.feed import (
+    find_command_waiver,
+    find_cut_user_parts,
+    release_dead_typing_claims,
+    spawn_typed_delivery,
+    take_command_waiver,
+)
 from bridge.gitinfo import GitInfo, read_git_info, read_repo_facts
 from bridge.guard import (
     CLOSE,
@@ -541,8 +547,14 @@ _CHAINED_APPLY = (
 )
 _PROD_VERB = (
     "bridge: {context} is a production context, and {program} {verb} there is refused for every session. Read it "
-    "with get, describe, logs or top. Anything else only the owner runs, by hand: send {assistant} the exact command "
-    "for a card. This guard has no waiver for agents, and typing the command into a tab is refused too."
+    "with get, describe, logs or top.{writable} For anything else, send {assistant} the exact command for a card: "
+    "once {owner} approves the card, the same command runs once, from any session, within 15 minutes. Typing it into "
+    "a tab is refused too."
+)
+_PROD_WRITABLE = (
+    " In a namespace named literally with -n that matches {namespaces}, a deploy passes: kubectl apply -f without "
+    "--prune, delete pod, rollout, scale or set image/env/resources on deployments, statefulsets or daemonsets, and "
+    "helm upgrade, install or rollback."
 )
 _TYPED_SHELL = (
     "bridge: an agent may not type a '!' shell command into a tab. Run it with the Bash tool; what this guard refuses "
@@ -563,6 +575,23 @@ _PROD_HELM_READS = frozenset({
     "", "list", "ls", "status", "history", "hist", "get", "show", "template", "search", "version", "diff",
     *_HELM_LOCAL,
 })  # fmt: skip
+# What a deploy to a writable namespace on a production context runs; anything else there needs the owner's waiver.
+_WORKLOAD_KINDS = frozenset({
+    "deployment", "deployments", "deploy", "statefulset", "statefulsets", "sts", "daemonset", "daemonsets", "ds",
+})  # fmt: skip
+_POD_KINDS = frozenset({"pod", "pods", "po"})
+_WORKLOAD_VERBS = (
+    ["rollout", "restart"], ["rollout", "undo"], ["rollout", "status"], ["scale"], ["set", "image"], ["set", "env"],
+    ["set", "resources"],
+)  # fmt: skip
+_HELM_DEPLOYS = frozenset({"upgrade", "install", "rollback"})
+# Options of those verbs that take the next word as their value, so it is not read as a target.
+_KUBECTL_DEPLOY_VALUE_OPTIONS = _CLUSTER_VALUE_OPTIONS | {
+    "-f", "--filename", "-k", "--kustomize", "--replicas", "--current-replicas", "--resource-version", "--to-revision",
+    "--containers", "--from", "--prefix", "-e", "--env", "--keys", "--limits", "--requests", "--image",
+    "--grace-period", "--field-manager",
+}  # fmt: skip
+_NAMESPACE_NAME_RE = re.compile(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?")
 # kubectl verbs whose words after -- are a command run in a container: read as a command line of their own.
 _KUBECTL_CONTAINER_RUNS = frozenset({"exec", "debug", "run"})
 _CLAUDE_VALUE_OPTIONS = frozenset({
@@ -634,9 +663,23 @@ def _map_command_to_rule_refusal(program: str, all_args: list[str], config: Conf
         context = _option_value(args, "--kube-context" if program == "helm" else "--context") or ""
         if "$" in context or "`" in context:
             return _UNREAD_CONTEXT.format(program=program, verb=first, context=context)
-        if any(fnmatch.fnmatchcase(context, pattern) for pattern in config.prod_kube_contexts):
-            return _PROD_VERB.format(context=context, program=program, verb=first, assistant=config.assistant_handle)
-        return None
+        if not any(fnmatch.fnmatchcase(context, pattern) for pattern in config.prod_kube_contexts):
+            return None
+        # After --, words are resources but for a verb that runs them as a command in a container.
+        tail = all_args[split + 1 :] if first not in _KUBECTL_CONTAINER_RUNS else []
+        if program == "kubectl":
+            positional = _list_positionals(args, limit=None, value_options=_KUBECTL_DEPLOY_VALUE_OPTIONS)
+        if _is_writable_namespace(program, [*positional, *tail], args, config.prod_kube_writable_namespaces):
+            return None
+        writable = config.prod_kube_writable_namespaces
+        return _PROD_VERB.format(
+            context=context,
+            program=program,
+            verb=first,
+            assistant=config.assistant_handle,
+            owner=config.owner_name,
+            writable=_PROD_WRITABLE.format(namespaces=", ".join(writable)) if writable else "",
+        )
     if program == "claude":
         positional = _list_claude_positionals(all_args)
         if positional[:1] == ["logout"] or positional[:2] == ["auth", "logout"]:
@@ -728,6 +771,72 @@ def _split_gh_args(args: list[str]) -> tuple[list[tuple[int, str]], list[tuple[s
             positional.append((at, arg))
         at += 1
     return positional, options
+
+
+def _is_writable_namespace(program: str, positional: list[str], args: list[str], patterns: tuple[str, ...]) -> bool:
+    """Every namespace the command names is a literal one the patterns match, and the command is a deploy."""
+    namespaces = _list_namespaces(args)
+    if not patterns or not namespaces:
+        return False
+    if not all(
+        _NAMESPACE_NAME_RE.fullmatch(ns) and any(fnmatch.fnmatchcase(ns, p) for p in patterns) for ns in namespaces
+    ):
+        return False
+    return positional[0] in _HELM_DEPLOYS if program == "helm" else _is_kubectl_deploy(positional, args)
+
+
+def _is_kubectl_deploy(positional: list[str], args: list[str]) -> bool:
+    """apply -f without --prune, delete pod <names>, or a rollout, scale or set on deployments, statefulsets or
+    daemonsets only; never --raw, and a file only for apply."""
+    short = [a[1:] for a in args if a.startswith("-") and not a.startswith("--")]
+    files = any(a.startswith("--filename") for a in args) or any("f" in letters for letters in short)
+    kustomized = any(a.startswith("--kustomize") for a in args) or any("k" in letters for letters in short)
+    if kustomized or _option_value(args, "--raw") is not None or any(a.startswith("--prune") for a in args):
+        return False
+    verb, operands = positional[0], positional[1:]
+    if verb == "apply":
+        return files and not operands
+    if files:
+        return False
+    if verb == "delete":
+        return bool(operands) and operands[0] in _POD_KINDS and not any("/" in w or "," in w for w in operands[1:])
+    for words in _WORKLOAD_VERBS:
+        if positional[: len(words)] == words:
+            # set image and set env take container=image, KEY=value and KEY- after the targets.
+            targets = [w for w in positional[len(words) :] if "=" not in w and not w.endswith("-")]
+            return bool(targets) and _names_workloads(targets)
+    return False
+
+
+def _names_workloads(targets: list[str]) -> bool:
+    """kind/name words, or a kind then names; the kind exact, with only the apps group."""
+    if "/" in targets[0]:
+        return all(_is_workload_kind(kind) and name for kind, _, name in (w.partition("/") for w in targets))
+    return _is_workload_kind(targets[0]) and len(targets) > 1 and not any("/" in w for w in targets[1:])
+
+
+def _is_workload_kind(kind: str) -> bool:
+    return kind.removesuffix(".apps") in _WORKLOAD_KINDS
+
+
+def _list_namespaces(args: list[str]) -> list[str] | None:
+    """Each -n/--namespace value in any spelling (-n x, -nx, -n=x, --namespace=x); None when it asks for all."""
+    found: list[str] = []
+    at = 0
+    while at < len(args):
+        arg = args[at]
+        letter, attached = read_short_cluster(arg, _CLUSTER_VALUE_LETTERS)
+        flags = arg[1 : arg.index(letter, 1)] if letter else arg[1:]
+        if arg.startswith("--all-namespaces") or (arg.startswith("-") and not arg.startswith("--") and "A" in flags):
+            return None
+        if arg == "--namespace" or (letter == "n" and attached is None):
+            found.append(args[at + 1] if at + 1 < len(args) else "")
+        elif arg.startswith("--namespace="):
+            found.append(arg.removeprefix("--namespace="))
+        elif letter == "n" and attached is not None:
+            found.append(attached)
+        at += 2 if arg in _CLUSTER_VALUE_OPTIONS or (letter is not None and attached is None) else 1
+    return found
 
 
 def _list_aws_positionals(args: list[str]) -> list[str]:
@@ -854,7 +963,9 @@ def _read_output_format(args: list[str]) -> str:
     return found
 
 
-def _list_positionals(args: list[str], limit: int | None = 3) -> list[str]:
+def _list_positionals(
+    args: list[str], limit: int | None = 3, value_options: frozenset[str] = _CLUSTER_VALUE_OPTIONS
+) -> list[str]:
     found: list[str] = []
     at = 0
     while at < len(args) and (limit is None or len(found) < limit):
@@ -867,7 +978,7 @@ def _list_positionals(args: list[str], limit: int | None = 3) -> list[str]:
                 and (arg.startswith("--") or len(arg) == 2)
             )
             letter, attached = read_short_cluster(arg, _CLUSTER_VALUE_LETTERS)
-            takes = arg in _CLUSTER_VALUE_OPTIONS or before_verb or (letter is not None and attached is None)
+            takes = arg in value_options or before_verb or (letter is not None and attached is None)
             at += 2 if takes else 1
         else:
             found.append(args[at])
@@ -1249,7 +1360,14 @@ def _check_pre_tool_use(
     if kill := find_kill_by_name_refusal(command):
         return _deny(kill)
     if rule := find_rule_refusal(command, config):
-        return _deny(rule)
+        unprotected = replace(config, prod_kube_contexts=())
+        if find_rule_refusal(command, unprotected) or not find_command_waiver(conn, command, now_ms()):
+            return _deny(rule)
+        # Waived: every other check still runs, and the waiver is spent only if none refuses.
+        decision = _check_pre_tool_use(conn, payload, unprotected, host_checkout, env)
+        if _is_denial(decision) or not take_command_waiver(conn, command, now_ms()):
+            return decision if _is_denial(decision) else _deny(rule)
+        return decision
     if unnamed_cluster := find_unnamed_cluster_refusal(command):
         return _deny(unnamed_cluster)
     if host_checkout is None and (codex := find_codex_read_refusal(command, _str(payload, "cwd") or os.getcwd())):
@@ -1436,6 +1554,10 @@ def _is_text_with_code(text: str) -> bool:
 
 def _note(context: str) -> str:
     return json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": context}})
+
+
+def _is_denial(decision: str) -> bool:
+    return bool(decision) and json.loads(decision)["hookSpecificOutput"].get("permissionDecision") == "deny"
 
 
 def _deny(reason: str) -> str:

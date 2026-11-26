@@ -32,6 +32,7 @@ from bridge.db import now_ms, transaction
 from bridge.errors import UsageError
 from bridge.feed import (
     ANSWER_KINDS,
+    COMMAND_OPTIONS,
     FEED_KINDS,
     LEAD_TO_WORKER,
     OPEN_KINDS,
@@ -123,6 +124,12 @@ def add_board_commands(sub: "argparse._SubParsersAction[argparse.ArgumentParser]
         "--urgent",
         action="store_true",
         help="blocked/decision only, when prod or users are hurting, money is leaking, or a deadline is today",
+    )
+    p.add_argument(
+        "--command",
+        default="",
+        help="blocked/decision: an exact production command the guard refuses; the card's options become Run it and "
+        "Don't run, and the owner choosing Run it lets that text run once, from any session, within 15 minutes",
     )
     p.add_argument("--ask", type=lambda s: int(s.lstrip("#")), metavar="N", help="done/insight: the ask it answers")
     p.add_argument(
@@ -329,6 +336,10 @@ def cmd_post(args: argparse.Namespace, conn: sqlite3.Connection, config: Config)
                 f"warning: {flag} {problem}; break it into lines or '- ' bullets so the card reads well",
                 file=sys.stderr,
             )
+    if args.command:
+        if args.option and [o.strip() for o in args.option] != list(COMMAND_OPTIONS):
+            raise UsageError(f"a post with --command has the options {' and '.join(COMMAND_OPTIONS)}; drop --option")
+        args.option = list(COMMAND_OPTIONS)
     body = sys.stdin.read() if args.body == "-" else str(args.body)
     shown = "\n".join([str(args.title), body, args.what or "", args.why or ""])
     in_buttons = [*args.option, *(c for c in args.cost if c), args.pick_why or ""]
@@ -349,6 +360,7 @@ def cmd_post(args: argparse.Namespace, conn: sqlite3.Connection, config: Config)
         flags = [*(["urgent"] if args.urgent else []), *(["pin its link"] if args.pin else [])]
         fields = [
             *(f"Answer {n}: {option}" for n, option in enumerate(args.option, 1)),
+            *([f"Command: {args.command}"] if args.command else []),
             *(f"Link: {link.label}={link.url}" if link.label else f"Link: {link.url}" for link in links),
             *([f"Answers ask #{args.ask}"] if args.ask is not None else []),
         ]
@@ -359,7 +371,7 @@ def cmd_post(args: argparse.Namespace, conn: sqlite3.Connection, config: Config)
         with transaction(conn):
             item_id = add_post(
                 conn, me, str(args.kind), str(args.title), body, links, list(args.option), at, bool(args.urgent),
-                args.ask,
+                args.ask, str(args.command),
             )  # fmt: skip
             if args.ask is not None and args.kind in ANSWER_KINDS:
                 mark_ask_told(conn, int(args.ask), at)

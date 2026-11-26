@@ -785,7 +785,7 @@ def _map_open_posts_to_needs(
     for row in conn.execute(
         f"""
         SELECT id, created_at, from_conversation, from_handle, kind, text, body, links, options, urgent, answer,
-               resolved_at, answer_message_id,
+               resolved_at, answer_message_id, command,
                (SELECT max(r.delivery_failed_at IS NOT NULL AND r.unproven_at IS NULL) FROM message_recipients r
                 WHERE r.message_id = answer_message_id) AS delivery_failed,
                (SELECT r.handle FROM message_recipients r WHERE r.message_id = answer_message_id LIMIT 1) AS answer_to,
@@ -823,6 +823,7 @@ def _map_open_posts_to_needs(
                 "links": map_stored_links_to_card_links(row["links"], titles),
                 "refs": find_text_links(config, url_of, titles, f"{row['text']}\n{row['body'] or ''}"),
                 "options": options,
+                "command": row["command"],
                 **({"colleague": colleague} if colleague is not None else {}),
                 **(
                     {

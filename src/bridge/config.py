@@ -160,6 +160,9 @@ class Config:
     prod_kube_contexts: tuple[str, ...] = ()
     """Kube contexts that are production, as names or fnmatch patterns (acme-prod, *-prod): the guard lets kubectl and
     helm only read there."""
+    prod_kube_writable_namespaces: tuple[str, ...] = ()
+    """Namespaces on a production context where kubectl and helm may write too, as names or fnmatch patterns
+    (staging, pr-*): only when the command names its namespace literally with -n and no cluster-wide kind."""
     work_timezone: str = ""
     """IANA zone of the team's working hours (09-19) for daytime-only nudges; empty is this machine's zone."""
     work_days: tuple[int, ...] = (0, 1, 2, 3, 4)
@@ -397,6 +400,9 @@ def map_toml_to_config(raw: dict[str, object]) -> Config:
         links=tuple(map_table_to_link(t) for t in _tables(raw, "links")),
         restricted_paths=tuple(map_table_to_restricted_path(t) for t in _tables(raw, "restricted_paths")),
         prod_kube_contexts=_str_list(raw, "prod_kube_contexts", defaults.prod_kube_contexts),
+        prod_kube_writable_namespaces=_str_list(
+            raw, "prod_kube_writable_namespaces", defaults.prod_kube_writable_namespaces
+        ),
         work_timezone=_zone(raw, "work_timezone", defaults.work_timezone),
         work_days=_weekdays(raw, "work_days", defaults.work_days),
         weekly_task_day=_weekday_or_none(raw, "weekly_task_day"),

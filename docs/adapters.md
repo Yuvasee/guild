@@ -153,7 +153,17 @@ guard lets kubectl and helm only read there (kubectl get, describe, logs, top, e
 version, cluster-info, auth can-i, diff, events, wait; helm list, status, history, get, show, template, search, version,
 diff) and refuses every other verb, for every session on this Mac and on worker hosts. A write whose context the shell
 fills in ($CTX) is refused too. Empty, the default, marks
-no context as production. Whatever the config, the guard also refuses printing secret values (kubectl get secret
+no context as production. `prod_kube_writable_namespaces = ["staging", "pr-*"]` (fnmatch patterns) lets writes there
+pass when the command names its namespace literally (`-n staging`, `--namespace=pr-12`), it matches, and the
+command is a deploy: `kubectl apply -f` without `--prune`, `kubectl delete pod <names>`, `kubectl rollout
+restart|undo|status`, `scale` or `set image|env|resources` on deployments, statefulsets or daemonsets (`.apps` the only
+group), or `helm upgrade|install|rollback`. With no namespace, `-A`, a namespace the shell fills in, `--raw`, `-k` or
+any other verb or kind, it is still refused. A manifest file or chart is not read, so a cluster-wide object inside one
+is not seen. For one other write, an agent posts a card with
+the exact command (`bridge post decision "…" --command "<exact command>"`), whose options are then Run it and Don't
+run; the owner's own click on Run it lets that whole text (spaces normalised) run once, from any session, within 15
+minutes, if no other check refuses it. An answer the assistant relays gives no such waiver, and no other rule is ever
+waived. Whatever the config, the guard also refuses printing secret values (kubectl get secret
 -o json, yaml, jsonpath, go-template, custom-columns), logging Claude out or touching its keychain entry, typing
 /logout into a tab, `aws iam simulate-*`, and a kubectl apply, kubectl create secret, helm upgrade or install chained
 with other steps.
