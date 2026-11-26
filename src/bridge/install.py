@@ -124,7 +124,8 @@ def convert_event_to_command(executable: str, event: str) -> str:
         cases = "|".join(convert_trigger_to_glob(t) for t in DEFAULT_TRIGGERS)
         # exec in a pipeline replaces only its subshell, so exit before the claims gate runs the hook again.
         run = f"printf '%s' \"$p\" | {direct}; exit 0;;"
-        always = "|".join([_ROBOT_GLOBS, _ARTIFACT_GLOBS, _SKILL_GLOBS, convert_trigger_to_glob(PUSH_TRIGGER), *_PYTHON_GLOBS])
+        push = convert_trigger_to_glob(PUSH_TRIGGER)
+        always = "|".join([_ROBOT_GLOBS, _ARTIFACT_GLOBS, _SKILL_GLOBS, push, *_PYTHON_GLOBS])
         return (
             f'p=$(cat); case "$p" in {always}) {run} esac; '
             '[ -f "${BRIDGE_STATE_DIR:-$HOME/.local/state/bridge}/claims-active" ] || exit 0; '
