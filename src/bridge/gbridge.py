@@ -371,11 +371,17 @@ def read_guard_checkouts(
     return found
 
 
+UNREADABLE_DIFF = "?unreadable"
+"""Sent in place of the diffs when git fails, so the Mac refuses the push rather than letting an empty file through."""
+
+
 def read_empty_diffs(directory: str, branch: str) -> list[str]:
     """Per remote commit the branch builds on, its raw diff to the branch cut to the empty files added or deleted;
-    none if git fails."""
+    UNREADABLE_DIFF alone if git fails."""
     listed = run_local_git(directory, "rev-list", "--boundary", branch, "--not", "--remotes")
-    if listed is None or listed.returncode != 0 or not listed.stdout:
+    if listed is None or listed.returncode != 0:
+        return [UNREADABLE_DIFF]
+    if not listed.stdout:
         return []
     bases = [line[1:] for line in listed.stdout.splitlines() if line.startswith("-")] or [EMPTY_TREE]
     diffs: list[str] = []
@@ -384,7 +390,7 @@ def read_empty_diffs(directory: str, branch: str) -> list[str]:
             directory, "diff", "--raw", "-z", "--no-abbrev", "--no-renames", "--diff-filter=AD", base, branch
         )
         if done is None or done.returncode != 0:
-            return []
+            return [UNREADABLE_DIFF]
         fields = done.stdout.split("\0")
         kept: list[str] = []
         for meta, path in zip(fields[::2], fields[1::2], strict=False):

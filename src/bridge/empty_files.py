@@ -4,6 +4,9 @@ from pathlib import PurePosixPath
 
 from bridge.guard import HostCheckout, Target
 
+# gbridge sends this alone when git fails on the host; gbridge imports nothing of bridge, so it keeps its own copy.
+UNREADABLE_DIFF = "?unreadable"
+
 EMPTY_BLOB = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
 EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 EMPTY_ALLOWED = frozenset({".gitkeep", "__init__.py"})
@@ -60,6 +63,9 @@ def find_host_new_empty_files(targets: list[Target], checkouts: tuple[HostChecko
                 os.path.normpath(checkout.directory) == os.path.normpath(directory)
                 and checkout.facts.branch == revision
             ):
+                if UNREADABLE_DIFF in checkout.empty_diffs:
+                    found.append("(the host could not list this push's new files: git failed there)")
+                    continue
                 found.extend(p for p in map_raw_diffs_to_new_empty_files(list(checkout.empty_diffs)) if p not in found)
     return found
 

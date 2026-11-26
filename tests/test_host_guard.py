@@ -1441,3 +1441,17 @@ def test_a_host_push_adding_an_empty_file_is_refused_naming_it_and_a_gitkeep_goe
 
     assert kept == ""
     assert "this push adds empty files: 0." in json.loads(refused)["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_a_host_push_whose_empty_files_git_could_not_list_is_refused(tmp_path: Path) -> None:
+    from bridge.empty_files import UNREADABLE_DIFF, find_host_new_empty_files
+    from bridge.guard import HostCheckout, Target
+
+    assert gbridge.read_empty_diffs(str(tmp_path), "feat/x") == [gbridge.UNREADABLE_DIFF] == [UNREADABLE_DIFF]
+    facts = RepoFacts(repo_root=str(tmp_path), branch="feat/x")
+    checkout = HostCheckout(str(tmp_path), facts, str(tmp_path), (UNREADABLE_DIFF,))
+    push = Target("branch:o/r#feat/x", "git push", (str(tmp_path), "feat/x"))
+
+    assert find_host_new_empty_files([push], (checkout,)) == [
+        "(the host could not list this push's new files: git failed there)"
+    ]
