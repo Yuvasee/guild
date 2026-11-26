@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import time
 from collections.abc import Callable, Generator
 from datetime import datetime
 from pathlib import Path
@@ -1008,3 +1009,23 @@ def test_one_message_or_one_cards_answer_is_recorded_once_while_its_ask_is_open(
     close_ask(conn, answered.id, None, "alex", 3000, dropped="Superseded")
     assert add_ask(conn, "alex", "alex", "Batch everything", "#20634", [], 4000).id
     assert add_ask(conn, "alex", "alex", f"Q#{card} again", "tab", [], 4000).id, "a closed ask blocks nothing"
+
+
+def test_a_reminder_for_a_reopened_ask_says_who_reopened_it_when_and_why_until_something_else_happens(
+    conn: sqlite3.Connection,
+) -> None:
+    reopened = add_ask(conn, "alex", "aide", "Check the export", "tab", [], 0).id
+    claim_ask_done(conn, reopened, WORKER, "Export fixed in PR 3", 0)
+    plain = add_ask(conn, "alex", "aide", "Answer the vendor", "tab", [], 0).id
+    why = "the export still fails on empty rows " + "x" * 200
+    reopen_ask(conn, reopened, "verifier-1", why, 5 * HOUR)
+
+    text = map_overdue_to_texts(conn, 10 * HOUR)["alex"]
+    at = time.strftime("%H:%M", time.localtime(5 * HOUR / 1000))
+
+    line = next(row for row in text.splitlines() if row.startswith(f"#{reopened} "))
+    assert line.startswith(f'#{reopened} reopened by verifier-1 {at}: "the export still fails on empty rows x')
+    assert f'{"x" * 80}…", no update for 5h: "Check the export"' in line
+    assert f'#{plain} open, no update for 10h: "Answer the vendor"' in text
+    note_ask(conn, reopened, LEAD, "started on it", 6 * HOUR)
+    assert f"#{reopened} open, no update for" in map_overdue_to_texts(conn, 11 * HOUR)["alex"]

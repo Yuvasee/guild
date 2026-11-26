@@ -2,6 +2,7 @@ import json
 import random
 import re
 import sqlite3
+import time
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Literal, cast
@@ -104,6 +105,8 @@ class Ask:
     told_at: int | None = None
     """When its verifier's `guild ask summary` told the assistant of its verified result."""
     verifier: str | None = None
+    reopened_by: str | None = None
+    """Who reopened it, set by find_overdue_asks while that reopen is still the ask's last event."""
 
 
 @dataclass(frozen=True)
@@ -584,8 +587,18 @@ def find_overdue_asks(conn: sqlite3.Connection, now: int, stale_ms: int, verify_
         """,
         (now - stale_ms, now - verify_ms, now, now - ASK_CHECK_DAYS * DAY_MS),
     )
-    asks = [map_row_to_ask(r) for r in rows]
+    asks = [_add_reopener(conn, map_row_to_ask(r)) for r in rows]
     return [a for a in asks if a.last_nag_at is None or now - a.last_nag_at >= _compute_ask_nag_gap(a, now, stale_ms)]
+
+
+def _add_reopener(conn: sqlite3.Connection, ask: Ask) -> Ask:
+    if ask.state != "open" or ask.reopened_at is None or ask.reopened_at != ask.updated_at:
+        return ask
+    row = conn.execute(
+        "SELECT by FROM ask_events WHERE ask_id = ? AND at = ? AND note LIKE 'reopened:%' ORDER BY id DESC LIMIT 1",
+        (ask.id, ask.reopened_at),
+    ).fetchone()
+    return replace(ask, reopened_by=str(row[0])) if row else ask
 
 
 def _compute_ask_nag_gap(ask: Ask, now: int, stale_ms: int) -> int:
@@ -696,7 +709,11 @@ def convert_overdue_to_assistant_line(ask: Ask, now: int, assistant: str) -> str
 
 
 def convert_overdue_to_owner_line(ask: Ask, owner: str, owner_name: str, now: int) -> str:
-    head = f'#{ask.id} {ask.state}, {_convert_wait(ask, now)}: "{_cut(ask.words, 160)}"'
+    state = ask.state
+    if ask.reopened_by and ask.reopened_at is not None:
+        at = time.strftime("%H:%M", time.localtime(ask.reopened_at / 1000))
+        state = f'reopened by {ask.reopened_by} {at}: "{_cut(ask.reopen_why or "", 120)}"'
+    head = f'#{ask.id} {state}, {_convert_wait(ask, now)}: "{_cut(ask.words, 160)}"'
     on_owner = map_owner_name_to_wait_on(owner_name) or "owner"
     if is_ask_due_check(ask, now):
         waits = convert_wait_to_text(ask, owner_name, now)
@@ -746,6 +763,7 @@ def _send_reminders(conn: sqlite3.Connection, config: Config, now: int) -> list[
                 ask,
                 words=map_words_to_sendable(conn, ask.words),
                 wait_why=ask.wait_why and map_words_to_sendable(conn, ask.wait_why),
+                reopen_why=ask.reopen_why and map_words_to_sendable(conn, ask.reopen_why),
             )
             for ask in asks
             if not is_owner_locked(conn, config, ask.owner)
