@@ -539,8 +539,12 @@ _CHAINED_APPLY = (
 )
 _PROD_VERB = (
     "bridge: {context} is a production context, and {program} {verb} there is refused for every session. Read it "
-    "with get, describe, logs or top. Anything else is the owner's to run: send {assistant} the exact command for a "
-    "card; the owner types it after '!' in a tab, which no hook sees, so this guard has no waiver for agents."
+    "with get, describe, logs or top. Anything else only the owner runs, by hand: send {assistant} the exact command "
+    "for a card. This guard has no waiver for agents, and typing the command into a tab is refused too."
+)
+_TYPED_SHELL = (
+    "bridge: an agent may not type a '!' shell command into a tab. Run it with the Bash tool; what this guard refuses "
+    "there only the owner runs."
 )
 _UNREAD_CONTEXT = (
     "bridge: the context of this {program} {verb} is {context}, which the shell fills in, so the guard cannot tell "
@@ -590,7 +594,7 @@ def find_rule_refusal(command: str, config: Config, depth: int = 0, chained_outs
             program = os.path.basename(words[0]) if words else ""
             if _asks_help(program, words[1:]):
                 continue
-            if refusal := _map_command_to_rule_refusal(program, words[1:], config):
+            if refusal := _map_command_to_rule_refusal(program, words[1:], config, depth):
                 return refusal
             if chained and (applied := _name_apply(program, words[1:])):
                 return _CHAINED_APPLY.format(what=applied)
@@ -606,7 +610,9 @@ def _asks_help(program: str, all_args: list[str]) -> bool:
     return "--help" in args or "-h" in args or (program == "aws" and "help" in args)
 
 
-def _map_command_to_rule_refusal(program: str, all_args: list[str], config: Config) -> str | None:
+def _map_command_to_rule_refusal(program: str, all_args: list[str], config: Config, depth: int = 0) -> str | None:
+    if typed := _map_typed_to_refusal(program, all_args, config, depth):
+        return typed
     if program in ("kubectl", "helm"):
         split = all_args.index("--") if "--" in all_args else len(all_args)
         args = all_args[:split]
@@ -636,8 +642,6 @@ def _map_command_to_rule_refusal(program: str, all_args: list[str], config: Conf
         subcommand = next((a for a in all_args if not a.startswith("-")), "")
         if "password" in subcommand and any("claude" in a.lower() for a in all_args):
             return _CLAUDE_LOGIN.format(what="read or change Claude's keychain entry")
-    if _types_logout(program, all_args):
-        return _CLAUDE_LOGIN.format(what="type /logout into a tab")
     if program == "aws":
         operation = _list_aws_positionals(all_args)
         if operation[:1] == ["iam"] and operation[1:2] and operation[1].startswith("simulate-"):
@@ -681,14 +685,14 @@ def _list_claude_positionals(args: list[str]) -> list[str]:
     return found
 
 
-def _types_logout(program: str, args: list[str]) -> bool:
-    """agtermctl or tmux send-keys typing text that starts with /logout, its words joined as the tab gets them."""
+def _list_typed_words(program: str, args: list[str]) -> list[str]:
+    """The words agtermctl or tmux send-keys types into a tab; the tab gets them joined with nothing between."""
     if program == "agtermctl":
         value_options = _AGTERM_VALUE_OPTIONS
     elif program == "tmux" and {"send-keys", "send"} & set(args):
         value_options = _TMUX_SEND_VALUE_OPTIONS
     else:
-        return False
+        return []
     typed: list[str] = []
     at = 0
     while at < len(args):
@@ -697,7 +701,23 @@ def _types_logout(program: str, args: list[str]) -> bool:
         else:
             typed.append(args[at])
             at += 1
-    return any("".join(typed[start:]).lstrip().startswith("/logout") for start in range(len(typed)))
+    return typed
+
+
+def _map_typed_to_refusal(program: str, args: list[str], config: Config, depth: int) -> str | None:
+    typed = _list_typed_words(program, args)
+    starts = ["".join(typed[start:]).lstrip() for start in range(len(typed))]
+    if any(start.startswith("/logout") for start in starts):
+        return _CLAUDE_LOGIN.format(what="type /logout into a tab")
+    if any(start.startswith("!") for start in starts):
+        return _TYPED_SHELL
+    if depth >= 2:
+        return None
+    # A shell tab runs what is typed, so it is read as a command from each word on; key names read as extra words.
+    words = [word.strip() for word in typed]
+    return next(
+        (r for start in range(len(words)) if (r := find_rule_refusal(" ".join(words[start:]), config, depth + 1))), None
+    )
 
 
 def _map_container_run_to_command(program: str, all_args: list[str]) -> str | None:

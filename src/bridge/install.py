@@ -39,10 +39,12 @@ _PR_ANSWER_GLOBS = ("*gh*pr*comment*", "*gh*pr*review*", "*gh*api*comments*", "*
 _KILL_GLOBS = ("*pkill*", "*killall*", "*pgrep*")
 # So is a kubectl, helm or k9s command that names no cluster, and one that changes the machine's default cluster.
 _CLUSTER_GLOBS = ("*kubectl*", "*kubectx*", "*kubens*", "*helm*", "*k9s*")
-# Claude's login (logout, its keychain entry, /logout typed into a tab) and AWS permission probes are refused too.
+# Claude's login (logout, its keychain entry, /logout typed into a tab), a '!' typed into a tab and AWS permission
+# probes are refused too.
 # Each names its program; "claude" must not be followed by / or -, as in the payload's transcript path.
 _LOGIN_PROBE_GLOBS = (
     "*claude[!/-]*logout*", "*security*-password*laude*", "*agtermctl*logout*", "*tmux*send*logout*", "*aws*simulate-*",
+    "*agtermctl*!*", "*tmux*send*!*",
 )  # fmt: skip
 # A checker piped into a filter loses its exit code; the hook adds a note, it never refuses.
 _PIPE_GLOBS = (

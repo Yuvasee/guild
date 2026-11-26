@@ -295,7 +295,7 @@ def test_a_production_context_allows_only_reads(command: str, verb: str) -> None
 
     assert refusal is not None and "production context" in refusal and f" {verb} there" in refusal
     assert "get, describe, logs or top" in refusal and "send aide the exact command" in refusal
-    assert "types it after '!' in a tab" in refusal
+    assert "'!'" not in refusal and "hook" not in refusal
     assert may_need_guard(list_guard_globs(), command)
 
 
@@ -444,3 +444,32 @@ def test_a_64_kb_command_is_read_quickly(command: str) -> None:
     started = time.monotonic()
     find_rule_refusal(command, PROD)
     assert time.monotonic() - started < 1
+
+
+TYPED_INTO_TAB = [
+    "tmux send-keys -t work:1 '!kubectl --context acme-prod delete pod web-1' Enter",
+    "tmux send-keys -t work:1 '!' 'kubectl --context acme-prod delete pod web-1' Enter",
+    "tmux send-keys -t work:1 '!'",
+    "tmux send-keys -t work:1 C-u '! ls' Enter",
+    "agtermctl session type --target 3 '! kubectl --context acme-prod delete pod web-1'",
+    "tmux send-keys -t work:1 'kubectl --context acme-prod delete pod web-1' Enter",
+    "agtermctl session type --target 3 $'kubectl --context acme-prod delete pod web-1\\r'",
+]
+
+
+@pytest.mark.parametrize("command", TYPED_INTO_TAB)
+def test_typing_a_bang_or_a_refused_command_into_a_tab_is_refused(command: str) -> None:
+    assert find_rule_refusal(command, PROD) is not None
+    assert may_need_guard(list_guard_globs(), command)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "tmux send-keys -t work:1 'echo done!' Enter",
+        "agtermctl session type --target 3 'kubectl --context acme-prod get pods'",
+        "tmux send-keys -t work:1 'git status' Enter",
+    ],
+)
+def test_typing_a_read_or_plain_text_into_a_tab_passes(command: str) -> None:
+    assert find_rule_refusal(command, PROD) is None
