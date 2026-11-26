@@ -522,6 +522,7 @@ def post_signals_to_leads(
     once to the assistant, and red CI on a PR in the owner's queue once more to the assistant when it is still red
     two hours after its lead was told. One that fails is logged and undone alone, so it never holds back the rest."""
     posted: list[Recipient] = []
+    signals = _drop_billing_stops_that_ended(conn, signals)
     _forget_billing_stops_that_ended(conn, signals)
     for signal in signals:
         conn.execute("SAVEPOINT signal_post")
@@ -548,8 +549,7 @@ def post_signals_to_leads(
 def _find_billing_org(signal: dict[str, object]) -> str | None:
     if signal.get("kind") != CI_STOPPED or CI_BLOCKED_BY_BILLING not in str(signal["text"]):
         return None
-    ref = str(signal["key"]).partition(f":{CI_STOPPED}:")[0]
-    return ref.partition(":")[2].partition("/")[0].lower()
+    return _find_org_of_ref(str(signal["key"]).partition(f":{CI_STOPPED}:")[0])
 
 
 def _map_signal_to_org_billing(signal: dict[str, object], org: str) -> dict[str, object]:
@@ -558,6 +558,37 @@ def _map_signal_to_org_billing(signal: dict[str, object], org: str) -> dict[str,
         "again until Actions runs a job; then rerun the failed jobs."
     )
     return {**signal, "key": f"{BILLING_KEY}{org}", "text": text}
+
+
+def _drop_billing_stops_that_ended(
+    conn: sqlite3.Connection, signals: list[dict[str, object]]
+) -> list[dict[str, object]]:
+    """A PR's red CI keeps its billing reason after the account is paid up and nobody reruns it. An org's stop is live
+    only while one of its blocked heads is newer than the newest head of the org that CI really ran on."""
+    ran: dict[str, int] = {}
+    for row in conn.execute(
+        """
+        SELECT p.ref, h.committed_at FROM review_prs p JOIN review_heads h ON h.ref = p.ref AND h.oid = p.head_oid
+        WHERE p.checks = 'SUCCESS' OR (p.checks = 'FAILURE' 
+          AND p.ci_blocked_for = p.head_oid AND p.ci_blocked_by IS NULL)
+        """
+    ):
+        org = _find_org_of_ref(str(row["ref"]))
+        ran[org] = max(ran.get(org, 0), int(row["committed_at"]))
+
+    def is_live(signal: dict[str, object], org: str) -> bool:
+        ref, _, oid = str(signal["key"]).partition(f":{CI_STOPPED}:")
+        row = conn.execute(
+            "SELECT committed_at FROM review_heads WHERE lower(ref) = lower(?) AND oid = ?", (ref, oid)
+        ).fetchone()
+        return row is None or int(row["committed_at"]) > ran.get(org, 0)
+
+    live = {org for s in signals if (org := _find_billing_org(s)) is not None and is_live(s, org)}
+    return [s for s in signals if (org := _find_billing_org(s)) is None or org in live]
+
+
+def _find_org_of_ref(ref: str) -> str:
+    return ref.partition(":")[2].partition("/")[0].lower()
 
 
 def _forget_billing_stops_that_ended(conn: sqlite3.Connection, signals: list[dict[str, object]]) -> None:

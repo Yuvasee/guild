@@ -3543,3 +3543,40 @@ def test_a_github_billing_stop_reaches_each_lead_and_the_assistant_once_for_the_
     assert sorted(first) == ["aide", "alex"] and other_pr == [] and over == []
     assert sorted(again) == ["aide", "alex"], "once Actions ran a job again, a new stop is news"
     assert len(bodies) == 4 and all(b.startswith("GitHub Actions is blocked for acme") for b in bodies)
+
+
+def test_a_billing_failure_older_than_the_orgs_newest_job_that_ran_is_no_stop_and_a_newer_one_is(
+    tmp_path: Path,
+) -> None:
+    conn = setup_shared_issue_pr(tmp_path)
+    with transaction(conn):
+        add_session(conn, "aide-c", CONFIG.assistant_handle)
+
+    def add_pr(number: int, checks: str, committed_at: int, blocked: bool) -> dict[str, object]:
+        ref, oid = f"pr:Acme/Web#{number}", f"oid{number}"
+        conn.execute(
+            """
+            INSERT INTO review_prs (ref, repo, number, title, url, draft, head, head_oid, base, loc, checks, updated_at,
+                                    first_seen_at, fetched_at, ci_blocked_by, ci_blocked_for)
+            VALUES (?, 'Acme/Web', ?, 'T', 'u', 0, 'h', ?, 'main', 1, ?, '', 0, 0, ?, ?)
+            """,
+            (ref, number, oid, checks, CI_BLOCKED_BY_BILLING if blocked else None, oid),
+        )
+        conn.execute("INSERT INTO review_heads VALUES (?, ?, ?)", (ref, oid, committed_at))
+        return {
+            "key": f"{ref}:ci stopped:{oid}", "kind": "ci stopped", "url": "u", "surface": "s-worker",
+            "text": f"web#{number} T: {CI_BLOCKED_BY_BILLING}, not a code failure: rerun the failed jobs.",
+        }  # fmt: skip
+
+    def post(at: int, *signals: dict[str, object]) -> list[str]:
+        with transaction(conn):
+            return [r.handle for r in post_signals_to_leads(conn, CONFIG, list(signals), at)]
+
+    with transaction(conn):
+        old = [add_pr(1, "FAILURE", 100, True), add_pr(2, "FAILURE", 200, True)]
+        add_pr(3, "SUCCESS", 300, False)
+    assert post(1000, *old) == [], "billing was paid before the newest job ran: those failures are history"
+    with transaction(conn):
+        fresh = add_pr(4, "FAILURE", 400, True)
+    assert sorted(post(2000, *old, fresh)) == ["aide", "alex"], "a failure newer than any job that ran is a stop"
+    assert post(3000, *old, fresh) == [], "and is told once"
