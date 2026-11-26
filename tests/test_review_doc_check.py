@@ -761,6 +761,21 @@ def test_a_pr_that_changes_ui_code_needs_a_raster_screenshot_that_exists_beside_
     assert find(page.replace("</body>", f"{SHOT}</body>"), ["web/app/Button.tsx"], UI, ["shot.png"]) == []
 
 
+def test_a_screenshot_inside_a_closed_fold_does_not_count_but_one_outside_or_in_an_open_fold_does() -> None:
+    page = make_doc().decode()
+    find = review_doc_check.find_screenshot_problems
+    web = ["web/app/Button.tsx"]
+    folded = page.replace("</body>", f"<details><summary>Screens</summary>{SHOT}</details></body>")
+    (refused,) = find(folded, web, UI, ["shot.png"])
+    assert "screenshots are all inside a closed <details>" in refused
+    nested = page.replace("</body>", f"<details open><details><summary>s</summary>{SHOT}</details></details></body>")
+    assert len(find(nested, web, UI, ["shot.png"])) == 1
+    both = folded.replace("</body>", '<img src="other.png"></body>')
+    assert find(both, web, UI, ["shot.png", "other.png"]) == []
+    opened = page.replace("</body>", f"<details open><summary>Screens</summary>{SHOT}</details></body>")
+    assert find(opened, web, UI, ["shot.png"]) == []
+
+
 def test_changes_outside_the_ui_paths_and_tests_need_no_screenshot() -> None:
     page = make_doc().decode()
     for changed in (["src/app/run.py"], ["web/Button.test.tsx", "web/__tests__/a.tsx", "web/tests/b.ts"]):

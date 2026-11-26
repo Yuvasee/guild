@@ -891,6 +891,36 @@ _TEST_PATH_RE = re.compile(
 RASTER_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
 
 
+class _VisibleImages(HTMLParser):
+    """The src of every <img> the doc shows when it opens: outside any <details> that is closed."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.srcs: list[str] = []
+        self._details: list[bool] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = dict(attrs)
+        if tag == "details":
+            self._details.append("open" in values)
+        elif tag == "img" and all(self._details) and values.get("src"):
+            self.srcs.append(str(values["src"]))
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "details" and self._details:
+            self._details.pop()
+
+
+def read_visible_image_names(page: str) -> set[str]:
+    reader = _VisibleImages()
+    try:
+        reader.feed(page)
+        reader.close()
+    except (AssertionError, ValueError):
+        pass
+    return set(reader.srcs)
+
+
 def find_screenshot_problems(
     page: str, changed: list[str] | None, ui_paths: tuple[str, ...], shots: list[str]
 ) -> list[str]:
@@ -910,7 +940,14 @@ def find_screenshot_problems(
         for path in changed
         if not _TEST_PATH_RE.search(path) and any(fnmatch.fnmatchcase(path, glob) for glob in ui_paths)
     ]
-    if not ui or shots:
+    if not ui:
+        return []
+    if shots and not set(shots) & read_visible_image_names(page):
+        return [
+            f"the PR changes UI code ({ui[0]}{f' and {len(ui) - 1} more' if len(ui) > 1 else ''}) and the doc's "
+            "screenshots are all inside a closed <details>: put at least one outside any fold, visible on opening"
+        ]
+    if shots:
         return []
     return [
         f"the PR changes UI code ({ui[0]}{f' and {len(ui) - 1} more' if len(ui) > 1 else ''}) but the doc has no "
