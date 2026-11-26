@@ -653,3 +653,36 @@ def test_the_lone_script_without_a_checkout_skips_paths_and_says_so(tmp_path: Pa
 
 def test_the_lone_scripts_limits_are_configs_defaults() -> None:
     assert LIMITS == review_doc_check.DEFAULT_LIMITS
+
+
+def decided(summary: str, body: str = "", mark: str = "decided") -> bytes:
+    head = f"<summary><b>{summary}</b> <span class='mark {mark}'>{mark}</span></summary>"
+    block = f"<details class='item'>{head}{body}</details>"
+    return make_doc(last=block)
+
+
+def test_a_decided_block_carries_the_owners_words_or_the_number_of_his_answer() -> None:
+    (refused,) = problems(decided("Only admins manage keys", "<p>Alternatives: any member.</p>"))
+    assert refused.startswith("the decided block 'Only admins manage keys' has no Q#N and no quoted words of Sam")
+    assert problems(decided("Only admins manage keys", "<p>Answer Q#882.</p>")) == []
+    assert problems(decided("Only admins manage keys", "<blockquote>admins only</blockquote>")) == []
+    assert problems(decided("Only admins manage keys", "<p>Sam: \u201cadmins only\u201d.</p>")) == []
+
+
+def test_a_technical_decision_made_by_the_author_needs_no_words_of_the_owner() -> None:
+    assert problems(decided("Retry uses a jittered backoff", mark="technical")) == []
+    both = make_doc(
+        last="<details class='item'><summary>Index added <span class='mark decided'>decided</span> "
+        "<span class='mark technical'>technical</span></summary></details>"
+    )
+    assert problems(both) == []
+
+
+def test_a_product_decisions_line_without_the_owners_words_is_refused_unless_it_says_none() -> None:
+    def line(text: str) -> list[str]:
+        return problems(make_doc(last=f"<p>{text}</p>"))
+
+    (refused,) = line("Product decisions: only admins manage keys.")
+    assert "Product decisions line 'only admins manage keys.' has no Q#N" in refused
+    assert line("Product decisions: only admins manage keys (Q#882).") == []
+    assert line("Product decisions: none.") == []

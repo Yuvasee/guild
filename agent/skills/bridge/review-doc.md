@@ -108,8 +108,11 @@ sharp but has never seen this code.
   client of the API, an export), each with what happens and its handling. A PR that adds a model, helper or concept
   also says which existing one looks most like it, and whether it was reused or why not.
 - **Details folded**, as above: clarity is not length.
-- **A decision you made yourself is marked decided.** An open question the lead settled is moved out of
-  `needs-decision` before the doc is registered, so the owner never sees a question that has an answer.
+- **A technical decision you made yourself is marked decided and technical.** An open question the lead settled is
+  moved out of `needs-decision` before the doc is registered, so the owner never sees a question that has an answer.
+  A product decision (what a user, an admin or an operator does or sees) is never yours: `decided` on one, and a
+  "Product decisions" line, carry the owner's words in quotes or the Q#N of their answer, or `guild review doc`
+  refuses the doc.
 - **Scripts leave diagrams alone.** A script that edits the doc's HTML (wrapping terms, renumbering) skips `svg` and
   `pre` blocks; look at the diagrams once more before registering.
 - **An enabling PR says how it will be used.** A PR that only enables something (a flag off by default, an opt-in
@@ -236,7 +239,8 @@ fallback for reading the file outside the viewer applies only without it.
 - **Mark:** provenance and handling labels, small and quiet, after the claim or at the end of a summary line, never in
   a heading, and no legend anywhere. `<span class="mark observed">observed</span>`. Classes: `observed`, `reproduced`,
   `from-code` (provenance), and `decided` (a decision taken and kept), `accepted`, `fixed-here`, `deferred`,
-  `rejected`, `needs-decision` (handling). The text is the class in lowercase, with a space for the hyphen.
+  `rejected`, `needs-decision`, `technical` (handling; with `decided`, a technical choice the author made). The text is the class in
+  lowercase, with a space for the hyphen.
 - **Verdict strip:** before the first `h2`, `<dl class="verdict"><dt>Type</dt><dd>Model / contract, 800 lines, mostly
   models and tests</dd><dt>You decide</dt><dd>…</dd><dt>Could break</dt><dd>…</dd><dt>Main risk</dt><dd>…</dd>
   <dt>Checks</dt><dd>…</dd></dl>`. The viewer lays it out.

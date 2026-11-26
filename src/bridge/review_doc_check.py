@@ -787,6 +787,99 @@ def _shorten(text: str, words: int = 14) -> str:
     return " ".join(parts[:words]) + (" …" if len(parts) > words else "")
 
 
+_QUOTE_RE = re.compile(r"[\"\u201c\u201d\u00ab\u00bb]")
+_OWNER_WORDS_RE = re.compile(r"Q#\d+")
+_PRODUCT_LINE_RE = re.compile(r"^\W*product decisions?\b\W*(?P<rest>.*)$", re.I)
+_NONE_RE = re.compile(r"^\W*(?:none|no\b|nothing|n/a)", re.I)
+
+
+class _DecidedBlocks(HTMLParser):
+    """Each folded block with a decided mark, as its summary and whether it carries the owner's words (a Q#N, a
+    quotation) or a technical mark."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.unbacked: list[str] = []
+        self._open: list[dict[str, object]] = []
+        self._spans: list[bool] = []
+        self._hidden = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in _HIDDEN_TAGS:
+            self._hidden += 1
+        if self._hidden:
+            return
+        if tag == "details":
+            self._open.append({"summary": [], "in_summary": False, "decided": False, "backed": False})
+        elif tag == "summary" and self._open:
+            self._open[-1]["in_summary"] = True
+        elif tag in ("blockquote", "q"):
+            self._back()
+        if tag == "span":
+            classes = (dict(attrs).get("class") or "").split()
+            self._spans.append("mark" in classes)
+            if "mark" in classes and self._open:
+                if "decided" in classes:
+                    self._open[-1]["decided"] = True
+                if "technical" in classes:
+                    self._back()
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in _HIDDEN_TAGS:
+            self._hidden = max(0, self._hidden - 1)
+            return
+        if self._hidden:
+            return
+        if tag == "summary" and self._open:
+            self._open[-1]["in_summary"] = False
+        elif tag == "span" and self._spans:
+            self._spans.pop()
+        elif tag == "details" and self._open:
+            block = self._open.pop()
+            if block["decided"] and not block["backed"]:
+                self.unbacked.append(" ".join("".join(block["summary"]).split()))  # type: ignore[arg-type]
+
+    def handle_data(self, data: str) -> None:
+        if self._hidden or not self._open:
+            return
+        if self._open[-1]["in_summary"] and not any(self._spans):
+            self._open[-1]["summary"].append(data)  # type: ignore[union-attr]
+        if _OWNER_WORDS_RE.search(data) or _QUOTE_RE.search(data):
+            self._back()
+
+    def _back(self) -> None:
+        for block in self._open:
+            block["backed"] = True
+
+
+def find_decision_problems(page: str, blocks: "list[_Block]", owner: str) -> list[str]:
+    """A decided mark or a Product decisions line says the owner decided: it carries their words (in quotes) or the
+    Q#N of their answer. A technical decision the author made is marked `technical` as well."""
+    reader = _DecidedBlocks()
+    try:
+        reader.feed(page)
+        reader.close()
+    except (AssertionError, ValueError):
+        pass
+    problems = [
+        f"the decided block '{_shorten(summary)}' has no Q#N and no quoted words of {owner}: a product decision "
+        f"(what a user, an admin or an operator does or sees) is decided only on {owner}'s words; "
+        "add them, or if it is a technical choice you made yourself add the mark technical"
+        for summary in reader.unbacked
+    ]
+    for block in blocks:
+        line = _PRODUCT_LINE_RE.match(" ".join("".join(block.text).split()))
+        if (
+            line
+            and not _NONE_RE.match(line["rest"])
+            and not (_OWNER_WORDS_RE.search(line["rest"]) or _QUOTE_RE.search(line["rest"]))
+        ):
+            problems.append(
+                f"the Product decisions line '{_shorten(line['rest'])}' has no Q#N and no quoted words of {owner}"
+            )
+    return problems
+
+
 def find_first_reader_problems(verified: str) -> list[str]:
     if _FIRST_READER_PASSED_RE.search(verified):
         return []
@@ -1140,7 +1233,12 @@ def map_row_to_path(text: str) -> str:
 
 
 def find_doc_problems(
-    page: bytes, owner_reviewed: bool, owner: str, files: frozenset[str] | None, limits: PlainLimits, base: str
+    page: bytes,
+    owner_reviewed: bool,
+    owner: str,
+    files: frozenset[str] | None,
+    limits: PlainLimits,
+    base: str,
 ) -> list[str]:
     """What breaks the spec's order, plainness and Where to look rules, one plain line each. `files` holds every file
     and directory of the commit the doc describes; None when that commit cannot be read, so paths are not looked up."""
@@ -1169,6 +1267,7 @@ def find_doc_problems(
     problems.extend(find_field_table_problems(text))
     blocks = read_blocks(text)
     problems.extend(find_baseline_problems(blocks, base))
+    problems.extend(find_decision_problems(text, blocks.blocks, owner))
     problems.extend(blocks.glossaries)
     if estimates := find_day_estimates("\n".join(" ".join(block.text) for block in blocks.blocks)):
         problems.append(map_estimates_to_problem(estimates))
