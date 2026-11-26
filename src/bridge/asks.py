@@ -1254,6 +1254,19 @@ def tell_owner_of_reopen(conn: sqlite3.Connection, config: Config, ask: Ask, now
     return [(send_message(conn, owner, [recipient], "info", text, now).message_id, recipient)]
 
 
+def tell_owner_of_verifier_reopen(
+    conn: sqlite3.Connection, config: Config, ask: Ask, by: str, now: int
+) -> list[tuple[int, Recipient]]:
+    """A verifier's reopen reaches the owner at once, not only with the next overdue reminder hours later."""
+    if by == ask.owner:
+        return []
+    text = (
+        f"{by} reopened ask #{ask.id}: {_cut(map_words_to_sendable(conn, ask.reopen_why or ''), 1500)} "
+        f"(`guild ask show {ask.id}`)"
+    )
+    return send_from_bridge(conn, config, ask.owner, text, now)
+
+
 def is_recipient_locked(conn: sqlite3.Connection, config: Config, to: str) -> bool:
     try:
         return is_owner_locked(conn, config, resolve_handle(conn, to).handle)

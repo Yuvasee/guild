@@ -1029,3 +1029,27 @@ def test_a_reminder_for_a_reopened_ask_says_who_reopened_it_when_and_why_until_s
     assert f'#{plain} open, no update for 10h: "Answer the vendor"' in text
     note_ask(conn, reopened, LEAD, "started on it", 6 * HOUR)
     assert f"#{reopened} open, no update for" in map_overdue_to_texts(conn, 11 * HOUR)["alex"]
+
+
+def test_a_verifiers_reopen_tells_the_asks_owner_at_once(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:
+    team = make_lead_and_assistant(bridge_env, spawn_process)
+    assert team.guild("ask", "add", "alex", "--words", "Fix the export", pid=team.b).returncode == 0
+    assert team.guild("ask", "done", "1", "--claim", "Deployed it to the status page", pid=team.a).returncode == 0
+
+    reopened = team.guild("ask", "reopen", "1", "--why", "The status page still shows the old copy", pid=team.b)
+
+    assert reopened.returncode == 0 and "alex is told" in reopened.stdout
+    conn = bridge_env.connect()
+    delivery = take_delivery(conn, "conv-a", int(time.time() * 1000) + 600_000, False)
+    assert delivery.context is not None
+    assert "reopened ask #1: The status page still shows the old copy" in delivery.context
+
+
+def test_an_owner_reopening_its_own_ask_is_not_told_of_it(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:
+    team = make_lead_and_assistant(bridge_env, spawn_process)
+    assert team.guild("ask", "add", "alex", "--words", "Fix the export", pid=team.b).returncode == 0
+    assert team.guild("ask", "done", "1", "--claim", "Deployed it to the status page", pid=team.a).returncode == 0
+
+    reopened = team.guild("ask", "reopen", "1", "--why", "My claim was early, more to do", pid=team.a)
+
+    assert reopened.returncode == 0 and "is told" not in reopened.stdout

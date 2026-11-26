@@ -30,6 +30,7 @@ from bridge.asks import (
     reopen_ask,
     start_ask,
     tell_assistant_of_drop,
+    tell_owner_of_verifier_reopen,
     verify_ask,
     wait_ask,
 )
@@ -335,7 +336,10 @@ def cmd_ask_reopen(args: argparse.Namespace, conn: sqlite3.Connection, config: C
     actor = current_actor(conn, config)
     with transaction(conn):
         ask = reopen_ask(conn, int(args.id), actor.handle, str(args.why), now_ms())
-    print(f"#{ask.id} open again")
+        told = tell_owner_of_verifier_reopen(conn, config, ask, actor.handle, now_ms())
+    for message_id, recipient in told:
+        spawn_typed_delivery(message_id, [recipient])
+    print(f"#{ask.id} open again" + (f"; {ask.owner} is told" if told else ""))
     return 0
 
 
