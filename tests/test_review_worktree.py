@@ -1092,7 +1092,7 @@ def test_a_large_pr_is_ready_for_the_owner_only_once_its_doc_names_codex_and_cla
             register_doc(conn, REVIEWS_CONFIG, REF, source, NOW)
         pr, ranking = view()
         assert (pr["reviews_gap"], pr["reviews_ran"]) == (gap, ran) and REF not in ranking
-    source.write_text(f"{TOP}<h3>Reviews</h3><p>Codex: fixed in abc. Claude: deferred, PROJ-1</p>")
+    source.write_text(f"{TOP}<h3>Reviews</h3><ul><li>Codex: fixed in abc.</li><li>Claude: deferred, PROJ-1</li></ul>")
     with transaction(conn):
         register_doc(conn, REVIEWS_CONFIG, REF, source, NOW)
     pr, ranking = view()

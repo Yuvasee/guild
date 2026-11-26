@@ -1032,9 +1032,7 @@ _TERM_PAIR_RE = re.compile(
     re.I,
 )
 """A 'Term: meaning.' sentence; the labels of a risk's parts and of a story step are not terms."""
-MIN_GLOSSARY_PAIRS = 3
-MIN_TITLED_GLOSSARY_PAIRS = 2
-"""Under a heading such as 'Words used', two pairs already make the list."""
+MIN_GLOSSARY_PAIRS = 2
 _LIST_TAGS = frozenset({"ul", "ol", "dl"})
 _BR = "\x00"
 
@@ -1211,7 +1209,7 @@ class _BlockReader(HTMLParser):
             pairs = sum(
                 bool(_TERM_PAIR_RE.match(sentence)) for line in lines for sentence in split_into_sentences(line)
             )
-            alone = pairs >= (MIN_TITLED_GLOSSARY_PAIRS if self._terms is not None else MIN_GLOSSARY_PAIRS)
+            alone = pairs >= MIN_GLOSSARY_PAIRS
             if alone:
                 self.glossaries.append(
                     f'{self._where("a paragraph")} ("{_shorten(text, 6)}") is a term list written as prose, with '
@@ -1226,7 +1224,7 @@ class _BlockReader(HTMLParser):
     def _end_terms(self) -> None:
         if self._terms is not None:
             heading, pairs, refused = self._terms
-            if pairs >= MIN_TITLED_GLOSSARY_PAIRS and not refused:
+            if pairs >= MIN_GLOSSARY_PAIRS and not refused:
                 self.glossaries.append(
                     f"'{heading}' defines {pairs} terms in paragraphs; make it a list (<ul> or <dl>) or a two-column "
                     "table"

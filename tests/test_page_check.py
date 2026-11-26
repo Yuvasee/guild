@@ -322,6 +322,16 @@ def test_a_table_wider_than_the_container_grows_to_the_window_and_scrolls_only_p
     assert doc["page"] == 1440 and doc["left"] >= doc["bar"] + 24 and doc["right"] <= 1440 - 24, doc
 
 
+@pytest.mark.parametrize("window", [600, 900])
+def test_a_widened_table_reaches_the_text_columns_edges_when_the_body_fills_the_window(
+    browser: str, window: int
+) -> None:
+    table = '<table><tr><td style="padding:0"><div style="width:1500px;height:10px"></div></td></tr></table>'
+    raw = page(f"<h2>Fields</h2><p>{LONG}</p><h2>Rows</h2>{table}")
+    got = render_reading(convert_served_page_to_styled(raw), None, browser, MEASURE_WIDE, (window, 900))
+    assert got["left"] == 16 and got["right"] == window - 16, got
+
+
 def test_a_layout_fault_only_the_dark_page_shows_is_told_as_dark(monkeypatch: pytest.MonkeyPatch) -> None:
     import bridge.page_check as page_check
 

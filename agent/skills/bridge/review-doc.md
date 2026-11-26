@@ -100,7 +100,7 @@ sharp but has never seen this code.
   **What changes and why**.
 - **Every Before names its baseline:** main today, a PR it builds on (`Before (#12 today)`), a named branch
   (`Before (branch dev/x today)`), or hypothetical; a design alternative is never shown as Before.
-- **A term list is a list.** Three or more terms with their meanings go in a `<ul>`, a `<dl>` or a two-column table,
+- **A term list is a list.** Two or more terms with their meanings go in a `<ul>`, a `<dl>` or a two-column table,
   never in a paragraph of `Term: meaning.` sentences.
 - **A changed model shows its fields.** A PR that adds or changes a model, a schema, an API or event contract, or a
   stored shape has a visible **Fields** section: every changed model and contract, each with all its added or
@@ -215,8 +215,8 @@ a line number after it (`run.py:40-52`) is fine.
 - that shows a Before (a heading, a table's header row or column, a bold or labelled line, a diagram label or image
   alt text) without '<base> today' / 'on <base>', 'branch <name>' or 'hypothetical' in the same table, figure or
   paragraph, or the one just before or after it;
-- with a paragraph holding three or more `Term: meaning.` (or `Term — meaning.`, `Term = meaning.`) pairs, or a
-  section titled like a glossary (Words used, Terms, Glossary) whose paragraphs hold three or more together;
+- with a paragraph holding two or more `Term: meaning.` (or `Term — meaning.`, `Term = meaning.`) pairs, or a
+  section titled like a glossary (Words used, Terms, Glossary) whose paragraphs hold two or more together;
 - whose **Where to look** names a file twice, gives a path not from the repo root, or, when the PR has a review
   worktree, a path the commit in `pr-head` does not have.
 
