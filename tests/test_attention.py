@@ -601,15 +601,17 @@ def test_the_service_notifies_once_without_touching_a_tab(
     bridge_env: BridgeEnv, spawn_process: SpawnProcess, dashboard: str
 ) -> None:
     team = Team(bridge_env, spawn_process)
-    team.enroll()
+    # Only the assistant puts a question in the owner's feed; a lead's goes to it as a draft.
+    assert bridge_env.cli("handle", "aide", pid=team.b).returncode == 0
     log = bridge_env.root / "notify.log"
     before = team.log()
 
-    bridge_env.cli("post", "blocked", "SECRET TITLE", "--body", "SECRET BODY", "--urgent", pid=team.a)
+    posted = bridge_env.cli("post", "blocked", "SECRET TITLE", "--body", "SECRET BODY", "--urgent", pid=team.b)
 
+    assert posted.returncode == 0, posted.stderr
     assert wait_for(log.exists, 15)
     text = log.read_text()
-    assert text.count("Urgent question Q#1 from Alex") == 1
+    assert text.count("Urgent question Q#1") == 1
     assert "SECRET" not in text
     assert team.log() == before
 
