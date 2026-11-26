@@ -227,6 +227,7 @@ WORKER_PAST_WORK_RULE = (
     "Before stating a fact about your own past work (merged, deployed, checked, done), read the record (gh for PRs, "
     "guild ask show for asks), not notes or memory."
 )
+WORKER_SCREENSHOTS_RULE = "A PR that changes UI ships its review doc with screenshots of the changed screens."
 # git add -A once committed a stray empty file an unquoted heredoc had made; the push guard refuses such a file too.
 WORKER_STAGING_RULE = "Stage files by path; never git add -A or git add ."
 
@@ -874,7 +875,7 @@ def build_worker_brief(
     return (
         f"{constitution}\n\n{place}# Your task\n\n{prompt.strip()}\n\n{rules}\n"
         f"{WORKER_BROWSER_RULE.format(owner=config.owner_name)}\n{WORKER_PAGES_RULE}\n{WORKER_SIZES_RULE}\n"
-        f"{WORKER_CODEX_RULE}\n{WORKER_REVIEW_ROUNDS_RULE}\n{WORKER_PAST_WORK_RULE}\n{WORKER_STAGING_RULE}\n\n{report}\n"
+        f"{WORKER_CODEX_RULE}\n{WORKER_REVIEW_ROUNDS_RULE}\n{WORKER_PAST_WORK_RULE}\n{WORKER_SCREENSHOTS_RULE}\n{WORKER_STAGING_RULE}\n\n{report}\n"
     )
 
 

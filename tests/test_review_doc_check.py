@@ -1,3 +1,4 @@
+import dataclasses
 import shutil
 import sqlite3
 import subprocess
@@ -12,7 +13,7 @@ from bridge import review_doc_check
 from bridge.config import Config, map_toml_to_config
 from bridge.db import transaction
 from bridge.review_doc_check import PlainLimits, find_doc_problems, read_reader_rounds, record_reader_round
-from bridge.review_worktree import DocError, read_registered_doc, register_doc
+from bridge.review_worktree import DocError, list_changed_files, read_registered_doc, register_doc
 
 WHERE = """
 <h2>Where to look</h2>
@@ -737,3 +738,56 @@ def test_registration_reads_the_rounds_beside_the_source_doc(tmp_path: Path, mon
     record_reader_round(str(source), 1, [])
     with transaction(conn):
         register_doc(conn, REVIEWS_CONFIG, REF, source, NOW)
+
+
+UI = ("web/**", "admin/src/**")
+SHOT = '<p><img src="data:image/png;base64,iVBOR" alt="the new button"></p>'
+
+
+def test_a_pr_that_changes_ui_code_needs_a_screenshot_in_its_doc() -> None:
+    page = make_doc().decode()
+    (refused,) = review_doc_check.find_screenshot_problems(page, ["web/app/Button.tsx", "web/a.css"], UI)
+    assert refused.startswith("the PR changes UI code (web/app/Button.tsx and 1 more) but the doc has no screenshot")
+    assert "Playwright in a hidden window" in refused
+    shot = page.replace("</body>", f"{SHOT}</body>")
+    assert review_doc_check.find_screenshot_problems(shot, ["web/app/Button.tsx"], UI) == []
+    empty = page.replace("</body>", "<img alt='x'></body>")
+    assert len(review_doc_check.find_screenshot_problems(empty, ["web/app/Button.tsx"], UI)) == 1
+
+
+def test_changes_outside_the_ui_paths_tests_and_unreadable_changes_need_no_screenshot() -> None:
+    page = make_doc().decode()
+    for changed in (["src/app/run.py"], ["web/Button.test.tsx", "web/__tests__/a.tsx", "web/tests/b.ts"], [], None):
+        assert review_doc_check.find_screenshot_problems(page, changed, UI) == [], changed
+    assert review_doc_check.find_screenshot_problems(page, ["web/Button.tsx"], ()) == []
+
+
+def test_the_files_a_pr_changes_come_from_the_review_worktree(tmp_path: Path) -> None:
+    repo, second = make_worktree(tmp_path)
+    first = git("rev-parse", "HEAD", cwd=repo)
+    assert list_changed_files(repo, first, second) == ["tests/test_run.py"]
+    assert list_changed_files(repo, "no-such-base", second) is None
+    assert list_changed_files(tmp_path / "missing", first, second) is None
+
+
+def test_registration_refuses_a_doc_without_a_screenshot_when_the_pr_changes_ui(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BRIDGE_STATE_DIR", str(tmp_path / "state"))
+    conn = setup_pr(tmp_path)
+    worktree, _ = make_worktree(tmp_path)
+    git("checkout", "-q", "main", cwd=worktree)
+    base = git("rev-parse", "HEAD~1", cwd=worktree)
+    (worktree / "src" / "app" / "run.py").write_text("x = 3\n")
+    git("commit", "-qam", "three", cwd=worktree)
+    head = git("rev-parse", "HEAD", cwd=worktree)
+    with transaction(conn):
+        conn.execute("UPDATE review_prs SET wt_path = ?, base = ?, head_oid = ?", (str(worktree), base, head))
+    config = dataclasses.replace(REVIEWS_CONFIG, review_ui_paths=("src/app/*",))
+    source = tmp_path / "doc.html"
+    source.write_bytes(make_doc())
+    with pytest.raises(DocError, match=r"changes UI code \(src/app/run.py\)"), transaction(conn):
+        register_doc(conn, config, REF, source, NOW)
+    source.write_bytes(make_doc().replace(b"</body>", SHOT.encode() + b"</body>"))
+    with transaction(conn):
+        register_doc(conn, config, REF, source, NOW)

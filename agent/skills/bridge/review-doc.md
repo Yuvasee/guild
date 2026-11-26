@@ -116,6 +116,9 @@ sharp but has never seen this code.
   A product decision (what a user, an admin or an operator does or sees) is never yours: `decided` on one, and a
   "Product decisions" line, carry the owner's words in quotes or the Q#N of their answer, or `guild review doc`
   refuses the doc.
+- **A PR that changes UI ships screenshots.** When the PR changes a file under the install's `review_ui_paths`
+  (tests do not count), the doc embeds at least one screenshot as an image, today and after where both exist, taken on
+  the sandbox or locally with Playwright in a hidden window; `guild review doc` refuses the doc without one.
 - **Scripts leave diagrams alone.** A script that edits the doc's HTML (wrapping terms, renumbering) skips `svg` and
   `pre` blocks; look at the diagrams once more before registering.
 - **An enabling PR says how it will be used.** A PR that only enables something (a flag off by default, an opt-in

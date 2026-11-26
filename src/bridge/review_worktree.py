@@ -19,7 +19,13 @@ from bridge.config import Config, state_dir
 from bridge.db import now_ms, transaction
 from bridge.doc_nav import ADDED, BEHIND_BANNER_STYLE, convert_doc_to_viewable, remove_injected_parts
 from bridge.leads import REVIEW_DOC_SPEC
-from bridge.review_doc_check import PlainLimits, find_doc_problems, read_doc_head, read_reader_rounds
+from bridge.review_doc_check import (
+    PlainLimits,
+    find_doc_problems,
+    find_screenshot_problems,
+    read_doc_head,
+    read_reader_rounds,
+)
 from bridge.review_marks import convert_reviews_to_text, map_html_to_reviews
 
 FRESH_FOR_PREPARING_MS = 14 * 24 * 3_600_000
@@ -996,6 +1002,9 @@ def register_doc(conn: sqlite3.Connection, config: Config, ref: str, source: Pat
         str(row["base"]),
         read_reader_rounds(str(source)),
     )
+    wt = Path(str(row["wt_path"])) if row["wt_path"] else None
+    changed = list_changed_files(wt, str(row["base"]), commit) if wt else None
+    problems.extend(find_screenshot_problems(text, changed, config.review_ui_paths))
     if problems:
         listed = "".join(f"\n- {problem}" for problem in problems)
         raise DocError(f"{ref}: the doc was not registered, as {REVIEW_DOC_SPEC} asks:{listed}")
@@ -1039,6 +1048,25 @@ def list_files_at(worktree: Path, commit: str) -> frozenset[str] | None:
     except (OSError, subprocess.SubprocessError):
         return None
     return frozenset(name.decode("utf-8", "replace") for name in listed.split(b"\0") if name)
+
+
+def list_changed_files(worktree: Path, base: str, commit: str) -> list[str] | None:
+    """The files the PR changes against its base, from the review worktree's repo; None when they cannot be read."""
+    if not worktree.is_dir():
+        return None
+    for ref in (f"origin/{base}", base):
+        try:
+            listed = subprocess.run(
+                ["git", "-C", str(worktree), "diff", "--name-only", "-z", f"{ref}...{commit}"],
+                capture_output=True,
+                stdin=subprocess.DEVNULL,
+                timeout=60,
+                check=True,
+            ).stdout
+        except (OSError, subprocess.SubprocessError):
+            continue
+        return [name.decode("utf-8", "replace") for name in listed.split(b"\0") if name]
+    return None
 
 
 def fill_doc_heads(conn: sqlite3.Connection) -> None:

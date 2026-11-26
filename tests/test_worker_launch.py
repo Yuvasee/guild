@@ -183,6 +183,7 @@ def test_guild_worker_starts_claude_without_chrome_and_briefs_it_on_the_browser(
         "Before stating a fact about your own past work (merged, deployed, checked, done), read the record (gh for "
         "PRs, guild ask show for asks), not notes or memory.\n" in brief
     )
+    assert "A PR that changes UI ships its review doc with screenshots of the changed screens.\n" in brief
     assert "Stage files by path; never git add -A or git add ." in brief
     assert BROWSER_RULE in brief
     assert "a part headed Reviews" in brief

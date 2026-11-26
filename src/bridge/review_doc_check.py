@@ -2,6 +2,7 @@
 as it is, `python3 review_doc_check.py <doc.html>`, from the copy bridge puts in its bridge skill folder."""
 
 import argparse
+import fnmatch
 import json
 import re
 import subprocess
@@ -879,6 +880,31 @@ def find_decision_problems(page: str, blocks: "list[_Block]", owner: str) -> lis
                 f"the Product decisions line '{_shorten(line['rest'])}' has no Q#N and no quoted words of {owner}"
             )
     return problems
+
+
+_IMAGE_RE = re.compile(r"<img\b[^>]*\bsrc\s*=\s*[\"']?[^\s\"'>]", re.I)
+_TEST_PATH_RE = re.compile(
+    r"(?:^|/)(?:tests?|__tests__|e2e|__snapshots__)/|(?:^|/)test_[^/]*$|[._]tests?\.\w+$|\.spec\.\w+$"
+)
+
+
+def find_screenshot_problems(page: str, changed: list[str] | None, ui_paths: tuple[str, ...]) -> list[str]:
+    """A PR that changes UI code (a file under a configured glob that is not a test) ships a doc with a screenshot.
+    `changed` is the PR's changed files; None when they cannot be read, so nothing is checked."""
+    if not changed:
+        return []
+    ui = [
+        path
+        for path in changed
+        if not _TEST_PATH_RE.search(path) and any(fnmatch.fnmatchcase(path, glob) for glob in ui_paths)
+    ]
+    if not ui or _IMAGE_RE.search(page):
+        return []
+    return [
+        f"the PR changes UI code ({ui[0]}{f' and {len(ui) - 1} more' if len(ui) > 1 else ''}) but the doc has no "
+        "screenshot: take them of the changed screens, today and after, on the sandbox or locally with Playwright in "
+        "a hidden window, and embed them as images in the doc"
+    ]
 
 
 ROUNDS_SUFFIX = ".reader-rounds"

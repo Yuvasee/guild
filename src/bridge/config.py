@@ -99,6 +99,8 @@ class Config:
     """The GitHub account the queue's PRs and the user's comments come from."""
     review_bot_logins: tuple[str, ...] = ()
     """Accounts whose reviews and review requests do not mean a person has seen the PR."""
+    review_ui_paths: tuple[str, ...] = ()
+    """Globs of UI code: a PR that changes a file there, other than a test, gets a review doc with a screenshot."""
     backport_bases: tuple[str, ...] = ()
     review_ignored_posts: tuple[str, ...] = ()
     """Slack ts of review-channel posts that publish nothing (say, a digest that listed PRs)."""
@@ -364,6 +366,7 @@ def map_toml_to_config(raw: dict[str, object]) -> Config:
         review_org=_str(raw, "review_org", defaults.review_org),
         review_author=_str(raw, "review_author", defaults.review_author),
         review_bot_logins=_str_list(raw, "review_bot_logins", defaults.review_bot_logins),
+        review_ui_paths=_str_list(raw, "review_ui_paths", defaults.review_ui_paths),
         backport_bases=_str_list(raw, "backport_bases", defaults.backport_bases),
         review_excluded_repos=_str_list(raw, "review_excluded_repos", defaults.review_excluded_repos),
         pr_issue_exempt_repos=_str_list(raw, "pr_issue_exempt_repos", defaults.pr_issue_exempt_repos),
