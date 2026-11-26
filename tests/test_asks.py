@@ -23,6 +23,7 @@ from bridge.asks import (
     find_overdue_asks,
     get_ask,
     is_ask_overdue,
+    link_card_to_ask,
     list_ask_events,
     list_asks,
     map_asks_to_owner_nags,
@@ -38,10 +39,11 @@ from bridge.asks import (
     verify_ask,
     wait_ask,
 )
-from bridge.board import Recipient, merge_user_messages, take_delivery
+from bridge.board import Party, Recipient, merge_user_messages, take_delivery
 from bridge.capacity import read_owner_presence, record_owner_off, record_owner_on
 from bridge.config import Config, map_toml_to_config
 from bridge.db import connect
+from bridge.feed import add_post
 from bridge.registry import rename_handle
 
 WORKER = Actor("work-1", "conv-w", "other")
@@ -61,7 +63,7 @@ def conn(tmp_path: Path) -> Generator[sqlite3.Connection]:
 
 def claimed(conn: sqlite3.Connection, by: Actor = WORKER) -> int:
     ask = add_ask(
-        conn, "alex", "aide", "Make the status page show the new copy", "#12", ["https://x.example/pr/1"], 1000
+        conn, "alex", "aide", "Make the status page show the new copy", "tab", ["https://x.example/pr/1"], 1000
     )
     start_ask(conn, ask.id, by, 2000)
     claim_ask_done(conn, ask.id, by, "Deployed PR 1 to the status page", 3000)
@@ -985,3 +987,24 @@ def test_the_panel_shows_at_least_one_ask() -> None:
     assert map_toml_to_config({"asks_panel_max": 3}).asks_panel_max == 3
     with pytest.raises(ValueError, match="asks_panel_max must be at least 1"):
         map_toml_to_config({"asks_panel_max": 0})
+
+
+def test_one_message_or_one_cards_answer_is_recorded_once_while_its_ask_is_open(conn: sqlite3.Connection) -> None:
+    first = add_ask(conn, "alex", "alex", "Batch everything", "#20634", [], 1000)
+    with pytest.raises(AskError, match=rf"message #20634 is already ask #{first.id}: .*guild ask note {first.id}"):
+        add_ask(conn, "alex", "alex", "Batch everything", "#20634", [], 2000)
+
+    card = add_post(conn, Party("conv-x", "aide"), "decision", "Show asked-for PRs?", "", [], ["A", "B"], 1000)
+    answered = add_ask(conn, "alex", "alex", "Show them", "tab", [], 1000)
+    link_card_to_ask(conn, answered.id, card)
+    with pytest.raises(AskError, match=rf"Q#{card} is already ask #{answered.id}"):
+        add_ask(conn, "alex", "alex", f"The owner answered q#{card}: always show them", "tab", [], 2000)
+
+    other = add_post(conn, Party("conv-x", "aide"), "decision", "Which vendor?", "", [], ["A", "B"], 1000)
+    clean = add_ask(conn, "alex", "alex", f"The owner answered Q#{other}: vendor A", "#20700", [], 2000)
+    assert clean.source == "#20700", "another message, and a card no ask stands for, record as usual"
+
+    drop_ask(conn, first.id, LEAD, "Recorded under the wrong owner", 3000)
+    close_ask(conn, answered.id, None, "alex", 3000, dropped="Superseded")
+    assert add_ask(conn, "alex", "alex", "Batch everything", "#20634", [], 4000).id
+    assert add_ask(conn, "alex", "alex", f"Q#{card} again", "tab", [], 4000).id, "a closed ask blocks nothing"

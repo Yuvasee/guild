@@ -185,6 +185,7 @@ def add_ask(
         raise AskError(f"the words are over {WORDS_MAX_CHARS} characters; quote the ask, not the whole thread")
     if len(refs) > REFS_MAX:
         raise AskError(f"at most {REFS_MAX} refs")
+    _check_not_recorded(conn, source, words)
     cursor = conn.execute(
         """
         INSERT INTO asks (owner, recorded_by, words, source, refs, state, created_at, updated_at, question)
@@ -195,6 +196,28 @@ def add_ask(
     ask_id = int(cursor.lastrowid or 0)
     _log(conn, ask_id, at_ms, recorded_by, "open", None)
     return get_ask(conn, ask_id)
+
+
+def _check_not_recorded(conn: sqlite3.Connection, source: str, words: str) -> None:
+    """The same owner's words twice make two asks that drift apart: one message, or one card's answer, is one ask."""
+    if source.startswith("#"):
+        row = conn.execute(
+            "SELECT id FROM asks WHERE source = ? AND state != 'closed' ORDER BY id LIMIT 1", (source,)
+        ).fetchone()
+        if row is not None:
+            raise AskError(f"message {source} is already ask #{row['id']}: add to it with `guild ask note {row['id']}`")
+    cards = sorted({int(n) for n in _WAIT_CARD.findall(words)})
+    if not cards:
+        return
+    row = conn.execute(
+        f"SELECT u.id, a.id AS ask_id FROM user_items u JOIN asks a ON a.id = u.ask_id "
+        f"WHERE u.id IN ({','.join('?' * len(cards))}) AND a.state != 'closed' ORDER BY u.id LIMIT 1",
+        cards,
+    ).fetchone()
+    if row is not None:
+        raise AskError(
+            f"Q#{row['id']} is already ask #{row['ask_id']}: add to it with `guild ask note {row['ask_id']}`"
+        )
 
 
 def start_ask(conn: sqlite3.Connection, ask_id: int, by: Actor, at_ms: int) -> Ask:
