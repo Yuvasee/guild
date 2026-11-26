@@ -361,6 +361,8 @@ class DashboardState:
         self._github_spell = FailureSpell()
         self._projects_retry_at = 0
         self._unpublished_told: dict[str, int] = {}
+        self._batch_spawned_at: dict[str, int] = {}
+        """When maintenance last woke each tab for its batch; lost on restart, which costs one extra spawn."""
         self._inspected_transcripts: dict[str, tuple[int, int]] = {}
         self._weekly_failure: str | None = None
         self._github: Callable[[list[str]], str] = run_gh
@@ -887,7 +889,7 @@ class DashboardState:
                         flag_overdue(conn, now_ms(), batch_grace_ms(self.config))
                         release_dead_typing_claims(conn, now_ms())
                         retries = take_delivery_retries(conn, now_ms())
-                        ripe = take_ripe_batches(conn, self.config, now_ms())
+                        ripe = take_ripe_batches(conn, self.config, now_ms(), self._batch_spawned_at)
                         undelivered = take_new_undelivered_tabs(conn, self.config, now_ms(), self._wake.counted_from())
                         stuck = find_stuck_deliveries(conn, now_ms())
                     sync_claims_flag(conn)

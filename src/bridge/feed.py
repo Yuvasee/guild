@@ -660,6 +660,7 @@ def retry_when_locked[T](what: str, call: Callable[[], T], delays: tuple[float, 
 
 _WAITING_SQL = """m.cancelled_at IS NULL AND r.acked_at IS NULL AND r.offered_at IS NULL AND r.done_at IS NULL
           AND r.declined_at IS NULL"""
+_GOES_NOW_SQL = f"(m.goes_now OR m.post_type IN ('{BLOCKED_TAB}', '{TURN_CUT}'))"
 _TYPED_HERE_SQL = f"""EXISTS (SELECT 1 FROM instances i
           WHERE i.conversation_id = r.conversation_id AND i.ended_at IS NULL AND {TYPED_MESSAGE_SQL})"""
 
@@ -677,7 +678,7 @@ def is_batch_ripe(conn: sqlite3.Connection, config: Config, conversation_id: str
     row = conn.execute(
         f"""
         SELECT count(*) AS waiting, min(m.created_at) AS oldest,
-               max(m.goes_now OR m.post_type IN ('{BLOCKED_TAB}', '{TURN_CUT}')) AS now
+               max({_GOES_NOW_SQL}) AS now
         FROM message_recipients r JOIN messages m ON m.id = r.message_id
         WHERE r.conversation_id = ? AND {_WAITING_SQL} AND {_TYPED_HERE_SQL}
         """,
@@ -702,11 +703,14 @@ def find_oldest_typable(conn: sqlite3.Connection, message_id: int, conversation_
     return int(row["oldest"]) if row["mine"] else message_id
 
 
-def take_ripe_batches(conn: sqlite3.Connection, config: Config, at_ms: int) -> list[tuple[int, Recipient]]:
+def take_ripe_batches(
+    conn: sqlite3.Connection, config: Config, at_ms: int, spawned_at: dict[str, int]
+) -> list[tuple[int, Recipient]]:
     """Tabs whose batch turned ripe with no send to start it, as when its oldest waited batch_age_min: each with its
     oldest waiting message, whose typer and wake bring it, and whose turn's hooks bring the rest. A tab is left out
-    while a typer holds a claim there (release_dead_typing_claims runs first, so its typer lives) or the retry pass
-    owns a failed message there; a typer that left with neither leaves the tab to the next round."""
+    while a typer holds a claim there (release_dead_typing_claims runs first, so its typer lives), and for
+    DELIVERY_RETRY_EVERY_MS after it was taken (spawned_at, kept by the caller), so a typer waiting for the tab to go
+    idle is not spawned again each round."""
     if not config.batch_age_min:
         return []
     oldest: dict[str, tuple[int, str]] = {}
@@ -716,21 +720,21 @@ def take_ripe_batches(conn: sqlite3.Connection, config: Config, at_ms: int) -> l
         FROM message_recipients r JOIN messages m ON m.id = r.message_id
         WHERE {_WAITING_SQL} AND {_TYPED_HERE_SQL}
           AND NOT EXISTS (
-              SELECT 1 FROM message_recipients w JOIN messages wm ON wm.id = w.message_id
-              WHERE w.conversation_id = r.conversation_id
-                AND (w.typing_started_at IS NOT NULL
-                     OR (w.delivery_failed_at IS NOT NULL AND w.acked_at IS NULL AND w.offered_at IS NULL
-                         AND wm.cancelled_at IS NULL)))
+              SELECT 1 FROM message_recipients w
+              WHERE w.conversation_id = r.conversation_id AND w.typing_started_at IS NOT NULL)
         ORDER BY m.id
         """
     ):
         oldest.setdefault(str(row["conversation_id"]), (int(row["message_id"]), str(row["handle"])))
-    return [
+    ripe = [
         (message_id, resolve_tab(conn, conversation_id, handle))
         for conversation_id, (message_id, handle) in oldest.items()
-        if is_batch_ripe(conn, config, conversation_id, at_ms)
+        if at_ms - spawned_at.get(conversation_id, at_ms - DELIVERY_RETRY_EVERY_MS) >= DELIVERY_RETRY_EVERY_MS
+        and is_batch_ripe(conn, config, conversation_id, at_ms)
         and not is_conversation_locked(conn, config, conversation_id)
     ]
+    spawned_at.update({tab.conversation_id: at_ms for _, tab in ripe})
+    return ripe
 
 
 def _find_typable_row(
@@ -1353,6 +1357,11 @@ class UndeliveredTab:
     """How its last turn ended, "cut by Mac sleep at 09:50", while bridge's resume of it waits."""
 
 
+_UNDELIVERED_AFTER_SQL = f"({UNDELIVERED_ALERT_AFTER_MS} + CASE WHEN {_GOES_NOW_SQL} THEN 0 ELSE ? END)"
+"""How long mail waits before it counts as undelivered: on top of the alert's limit, mail that can wait for its batch
+gets the longest batch wait (the parameter)."""
+
+
 def take_new_undelivered_tabs(
     conn: sqlite3.Connection, config: Config, at_ms: int, counted_from: int = 0
 ) -> list[UndeliveredTab]:
@@ -1374,10 +1383,10 @@ def take_new_undelivered_tabs(
                (SELECT c.compact_phase FROM conversations c WHERE c.conversation_id = r.conversation_id) AS phase,
                (SELECT c.context_dead_why FROM conversations c WHERE c.conversation_id = r.conversation_id) AS dead
         FROM message_recipients r JOIN messages m ON m.id = r.message_id
-        WHERE {_PENDING_SQL} AND max(m.created_at, ?) <= ?
+        WHERE {_PENDING_SQL} AND max(m.created_at, ?) + {_UNDELIVERED_AFTER_SQL} <= ?
         GROUP BY r.conversation_id
         """,
-        (TURN_CUT, counted_from, at_ms - UNDELIVERED_ALERT_AFTER_MS - batch_grace_ms(config)),
+        (TURN_CUT, counted_from, batch_grace_ms(config), at_ms),
     ).fetchall()
     current: dict[str, UndeliveredTab] = {}
     for row in rows:
@@ -1488,9 +1497,9 @@ def tell_of_undelivered_tab(
     still_pending = conn.execute(
         f"""
         SELECT 1 FROM message_recipients r JOIN messages m ON m.id = r.message_id
-        WHERE r.conversation_id = ? AND max(m.created_at, ?) <= ? AND {_PENDING_SQL}
+        WHERE r.conversation_id = ? AND max(m.created_at, ?) + {_UNDELIVERED_AFTER_SQL} <= ? AND {_PENDING_SQL}
         """,
-        (tab.conversation_id, tab.counted_from, at_ms - UNDELIVERED_ALERT_AFTER_MS),
+        (tab.conversation_id, tab.counted_from, batch_grace_ms(config), at_ms),
     ).fetchone()
     if still_pending is None:
         return None

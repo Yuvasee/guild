@@ -21,6 +21,7 @@ from bridge.feed import (
     record_failed_delivery,
     take_new_undelivered_tabs,
     take_ripe_batches,
+    tell_of_undelivered_tab,
 )
 from bridge.rewake import _has_wakeful_mail  # pyright: ignore[reportPrivateUsage]
 from bridge.serve import spawn_typers
@@ -87,7 +88,7 @@ def test_nine_waiting_messages_wake_nothing_and_the_tenths_typer_types_the_first
     assert not _wakes(conn, BATCHED, T + 10)
     assert all(_spawned(conn, BATCHED, m, T + 10) == [] for m in sent)
     assert all(_typer_goes_for(conn, BATCHED, m, T + 10) == [] for m in sent)
-    assert take_ripe_batches(conn, BATCHED, T + 10) == []
+    assert take_ripe_batches(conn, BATCHED, T + 10, {}) == []
 
     tenth = _send(conn, T + 10)
 
@@ -98,18 +99,19 @@ def test_nine_waiting_messages_wake_nothing_and_the_tenths_typer_types_the_first
 
 def test_a_lone_message_is_woken_for_by_maintenance_at_five_minutes_and_only_once(conn: sqlite3.Connection) -> None:
     message = _send(conn, T)
-    assert take_ripe_batches(conn, BATCHED, T + 4 * MIN) == []
+    spawned_at: dict[str, int] = {}
+    assert take_ripe_batches(conn, BATCHED, T + 4 * MIN, spawned_at) == []
     assert not _wakes(conn, BATCHED, T + 4 * MIN)
 
-    [(woken, tab)] = take_ripe_batches(conn, BATCHED, T + 5 * MIN)
+    [(woken, tab)] = take_ripe_batches(conn, BATCHED, T + 5 * MIN, spawned_at)
     assert (woken, tab.conversation_id) == (message, "conv-ana")
     assert _wakes(conn, BATCHED, T + 5 * MIN)
 
-    conn.execute("UPDATE message_recipients SET typing_started_at = ? WHERE message_id = ?", (T + 5 * MIN, message))
-    assert take_ripe_batches(conn, BATCHED, T + 5 * MIN + 30_000) == [], "its typer types it"
+    assert take_ripe_batches(conn, BATCHED, T + 5 * MIN + 30_000, spawned_at) == [], "its typer may still wait for idle"
+    conn.execute("UPDATE message_recipients SET typing_started_at = ? WHERE message_id = ?", (T + 6 * MIN, message))
+    assert take_ripe_batches(conn, BATCHED, T + 8 * MIN, spawned_at) == [], "its typer types it"
     conn.execute("UPDATE message_recipients SET typing_started_at = NULL WHERE message_id = ?", (message,))
-    record_failed_delivery(conn, message, "conv-ana", T + 5 * MIN + 40_000)
-    assert take_ripe_batches(conn, BATCHED, T + 6 * MIN) == [], "the retry pass owns it"
+    assert [m for m, _ in take_ripe_batches(conn, BATCHED, T + 8 * MIN, spawned_at)] == [message], "it left: again"
 
 
 def test_a_typer_refused_by_a_lock_leaves_the_batch_to_maintenance_once_the_tab_is_unlocked(
@@ -124,9 +126,9 @@ def test_a_typer_refused_by_a_lock_leaves_the_batch_to_maintenance_once_the_tab_
     with mock.patch("bridge.feed.now_ms", return_value=T + 5 * MIN):
         assert deliver_typed(conn, BATCHED, message, "conv-ana") is None
 
-    assert take_ripe_batches(conn, BATCHED, T + 5 * MIN + 30_000) == [], "a locked tab is outside everything"
+    assert take_ripe_batches(conn, BATCHED, T + 5 * MIN + 30_000, {}) == [], "a locked tab is outside everything"
     conn.execute("UPDATE surfaces SET tab_name = NULL WHERE surface = 's-ana'")
-    assert [m for m, _ in take_ripe_batches(conn, BATCHED, T + 6 * MIN)] == [message]
+    assert [m for m, _ in take_ripe_batches(conn, BATCHED, T + 6 * MIN, {})] == [message]
 
 
 def test_a_relayed_answer_a_typer_went_for_does_not_hold_back_a_workers_later_batch(conn: sqlite3.Connection) -> None:
@@ -140,15 +142,28 @@ def test_a_relayed_answer_a_typer_went_for_does_not_hold_back_a_workers_later_ba
     conn.execute("UPDATE messages SET post_type = ? WHERE id = ?", (RELAYED_ANSWER, relayed))
     with mock.patch("bridge.feed.now_ms", return_value=T):  # its typer ran before batching, which left it marked
         assert deliver_typed(conn, Config(batch_age_min=0), relayed, "conv-worker") is None
+    record_failed_delivery(conn, relayed, "conv-worker", T)
+    assert conn.execute(
+        "SELECT delivery_failed_at FROM message_recipients WHERE message_id = ?", (relayed,)
+    ).fetchone()[0]
     owner = send_message(conn, OWNER, [worker], "info", "and ship it", T + 1000).message_id
 
-    assert [m for m, _ in take_ripe_batches(conn, BATCHED, T + 6 * MIN)] == [owner]
+    assert [m for m, _ in take_ripe_batches(conn, BATCHED, T + 6 * MIN, {})] == [owner]
+
+
+def test_an_old_failure_no_longer_typed_does_not_hold_back_a_later_batch(conn: sqlite3.Connection) -> None:
+    peer = send_message(conn, WORKER, [ANA], "info", "deployed to staging", T).message_id
+    record_failed_delivery(conn, peer, "conv-ana", T + 1000)
+    conn.execute("UPDATE leads SET retired_at = 1 WHERE name = 'ana'")
+    owner = _send(conn, T + 2000)
+
+    assert [m for m, _ in take_ripe_batches(conn, BATCHED, T + 6 * MIN, {})] == [owner]
 
 
 def test_maintenance_wakes_a_batch_by_its_oldest_message(conn: sqlite3.Connection) -> None:
     sent = [_send(conn, T + i * MIN) for i in range(3)]
 
-    assert [m for m, _ in take_ripe_batches(conn, BATCHED, T + 5 * MIN)] == [sent[0]]
+    assert [m for m, _ in take_ripe_batches(conn, BATCHED, T + 5 * MIN, {})] == [sent[0]]
 
 
 def test_a_now_message_wakes_at_once(conn: sqlite3.Connection) -> None:
@@ -180,7 +195,7 @@ def test_batching_off_wakes_for_each_message(conn: sqlite3.Connection) -> None:
     _send(conn, T)
     message = _send(conn, T + 1000)
 
-    assert take_ripe_batches(conn, unbatched, T + 10 * MIN) == [], "maintenance starts no typer of its own"
+    assert take_ripe_batches(conn, unbatched, T + 10 * MIN, {}) == [], "maintenance starts no typer of its own"
     assert _wakes(conn, unbatched, T)
     assert _spawned(conn, unbatched, message, T) == [message]
     assert _typer_goes_for(conn, unbatched, message, T) == [message], "each message its own typer, as on main"
@@ -199,6 +214,17 @@ def test_a_lead_is_told_of_as_undelivered_only_past_the_longest_batch_wait(conn:
 
     assert take_new_undelivered_tabs(conn, BATCHED, T + 10 * MIN - 1) == []
     assert [t.oldest_message_id for t in take_new_undelivered_tabs(conn, BATCHED, T + 10 * MIN)] == [message]
+
+
+def test_the_undelivered_alert_rechecks_with_the_same_wait(conn: sqlite3.Connection) -> None:
+    config = Config(batch_count=10, batch_age_min=5, assistant_handle="ana")
+    first, second = _send(conn, T), _send(conn, T + 4 * MIN)
+    conn.execute("UPDATE message_recipients SET typing_wanted_at = ?", (T + 5 * MIN,))
+    [tab] = take_new_undelivered_tabs(conn, config, T + 10 * MIN)
+    conn.execute("UPDATE message_recipients SET acked_at = ? WHERE message_id = ?", (T + 10 * MIN, first))
+
+    assert tell_of_undelivered_tab(conn, config, tab, None, T + 10 * MIN) is None
+    assert conn.execute("SELECT told_at FROM undelivered_tabs").fetchone()[0] is None, f"#{second} waited 1 min more"
 
 
 def test_the_sender_is_told_a_held_message_waits_for_the_batch(
