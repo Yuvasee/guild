@@ -59,6 +59,50 @@ def test_worker_settings_without_project_servers_reject_nothing(tmp_path: Path) 
     assert "disabledMcpjsonServers" not in json.loads(map_cwd_to_worker_settings(tmp_path))
 
 
+def _write_claude_settings(directory: Path, name: str, settings: dict[str, Any]) -> None:
+    (directory / ".claude").mkdir(parents=True, exist_ok=True)
+    (directory / ".claude" / name).write_text(json.dumps(settings))
+
+
+def test_a_worker_below_a_project_gets_its_skill_switches_and_denied_tools_but_nothing_it_allows(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _write_claude_settings(
+        project,
+        "settings.json",
+        {"skillOverrides": {"trainer": "off", "br": "on"}, "permissions": {"deny": ["Artifact"], "allow": ["Bash"]}},
+    )
+    _write_claude_settings(
+        project,
+        "settings.local.json",
+        {"skillOverrides": {"br": "off"}, "permissions": {"deny": ["Artifact", "Workflow"], "allow": ["Edit"]}},
+    )
+    worktree = project / "_wt" / "fix"
+    worktree.mkdir(parents=True)
+
+    settings = json.loads(map_cwd_to_worker_settings(worktree))
+
+    assert settings["skillOverrides"] == {"trainer": "off", "br": "off"}
+    assert settings["permissions"] == {"deny": ["Artifact", "Workflow"]}
+
+
+def test_a_worker_behind_a_symlink_gets_the_settings_above_the_real_directory(tmp_path: Path) -> None:
+    _write_claude_settings(tmp_path / "project", "settings.local.json", {"skillOverrides": {"trainer": "off"}})
+    (tmp_path / "project" / "real").mkdir()
+    (tmp_path / "link").symlink_to(tmp_path / "project" / "real")
+
+    assert json.loads(map_cwd_to_worker_settings(tmp_path / "link" / "sub"))["skillOverrides"] == {"trainer": "off"}
+
+
+def test_worker_settings_without_project_settings_are_unchanged(tmp_path: Path) -> None:
+    _write_claude_settings(tmp_path, "settings.json", {"permissions": {"allow": ["Bash"]}, "model": "opus"})
+
+    assert json.loads(map_cwd_to_worker_settings(tmp_path / "sub")) == {
+        "enabledPlugins": {"playwright@claude-plugins-official": False}
+    }
+
+
 def test_worker_claude_keeps_claude_ai_connectors_and_has_no_chrome(tmp_path: Path) -> None:
     _write_mcp(tmp_path, "it's-quoted")
 

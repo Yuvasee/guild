@@ -1006,14 +1006,46 @@ def map_cwd_to_worker_settings(cwd: Path) -> str:
     settings: dict[str, Any] = {"enabledPlugins": dict.fromkeys(WORKER_DISABLED_PLUGINS, False)}
     if servers := list_project_mcp_servers(cwd):
         settings["disabledMcpjsonServers"] = servers
+    settings.update(read_ancestor_restrictions(cwd))
     return json.dumps(settings, separators=(",", ":"))
+
+
+def _list_start_and_above(cwd: Path) -> list[Path]:
+    """The start directory and every directory above it, the symlink-resolved path too, nearest first."""
+    return list(dict.fromkeys([cwd, *cwd.parents, cwd.resolve(), *cwd.resolve().parents]))
+
+
+def read_ancestor_restrictions(cwd: Path) -> dict[str, Any]:
+    """Claude reads a project's .claude/settings.json and settings.local.json only when it starts in that very
+    directory, so a worker in a worktree below it would miss them: it gets their skill switches and denied tools,
+    and never anything they allow. A nearer directory's switch wins."""
+    overrides: dict[str, Any] = {}
+    deny: list[str] = []
+    for directory in reversed(_list_start_and_above(cwd)):
+        for name in ("settings.json", "settings.local.json"):
+            try:
+                data = json.loads((directory / ".claude" / name).read_text(encoding="utf-8-sig"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            found = cast(dict[str, Any], data)
+            if isinstance(skills := found.get("skillOverrides"), dict):
+                overrides.update(cast(dict[str, Any], skills))
+            permissions = found.get("permissions")
+            denied = cast(dict[str, Any], permissions).get("deny") if isinstance(permissions, dict) else None
+            if isinstance(denied, list):
+                deny.extend(str(rule) for rule in cast(list[Any], denied) if str(rule) not in deny)
+    return {
+        **({"skillOverrides": overrides} if overrides else {}),
+        **({"permissions": {"deny": deny}} if deny else {}),
+    }
 
 
 def list_project_mcp_servers(cwd: Path) -> list[str]:
     """Claude reads .mcp.json in the start directory and every directory above it, the symlink-resolved path too."""
     names: set[str] = set()
-    directories = dict.fromkeys([cwd, *cwd.parents, cwd.resolve(), *cwd.resolve().parents])
-    for directory in directories:
+    for directory in _list_start_and_above(cwd):
         try:
             data = json.loads((directory / ".mcp.json").read_text(encoding="utf-8-sig"))
         except (OSError, ValueError):
