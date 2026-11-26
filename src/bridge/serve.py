@@ -164,6 +164,7 @@ from bridge.review_worktree import (
     link_worktrees_to_prs,
     map_doc_to_served,
     pick_worktree_job,
+    read_doc_image,
     spawn_worktree_job,
 )
 from bridge.reviews import (
@@ -1141,6 +1142,10 @@ class DashboardState:
             doc = map_doc_to_served(conn, repo, number)
         return None if doc is None else convert_page_to_themed(doc, self.read_theme())
 
+    def read_review_image(self, repo: str, number: int, name: str) -> tuple[str, bytes] | None:
+        with self._connection() as conn:
+            return read_doc_image(conn, repo, number, name)
+
     def read_theme(self) -> str | None:
         try:
             theme = (state_dir() / "theme").read_text(encoding="utf-8").strip()
@@ -1665,6 +1670,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send(404, "text/plain", b"no document registered for this PR")
             else:
                 self._send_sandboxed_html(doc)
+        elif match := re.fullmatch(r"/reviews/([\w.-]+/[\w.-]+)/(\d{1,9})/([\w][\w.-]*)", self.path):
+            image = self.state.read_review_image(match.group(1), int(match.group(2)), match.group(3))
+            if image is None:
+                self._send(404, "text/plain", b"no such image")
+            else:
+                self._send_image(*image)
         elif match := re.fullmatch(r"/(api/)?pinned(?:\?(.*))?", self.path):
             try:
                 request = map_query_string_to_request(match.group(2) or "")
@@ -1840,6 +1851,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Security-Policy", "sandbox allow-scripts")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_image(self, content_type: str, body: bytes) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Security-Policy", "sandbox")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()

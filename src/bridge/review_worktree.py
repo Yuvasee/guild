@@ -973,6 +973,34 @@ def review_docs_dir() -> Path:
     return state_dir() / "review-docs"
 
 
+DOC_IMAGE_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".svg": "image/svg+xml",
+}
+_DOC_IMAGE_SRC_RE = re.compile(r"""<img\b[^>]*?\bsrc\s*=\s*["']([\w][\w.-]*)["']""", re.I)
+
+
+def doc_images_dir(doc: Path) -> Path:
+    return doc.with_suffix(".files")
+
+
+def store_doc_images(text: str, source_dir: Path, doc: Path) -> None:
+    """The images the doc names by a bare file name are copied from beside its source, so the page serves them."""
+    for name in dict.fromkeys(_DOC_IMAGE_SRC_RE.findall(text)):
+        origin = source_dir / name
+        if Path(name).suffix.lower() not in DOC_IMAGE_TYPES or not origin.is_file() or origin.is_symlink():
+            continue
+        if origin.stat().st_size > DOC_MAX_BYTES:
+            continue
+        target = doc_images_dir(doc) / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(origin, target)
+
+
 def register_doc(conn: sqlite3.Connection, config: Config, ref: str, source: Path, now: int) -> bytes:
     """Copied in, so the page serves what was registered and never follows a path it was handed later. A new doc starts
     the update requests and the assistant's notice over. Returns the page as registered."""
@@ -1014,6 +1042,7 @@ def register_doc(conn: sqlite3.Connection, config: Config, ref: str, source: Pat
     temporary = target.with_suffix(".tmp")
     temporary.write_bytes(page)
     temporary.replace(target)
+    store_doc_images(text, source.parent, target)
     conn.execute(
         """
         UPDATE review_prs SET doc_file = ?, doc_oid = ?, doc_at = ?, doc_head = ?, doc_reviews = ?,
@@ -1143,5 +1172,17 @@ def read_registered_doc(conn: sqlite3.Connection, repo: str, number: int) -> byt
         return None
     try:
         return (review_docs_dir() / Path(str(row["doc_file"])).name).read_bytes()
+    except OSError:
+        return None
+
+
+def read_doc_image(conn: sqlite3.Connection, repo: str, number: int, name: str) -> tuple[str, bytes] | None:
+    """An image file registered with the doc: its content type and bytes; None for any other name."""
+    content_type = DOC_IMAGE_TYPES.get(Path(name).suffix.lower())
+    row = conn.execute("SELECT doc_file FROM review_prs WHERE repo = ? AND number = ?", (repo, number)).fetchone()
+    if content_type is None or name.startswith(".") or row is None or not row["doc_file"]:
+        return None
+    try:
+        return content_type, (doc_images_dir(review_docs_dir() / Path(str(row["doc_file"])).name) / name).read_bytes()
     except OSError:
         return None

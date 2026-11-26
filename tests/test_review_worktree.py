@@ -916,6 +916,29 @@ def test_the_page_serves_registered_docs_only_and_sandboxed(
         assert b'window.bridgeTheme="light";</script><style id="bridge-doc-style"' in response.read()
 
 
+def test_the_page_serves_the_images_the_doc_names_from_beside_its_source_only(
+    bridge_env: BridgeEnv, dashboard: str, tmp_path: Path
+) -> None:
+    conn = bridge_env.connect()
+    with transaction(conn):
+        store_open_prs(conn, [make_pr()], 500)
+    source = tmp_path / "d.html"
+    source.write_text(TOP + '<img src="shot.png"><img src="note.txt"><img src="gone.png">')
+    (tmp_path / "shot.png").write_bytes(b"\x89PNG-bytes")
+    (tmp_path / "note.txt").write_text("secret")
+    (tmp_path / "other.png").write_bytes(b"not named by the doc")
+    env = bridge_env.env
+    with mock.patch.dict("os.environ", {"BRIDGE_STATE_DIR": env["BRIDGE_STATE_DIR"]}), transaction(conn):
+        register_doc(conn, REVIEWS_CONFIG, REF, source, NOW)
+    import urllib.request
+
+    with urllib.request.urlopen(f"{dashboard}/reviews/Org/app/7/shot.png", timeout=5) as response:
+        assert response.read() == b"\x89PNG-bytes" and response.headers["Content-Type"] == "image/png"
+    for refused in ("note.txt", "other.png", "gone.png", "..%2Fd.html", "%2e%2e/shot.png", "d.html"):
+        http_request(f"{dashboard}/reviews/Org/app/7/{refused}", expect=404)
+    http_request(f"{dashboard}/reviews/Org/app/8/shot.png", expect=404)
+
+
 def test_a_worktree_gets_a_workspace_beside_it_that_opens_on_its_pr(tmp_path: Path) -> None:
     _, _, second = make_origin(tmp_path)
     config = config_for(tmp_path)
