@@ -11,7 +11,7 @@ from conftest import BridgeEnv, SpawnProcess
 from test_leads import Team
 from test_typing import NBSP, PROMPT, RULE, FakeClaudeBox
 
-from bridge.board import Recipient
+from bridge.board import USER_CONVERSATION, Party, Recipient, send_message
 from bridge.compaction import TrailingFailure, read_trailing_failure
 from bridge.config import Config
 from bridge.feed import (
@@ -19,12 +19,14 @@ from bridge.feed import (
     UndeliveredTab,
     convert_screen_to_hold_reason,
     deliver_typed,
+    record_failed_delivery,
     take_new_undelivered_tabs,
+    take_oldest_typable,
     tell_of_undelivered_tab,
 )
 from bridge.hooks import HOOK_EVENTS, handle_hook
 from bridge.tabinput import TypeResult, type_when_idle
-from bridge.turncut import sweep_turn_cuts
+from bridge.turncut import Inspected, sweep_turn_cuts
 
 SLEEP_TEXT = "API Error: Your computer went to sleep mid-response. The response above may be incomplete."
 BASE_NS = 1_800_000_000_000 * 1_000_000
@@ -315,7 +317,7 @@ def _write_idle_transcript(cut: Cut, written_s: int, *entries: dict[str, object]
     os.utime(cut.transcript, (at, at))
 
 
-def _sweep(cut: Cut, t_s: int, inspected: dict[str, tuple[int, int]] | None = None) -> list[str]:
+def _sweep(cut: Cut, t_s: int, inspected: Inspected | None = None) -> list[str]:
     with cut.env.connect() as conn:
         sent = sweep_turn_cuts(conn, CONFIG, BASE_NS // 1_000_000 + t_s * 1000, {} if inspected is None else inspected)
     return [r.handle for _, r in sent]
@@ -329,7 +331,7 @@ def _cut_unseen_by_hooks(cut: Cut) -> None:
 
 def test_a_tab_idle_on_a_cut_no_hook_took_is_told_to_the_assistant_once_and_not_resumed(cut: Cut) -> None:
     _cut_unseen_by_hooks(cut)
-    inspected: dict[str, tuple[int, int]] = {}
+    inspected: Inspected = {}
 
     early = _sweep(cut, 60, inspected)
     first = _sweep(cut, 200, inspected)
@@ -391,7 +393,7 @@ def _count_reads(reads: list[Path]) -> Any:
 def test_the_sweep_reads_an_unchanged_transcript_once_and_never_one_of_a_tab_it_could_not_resume(cut: Cut) -> None:
     cut.hook("UserPromptSubmit", 0, prompt="go on", prompt_id="p1")
     _write_idle_transcript(cut, 20, _answer(-300), _prompt(0), _answer(10))
-    inspected: dict[str, tuple[int, int]] = {}
+    inspected: Inspected = {}
     reads: list[Path] = []
 
     with _count_reads(reads):
@@ -408,7 +410,7 @@ def test_the_sweep_reads_an_unchanged_transcript_once_and_never_one_of_a_tab_it_
 
 def test_a_transcript_written_during_the_sweep_is_not_told_of(cut: Cut) -> None:
     _cut_unseen_by_hooks(cut)
-    inspected: dict[str, tuple[int, int]] = {}
+    inspected: Inspected = {}
 
     def read_then_prompt(path: Path) -> TrailingFailure | None:
         failure = read_trailing_failure(path)
@@ -422,3 +424,80 @@ def test_a_transcript_written_during_the_sweep_is_not_told_of(cut: Cut) -> None:
 
     assert (during, after) == ([], [])
     assert cut.messages() == []
+
+
+def _cut_resumed_by_hook(cut: Cut, older_mail: bool = False) -> int:
+    cut.hook("UserPromptSubmit", 0, prompt="go on", prompt_id="p1")
+    if older_mail:
+        alex = Recipient("alex", "conv-a", cut.team.a, "idle", None, False)
+        with cut.env.connect() as conn:
+            send_message(conn, Party(USER_CONVERSATION, "dana"), [alex], "info", "older", BASE_NS // 1_000_000 + 1)
+    _write_idle_transcript(cut, 10, _answer(-300), _prompt(0), _failure(10))
+    cut.fail(11)
+    return int(cut.messages(TURN_CUT)[0]["id"])
+
+
+def _fail_typing(cut: Cut, message_id: int, t_s: int) -> None:
+    with cut.env.connect() as conn:
+        record_failed_delivery(conn, message_id, "conv-a", BASE_NS // 1_000_000 + t_s * 1000)
+
+
+def test_a_cut_whose_resume_could_not_be_typed_is_told_to_the_assistant_once(cut: Cut) -> None:
+    resume = _cut_resumed_by_hook(cut)
+    inspected: Inspected = {}
+    waiting = _sweep(cut, 200, inspected)
+    _fail_typing(cut, resume, 900)
+
+    told = [_sweep(cut, 1000, inspected), _sweep(cut, 1200, inspected), _sweep(cut, 1400)]
+
+    alerts = cut.messages("to-assistant")
+    assert (waiting, told) == ([], [["old-b"], [], []])
+    assert len(alerts) == 1
+    assert f", and bridge's resume #{resume} could not be typed there." in alerts[0]["body"]
+    assert "agtermctl session text --target TAB-A --pane-id PANE-A" in alerts[0]["body"]
+    assert "no StopFailure hook" not in alerts[0]["body"]
+
+
+def test_a_resume_typed_on_a_retry_after_failing_still_takes_the_cut(cut: Cut) -> None:
+    resume = _cut_resumed_by_hook(cut)
+    _fail_typing(cut, resume, 900)
+    with cut.env.connect() as conn:
+        conn.execute("UPDATE message_recipients SET offered_at = ?, acked_at = ? WHERE message_id = ?", (1, 1, resume))
+
+    assert _sweep(cut, 1000) == []
+    assert cut.messages("to-assistant") == []
+
+
+def test_a_resume_waiting_in_a_batch_behind_mail_that_could_not_be_typed_still_takes_the_cut(cut: Cut) -> None:
+    resume = _cut_resumed_by_hook(cut, older_mail=True)
+    with cut.env.connect() as conn:
+        typed = take_oldest_typable(conn, Config(batch_count=10, batch_age_min=5), resume, "conv-a")
+    _fail_typing(cut, typed, 900)
+
+    assert typed < resume
+    assert _sweep(cut, 1000) == []
+    assert cut.messages("to-assistant") == []
+
+
+def _tell_by_undelivered_alert(cut: Cut, resume: int) -> None:
+    at = BASE_NS // 1_000_000 + 400_000
+    with cut.env.connect() as conn:
+        conn.execute("UPDATE message_recipients SET typing_wanted_at = ? WHERE message_id = ?", (at - 390_000, resume))
+        tabs = take_new_undelivered_tabs(conn, CONFIG, at)
+        assert [t.oldest_message_id for t in tabs] == [resume]
+        assert tell_of_undelivered_tab(conn, CONFIG, tabs[0], _screen(""), at) is not None
+
+
+@pytest.mark.parametrize("told_by", ["undelivered", "draft", "stuck"])
+def test_a_failed_resume_another_alert_already_told_of_gets_no_second_alert(cut: Cut, told_by: str) -> None:
+    resume = _cut_resumed_by_hook(cut)
+    if told_by == "undelivered":
+        _tell_by_undelivered_alert(cut, resume)
+    else:
+        with cut.env.connect() as conn:
+            conn.execute(f"UPDATE message_recipients SET {told_by}_told_at = 1 WHERE message_id = ?", (resume,))
+    told_before = len(cut.messages("to-assistant"))
+    _fail_typing(cut, resume, 900)
+
+    assert _sweep(cut, 1000) == []
+    assert len(cut.messages("to-assistant")) == told_before

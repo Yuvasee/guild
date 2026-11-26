@@ -188,7 +188,7 @@ from bridge.stall_guard import tell_of_stalls
 from bridge.status_watchers import alert_watchers, read_watchers
 from bridge.tabinput import map_tree_to_pane_session, run_agterm
 from bridge.turncut import SWEEP_EVERY_S as TURN_CUT_SWEEP_EVERY_S
-from bridge.turncut import sweep_turn_cuts
+from bridge.turncut import Inspected, sweep_turn_cuts
 from bridge.wake import WakeWatch
 from bridge.watcher import (
     map_tree_to_blocked_tabs,
@@ -363,7 +363,7 @@ class DashboardState:
         self._unpublished_told: dict[str, int] = {}
         self._batch_spawned_at: dict[str, int] = {}
         """When maintenance last woke each tab for its batch; lost on restart, which costs one extra spawn."""
-        self._inspected_transcripts: dict[str, tuple[int, int]] = {}
+        self._inspected_transcripts: Inspected = {}
         self._weekly_failure: str | None = None
         self._github: Callable[[list[str]], str] = run_gh
 

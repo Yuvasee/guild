@@ -14,7 +14,7 @@ from bridge.board import (
     resolve_handle,
     send_message,
 )
-from bridge.compaction import TOO_LONG_TEXT, is_context_full, read_trailing_failure
+from bridge.compaction import TOO_LONG_TEXT, TrailingFailure, is_context_full, read_trailing_failure
 from bridge.config import Config
 from bridge.db import transaction
 from bridge.errlog import log_error
@@ -27,6 +27,7 @@ SLEEP_TEXT = "went to sleep"
 SWEEP_EVERY_S = 120
 IDLE_AFTER_MS = 2 * 60_000
 """StopFailure resumes a cut within seconds; a tab still idle on one this long is one no hook took."""
+Inspected = dict[str, tuple[tuple[int, int], TrailingFailure | None]]
 
 
 def map_failure_to_cause(error: str | None, text: str | None) -> str:
@@ -103,12 +104,13 @@ def take_turn_cut(
 
 
 def sweep_turn_cuts(
-    conn: sqlite3.Connection, config: Config, at_ms: int, inspected: dict[str, tuple[int, int]]
+    conn: sqlite3.Connection, config: Config, at_ms: int, inspected: Inspected
 ) -> list[tuple[int, Recipient]]:
-    """Tells the assistant once of each lead's or worker's tab idle on a cut no StopFailure took; resumes nothing,
-    so a hook that takes the cut later never reads the sweep's doing as a second cut.
+    """Tells the assistant once of each lead's or worker's tab idle on a cut no StopFailure took or whose resume could
+    not be typed; resumes nothing, so a hook that takes the cut later never reads the sweep's doing as a second cut.
 
-    inspected: each transcript's (mtime_ns, size) when last read, so an unchanged one is not read again.
+    inspected: each transcript's (mtime_ns, size) when last read and the failure it ended on, so an unchanged one is
+    not read again, while its cut is checked every sweep: a resume still waiting at one may have failed by the next.
     """
     rows = conn.execute(
         """
@@ -126,10 +128,14 @@ def sweep_turn_cuts(
             continue
         live.add(path)
         version = _stat_version(path)
-        if version is None or at_ms - version[0] // 1_000_000 < IDLE_AFTER_MS or inspected.get(path) == version:
+        if version is None or at_ms - version[0] // 1_000_000 < IDLE_AFTER_MS:
             continue
-        inspected[path] = version
-        failure = read_trailing_failure(Path(path))
+        seen = inspected.get(path)
+        if seen is not None and seen[0] == version:
+            failure = seen[1]
+        else:
+            failure = read_trailing_failure(Path(path))
+            inspected[path] = (version, failure)
         if failure is not None and TOO_LONG_TEXT not in failure.text:
             cause = map_failure_to_cause(failure.error, failure.text)
             found.append((conversation_id, surface, path, failure.at_ms, cause))
@@ -137,7 +143,8 @@ def sweep_turn_cuts(
         del inspected[path]
     sent: list[tuple[int, Recipient]] = []
     for conversation_id, surface, path, cut_at, cause in found:
-        if _stat_version(path) != inspected.get(path):
+        seen = inspected.get(path)
+        if seen is None or _stat_version(path) != seen[0]:
             # A prompt or answer since the read: the next sweep reads it again.
             inspected.pop(path, None)
             continue
@@ -157,9 +164,11 @@ def sweep_turn_cuts(
             conn.execute(
                 "UPDATE conversations SET cut_told_at = ? WHERE conversation_id = ?", (cut_at, conversation_id)
             )
-            sent += _tell_of_untaken_cut(conn, config, conversation_id, surface, cut_at, cause, at_ms)
-        # Each one is a StopFailure that did not do its job: errors.log keeps them for finding why.
-        log_error("turn cut sweep", f"{conversation_id}: cut at {_clock(cut_at)} by {cause}, taken by no hook")
+            failed = _find_failed_resume(conn, conversation_id, cut_at)
+            sent += _tell_of_untaken_cut(conn, config, conversation_id, surface, cut_at, cause, failed, at_ms)
+        # Each one is a StopFailure or a typer that did not do its job: errors.log keeps them for finding why.
+        why = f"its resume #{failed} not typed" if failed else "taken by no hook"
+        log_error("turn cut sweep", f"{conversation_id}: cut at {_clock(cut_at)} by {cause}, {why}")
     return sent
 
 
@@ -180,20 +189,45 @@ def _stat_version(path: str) -> tuple[int, int] | None:
 
 
 def _find_cut_taken_at(conn: sqlite3.Connection, conversation_id: str) -> int:
-    """When StopFailure last resumed this tab or told of its cut; 0 if never."""
+    """When StopFailure last resumed this tab or told of its cut; 0 if never. A resume whose typing failed takes the
+    cut only once an alert told the assistant of it; one still waiting, for its typer or its batch, takes it."""
     row = conn.execute(
         """
         SELECT MAX(m.created_at, COALESCE(m.cancelled_at, 0)) AS at FROM messages m
         JOIN message_recipients r ON r.message_id = m.id
-        WHERE r.conversation_id = ? AND m.post_type = ? ORDER BY m.id DESC LIMIT 1
+        WHERE r.conversation_id = ?1 AND m.post_type = ?2
+          AND (r.delivery_failed_at IS NULL OR r.offered_at IS NOT NULL OR r.acked_at IS NOT NULL
+               OR m.cancelled_at IS NOT NULL OR r.draft_told_at IS NOT NULL OR r.stuck_told_at IS NOT NULL
+               OR EXISTS (SELECT 1 FROM undelivered_tabs u
+                          WHERE u.conversation_id = ?1 AND u.told_at >= m.created_at))
+        ORDER BY m.id DESC LIMIT 1
         """,
         (conversation_id, TURN_CUT),
     ).fetchone()
     return int(row["at"]) if row is not None else 0
 
 
+def _find_failed_resume(conn: sqlite3.Connection, conversation_id: str, cut_at: int) -> int | None:
+    """This cut's resume when the sweep tells of the cut, which happens only once its typing failed."""
+    row = conn.execute(
+        """
+        SELECT MAX(m.id) AS id FROM messages m JOIN message_recipients r ON r.message_id = m.id
+        WHERE r.conversation_id = ? AND m.post_type = ? AND m.created_at >= ?
+        """,
+        (conversation_id, TURN_CUT, cut_at),
+    ).fetchone()
+    return int(row["id"]) if row["id"] is not None else None
+
+
 def _tell_of_untaken_cut(
-    conn: sqlite3.Connection, config: Config, conversation_id: str, surface: str, cut_at: int, cause: str, at_ms: int
+    conn: sqlite3.Connection,
+    config: Config,
+    conversation_id: str,
+    surface: str,
+    cut_at: int,
+    cause: str,
+    failed_resume: int | None,
+    at_ms: int,
 ) -> list[tuple[int, Recipient]]:
     tab = conn.execute("SELECT handle, agterm_session, tab_name FROM surfaces WHERE surface = ?", (surface,)).fetchone()
     handle = str(tab["handle"]) if tab and tab["handle"] else None
@@ -209,11 +243,13 @@ def _tell_of_untaken_cut(
         if tab and tab["agterm_session"]
         else ""
     )
-    resume = f' Resume it: bridge send {handle} "continue where you left off".' if handle else ""
-    body = (
-        f"{name} has been idle since {cause} cut its turn at {_clock(cut_at)}, and no StopFailure hook took the cut, "
-        f"so bridge did not resume it.{look}{resume}"
-    )
+    if failed_resume is not None:
+        why = f"and bridge's resume #{failed_resume} could not be typed there"
+        resume = " Resume it by hand once the tab can take text."
+    else:
+        why = "and no StopFailure hook took the cut, so bridge did not resume it"
+        resume = f' Resume it: bridge send {handle} "continue where you left off".' if handle else ""
+    body = f"{name} has been idle since {cause} cut its turn at {_clock(cut_at)}, {why}.{look}{resume}"
     # As asks.send_from_bridge sends it; importing that module would load page code into every hook.
     result = send_message(conn, bridge, [assistant], "info", body, at_ms)
     conn.execute("UPDATE messages SET post_type = ? WHERE id = ?", (TO_ASSISTANT, result.message_id))
