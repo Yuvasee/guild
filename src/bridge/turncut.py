@@ -165,6 +165,8 @@ def sweep_turn_cuts(
                 "UPDATE conversations SET cut_told_at = ? WHERE conversation_id = ?", (cut_at, conversation_id)
             )
             failed = _find_failed_resume(conn, conversation_id, cut_at)
+            if failed is not None:
+                conn.execute("UPDATE messages SET resume_told_at = ? WHERE id = ?", (at_ms, failed))
             sent += _tell_of_untaken_cut(conn, config, conversation_id, surface, cut_at, cause, failed, at_ms)
         # Each one is a StopFailure or a typer that did not do its job: errors.log keeps them for finding why.
         why = f"its resume #{failed} not typed" if failed else "taken by no hook"
@@ -190,16 +192,14 @@ def _stat_version(path: str) -> tuple[int, int] | None:
 
 def _find_cut_taken_at(conn: sqlite3.Connection, conversation_id: str) -> int:
     """When StopFailure last resumed this tab or told of its cut; 0 if never. A resume whose typing failed takes the
-    cut only once an alert told the assistant of it; one still waiting, for its typer or its batch, takes it."""
+    cut only once the assistant was told it did not go in; one still waiting, for its typer or its batch, takes it."""
     row = conn.execute(
         """
         SELECT MAX(m.created_at, COALESCE(m.cancelled_at, 0)) AS at FROM messages m
         JOIN message_recipients r ON r.message_id = m.id
-        WHERE r.conversation_id = ?1 AND m.post_type = ?2
+        WHERE r.conversation_id = ? AND m.post_type = ?
           AND (r.delivery_failed_at IS NULL OR r.offered_at IS NOT NULL OR r.acked_at IS NOT NULL
-               OR m.cancelled_at IS NOT NULL OR r.draft_told_at IS NOT NULL OR r.stuck_told_at IS NOT NULL
-               OR EXISTS (SELECT 1 FROM undelivered_tabs u
-                          WHERE u.conversation_id = ?1 AND u.told_at >= m.created_at))
+               OR m.cancelled_at IS NOT NULL OR m.resume_told_at IS NOT NULL)
         ORDER BY m.id DESC LIMIT 1
         """,
         (conversation_id, TURN_CUT),

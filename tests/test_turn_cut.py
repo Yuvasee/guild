@@ -22,6 +22,7 @@ from bridge.feed import (
     record_failed_delivery,
     take_new_undelivered_tabs,
     take_oldest_typable,
+    tell_assistant_of_draft,
     tell_of_undelivered_tab,
 )
 from bridge.hooks import HOOK_EVENTS, handle_hook
@@ -479,25 +480,72 @@ def test_a_resume_waiting_in_a_batch_behind_mail_that_could_not_be_typed_still_t
     assert cut.messages("to-assistant") == []
 
 
-def _tell_by_undelivered_alert(cut: Cut, resume: int) -> None:
-    at = BASE_NS // 1_000_000 + 400_000
+def _ms(t_s: int) -> int:
+    return BASE_NS // 1_000_000 + t_s * 1000
+
+
+def _want_typed(cut: Cut, message_id: int) -> None:
+    """As its typer marks it, so the undelivered alert counts it."""
     with cut.env.connect() as conn:
-        conn.execute("UPDATE message_recipients SET typing_wanted_at = ? WHERE message_id = ?", (at - 390_000, resume))
-        tabs = take_new_undelivered_tabs(conn, CONFIG, at)
-        assert [t.oldest_message_id for t in tabs] == [resume]
-        assert tell_of_undelivered_tab(conn, CONFIG, tabs[0], _screen(""), at) is not None
+        conn.execute("UPDATE message_recipients SET typing_wanted_at = 1 WHERE message_id = ?", (message_id,))
 
 
-@pytest.mark.parametrize("told_by", ["undelivered", "draft", "stuck"])
-def test_a_failed_resume_another_alert_already_told_of_gets_no_second_alert(cut: Cut, told_by: str) -> None:
+def _undelivered_alerts(cut: Cut, t_s: int, counted_from: int = 0) -> int:
+    """How many alerts maintenance's undelivered watch sends at t_s."""
+    with cut.env.connect() as conn:
+        tabs = take_new_undelivered_tabs(conn, CONFIG, _ms(t_s), counted_from)
+        return sum(tell_of_undelivered_tab(conn, CONFIG, tab, _screen(""), _ms(t_s)) is not None for tab in tabs)
+
+
+def test_a_failed_resume_the_undelivered_alert_told_of_gets_no_second_alert_even_after_a_wake(cut: Cut) -> None:
     resume = _cut_resumed_by_hook(cut)
-    if told_by == "undelivered":
-        _tell_by_undelivered_alert(cut, resume)
-    else:
-        with cut.env.connect() as conn:
-            conn.execute(f"UPDATE message_recipients SET {told_by}_told_at = 1 WHERE message_id = ?", (resume,))
-    told_before = len(cut.messages("to-assistant"))
-    _fail_typing(cut, resume, 900)
+    _want_typed(cut, resume)
+    undelivered = _undelivered_alerts(cut, 400)
+    _fail_typing(cut, resume, 410)
+    inspected: Inspected = {}
+    swept = _sweep(cut, 600, inspected)
+    # A wake moves the count on: nothing is overdue, so the undelivered episode and its record go.
+    after_wake = _undelivered_alerts(cut, 700, counted_from=_ms(700))
+    with cut.env.connect() as conn:
+        episodes = conn.execute("SELECT count(*) FROM undelivered_tabs").fetchone()[0]
 
-    assert _sweep(cut, 1000) == []
-    assert len(cut.messages("to-assistant")) == told_before
+    assert (undelivered, swept, after_wake, episodes) == (1, [], 0, 0)
+    assert _sweep(cut, 800, inspected) == [] and _sweep(cut, 1000) == []
+    assert len(cut.messages("to-assistant")) == 1
+
+
+def test_a_failed_resume_the_sweep_told_of_gets_no_undelivered_alert(cut: Cut) -> None:
+    resume = _cut_resumed_by_hook(cut)
+    _want_typed(cut, resume)
+    _fail_typing(cut, resume, 60)
+
+    assert _sweep(cut, 200) == ["old-b"]
+    assert _undelivered_alerts(cut, 400) == 0 and _undelivered_alerts(cut, 1000) == 0
+    assert len(cut.messages("to-assistant")) == 1
+
+
+def test_an_undelivered_alert_of_older_mail_does_not_stand_for_the_resume(cut: Cut) -> None:
+    resume = _cut_resumed_by_hook(cut, older_mail=True)
+    with cut.env.connect() as conn:
+        older = int(conn.execute("SELECT id FROM messages WHERE body = 'older'").fetchone()[0])
+        conn.execute("UPDATE messages SET created_at = ? WHERE id = ?", (_ms(-600), older))
+    _want_typed(cut, older)
+    _want_typed(cut, resume)
+    told_of_older = _undelivered_alerts(cut, 100)
+    _fail_typing(cut, resume, 200)
+
+    assert told_of_older == 1
+    assert _sweep(cut, 400) == ["old-b"]
+    assert _undelivered_alerts(cut, 500) == 0
+    alerts = cut.messages("to-assistant")
+    assert len(alerts) == 2 and f"resume #{resume} could not be typed" in alerts[1]["body"]
+
+
+def test_a_draft_alert_that_reached_nobody_does_not_stand_for_the_resume(cut: Cut) -> None:
+    resume = _cut_resumed_by_hook(cut)
+    with cut.env.connect() as conn:
+        draft = tell_assistant_of_draft(conn, Config(assistant_handle="away"), resume, "conv-a", _ms(100))
+    _fail_typing(cut, resume, 200)
+
+    assert draft is None
+    assert _sweep(cut, 400) == ["old-b"]

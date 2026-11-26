@@ -1367,6 +1367,8 @@ class UndeliveredTab:
     """How its last turn ended, "cut by Mac sleep at 09:50", while bridge's resume of it waits."""
 
 
+_RESUME_UNTOLD_SQL = f"NOT (m.post_type = '{TURN_CUT}' AND m.resume_told_at IS NOT NULL)"
+"""A resume the assistant already heard did not go in is not told of again."""
 _UNDELIVERED_AFTER_SQL = f"({UNDELIVERED_ALERT_AFTER_MS} + CASE WHEN {_GOES_NOW_SQL} THEN 0 ELSE ? END)"
 """How long mail waits before it counts as undelivered: on top of the alert's limit, mail that can wait for its batch
 gets the longest batch wait (the parameter)."""
@@ -1393,7 +1395,7 @@ def take_new_undelivered_tabs(
                (SELECT c.compact_phase FROM conversations c WHERE c.conversation_id = r.conversation_id) AS phase,
                (SELECT c.context_dead_why FROM conversations c WHERE c.conversation_id = r.conversation_id) AS dead
         FROM message_recipients r JOIN messages m ON m.id = r.message_id
-        WHERE {_PENDING_SQL} AND max(m.created_at, ?) + {_UNDELIVERED_AFTER_SQL} <= ?
+        WHERE {_PENDING_SQL} AND {_RESUME_UNTOLD_SQL} AND max(m.created_at, ?) + {_UNDELIVERED_AFTER_SQL} <= ?
         GROUP BY r.conversation_id
         """,
         (TURN_CUT, counted_from, batch_grace_ms(config), at_ms),
@@ -1508,6 +1510,7 @@ def tell_of_undelivered_tab(
         f"""
         SELECT 1 FROM message_recipients r JOIN messages m ON m.id = r.message_id
         WHERE r.conversation_id = ? AND max(m.created_at, ?) + {_UNDELIVERED_AFTER_SQL} <= ? AND {_PENDING_SQL}
+          AND {_RESUME_UNTOLD_SQL}
         """,
         (tab.conversation_id, tab.counted_from, batch_grace_ms(config), at_ms),
     ).fetchone()
@@ -1537,6 +1540,16 @@ def tell_of_undelivered_tab(
         return None
     result = send_message(conn, Party(SYSTEM_CONVERSATION, "bridge"), [assistant], "info", detail, at_ms)
     conn.execute("UPDATE messages SET post_type = ? WHERE id = ?", (TO_ASSISTANT, result.message_id))
+    if tab.cut is not None:
+        conn.execute(
+            f"""
+            UPDATE messages SET resume_told_at = ? WHERE id IN (
+                SELECT m.id FROM message_recipients r JOIN messages m ON m.id = r.message_id
+                WHERE r.conversation_id = ? AND m.post_type = ? AND {_PENDING_SQL} AND {_RESUME_UNTOLD_SQL}
+                  AND max(m.created_at, ?) + {_UNDELIVERED_AFTER_SQL} <= ?)
+            """,
+            (at_ms, tab.conversation_id, TURN_CUT, tab.counted_from, batch_grace_ms(config), at_ms),
+        )
     return result.message_id, assistant
 
 

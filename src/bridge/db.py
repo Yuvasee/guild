@@ -984,6 +984,9 @@ MIGRATIONS: tuple[str, ...] = (
     ALTER TABLE refs ADD COLUMN spoken_at INTEGER;
     ALTER TABLE refs ADD COLUMN spoken_turn INTEGER;
     """,
+    # When the assistant was told that a turn-cut resume did not go in, by the cut sweep or the undelivered alert:
+    # each reads it, so one cut is told of once whichever path tells first.
+    "ALTER TABLE messages ADD COLUMN resume_told_at INTEGER;",
 )
 
 HOOK_BUSY_TIMEOUT_MS = 200
