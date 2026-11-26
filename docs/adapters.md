@@ -207,6 +207,7 @@ review_generated_files = ["api-client.ts"]  # left out of a PR's line count, bes
 review_python_paths = ["lib/python"]      # extra Python roots for review worktrees' editor and services
 pages_dir = "~/pages"                     # where published pages' sources live (the default)
 disk_folders = ["~/code/worktrees"]       # measured hourly; Right Hand hears when the disk runs low
+spend_file = "~/.guild/spend.json"        # token spend written by your own job; the page's Spend this week block (empty: hidden)
 overlay_dir = "~/.config/bridge/house"    # your house texts, below
 host_sync_dirs = ["~/.claude/skills/slides"]  # more folders each deploy copies to worker hosts, with subfolders
 people_dir = "~/.config/bridge/people"    # your people file, below

@@ -206,6 +206,9 @@ class Config:
     """Where published pages' sources live, one folder per slug."""
     disk_folders: tuple[str, ...] = ()
     """Worktree folders the disk check measures (~ allowed)."""
+    spend_file: str = ""
+    """JSON file another process writes with the week's token spend (~ allowed); the page's Spend this week block
+    reads it, and is hidden while this is empty or the file is missing."""
     review_generated_files: tuple[str, ...] = ()
     """File names (fnmatch on the base name) left out of a PR's line count, besides lockfiles."""
     review_python_paths: tuple[str, ...] = ()
@@ -424,6 +427,7 @@ def map_toml_to_config(raw: dict[str, object]) -> Config:
         grooming_questions_re=_questions_regex(raw, "grooming_questions_re", defaults.grooming_questions_re),
         pages_dir=_str(raw, "pages_dir", defaults.pages_dir),
         disk_folders=_str_list(raw, "disk_folders", defaults.disk_folders),
+        spend_file=_str(raw, "spend_file", defaults.spend_file),
         review_generated_files=_str_list(raw, "review_generated_files", defaults.review_generated_files),
         review_python_paths=_str_list(raw, "review_python_paths", defaults.review_python_paths),
         overlay_dir=_str(raw, "overlay_dir", defaults.overlay_dir),

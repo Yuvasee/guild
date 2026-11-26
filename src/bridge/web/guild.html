@@ -451,6 +451,7 @@ details td.what { color: var(--faint); font-weight: 400; }
     <h2>Team Leads</h2>
     <details id="laptop" class="pop end" hidden><summary></summary><div class="panel"></div></details>
   </header><div class="body"></div></section>
+  <section id="spend" class="section" data-tab="Spend" hidden><header><h2>Spend this week</h2><span class="note" id="spend-note"></span></header><div class="body"></div></section>
   <section id="resources" class="section" data-tab="Resources" hidden><header><h2>Resources in use</h2></header><div class="body"></div></section>
   <section id="chat" class="section" data-tab="Chat"><header>
     <h2>Team chat</h2>
@@ -1617,6 +1618,40 @@ function renderResources() {
     box.append(more);
   }
   if (hotspots.resources.length) box.append(hotspotsBlock(hotspots));
+}
+
+function spendTime(ms) {
+  const when = new Date(ms);
+  const pad = (n) => String(n).padStart(2, "0");
+  return pad(when.getMonth() + 1) + "-" + pad(when.getDate()) + " " + pad(when.getHours()) + ":" + pad(when.getMinutes());
+}
+
+function renderSpend() {
+  const spend = state.spend;
+  const box = showSection("spend", spend ? 1 : 0);
+  if (!spend || !changed("spend", spend)) return;
+  box.replaceChildren();
+  if (spend.stale_hours !== undefined) {
+    box.append(el("p", "note", "spend data is " + spend.stale_hours + " h old"));
+    return;
+  }
+  for (const account of spend.accounts) {
+    const pct = account.weekly_pct === null ? "unknown" : Math.round(account.weekly_pct) + "%";
+    const parts = [account.id + " " + pct, account.active ? "active" : "not active"];
+    if (account.resets_at) parts.push("resets " + spendTime(account.resets_at));
+    box.append(el("p", "note", parts.join(" · ")));
+  }
+  const table = el("table");
+  const head = el("tr");
+  head.append(el("th", "", "Lead"), el("th", "", "Share"), el("th", "", "Est. % of active week"));
+  table.append(head);
+  for (const row of [...spend.rows, spend.harness, spend.other]) {
+    const line = el("tr");
+    line.append(el("td", "", row.name), el("td", "", Math.round(row.share * 100) + "%"), el("td", "", row.est_pct.toFixed(1) + "%"));
+    table.append(line);
+  }
+  box.append(table);
+  if (spend.page) box.append(linkTo(spend.page, "Details"));
 }
 
 function stuckList() {
@@ -2822,7 +2857,7 @@ function renderColleagueComments() {
   box.replaceChildren(...nodes);
 }
 
-const RENDERERS = [renderNeeds, renderAnswers, renderAsks, renderQueue, renderColleagueComments, renderLeads, renderRoom, renderResources, renderWatchers, renderLinks, renderLaptop, renderVerdict, renderSectionNav];
+const RENDERERS = [renderNeeds, renderAnswers, renderAsks, renderQueue, renderColleagueComments, renderLeads, renderRoom, renderResources, renderSpend, renderWatchers, renderLinks, renderLaptop, renderVerdict, renderSectionNav];
 
 async function refresh() {
   try {

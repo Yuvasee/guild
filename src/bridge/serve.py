@@ -184,6 +184,7 @@ from bridge.shadow_filter import ask_model as ask_shadow_model
 from bridge.shadow_filter import find_start_id as find_shadow_start_id
 from bridge.shadow_filter import run_shadow_tick
 from bridge.signals import SessionRefs, find_signals, map_enrichment_to_status, map_signal_to_dict
+from bridge.spend import map_file_to_spend
 from bridge.stall_guard import tell_of_stalls
 from bridge.status_watchers import alert_watchers, read_watchers
 from bridge.tabinput import map_tree_to_pane_session, run_agterm
@@ -452,6 +453,7 @@ class DashboardState:
             guild["watchers"] = read_watchers(self.config.watchers, now_ms())
             guild["page_version"] = GUILD_PAGE_VERSION
             guild["disk"] = map_reading_to_dict(self._disk) if self._disk else None
+            guild["spend"] = map_file_to_spend(self.config.spend_file, now_ms())
             guild["links"] = [{"name": link.name, "url": link.url} for link in self.config.links]
             guild["agents"] = {
                 "busy": count_busy_agents(conn),
