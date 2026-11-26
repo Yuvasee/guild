@@ -40,8 +40,11 @@ from bridge.feed import (
     TO_LEAD,
     WORKER_REPORT,
     add_post,
+    batch_grace_ms,
     build_decision_body,
     find_leads_to_wake,
+    find_oldest_typable,
+    is_batch_ripe,
     map_arg_to_link,
     post_to_board,
     reject_locked_recipients,
@@ -64,6 +67,9 @@ from bridge.watcher import (
 
 USER_TARGET = "user"
 POST_RESOLVE = "resolve"
+NOW_HELP = (
+    "wake an idle recipient at once instead of with its next batch: urgent only (a prod alarm, or the user said so)"
+)
 NO_LINK_HELP = "the words page, analysis, explainer, write-up or doc here name no page; post without a --link"
 
 
@@ -73,12 +79,14 @@ def add_board_commands(sub: "argparse._SubParsersAction[argparse.ArgumentParser]
     p.add_argument("text")
     p.add_argument("--request", action="store_true", help="expects a response (ack/reply/done/decline)")
     p.add_argument("--respond-within", type=convert_duration_to_seconds, default=DEFAULT_RESPOND_WITHIN_S)
+    p.add_argument("--now", action="store_true", help=NOW_HELP)
     p.set_defaults(func=cmd_send)
 
     p = sub.add_parser("reply", help="reply to a message")
     p.add_argument("id", type=int)
     p.add_argument("text")
     p.add_argument("--done", action="store_true", help="also close the request")
+    p.add_argument("--now", action="store_true", help=NOW_HELP)
     p.set_defaults(func=cmd_reply)
 
     for action, text in (
@@ -138,6 +146,7 @@ def add_board_commands(sub: "argparse._SubParsersAction[argparse.ArgumentParser]
     p.add_argument("--type", choices=POST_TYPES, help="what kind of post this is")
     p.add_argument("--thread", help="an issue or PR id; posts with the same id form a thread")
     p.add_argument("--link", help="the PR, issue or doc this post points to")
+    p.add_argument("--now", action="store_true", help=NOW_HELP)
     p.set_defaults(func=cmd_board)
 
 
@@ -183,8 +192,10 @@ def cmd_send(args: argparse.Namespace, conn: sqlite3.Connection, config: Config)
             reject_locked_recipients(conn, config, recipients)
             if any(r.conversation_id == me.conversation_id for r in recipients):
                 raise MessageStateError("you cannot message yourself")
-            flag_overdue(conn, at)
-            result = send_message(conn, me, recipients, kind, str(args.text), at, int(args.respond_within))
+            flag_overdue(conn, at, batch_grace_ms(config))
+            result = send_message(
+                conn, me, recipients, kind, str(args.text), at, int(args.respond_within), goes_now=bool(args.now)
+            )
     except (MessageStateError, AddressError) as exc:
         raise UsageError(str(exc)) from exc
     nudge_recipients(recipients)
@@ -215,7 +226,9 @@ def cmd_reply(args: argparse.Namespace, conn: sqlite3.Connection, config: Config
             original_sender = resolve_tab(conn, str(row["from_conversation"]), str(row["from_handle"]))
             if args.done:
                 respond(conn, me, int(args.id), "done", at)
-            result = send_message(conn, me, [original_sender], "reply", str(args.text), at, reply_to=int(args.id))
+            result = send_message(
+                conn, me, [original_sender], "reply", str(args.text), at, reply_to=int(args.id), goes_now=bool(args.now)
+            )
     except MessageStateError as exc:
         raise UsageError(str(exc)) from exc
     nudge_recipients([original_sender])
@@ -241,7 +254,7 @@ def cmd_inbox(args: argparse.Namespace, conn: sqlite3.Connection, config: Config
     me = current_party(conn)
     at = now_ms()
     with transaction(conn):
-        flag_overdue(conn, at)
+        flag_overdue(conn, at, batch_grace_ms(config))
         rows = list_inbox(conn, me.conversation_id, bool(args.all))
         mark_seen_in_inbox(conn, me.conversation_id, [int(r["id"]) for r in rows], at)
     if not rows:
@@ -482,13 +495,13 @@ def cmd_board(args: argparse.Namespace, conn: sqlite3.Connection, config: Config
             with transaction(conn):
                 reject_locked_sender(conn, config, me)
                 result = post_to_board(
-                    conn, me, str(args.text), args.topic, at, config, args.type, args.thread, args.link
+                    conn, me, str(args.text), args.topic, at, config, args.type, args.thread, args.link, bool(args.now)
                 )
                 wake = [] if result.paused else find_leads_to_wake(conn, config, str(args.text), me)
         except MessageStateError as exc:
             raise UsageError(str(exc)) from exc
         nudge_recipients(result.recipients)
-        spawn_typed_delivery(result.message_id, wake)
+        spawn_when_ripe(conn, config, result.message_id, wake)
         if result.paused:
             print(
                 f"board #{result.message_id}; thread paused after {MAX_AGENT_HOPS} agent hops: "
@@ -524,13 +537,16 @@ def print_wake_lines(
     # A locked tab is out of the team: its message waits for the next hook, and it is told of no way to wake anyone.
     if is_conversation_locked(conn, config, sender.conversation_id):
         return
-    leads, workers, assistants = wake_typed_recipients(conn, config, sender, message_id, recipients)
-    for recipient in leads:
-        print(f"{recipient.handle} is a team lead: this is typed into its tab as soon as it is idle.")
-    for recipient in workers:
-        print(f"{recipient.handle} is your worker: this is typed into its tab as soon as it is idle.")
-    for recipient in assistants:
-        print(f"{recipient.handle} is the assistant: this is typed into its tab as soon as it is idle.")
+    leads, workers, assistants, held = wake_typed_recipients(conn, config, sender, message_id, recipients)
+    for recipients_of, role in ((leads, "a team lead"), (workers, "your worker"), (assistants, "the assistant")):
+        for recipient in recipients_of:
+            if recipient in held:
+                print(
+                    f"{recipient.handle} gets this with its next batch "
+                    f"({config.batch_count} waiting or {config.batch_age_min:g} min)."
+                )
+            else:
+                print(f"{recipient.handle} is {role}: this is typed into its tab as soon as it is idle.")
     typed = [*leads, *workers, *assistants]
     hinted = [r for r in wake if r not in typed and not is_conversation_locked(conn, config, r.conversation_id)]
     for line in map_wake_to_lines(hinted):
@@ -539,8 +555,9 @@ def print_wake_lines(
 
 def wake_typed_recipients(
     conn: sqlite3.Connection, config: Config, sender: Party, message_id: int, recipients: list[Recipient]
-) -> tuple[list[Recipient], list[Recipient], list[Recipient]]:
-    """Runs after the commit: what is not typed still waits for the recipient's next hook."""
+) -> tuple[list[Recipient], list[Recipient], list[Recipient], list[Recipient]]:
+    """Runs after the commit: what is not typed still waits for the recipient's next hook. Last come the typed
+    recipients whose batch holds it."""
     workers = find_worker_recipients(conn, config, sender, recipients)
     assistants = [r for r in find_assistant_recipients(conn, config, sender, recipients) if r not in workers]
     leads = [
@@ -552,8 +569,22 @@ def wake_typed_recipients(
         post_type = LEAD_TO_WORKER if workers else TO_ASSISTANT if assistants else TO_LEAD
         with transaction(conn):
             conn.execute("UPDATE messages SET post_type = ? WHERE id = ?", (post_type, message_id))
-        spawn_typed_delivery(message_id, typed)
-    return leads, workers, assistants
+    return leads, workers, assistants, spawn_when_ripe(conn, config, message_id, typed)
+
+
+def spawn_when_ripe(
+    conn: sqlite3.Connection, config: Config, message_id: int, recipients: list[Recipient]
+) -> list[Recipient]:
+    """Starts a typer for each recipient whose batch is ripe, of its oldest waiting message: that turn's hooks bring
+    the rest after it, in order. Returns the others, whose batch holds it."""
+    held: list[Recipient] = []
+    for recipient in recipients:
+        if not is_batch_ripe(conn, config, recipient.conversation_id, now_ms()):
+            held.append(recipient)
+            continue
+        oldest = find_oldest_typable(conn, recipient.conversation_id) if config.batch_age_min else None
+        spawn_typed_delivery(oldest or message_id, [recipient])
+    return held
 
 
 def find_worker_recipients(

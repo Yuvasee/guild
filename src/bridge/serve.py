@@ -81,6 +81,7 @@ from bridge.feed import (
     TAB_NOT_FOUND,
     StuckDelivery,
     UndeliveredTab,
+    batch_grace_ms,
     dismiss_undelivered_answer,
     find_stuck_deliveries,
     mark_answer_opened,
@@ -89,12 +90,12 @@ from bridge.feed import (
     release_dead_typing_claims,
     reply_on_answer,
     reply_on_card,
-    resolve_tab,
     send_from_user,
     spawn_queued_retries,
     spawn_typed_delivery,
     take_delivery_retries,
     take_new_undelivered_tabs,
+    take_ripe_batches,
     tell_assistant_of_stuck,
     tell_of_undelivered_tab,
 )
@@ -179,10 +180,9 @@ from bridge.reviews import (
 )
 from bridge.rewake_marks import prune_rewake_marks
 from bridge.shadow_filter import EVERY_S as SHADOW_EVERY_S
-from bridge.shadow_filter import LIVE_EVERY_S as LIVE_FILTER_EVERY_S
 from bridge.shadow_filter import ask_model as ask_shadow_model
 from bridge.shadow_filter import find_start_id as find_shadow_start_id
-from bridge.shadow_filter import run_shadow_tick, take_due_wakes
+from bridge.shadow_filter import run_shadow_tick
 from bridge.signals import SessionRefs, find_signals, map_enrichment_to_status, map_signal_to_dict
 from bridge.stall_guard import tell_of_stalls
 from bridge.status_watchers import alert_watchers, read_watchers
@@ -279,6 +279,18 @@ def serve(config: Config, port: int) -> None:
     server = ThreadingHTTPServer(("127.0.0.1", port), handler)
     print(f"bridge dashboard on http://127.0.0.1:{port}/", flush=True)
     server.serve_forever()
+
+
+def wake_ripe_batches(ripe: list[tuple[int, Recipient]]) -> None:
+    """One tab's failed wake, as when no process can be spawned, must not end maintenance: its batch is still ripe
+    and unwanted on the next round, which tries again."""
+    for message_id, recipient in ripe:
+        try:
+            if recipient.pid:
+                write_hint(recipient.pid, HINT_SENT)
+            spawn_typed_delivery(message_id, [recipient])
+        except OSError:
+            log_error("batch wake", traceback.format_exc())
 
 
 POLL_FAILING = (
@@ -666,35 +678,24 @@ class DashboardState:
             self._rest("notify_urgent_forever", NOTIFY_EVERY_S)
 
     def shadow_filter_forever(self) -> None:
-        """Its own thread: a slow or failing model call holds up nothing else. Live, it also starts the delivery of
-        each message it lets through, and of held ones whose hold ran out."""
+        """Its own thread: a slow or failing model call holds up nothing else. It only logs: batches hold wakes now."""
         url, key_file = self.config.shadow_filter_url, self.config.shadow_filter_key_file
-        live = self.config.shadow_filter_live
+        logging_only = replace(self.config, shadow_filter_live=False)
         after: int | None = None
         while True:
             try:
                 with self._connection() as conn:
-
-                    def wake(message_id: int, conversation_id: str, handle: str) -> None:
-                        recipient = resolve_tab(conn, conversation_id, handle)
-                        if recipient.pid:
-                            write_hint(recipient.pid, HINT_SENT)
-                        spawn_typed_delivery(message_id, [recipient])
-
                     if after is None:
-                        after = find_shadow_start_id(conn, self.config, now_ms())
+                        after = find_shadow_start_id(conn, logging_only, now_ms())
                     after = run_shadow_tick(
-                        conn, self.config, after, now_ms(), lambda state: ask_shadow_model(url, key_file, state), wake
+                        conn, logging_only, after, now_ms(), lambda state: ask_shadow_model(url, key_file, state)
                     )
-                    if live:
-                        for message_id, conversation_id, handle in take_due_wakes(conn, self.config, now_ms()):
-                            wake(message_id, conversation_id, handle)
             except Exception as exc:
                 # Any failure: an escaped exception would end the filter until restart. The log says how far it got.
                 after = None
                 print(f"shadow filter failed: {exc}", flush=True)
                 log_error("shadow filter", traceback.format_exc())
-            self._rest("shadow_filter_forever", LIVE_FILTER_EVERY_S if live else SHADOW_EVERY_S)
+            self._rest("shadow_filter_forever", SHADOW_EVERY_S)
 
     def start_queued_workers_forever(self) -> None:
         """Workers queued by the laptop cap start, oldest first, as slots free; the lead that asked is told."""
@@ -883,9 +884,10 @@ class DashboardState:
                     dead = find_dead_instances(conn)
                     with transaction(conn):
                         end_instances(conn, dead, now_ms())
-                        flag_overdue(conn, now_ms())
+                        flag_overdue(conn, now_ms(), batch_grace_ms(self.config))
                         release_dead_typing_claims(conn, now_ms())
                         retries = take_delivery_retries(conn, now_ms())
+                        ripe = take_ripe_batches(conn, self.config, now_ms())
                         undelivered = take_new_undelivered_tabs(conn, self.config, now_ms(), self._wake.counted_from())
                         stuck = find_stuck_deliveries(conn, now_ms())
                     sync_claims_flag(conn)
@@ -914,6 +916,7 @@ class DashboardState:
                     self._alert_watchers(conn)
                 for message_id, recipient in retries:
                     spawn_typed_delivery(message_id, [recipient])
+                wake_ripe_batches(ripe)
                 spawn_queued_retries()
                 prune_typer_locks()
                 prune_rewake_marks()

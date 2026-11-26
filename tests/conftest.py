@@ -221,8 +221,10 @@ def bridge_env(tmp_path: Path) -> BridgeEnv:
         (stub_bin / name).write_text("#!/bin/sh\nexit 1\n")
         (stub_bin / name).chmod(0o755)
     config = tmp_path / "config.toml"
+    # Each message wakes its tab at once, as before batching; the batch tests set their own.
     config.write_text(
         f'issue_prefixes = ["ABC"]\nagtermctl = "{stub}"\nissue_url = "https://tracker.example/issue/{{key}}"\n'
+        "batch_age_min = 0\n"
     )
     # A Mac worker starts only in a folder Claude Code trusts: the tests' folders are, in a config of their own.
     claude_home = tmp_path / "claude-home"

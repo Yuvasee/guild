@@ -89,7 +89,7 @@ options:
 message other sessions by handle (comma-separated)
 
 ```text
-usage: bridge send [-h] [--request] [--respond-within RESPOND_WITHIN] to text
+usage: bridge send [-h] [--request] [--respond-within RESPOND_WITHIN] [--now] to text
 
 positional arguments:
   to                    handle[,handle…]
@@ -99,6 +99,8 @@ options:
   -h, --help            show this help message and exit
   --request             expects a response (ack/reply/done/decline)
   --respond-within RESPOND_WITHIN
+  --now                 wake an idle recipient at once instead of with its next batch: urgent only
+                        (a prod alarm, or the user said so)
 ```
 
 ### bridge reply
@@ -106,7 +108,7 @@ options:
 reply to a message
 
 ```text
-usage: bridge reply [-h] [--done] id text
+usage: bridge reply [-h] [--done] [--now] id text
 
 positional arguments:
   id
@@ -115,6 +117,8 @@ positional arguments:
 options:
   -h, --help  show this help message and exit
   --done      also close the request
+  --now       wake an idle recipient at once instead of with its next batch: urgent only (a prod
+              alarm, or the user said so)
 ```
 
 ### bridge ack
@@ -247,7 +251,7 @@ the team board: post to everyone (no TEXT: read recent posts)
 
 ```text
 usage: bridge board [-h] [--topic TOPIC] [--type {heads-up,question,report,handoff}]
-                    [--thread THREAD] [--link LINK]
+                    [--thread THREAD] [--link LINK] [--now]
                     [text]
 
 positional arguments:
@@ -260,6 +264,8 @@ options:
                         what kind of post this is
   --thread THREAD       an issue or PR id; posts with the same id form a thread
   --link LINK           the PR, issue or doc this post points to
+  --now                 wake an idle recipient at once instead of with its next batch: urgent only
+                        (a prod alarm, or the user said so)
 ```
 
 </details>
@@ -1406,7 +1412,7 @@ options:
 
 ### guild urgent
 
-questions marked urgent, newest first, to audit against the criteria
+questions marked urgent and messages sent --now, newest first, to audit against the criteria
 
 ```text
 usage: guild urgent [-h] [--days DAYS]

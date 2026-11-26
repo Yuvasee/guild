@@ -411,6 +411,7 @@ def post_to_board(
     post_type: str | None = None,
     thread_key: str | None = None,
     link: str | None = None,
+    goes_now: bool = False,
 ) -> SendResult:
     """A post everyone can read; it reaches the sessions it mentions or whose PRs and issues it names."""
     if post_type is not None and post_type not in POST_TYPES:
@@ -429,7 +430,7 @@ def post_to_board(
             "SELECT thread_id FROM messages WHERE thread_key = ? AND board = 1 ORDER BY id LIMIT 1", (thread_key,)
         ).fetchone()
         thread_id = int(root["thread_id"]) if root else None
-    result = send_message(conn, sender, recipients, "info", text, at_ms, thread_id=thread_id)
+    result = send_message(conn, sender, recipients, "info", text, at_ms, thread_id=thread_id, goes_now=goes_now)
     conn.execute(
         "UPDATE messages SET board = 1, topic = ?, post_type = ?, thread_key = ?, link = ? WHERE id = ?",
         (topic, post_type, thread_key, link, result.message_id),
@@ -657,13 +658,81 @@ def retry_when_locked[T](what: str, call: Callable[[], T], delays: tuple[float, 
         raise StillLockedError(what) from exc
 
 
+_WAITING_SQL = """m.cancelled_at IS NULL AND r.acked_at IS NULL AND r.offered_at IS NULL AND r.done_at IS NULL
+          AND r.declined_at IS NULL"""
+_TYPED_HERE_SQL = f"""EXISTS (SELECT 1 FROM instances i
+          WHERE i.conversation_id = r.conversation_id AND i.ended_at IS NULL AND {TYPED_MESSAGE_SQL})"""
+
+
+def batch_grace_ms(config: Config) -> int:
+    """The longest a message bridge would type waits for its tab's batch."""
+    return int(config.batch_age_min * 60_000)
+
+
+def is_batch_ripe(conn: sqlite3.Connection, config: Config, conversation_id: str, at_ms: int) -> bool:
+    """Whether bridge may wake this idle tab or type into it: batch_count messages it would type wait there, the
+    oldest waited batch_age_min, or one goes now. Read from the waiting rows alone, so nothing stored can disagree."""
+    if not config.batch_age_min:
+        return True
+    row = conn.execute(
+        f"""
+        SELECT count(*) AS waiting, min(m.created_at) AS oldest,
+               max(m.goes_now OR m.post_type IN ('{BLOCKED_TAB}', '{TURN_CUT}')) AS now
+        FROM message_recipients r JOIN messages m ON m.id = r.message_id
+        WHERE r.conversation_id = ? AND {_WAITING_SQL} AND {_TYPED_HERE_SQL}
+        """,
+        (conversation_id,),
+    ).fetchone()
+    return bool(row["waiting"]) and (
+        row["waiting"] >= config.batch_count or row["oldest"] <= at_ms - batch_grace_ms(config) or bool(row["now"])
+    )
+
+
+def find_oldest_typable(conn: sqlite3.Connection, conversation_id: str) -> int | None:
+    row = conn.execute(
+        f"""
+        SELECT r.message_id FROM message_recipients r JOIN messages m ON m.id = r.message_id
+        WHERE r.conversation_id = ? AND {_WAITING_SQL} AND {_TYPED_HERE_SQL} ORDER BY m.id LIMIT 1
+        """,
+        (conversation_id,),
+    ).fetchone()
+    return None if row is None else int(row[0])
+
+
+def take_ripe_batches(conn: sqlite3.Connection, config: Config, at_ms: int) -> list[tuple[int, Recipient]]:
+    """Tabs whose batch turned ripe with no send to start it, as when its oldest waited batch_age_min: each with its
+    oldest waiting message, whose typer and wake bring it, and whose turn's hooks bring the rest. Only a batch none of
+    whose mail had a typer yet, and none being typed: from its first typer on, the retry pass owns it."""
+    if not config.batch_age_min:
+        return []
+    oldest: dict[str, tuple[int, str]] = {}
+    for row in conn.execute(
+        f"""
+        SELECT r.conversation_id, r.message_id, r.handle
+        FROM message_recipients r JOIN messages m ON m.id = r.message_id
+        WHERE {_WAITING_SQL} AND {_TYPED_HERE_SQL}
+          AND NOT EXISTS (
+              SELECT 1 FROM message_recipients w JOIN messages wm ON wm.id = w.message_id
+              WHERE w.conversation_id = r.conversation_id
+                AND (w.typing_started_at IS NOT NULL
+                     OR (w.typing_wanted_at IS NOT NULL AND w.acked_at IS NULL AND w.offered_at IS NULL
+                         AND w.done_at IS NULL AND w.declined_at IS NULL AND wm.cancelled_at IS NULL)))
+        ORDER BY m.id
+        """
+    ):
+        oldest.setdefault(str(row["conversation_id"]), (int(row["message_id"]), str(row["handle"])))
+    return [
+        (message_id, resolve_tab(conn, conversation_id, handle))
+        for conversation_id, (message_id, handle) in oldest.items()
+        if is_batch_ripe(conn, config, conversation_id, at_ms)
+    ]
+
+
 def _find_typable_row(
     conn: sqlite3.Connection, config: Config, message_id: int, conversation_id: str
 ) -> sqlite3.Row | None:
-    from bridge.shadow_filter import is_wake_held  # it loads the HTTP client, which hooks never use
-
-    if is_wake_held(conn, config, message_id, conversation_id, now_ms()):
-        # The live filter starts its delivery once it lets it through.
+    if not is_batch_ripe(conn, config, conversation_id, now_ms()):
+        # Its wake waits for the batch: the send that fills it, or serve's maintenance once the oldest is old enough.
         return None
     # Whoever spawned this decided it is typed; the undelivered alert counts only such rows.
     conn.execute(

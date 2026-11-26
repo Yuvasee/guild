@@ -123,6 +123,7 @@ def send_message(
     respond_within_s: int | None = None,
     reply_to: int | None = None,
     thread_id: int | None = None,
+    goes_now: bool = False,
 ) -> SendResult:
     if not body.strip():
         raise MessageStateError("empty message")
@@ -150,10 +151,11 @@ def send_message(
     respond_by = at_ms + respond_within_s * 1000 if kind == "request" and respond_within_s else None
     cursor = conn.execute(
         """
-        INSERT INTO messages (created_at, from_conversation, from_handle, kind, thread_id, reply_to, body, respond_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO messages (created_at, from_conversation, from_handle, kind, thread_id, reply_to, body, respond_by,
+                              goes_now)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (at_ms, sender.conversation_id, sender.handle, kind, thread_id, reply_to, body, respond_by),
+        (at_ms, sender.conversation_id, sender.handle, kind, thread_id, reply_to, body, respond_by, int(goes_now)),
     )
     message_id = int(cursor.lastrowid or 0)
     if reply_to is not None:
@@ -272,19 +274,20 @@ def resolve_settled_overdue(conn: sqlite3.Connection, message_id: int, at_ms: in
     )
 
 
-def flag_overdue(conn: sqlite3.Connection, at_ms: int) -> int:
-    """Creates one user item per request whose respond-by passed with a recipient that never responded."""
+def flag_overdue(conn: sqlite3.Connection, at_ms: int, grace_ms: int = 0) -> int:
+    """Creates one user item per request whose respond-by passed grace_ms ago with a recipient that never responded:
+    with batches, the longest an idle tab's wake can wait for its batch (batch_grace_ms)."""
     rows = conn.execute(
         """
         SELECT m.id, m.from_conversation, m.from_handle, m.body, m.respond_by,
                group_concat(r.handle, ', ') AS silent
         FROM messages m JOIN message_recipients r ON r.message_id = m.id
-        WHERE m.kind = 'request' AND m.cancelled_at IS NULL AND m.respond_by < ?
+        WHERE m.kind = 'request' AND m.cancelled_at IS NULL AND m.respond_by + ? < ?
           AND r.acked_at IS NULL AND r.done_at IS NULL AND r.declined_at IS NULL
           AND NOT EXISTS (SELECT 1 FROM user_items u WHERE u.message_id = m.id AND u.source = 'overdue')
         GROUP BY m.id
         """,
-        (at_ms,),
+        (grace_ms, at_ms),
     ).fetchall()
     for row in rows:
         minutes = (at_ms - int(row["respond_by"])) // 60_000

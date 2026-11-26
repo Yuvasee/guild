@@ -29,7 +29,7 @@ from bridge.shadow_filter import (
 )
 
 NOW = 1_800_000_000_000
-CONFIG = Config(assistant_handle="aide", shadow_filter=True, shadow_filter_threshold=0.2)
+CONFIG = Config(assistant_handle="aide", shadow_filter=True, shadow_filter_threshold=0.2, batch_age_min=0)
 FAKE_KEY = "fake-key-0123456789"
 WORKER = Party("conv-worker", "fix-login")
 
@@ -488,7 +488,6 @@ def test_live_a_batched_message_is_not_typed_then_comes_with_the_next_message_th
 
     after = run_shadow_tick(conn, LIVE, 0, NOW, FakeModel(0.01), wakes)
 
-    assert deliver_typed(conn, LIVE, deployed, "conv-ana") is None
     assert _recipient_row(conn, deployed) == (None, NOW, None)
     assert wakes.calls == []
     failing = _send(conn, "CI fails on main", at=NOW + 1000)

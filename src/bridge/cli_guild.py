@@ -39,7 +39,7 @@ from bridge.capacity import (
     record_owner_on,
 )
 from bridge.cli_asks import add_ask_commands, map_local_time_arg_to_ms
-from bridge.cli_board import map_wake_to_lines, nudge_recipients
+from bridge.cli_board import map_wake_to_lines, nudge_recipients, spawn_when_ripe
 from bridge.colleague_comments import (
     list_open_calls,
     map_arg_to_comment_key,
@@ -63,7 +63,7 @@ from bridge.dream import (
     spawn_night,
 )
 from bridge.errors import UsageError
-from bridge.feed import answer_post, spawn_typed_delivery
+from bridge.feed import answer_post
 from bridge.folder_trust import ensure_worker_folder_trusted
 from bridge.host_workers import (
     HOST_KIND_PREFIX,
@@ -458,7 +458,9 @@ def build_parser(config: Config) -> argparse.ArgumentParser:
     p = priority_sub.add_parser("show", help="the list as the page ranks by it")
     p.set_defaults(func=cmd_priority_show)
 
-    p = sub.add_parser("urgent", help="questions marked urgent, newest first, to audit against the criteria")
+    p = sub.add_parser(
+        "urgent", help="questions marked urgent and messages sent --now, newest first, to audit against the criteria"
+    )
     p.add_argument("--days", type=int, default=14)
     p.set_defaults(func=cmd_urgent)
 
@@ -1394,7 +1396,7 @@ def cmd_answer(args: argparse.Namespace, conn: sqlite3.Connection, config: Confi
     except MessageStateError as exc:
         raise UsageError(str(exc)) from exc
     nudge_recipients(result.recipients)
-    spawn_typed_delivery(result.message_id, result.recipients)
+    spawn_when_ripe(conn, config, result.message_id, result.recipients)
     print(f"answered #{args.id}; typing it into {', '.join(r.handle for r in result.recipients) or 'nobody'}")
     # A native peer message wakes the tab even if typing cannot get in; the answer also waits in its inbox.
     for line in map_wake_to_lines(result.recipients):
@@ -1709,8 +1711,20 @@ def cmd_urgent(args: argparse.Namespace, conn: sqlite3.Connection, config: Confi
         (now_ms() - int(args.days) * 86_400_000,),
     ).fetchall()
     shown = [row for row in rows if not is_conversation_locked(conn, config, str(row["from_conversation"]))]
-    if not shown:
-        print(f"no urgent questions in the last {args.days} days")
+    sent_now = [
+        row
+        for row in conn.execute(
+            """
+            SELECT m.id, m.created_at, m.from_conversation, m.from_handle, m.body,
+                   (SELECT group_concat(handle, ', ') FROM message_recipients WHERE message_id = m.id) AS recipients
+            FROM messages m WHERE m.goes_now = 1 AND m.created_at > ? ORDER BY m.created_at DESC
+            """,
+            (now_ms() - int(args.days) * 86_400_000,),
+        )
+        if not is_conversation_locked(conn, config, str(row["from_conversation"]))
+    ]
+    if not shown and not sent_now:
+        print(f"no urgent questions or messages sent --now in the last {args.days} days")
     for row in shown:
         stamp = time.strftime("%m-%d %H:%M", time.localtime(int(row["created_at"]) / 1000))
         closed = f"answered: {row['answer']}" if row["answer"] else "closed" if row["resolved_at"] else "open"
@@ -1718,6 +1732,10 @@ def cmd_urgent(args: argparse.Namespace, conn: sqlite3.Connection, config: Confi
         print(f"#{row['id']} {stamp} {row['from_handle']} ({row['kind']}, {closed}, {notified})\n  {row['text']}")
         if row["body"]:
             print("  " + str(row["body"]).replace("\n", "\n  "))
+    for row in sent_now:
+        stamp = time.strftime("%m-%d %H:%M", time.localtime(int(row["created_at"]) / 1000))
+        print(f"message #{row['id']} {stamp} {row['from_handle']} → {row['recipients'] or 'nobody'} (sent --now)")
+        print("  " + str(row["body"]).replace("\n", "\n  "))
     return 0
 
 

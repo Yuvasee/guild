@@ -19,12 +19,11 @@ from bridge.compaction import is_context_full
 from bridge.config import Config, db_path, load_config
 from bridge.db import connect, transaction
 from bridge.errlog import log_error
-from bridge.feed import TYPED_MESSAGE_SQL, release_dead_typing_claims
+from bridge.feed import TYPED_MESSAGE_SQL, is_batch_ripe, release_dead_typing_claims
 from bridge.inject import Part, add_parts, pack_parts, read_later_parts, save_later_parts, take_later_parts
 from bridge.leads import is_conversation_locked, is_surface_locked
 from bridge.procinfo import process_start_ms
 from bridge.registry import make_instance_id, record_activity
-from bridge.shadow_filter import is_wake_held
 
 WAKE = 2
 UNHEARD = 3
@@ -120,14 +119,15 @@ def _has_wakeful_mail(
     conn: sqlite3.Connection, config: Config, conversation_id: str, instance_id: str, at_ms: int
 ) -> bool:
     """Mail that would be typed into the tab; anything else waits for the session's own next turn, as it always did."""
-    rows = conn.execute(
+    row = conn.execute(
         f"""
-        SELECT r.message_id FROM message_recipients r JOIN messages m ON m.id = r.message_id
+        SELECT 1 FROM message_recipients r JOIN messages m ON m.id = r.message_id
         JOIN instances i ON i.instance_id = ?
         WHERE r.conversation_id = ? AND r.acked_at IS NULL AND r.offered_at IS NULL
           AND r.done_at IS NULL AND r.declined_at IS NULL AND m.cancelled_at IS NULL
           AND {TYPED_MESSAGE_SQL}
+        LIMIT 1
         """,
         (instance_id, conversation_id),
-    ).fetchall()
-    return any(not is_wake_held(conn, config, int(row[0]), conversation_id, at_ms) for row in rows)
+    ).fetchone()
+    return row is not None and is_batch_ripe(conn, config, conversation_id, at_ms)

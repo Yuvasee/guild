@@ -650,21 +650,22 @@ def test_a_typer_waits_out_a_running_turn_and_leaves_its_end_to_the_waiter(
     assert fake.typed == []
 
 
-def test_live_the_waiter_does_not_wake_a_lead_for_mail_the_filter_holds(
+def test_the_waiter_wakes_a_lead_only_once_its_mail_makes_a_batch(
     bridge_env: BridgeEnv, spawn_process: SpawnProcess
 ) -> None:
     team = Team(bridge_env, spawn_process)
     team.enroll()
     message_id = _overdue_message_to(bridge_env, "alex", team.b)
-    live = Config(shadow_filter=True, shadow_filter_live=True)
+    batched = Config(batch_count=10, batch_age_min=5)
 
     with bridge_env.connect() as conn, mock.patch.dict(os.environ, bridge_env.env):
-        conn.execute("UPDATE messages SET created_at = ? WHERE id = ?", (int(time.time() * 1000), message_id))
+        now = int(time.time() * 1000)
+        conn.execute("UPDATE messages SET created_at = ? WHERE id = ?", (now - 4 * 60_000, message_id))
         held_out = io.StringIO()
-        held = write_rewake(conn, live, team.a, time.time_ns(), held_out)
-        conn.execute("UPDATE message_recipients SET filter_passed_at = 1 WHERE message_id = ?", (message_id,))
-        passed_out = io.StringIO()
-        passed = write_rewake(conn, live, team.a, time.time_ns(), passed_out)
+        held = write_rewake(conn, batched, team.a, time.time_ns(), held_out)
+        conn.execute("UPDATE messages SET created_at = ? WHERE id = ?", (now - 5 * 60_000, message_id))
+        ripe_out = io.StringIO()
+        ripe = write_rewake(conn, batched, team.a, time.time_ns(), ripe_out)
 
     assert (held, held_out.getvalue()) == (False, "")
-    assert passed and f"#{message_id}" in passed_out.getvalue()
+    assert ripe and f"#{message_id}" in ripe_out.getvalue()

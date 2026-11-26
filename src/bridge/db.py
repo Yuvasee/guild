@@ -967,6 +967,10 @@ MIGRATIONS: tuple[str, ...] = (
     """
     ALTER TABLE conversations ADD COLUMN cut_told_at INTEGER;
     """,
+    # Sent --now: it wakes its idle recipient at once instead of waiting for a batch.
+    """
+    ALTER TABLE messages ADD COLUMN goes_now INTEGER NOT NULL DEFAULT 0;
+    """,
 )
 
 HOOK_BUSY_TIMEOUT_MS = 200

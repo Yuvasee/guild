@@ -204,6 +204,11 @@ class Config:
     """Folder of this install's own texts (house rules), one <slot>.md per named slot; empty uses the generic texts."""
     people_dir: str = ""
     """Local folder whose people.toml holds the keys about people (PEOPLE_KEYS); set, config.toml may not hold them."""
+    batch_count: int = 10
+    """An idle tab is woken or typed into once this many messages bridge would type wait for it, the oldest waited
+    batch_age_min, or one goes now; a busy tab's hooks deliver as they come."""
+    batch_age_min: float = 5.0
+    """The longest such a message waits for its batch; 0 wakes for each message at once."""
     shadow_filter: bool = False
     """Judges each message to a team lead after delivery, as a wake-up filter would, and only logs the verdict."""
     shadow_filter_url: str = "https://api.typesafe.ai/v1/systemone"
@@ -212,8 +217,7 @@ class Config:
     shadow_filter_key_file: str = ""
     """File holding the classifier's API key (~ allowed); read for each call, never copied; doc_screen uses it too."""
     shadow_filter_live: bool = False
-    """The filter decides before delivery: a message it batches does not wake its lead, but waits for the lead's next
-    message that goes now, or for shadow_filter_hold_min. Needs shadow_filter."""
+    """No longer holds anything: batch_count and batch_age_min hold wakes now, and the filter only logs."""
     shadow_filter_hold_min: int = 30
     """The longest a batched message waits before it wakes its lead anyway."""
     shadow_filter_refusal_phrases: tuple[str, ...] = ("Live now:", "is refused unless", "now refuses")
@@ -405,6 +409,8 @@ def map_toml_to_config(raw: dict[str, object]) -> Config:
         overlay_dir=_str(raw, "overlay_dir", defaults.overlay_dir),
         host_sync_dirs=_str_list(raw, "host_sync_dirs", defaults.host_sync_dirs),
         people_dir=_str(raw, "people_dir", defaults.people_dir),
+        batch_count=_positive(raw, "batch_count", defaults.batch_count),
+        batch_age_min=_non_negative(raw, "batch_age_min", defaults.batch_age_min),
         shadow_filter=_bool(raw, "shadow_filter", defaults.shadow_filter),
         shadow_filter_url=_str(raw, "shadow_filter_url", defaults.shadow_filter_url),
         shadow_filter_threshold=_fraction(raw, "shadow_filter_threshold", defaults.shadow_filter_threshold),
