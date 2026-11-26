@@ -55,9 +55,11 @@ _PIPE_GLOBS = (
 )  # fmt: skip
 _HEAVY_GLOBS = ("*uv*sync*", "*docker*build*")
 """Heavy jobs the pipe globs miss; only the Mac's gate has them, since a host's own load is not the Mac's."""
+_CODEX_READ_GLOBS = ("*git*rebase*", "*git*reset*", "*git*checkout*", "*git*switch*", "*git*pull*")
+"""Moves of a worktree's files, refused while Codex reads it; only the Mac's gate has them, as Codex runs there."""
 _PYTHON_GLOBS = (
     *_LABEL_GLOBS, *_PR_ISSUE_GLOBS, *_PR_ANSWER_GLOBS, *_KILL_GLOBS, *_CLUSTER_GLOBS, *_LOGIN_PROBE_GLOBS,
-    *_ADMIN_GLOBS, *_PIPE_GLOBS, *_HEAVY_GLOBS,
+    *_ADMIN_GLOBS, *_PIPE_GLOBS, *_HEAVY_GLOBS, *_CODEX_READ_GLOBS,
 )  # fmt: skip
 # A publish to claude.ai, matched by the tool's own field so a command that names the tool does not start Python; not a
 # host glob, since gbridge sends every Artifact call to the Mac.
@@ -150,7 +152,7 @@ def list_guard_globs() -> list[str]:
     a label, open or edit a PR, comment on one, kill processes by name, reach a Kubernetes cluster, touch Claude's
     login, probe AWS permissions or use admin rights on GitHub."""
     # The host's gate matches a literal pipe, so a checker run without one is not sent to the Mac.
-    plain = [glob for glob in _PYTHON_GLOBS if glob not in _PIPE_GLOBS and glob not in _HEAVY_GLOBS]
+    plain = [g for g in _PYTHON_GLOBS if g not in (*_PIPE_GLOBS, *_HEAVY_GLOBS, *_CODEX_READ_GLOBS)]
     return [
         *(convert_trigger_to_glob(t) for t in DEFAULT_TRIGGERS),
         f"*{ROBOT}*",

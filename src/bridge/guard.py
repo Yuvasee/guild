@@ -81,7 +81,7 @@ _INERT_COMMANDS = frozenset(
      "realpath", "readlink", "stat", "du", "df", "mkdir", "touch", "cp", "mv", "rm", "ln", "chmod", "tee", "wait",
      "exit", "bridge", "gbridge"}
 )  # fmt: skip
-_GIT_VALUE_OPTIONS = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--attr-source"})
+GIT_VALUE_OPTIONS = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--attr-source"})
 # `git -c` keys that neither route a push nor run a program.
 _HARMLESS_CONFIG = ("user.", "color.", "advice.")
 SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
@@ -556,7 +556,7 @@ def _is_unplain_push(tokens: list[str]) -> bool:
     while args[i].startswith("-"):
         if args[i].startswith(("-c", "--config-env")) and not (args[i] == "-c" and _is_harmless_config(args[i + 1])):
             return True
-        i += 2 if args[i] in _GIT_VALUE_OPTIONS else 1
+        i += 2 if args[i] in GIT_VALUE_OPTIONS else 1
     push = _parse_push_args(args[i + 1 :])
     remote = push.positional[0] if push.positional else push.repo
     return remote is not None and bool(_URL_RE.match(remote))
@@ -637,7 +637,7 @@ def _read_switched_branch(tokens: list[str]) -> tuple[str | None, bool] | None:
         return None
     i = 1
     while i < len(tokens) and tokens[i].startswith("-"):
-        i += 2 if tokens[i] in _GIT_VALUE_OPTIONS else 1
+        i += 2 if tokens[i] in GIT_VALUE_OPTIONS else 1
     if i >= len(tokens) or tokens[i] not in ("checkout", "switch"):
         return None
     if i > 1:
@@ -710,7 +710,7 @@ def _is_branch_change(tokens: list[str]) -> bool:
     args = tokens[1:]
     i = 0
     while i < len(args) and args[i].startswith("-"):
-        i += 2 if args[i] in _GIT_VALUE_OPTIONS else 1
+        i += 2 if args[i] in GIT_VALUE_OPTIONS else 1
     if i >= len(args) or args[i] != "push":
         return False
     push = _parse_push_args(args[i + 1 :])
@@ -853,7 +853,7 @@ def _git_targets(
             unsure = unsure or _is_expanded(arg) or host_unsure
         elif arg.split("=", 1)[0] in _GIT_REPO_OPTIONS:
             unsure = True
-        i += 2 if arg in _GIT_VALUE_OPTIONS else 1
+        i += 2 if arg in GIT_VALUE_OPTIONS else 1
     if i >= len(args) or args[i] != "push":
         return [], False
     git = read_repo(directory)

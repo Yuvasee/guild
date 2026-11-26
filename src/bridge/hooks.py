@@ -31,6 +31,7 @@ from bridge.board import (
 )
 from bridge.claims import record_nudges, take_expired_claim_reminder
 from bridge.claude import read_session_file
+from bridge.codex_reads import find_codex_read_refusal
 from bridge.compaction import (
     COMPACT_AT_WINDOW_SHARE,
     PHASE_COMPACTING,
@@ -1218,6 +1219,8 @@ def _check_pre_tool_use(
         return _deny(rule)
     if unnamed_cluster := find_unnamed_cluster_refusal(command):
         return _deny(unnamed_cluster)
+    if host_checkout is None and (codex := find_codex_read_refusal(command, _str(payload, "cwd") or os.getcwd())):
+        return _deny(codex)
     titles = find_prefixed_titles(command)
     if titles:
         return _deny(map_titles_to_denial(titles))
