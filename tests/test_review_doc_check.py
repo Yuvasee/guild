@@ -718,6 +718,24 @@ def test_passed_in_the_checks_line_needs_a_last_round_explained_right_with_every
     assert "round 2 is not recorded as explained right" in unrecorded
 
 
+def test_round_four_and_above_need_a_recorded_allowance_with_its_reason(tmp_path: Path) -> None:
+    page = make_doc()
+    for number in (1, 2, 3):
+        done = run_standalone(tmp_path, page, "--no-rounds", "--reader-round", str(number), "--explained", "wrong")
+        assert done.returncode == 0
+    refused = run_standalone(tmp_path, page, "--no-rounds", "--reader-round", "4", "--explained", "right")
+    assert refused.returncode == 1 and "round 4 is over the 3 readers" in refused.stderr
+    no_reason = run_standalone(tmp_path, page, "--no-rounds", "--allow-rounds", "5")
+    assert no_reason.returncode == 2 and "--allow-rounds needs --reason" in no_reason.stderr
+    allowed = run_standalone(tmp_path, page, "--no-rounds", "--allow-rounds", "5", "--reason", "new top section")
+    assert allowed.stdout.strip() == "allowed reader rounds up to 5"
+    assert run_standalone(tmp_path, page, "--no-rounds", "--reader-round", "4", "--explained", "right").returncode == 0
+    assert run_standalone(tmp_path, page, "--no-rounds", "--reader-round", "6", "--explained", "right").returncode == 1
+    lines = (tmp_path / "doc.html.reader-rounds").read_text().splitlines()
+    assert any('"reason": "new top section"' in line for line in lines)
+    assert read_reader_rounds(str(tmp_path / "doc.html"))[-1] == (4, [], "right")
+
+
 def test_registration_reads_the_rounds_beside_the_source_doc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("bridge.review_worktree.read_reader_rounds", read_reader_rounds)
     conn = setup_pr(tmp_path)

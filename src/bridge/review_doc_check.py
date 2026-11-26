@@ -992,6 +992,31 @@ def record_reader_round(doc: str, number: int, terms: list[str], explained: str)
         f.write(json.dumps({"round": number, "terms": terms, "explained": explained}) + "\n")
 
 
+FREE_ROUNDS = 3
+"""Rounds a doc may record without an allowance; more readers than this mean the doc's top needs rework."""
+
+
+def read_round_allowance(doc: str) -> int:
+    """The highest round recorded as allowed for this doc, FREE_ROUNDS when none."""
+    allowed = FREE_ROUNDS
+    try:
+        with open(doc + ROUNDS_SUFFIX, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return allowed
+    for line in lines:
+        try:
+            allowed = max(allowed, int(json.loads(line)["allow_rounds"]))
+        except (ValueError, KeyError, TypeError):
+            continue
+    return allowed
+
+
+def record_round_allowance(doc: str, up_to: int, reason: str) -> None:
+    with open(doc + ROUNDS_SUFFIX, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"allow_rounds": up_to, "reason": reason}) + "\n")
+
+
 _CLICK_TERM_RE = re.compile(r"<ins\b[^>]*>.*?</ins>", re.I | re.S)
 _TAG_RE = re.compile(r"<[^>]*>")
 
@@ -1481,14 +1506,31 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--reader-round", type=int, metavar="N", help="record first reader round N and exit")
     parser.add_argument("--term", action="append", default=[], help="a term that round flagged (repeat per term)")
     parser.add_argument(
+        "--allow-rounds", type=int, metavar="N", help="allow reader rounds up to N for this doc and exit"
+    )
+    parser.add_argument("--reason", default="", help="why more rounds are needed (with --allow-rounds)")
+    parser.add_argument(
         "--explained",
         choices=("right", "wrong"),
         help="whether that round's explain-back was right (with --reader-round)",
     )
     args = parser.parse_args(argv)
+    if args.allow_rounds is not None:
+        if not args.reason.strip():
+            parser.error("--allow-rounds needs --reason")
+        record_round_allowance(args.file, args.allow_rounds, args.reason)
+        print(f"allowed reader rounds up to {args.allow_rounds}")
+        return 0
     if args.reader_round is not None:
         if args.explained is None:
             parser.error("--reader-round needs --explained right|wrong")
+        if args.reader_round > read_round_allowance(args.file):
+            print(
+                f"round {args.reader_round} is over the {FREE_ROUNDS} readers a doc gets: rework the top, "
+                f"not more readers; if more are needed, run --allow-rounds {args.reader_round} --reason '...' first",
+                file=sys.stderr,
+            )
+            return 1
         record_reader_round(args.file, args.reader_round, args.term, args.explained)
         print(f"recorded round {args.reader_round}: {len(args.term)} flagged terms")
         return 0

@@ -32,7 +32,8 @@ the full version, so change it here first.
    the doc: `python3 ~/.claude/skills/bridge/review_doc_check.py <doc> --reader-round N --explained right|wrong --term T ...`
    (one `--term` per term it flagged, none when it flagged none). `guild review doc` accepts that line only when the
    last recorded round's explain-back is right and each of its flagged terms is now absent from the doc or wrapped as
-   a click term (`<ins title=...>`).
+   a click term (`<ins title=...>`). Round 4 and above are refused unless `--allow-rounds N --reason '...'` was
+   recorded for the doc first.
 
 ## The PR description
 
