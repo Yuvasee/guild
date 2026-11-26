@@ -1535,6 +1535,30 @@ def test_an_i_that_replaces_a_grey_suggestion_as_text_is_taken_back(tmp_path: Pa
     assert fake.boxes["S"] == ""
 
 
+def test_an_i_that_lands_as_text_before_a_fresh_box_shows_insert_is_taken_back_and_the_message_typed(
+    tmp_path: Path,
+) -> None:
+    class InsertNotShownYet(GreySuggestion):
+        """A fresh vim box's first frame names no mode, with a "Try" tip as grey text; INSERT shows right after."""
+
+        shown = False
+
+        def run(self, _: Config, args: list[str]) -> str | None:
+            self.shown = self.shown or args[:2] == ["session", "type"]
+            screen = super().run(_, args)
+            if args[:2] == ["session", "text"] and screen is not None and not self.shown:
+                return screen.replace("  -- INSERT --", "  \u23f8 manual mode on")
+            return screen
+
+    fake = InsertNotShownYet('Try "fix lint errors"')
+
+    result = _type(tmp_path, fake, wait_s=10, may_probe_box=lambda: True, vim=True)
+
+    assert result == "typed"
+    assert fake.typed[:2] == ["i", "\x7f"]
+    assert fake.submitted == ["hello"]
+
+
 def test_without_vim_the_same_footer_is_the_default_mode_and_gets_its_keys(tmp_path: Path) -> None:
     fake = VimNormal({"S": "."})
 

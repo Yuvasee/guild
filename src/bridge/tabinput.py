@@ -572,7 +572,8 @@ def _prove_typed(
 def _enter_vim_insert(config: Config, target: list[str], before: str, still_allowed: Callable[[], bool]) -> bool:
     """True once the footer shows INSERT over the box as it was: "i" in vim NORMAL does that (REPRODUCED on Claude
     Code 2.1.332 with a draft, a lone "." and an empty box). A tab still in default mode takes it as text, added to a
-    draft or replacing a grey suggestion, and it is taken back; either way the caller sends no more keys."""
+    draft or replacing a grey suggestion, and it is taken back; the caller then sends no more keys. So does a fresh
+    vim box whose first frame names no mode yet, but its footer shows INSERT once the key is taken back: True."""
     if run_agterm(config, ["session", "type", *target, VIM_INSERT_KEY]) is None:
         return False
     started = _Stopwatch()
@@ -585,11 +586,19 @@ def _enter_vim_insert(config: Config, target: list[str], before: str, still_allo
         after = _squash(draft)
         # A draft that already was "i" stays as it was when the key enters INSERT.
         if after != _squash(before) and (after == VIM_INSERT_KEY or _adds_key(_squash(before), after, VIM_INSERT_KEY)):
-            if run_agterm(config, ["session", "type", *target, BACKSPACE]) is not None:
-                # A suggestion the key replaced may come back or not.
-                back = {_squash(before), ""} if after == VIM_INSERT_KEY else {_squash(before)}
+            if run_agterm(config, ["session", "type", *target, BACKSPACE]) is None:
+                return False
+            # A suggestion the key replaced may come back or not.
+            back = {_squash(before), ""} if after == VIM_INSERT_KEY else {_squash(before)}
+            if (
                 _await_box(config, target, lambda now, back=back: now in back, lambda now, after=after: now == after)
-            return False
+                is None
+            ):
+                return False
+            # Claude Code 2.1.332 draws a fresh vim box's first frame with no mode, then INSERT (REPRODUCED).
+            now = _read_screen(config, target)
+            shown = map_screen_to_draft(now) if now is not None else None
+            return now is not None and shown is not None and _squash(shown) in back and map_screen_to_vim_insert(now)
         if draft != before:
             return False
         if map_screen_to_vim_insert(now):
