@@ -281,16 +281,16 @@ def serve(config: Config, port: int) -> None:
     server.serve_forever()
 
 
-def wake_ripe_batches(ripe: list[tuple[int, Recipient]]) -> None:
-    """One tab's failed wake, as when no process can be spawned, must not end maintenance: its batch is still ripe
-    and unwanted on the next round, which tries again."""
-    for message_id, recipient in ripe:
+def spawn_typers(typers: list[tuple[int, Recipient]], hint: bool = False) -> None:
+    """One tab's failed spawn, as when no process can be spawned, must not end maintenance: what it was for comes due
+    again on a later round."""
+    for message_id, recipient in typers:
         try:
-            if recipient.pid:
+            if hint and recipient.pid:
                 write_hint(recipient.pid, HINT_SENT)
             spawn_typed_delivery(message_id, [recipient])
         except OSError:
-            log_error("batch wake", traceback.format_exc())
+            log_error("typer spawn", traceback.format_exc())
 
 
 POLL_FAILING = (
@@ -914,9 +914,8 @@ class DashboardState:
                         if not show_notification(text):
                             self._outages.release(cause)
                     self._alert_watchers(conn)
-                for message_id, recipient in retries:
-                    spawn_typed_delivery(message_id, [recipient])
-                wake_ripe_batches(ripe)
+                spawn_typers(retries)
+                spawn_typers(ripe, hint=True)
                 spawn_queued_retries()
                 prune_typer_locks()
                 prune_rewake_marks()

@@ -57,6 +57,7 @@ from bridge.feed import (
     StillLockedError,
     claim_failure_log,
     deliver_typed,
+    find_oldest_typable,
     hold_typer_lock,
     queue_retry_without_db,
     record_failed_delivery,
@@ -675,6 +676,14 @@ def cmd_review_slack_read(args: argparse.Namespace, conn: sqlite3.Connection, co
 
 def cmd_deliver(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
     try:
+        if config.batch_age_min:
+            # Whatever spawned it, a batch is typed from its oldest message, and that turn's hooks bring the rest.
+            conversation_id = str(args.conversation_id)
+            args.message_id = retry_when_locked(
+                f"#{args.message_id} to {conversation_id}: find the oldest",
+                lambda: find_oldest_typable(conn, int(args.message_id), conversation_id),
+                LOCKED_PATIENT_DELAYS_S,
+            )
         with hold_typer_lock(int(args.message_id), str(args.conversation_id)) as only_typer:
             return _deliver_as_only_typer(args, conn, config) if only_typer else 0
     except StillLockedError:

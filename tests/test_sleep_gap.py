@@ -652,7 +652,7 @@ def test_a_delivery_queued_without_the_database_lets_go_of_its_typer_lock_first(
         mock.patch("bridge.cli.transaction", side_effect=locked),
         mock.patch("bridge.cli.queue_retry_without_db", queue),
     ):
-        code = cmd_deliver(args, mock.MagicMock(), Config())
+        code = cmd_deliver(args, mock.MagicMock(), Config(batch_age_min=0))
 
     assert code == 1
     assert lock_free_when_queued == [True]

@@ -43,7 +43,6 @@ from bridge.feed import (
     batch_grace_ms,
     build_decision_body,
     find_leads_to_wake,
-    find_oldest_typable,
     is_batch_ripe,
     map_arg_to_link,
     post_to_board,
@@ -575,15 +574,14 @@ def wake_typed_recipients(
 def spawn_when_ripe(
     conn: sqlite3.Connection, config: Config, message_id: int, recipients: list[Recipient]
 ) -> list[Recipient]:
-    """Starts a typer for each recipient whose batch is ripe, of its oldest waiting message: that turn's hooks bring
-    the rest after it, in order. Returns the others, whose batch holds it."""
+    """Starts a typer for each recipient whose batch is ripe; it types the tab's oldest waiting message first. Returns
+    the others, whose batch holds it."""
     held: list[Recipient] = []
     for recipient in recipients:
         if not is_batch_ripe(conn, config, recipient.conversation_id, now_ms()):
             held.append(recipient)
             continue
-        oldest = find_oldest_typable(conn, recipient.conversation_id) if config.batch_age_min else None
-        spawn_typed_delivery(oldest or message_id, [recipient])
+        spawn_typed_delivery(message_id, [recipient])
     return held
 
 

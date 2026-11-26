@@ -1,3 +1,4 @@
+import argparse
 import re
 import sqlite3
 from collections.abc import Generator
@@ -7,13 +8,22 @@ from unittest import mock
 import pytest
 
 from bridge.board import USER_CONVERSATION, Party, Recipient, flag_overdue, send_message, take_delivery
-from bridge.cli import build_parser
+from bridge.cli import build_parser, cmd_deliver
 from bridge.cli_board import print_wake_lines, spawn_when_ripe
-from bridge.config import Config
+from bridge.config import HIDDEN_NAME_MARKS, Config
 from bridge.db import connect
-from bridge.feed import BLOCKED_TAB, TURN_CUT, deliver_typed, is_batch_ripe, take_ripe_batches
+from bridge.feed import (
+    BLOCKED_TAB,
+    RELAYED_ANSWER,
+    TURN_CUT,
+    deliver_typed,
+    is_batch_ripe,
+    record_failed_delivery,
+    take_new_undelivered_tabs,
+    take_ripe_batches,
+)
 from bridge.rewake import _has_wakeful_mail  # pyright: ignore[reportPrivateUsage]
-from bridge.serve import wake_ripe_batches
+from bridge.serve import spawn_typers
 
 T = 1_800_000_000_000
 MIN = 60_000
@@ -52,33 +62,38 @@ def _wakes(conn: sqlite3.Connection, config: Config, at: int) -> bool:
     return _has_wakeful_mail(conn, config, "conv-ana", "4242@ana", at)
 
 
-def _starts_typer(conn: sqlite3.Connection, config: Config, message_id: int, at: int) -> tuple[list[int], bool]:
-    """The messages whose typer the send spawns, and whether this message's typer, past its own check, goes for it:
-    deliver_typed finds no agterm tab here and types nothing, but marks a message it went for."""
+def _spawned(conn: sqlite3.Connection, config: Config, message_id: int, at: int) -> list[int]:
     with (
         mock.patch("bridge.cli_board.spawn_typed_delivery") as spawn,
         mock.patch("bridge.cli_board.now_ms", return_value=at),
     ):
         spawn_when_ripe(conn, config, message_id, [ANA])
+    return [c.args[0] for c in spawn.call_args_list]
+
+
+def _typer_goes_for(conn: sqlite3.Connection, config: Config, message_id: int, at: int) -> list[int]:
+    """The messages this message's typer goes for, whoever spawned it: there is no agterm tab here, so it types
+    nothing, but it marks a message it went for."""
     with mock.patch("bridge.feed.now_ms", return_value=at):
-        deliver_typed(conn, config, message_id, "conv-ana")
-    wanted = conn.execute("SELECT typing_wanted_at FROM message_recipients WHERE message_id = ?", (message_id,))
-    return [c.args[0] for c in spawn.call_args_list], wanted.fetchone()[0] is not None
+        cmd_deliver(argparse.Namespace(message_id=message_id, conversation_id="conv-ana"), conn, config)
+    rows = conn.execute("SELECT message_id FROM message_recipients WHERE typing_wanted_at IS NOT NULL ORDER BY 1")
+    return [int(r[0]) for r in rows]
 
 
-def test_nine_waiting_messages_wake_nothing_and_the_tenth_starts_the_typer_of_the_first(
-    conn: sqlite3.Connection,
-) -> None:
+def test_nine_waiting_messages_wake_nothing_and_the_tenths_typer_types_the_first(conn: sqlite3.Connection) -> None:
+    """Whoever spawns the typer (a send, the dashboard, a retry), it types the batch from its oldest message."""
     sent = [_send(conn, T + i) for i in range(9)]
 
     assert not _wakes(conn, BATCHED, T + 10)
-    assert all(_starts_typer(conn, BATCHED, m, T + 10) == ([], False) for m in sent)
+    assert all(_spawned(conn, BATCHED, m, T + 10) == [] for m in sent)
+    assert all(_typer_goes_for(conn, BATCHED, m, T + 10) == [] for m in sent)
     assert take_ripe_batches(conn, BATCHED, T + 10) == []
 
     tenth = _send(conn, T + 10)
 
     assert _wakes(conn, BATCHED, T + 10)
-    assert _starts_typer(conn, BATCHED, tenth, T + 10) == ([sent[0]], True)
+    assert _spawned(conn, BATCHED, tenth, T + 10) == [tenth]
+    assert _typer_goes_for(conn, BATCHED, tenth, T + 10) == [sent[0]]
 
 
 def test_a_lone_message_is_woken_for_by_maintenance_at_five_minutes_and_only_once(conn: sqlite3.Connection) -> None:
@@ -89,10 +104,45 @@ def test_a_lone_message_is_woken_for_by_maintenance_at_five_minutes_and_only_onc
     [(woken, tab)] = take_ripe_batches(conn, BATCHED, T + 5 * MIN)
     assert (woken, tab.conversation_id) == (message, "conv-ana")
     assert _wakes(conn, BATCHED, T + 5 * MIN)
-    with mock.patch("bridge.feed.now_ms", return_value=T + 5 * MIN):
-        deliver_typed(conn, BATCHED, message, "conv-ana")
 
-    assert take_ripe_batches(conn, BATCHED, T + 5 * MIN + 30_000) == [], "its typer owns it now"
+    conn.execute("UPDATE message_recipients SET typing_started_at = ? WHERE message_id = ?", (T + 5 * MIN, message))
+    assert take_ripe_batches(conn, BATCHED, T + 5 * MIN + 30_000) == [], "its typer types it"
+    conn.execute("UPDATE message_recipients SET typing_started_at = NULL WHERE message_id = ?", (message,))
+    record_failed_delivery(conn, message, "conv-ana", T + 5 * MIN + 40_000)
+    assert take_ripe_batches(conn, BATCHED, T + 6 * MIN) == [], "the retry pass owns it"
+
+
+def test_a_typer_refused_by_a_lock_leaves_the_batch_to_maintenance_once_the_tab_is_unlocked(
+    conn: sqlite3.Connection,
+) -> None:
+    message = _send(conn, T)
+    conn.execute(
+        "INSERT INTO conversations (conversation_id, instance_id, first_seen_at, last_seen_at)"
+        " VALUES ('conv-ana', '4242@ana', 0, 0)"
+    )
+    conn.execute("UPDATE surfaces SET tab_name = ? WHERE surface = 's-ana'", (f"notes {HIDDEN_NAME_MARKS[0]}",))
+    with mock.patch("bridge.feed.now_ms", return_value=T + 5 * MIN):
+        assert deliver_typed(conn, BATCHED, message, "conv-ana") is None
+
+    assert take_ripe_batches(conn, BATCHED, T + 5 * MIN + 30_000) == [], "a locked tab is outside everything"
+    conn.execute("UPDATE surfaces SET tab_name = NULL WHERE surface = 's-ana'")
+    assert [m for m, _ in take_ripe_batches(conn, BATCHED, T + 6 * MIN)] == [message]
+
+
+def test_a_relayed_answer_a_typer_went_for_does_not_hold_back_a_workers_later_batch(conn: sqlite3.Connection) -> None:
+    conn.execute("INSERT INTO surfaces (surface, handle, updated_at) VALUES ('s-wk', 'fix-login', 0)")
+    conn.execute(
+        "INSERT INTO instances (instance_id, pid, proc_start_ms, conversation_id, surface, first_seen_at,"
+        " last_observed_at) VALUES ('77@wk', 77, 1, 'conv-worker', 's-wk', 0, 0)"
+    )
+    worker = Recipient("fix-login", "conv-worker", 77, "idle", None, False)
+    relayed = send_message(conn, Party("conv-ben", "ben"), [worker], "info", "the owner said: yes", T).message_id
+    conn.execute("UPDATE messages SET post_type = ? WHERE id = ?", (RELAYED_ANSWER, relayed))
+    with mock.patch("bridge.feed.now_ms", return_value=T):  # its typer ran before batching, which left it marked
+        assert deliver_typed(conn, Config(batch_age_min=0), relayed, "conv-worker") is None
+    owner = send_message(conn, OWNER, [worker], "info", "and ship it", T + 1000).message_id
+
+    assert [m for m, _ in take_ripe_batches(conn, BATCHED, T + 6 * MIN)] == [owner]
 
 
 def test_maintenance_wakes_a_batch_by_its_oldest_message(conn: sqlite3.Connection) -> None:
@@ -106,7 +156,7 @@ def test_a_now_message_wakes_at_once(conn: sqlite3.Connection) -> None:
     urgent = _send(conn, T + 1000, goes_now=True)
 
     assert _wakes(conn, BATCHED, T + 1000)
-    assert _starts_typer(conn, BATCHED, urgent, T + 1000)[1]
+    assert _spawned(conn, BATCHED, urgent, T + 1000) == [urgent]
 
 
 @pytest.mark.parametrize("post_type", [BLOCKED_TAB, TURN_CUT])
@@ -132,7 +182,8 @@ def test_batching_off_wakes_for_each_message(conn: sqlite3.Connection) -> None:
 
     assert take_ripe_batches(conn, unbatched, T + 10 * MIN) == [], "maintenance starts no typer of its own"
     assert _wakes(conn, unbatched, T)
-    assert _starts_typer(conn, unbatched, message, T) == ([message], True), "each send its own typer, as on main"
+    assert _spawned(conn, unbatched, message, T) == [message]
+    assert _typer_goes_for(conn, unbatched, message, T) == [message], "each message its own typer, as on main"
 
 
 def test_a_request_is_overdue_only_past_the_longest_batch_wait(conn: sqlite3.Connection) -> None:
@@ -140,6 +191,14 @@ def test_a_request_is_overdue_only_past_the_longest_batch_wait(conn: sqlite3.Con
 
     assert flag_overdue(conn, T + 6 * MIN, 5 * MIN) == 0
     assert flag_overdue(conn, T + 6 * MIN + 1, 5 * MIN) == 1
+
+
+def test_a_lead_is_told_of_as_undelivered_only_past_the_longest_batch_wait(conn: sqlite3.Connection) -> None:
+    message = _send(conn, T)
+    conn.execute("UPDATE message_recipients SET typing_wanted_at = ? WHERE message_id = ?", (T + 5 * MIN, message))
+
+    assert take_new_undelivered_tabs(conn, BATCHED, T + 10 * MIN - 1) == []
+    assert [t.oldest_message_id for t in take_new_undelivered_tabs(conn, BATCHED, T + 10 * MIN)] == [message]
 
 
 def test_the_sender_is_told_a_held_message_waits_for_the_batch(
@@ -165,12 +224,13 @@ def test_send_reply_and_board_take_now(command: str) -> None:
     assert build_parser(Config()).parse_args([*command.split(), "--now"]).now
 
 
-def test_one_tabs_failed_wake_does_not_stop_the_others() -> None:
+def test_one_tabs_failed_spawn_does_not_stop_the_others() -> None:
+    """serve's maintenance spawns its retries and its ripe batches this way."""
     with (
         mock.patch("bridge.serve.write_hint"),
         mock.patch("bridge.serve.spawn_typed_delivery", side_effect=[OSError("no processes"), None]) as spawn,
         mock.patch("bridge.serve.log_error"),
     ):
-        wake_ripe_batches([(1, ANA), (2, BEN)])
+        spawn_typers([(1, ANA), (2, BEN)], hint=True)
 
     assert [c.args[0] for c in spawn.call_args_list] == [1, 2]

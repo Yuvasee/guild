@@ -688,21 +688,25 @@ def is_batch_ripe(conn: sqlite3.Connection, config: Config, conversation_id: str
     )
 
 
-def find_oldest_typable(conn: sqlite3.Connection, conversation_id: str) -> int | None:
+def find_oldest_typable(conn: sqlite3.Connection, message_id: int, conversation_id: str) -> int:
+    """The tab's oldest waiting message bridge would type, when this message is one of them: its typer types that one
+    first, and that turn's hooks bring the rest in order. Any other message is its own."""
     row = conn.execute(
         f"""
-        SELECT r.message_id FROM message_recipients r JOIN messages m ON m.id = r.message_id
-        WHERE r.conversation_id = ? AND {_WAITING_SQL} AND {_TYPED_HERE_SQL} ORDER BY m.id LIMIT 1
+        SELECT min(r.message_id) AS oldest, max(r.message_id = ?) AS mine
+        FROM message_recipients r JOIN messages m ON m.id = r.message_id
+        WHERE r.conversation_id = ? AND {_WAITING_SQL} AND {_TYPED_HERE_SQL}
         """,
-        (conversation_id,),
+        (message_id, conversation_id),
     ).fetchone()
-    return None if row is None else int(row[0])
+    return int(row["oldest"]) if row["mine"] else message_id
 
 
 def take_ripe_batches(conn: sqlite3.Connection, config: Config, at_ms: int) -> list[tuple[int, Recipient]]:
     """Tabs whose batch turned ripe with no send to start it, as when its oldest waited batch_age_min: each with its
-    oldest waiting message, whose typer and wake bring it, and whose turn's hooks bring the rest. Only a batch none of
-    whose mail had a typer yet, and none being typed: from its first typer on, the retry pass owns it."""
+    oldest waiting message, whose typer and wake bring it, and whose turn's hooks bring the rest. A tab is left out
+    while a typer holds a claim there (release_dead_typing_claims runs first, so its typer lives) or the retry pass
+    owns a failed message there; a typer that left with neither leaves the tab to the next round."""
     if not config.batch_age_min:
         return []
     oldest: dict[str, tuple[int, str]] = {}
@@ -715,8 +719,8 @@ def take_ripe_batches(conn: sqlite3.Connection, config: Config, at_ms: int) -> l
               SELECT 1 FROM message_recipients w JOIN messages wm ON wm.id = w.message_id
               WHERE w.conversation_id = r.conversation_id
                 AND (w.typing_started_at IS NOT NULL
-                     OR (w.typing_wanted_at IS NOT NULL AND w.acked_at IS NULL AND w.offered_at IS NULL
-                         AND w.done_at IS NULL AND w.declined_at IS NULL AND wm.cancelled_at IS NULL)))
+                     OR (w.delivery_failed_at IS NOT NULL AND w.acked_at IS NULL AND w.offered_at IS NULL
+                         AND wm.cancelled_at IS NULL)))
         ORDER BY m.id
         """
     ):
@@ -725,6 +729,7 @@ def take_ripe_batches(conn: sqlite3.Connection, config: Config, at_ms: int) -> l
         (message_id, resolve_tab(conn, conversation_id, handle))
         for conversation_id, (message_id, handle) in oldest.items()
         if is_batch_ripe(conn, config, conversation_id, at_ms)
+        and not is_conversation_locked(conn, config, conversation_id)
     ]
 
 
@@ -1372,7 +1377,7 @@ def take_new_undelivered_tabs(
         WHERE {_PENDING_SQL} AND max(m.created_at, ?) <= ?
         GROUP BY r.conversation_id
         """,
-        (TURN_CUT, counted_from, at_ms - UNDELIVERED_ALERT_AFTER_MS),
+        (TURN_CUT, counted_from, at_ms - UNDELIVERED_ALERT_AFTER_MS - batch_grace_ms(config)),
     ).fetchall()
     current: dict[str, UndeliveredTab] = {}
     for row in rows:
