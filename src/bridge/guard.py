@@ -910,7 +910,7 @@ def _git_targets(
 def _gh_api_targets(args: list[str]) -> tuple[list[Target], str | None, bool]:
     """The PR a `gh api` call merges or closes; what it may do (MERGE, CLOSE, COMMAND for a branch write or a query
     the guard cannot read, None for nothing guarded); and whether the PR is unknown though it may be changed."""
-    method, fields, path, has_input = _parse_gh_api_args(args)
+    method, fields, path, has_input = parse_gh_api_args(args)
     if path == "graphql" or path.endswith("/graphql"):
         field = next(((typed, v.split("=", 1)[1]) for typed, v in fields if v.startswith("query=")), None)
         if has_input or field is None or field[1].startswith("$") or (field[0] and field[1].startswith("@")):
@@ -970,7 +970,7 @@ def _map_api_branch_write_to_targets(path: str, fields: list[tuple[bool, str]], 
     return [Target(f"branch:{owner.lower()}/{name.lower()}:{branch}", "gh api branch write")]
 
 
-def _parse_gh_api_args(args: list[str]) -> tuple[str, list[tuple[bool, str]], str, bool]:
+def parse_gh_api_args(args: list[str]) -> tuple[str, list[tuple[bool, str]], str, bool]:
     """Method, fields (typed for -F, whose @file is read from disk), path, and whether a body comes from --input."""
     method: str | None = None
     fields: list[tuple[bool, str]] = []

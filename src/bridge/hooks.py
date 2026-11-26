@@ -79,6 +79,7 @@ from bridge.guard import (
     map_held_writes_to_lines,
     map_merge_blocks_to_lines,
     map_sandbox_merges_to_lines,
+    parse_gh_api_args,
     read_short_cluster,
     segment_command,
     strip_prefixes,
@@ -586,9 +587,10 @@ _AGTERM_VALUE_OPTIONS = frozenset({"--pane", "--target", "--socket", "--window",
 
 def find_rule_refusal(command: str, config: Config, depth: int = 0, chained_outside: bool = False) -> str | None:
     """Prod and secrets rules, said in the refusal rather than in every session's context: no secret values read, no
-    Claude logout, no AWS permission probe, a secret or cluster apply run alone, and on a production context only
-    reads. Read through ssh, a shell's -c and the rest as the cluster check reads them, and a command kubectl exec
-    runs in a container too. An alias defined in the command itself (k=kubectl) is not followed: that is evasion."""
+    Claude logout, no AWS permission probe, no admin rights on GitHub, a secret or cluster apply run alone, and on a
+    production context only reads. Read through ssh, a shell's -c and the rest as the cluster check reads them, and a
+    command kubectl exec runs in a container too. An alias defined in the command itself (k=kubectl) is not followed:
+    that is evasion."""
     for line, chained in _list_command_lines(command, chained_outside=chained_outside):
         for words, _ in line:
             program = os.path.basename(words[0]) if words else ""
@@ -646,7 +648,52 @@ def _map_command_to_rule_refusal(program: str, all_args: list[str], config: Conf
         operation = _list_aws_positionals(all_args)
         if operation[:1] == ["iam"] and operation[1:2] and operation[1].startswith("simulate-"):
             return _PERMISSION_PROBE
+    if program == "gh":
+        return _map_gh_to_admin_refusal(all_args, config)
     return None
+
+
+_ADMIN_RIGHTS = (
+    "bridge: {what} can use the owner's admin rights to get past the repository's merge rules, and the owner's "
+    "rule is that no one uses them until the owner asks. Merge with a plain `gh pr merge <number>` once the PR meets "
+    "the rules; if it cannot, send {assistant} the exact command for a card, and the owner runs it by hand."
+)
+_API_MERGE_RE = re.compile(r"(?:^|/)repos/[^/\s]+/[^/\s]+/pulls/[^/\s]+/merge")
+_API_RULES_RE = re.compile(
+    r"(?:^|/)(?:repos/[^/\s]+/[^/\s]+|orgs/[^/\s]+)/(?:rulesets|branches/\S+/protection)(?:[/?]|$)"
+)
+_GRAPHQL_ADMIN_RE = re.compile(r"mergePullRequest|(?:create|update|delete)\w*(?:Ruleset|BranchProtectionRule)", re.I)
+
+
+def _map_gh_to_admin_refusal(args: list[str], config: Config) -> str | None:
+    """gh pr merge --admin, a merge through the API (which an admin token gets past the rules with, as --admin does)
+    and a ruleset or branch protection write."""
+    positional: list[tuple[int, str]] = []
+    at = 0
+    while at < len(args) and len(positional) < 2:
+        if args[at] in ("-R", "--repo"):
+            at += 1
+        elif not args[at].startswith("-"):
+            positional.append((at, args[at]))
+        at += 1
+    words = [word for _, word in positional]
+    what = None
+    if words == ["pr", "merge"] and any(_is_admin_flag(a) for a in args[positional[1][0] + 1 :]):
+        what = "gh pr merge --admin"
+    elif words[:1] == ["api"]:
+        method, fields, path, _ = parse_gh_api_args(args[positional[0][0] + 1 :])
+        if path.strip("/") == "graphql" and _GRAPHQL_ADMIN_RE.search(" ".join(value for _, value in fields)):
+            what = "this GraphQL mutation"
+        elif method not in ("GET", "HEAD") and _API_MERGE_RE.search(path):
+            what = "a merge through gh api"
+        elif method not in ("GET", "HEAD") and _API_RULES_RE.search(path):
+            what = "a ruleset or branch protection change"
+    return _ADMIN_RIGHTS.format(what=what, assistant=config.assistant_handle) if what else None
+
+
+def _is_admin_flag(arg: str) -> bool:
+    name, eq, value = arg.partition("=")
+    return name == "--admin" and (not eq or value.lower() not in ("false", "f", "0"))
 
 
 def _list_aws_positionals(args: list[str]) -> list[str]:
@@ -1319,8 +1366,7 @@ def map_unreadable_to_line(unreadable: Unreadable, readable: tuple[str, ...] | N
     if unreadable.kind == MERGE:
         return (
             f"bridge: this merge names no PR the guard can identify ({text}).{where} Name the PR plainly, with no "
-            "variable or repo-picking environment: `gh pr merge <number> -R <owner>/<repo>`, its URL, or "
-            "`gh api -X PUT repos/<owner>/<repo>/pulls/<number>/merge`."
+            "variable or repo-picking environment: `gh pr merge <number> -R <owner>/<repo>` or its URL."
         )
     if unreadable.kind == CLOSE:
         return (

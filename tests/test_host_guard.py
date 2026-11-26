@@ -1131,12 +1131,12 @@ def test_mac_refuses_a_merge_or_api_close_whose_text_hides_its_pr(
         "GIT_DIR=/elsewhere/.git gh pr merge 12",
         'gh pr merge "$PR" --squash',
         "cd $OTHER && gh pr merge 12",
-        MERGE_MUTATION,
         CLOSE_MUTATION,
-        "gh api -X PUT 'repos/{owner}/{repo}/pulls/5/merge'",
         "gh api -X PATCH 'repos/{owner}/{repo}/pulls/12' -f state=closed",
     ):
         assert "names no PR the guard can identify" in on_mac(command), command
+    for command in (MERGE_MUTATION, "gh api -X PUT 'repos/{owner}/{repo}/pulls/5/merge'"):
+        assert "can use the owner's admin rights" in on_mac(command), command
     assert keys("GH_REPO=Acme/Other gh pr merge 12") == ["pr:acme/other#12"]
     assert keys("gh pr merge -RAcme/Other 12") == ["pr:acme/other#12"]
     assert keys("gh api -X PATCH repos/Acme/Web/pulls/12 -f state=closed") == ["pr:acme/web#12"]

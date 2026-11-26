@@ -287,7 +287,7 @@ def test_a_merge_waits_for_approval_owners_comments_and_green_ci_by_number_and_b
     update("UPDATE review_prs SET approved_by = '[]', reviewed_at = 600")
     assert "Acme/Web#12 is not mergeable yet: not approved." in refusal("gh pr merge 12")
     update("""UPDATE review_prs SET approved_by = '["mira"]', open_threads = 1, his_open_threads = 1""")
-    for command in ("gh pr merge 12 --squash", "gh pr merge", "gh api -X PUT repos/Acme/Web/pulls/12/merge"):
+    for command in ("gh pr merge 12 --squash", "gh pr merge"):
         assert "the owner's comments are open (1 review thread is unresolved)" in refusal(command)
     assert _run_guard(bridge_env, pair.b, "conv-b", "gh pr merge 13", web) == ""
     update("UPDATE review_prs SET open_threads = 0, his_open_threads = 0, checks = 'PENDING'")
@@ -340,7 +340,7 @@ def test_a_merge_that_deletes_a_kept_sandbox_is_refused_once_per_session_and_hea
 
     assert not denied("gh pr merge 12 --disable-auto")
     assert not denied("gh pr merge 12 --help")
-    first = json.loads(_run_guard(bridge_env, pair.b, "conv-b", "gh api -X PUT repos/Acme/Web/pulls/12/merge", web))
+    first = json.loads(_run_guard(bridge_env, pair.b, "conv-b", "gh pr merge 12 --squash", web))
     reason = first["hookSpecificOutput"]["permissionDecisionReason"]
     assert "Acme/Web#12 asks in its body to keep its persistent sandbox (PERSIST_SANDBOX)" in reason
     assert "deletes sandbox pr-12" in reason and "run the same merge again within 10 minutes" in reason

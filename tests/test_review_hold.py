@@ -247,7 +247,7 @@ def _setup_two_prs(tmp_path: Path, **second: Any) -> Any:
     return conn
 
 
-@pytest.mark.parametrize("command", ["gh pr merge 8", "gh pr merge dev/y", "gh api -X PUT repos/Org/app/pulls/8/merge"])
+@pytest.mark.parametrize("command", ["gh pr merge 8", "gh pr merge dev/y"])
 def test_merging_a_queued_pr_into_the_held_branch_is_refused(tmp_path: Path, command: str) -> None:
     conn = _setup_two_prs(tmp_path, head="dev/y", base="dev/x", approved_by=("mira",))
 

@@ -46,6 +46,8 @@ _LOGIN_PROBE_GLOBS = (
     "*claude[!/-]*logout*", "*security*-password*laude*", "*agtermctl*logout*", "*tmux*send*logout*", "*aws*simulate-*",
     "*agtermctl*!*", "*tmux*send*!*",
 )  # fmt: skip
+# So is admin use on GitHub: gh pr merge --admin, a merge through the API, a ruleset or branch protection write.
+_ADMIN_GLOBS = ("*gh*merge*admin*", "*gh*api*merge*", "*gh*api*uleset*", "*gh*api*rotection*")
 # A checker piped into a filter loses its exit code; the hook adds a note, it never refuses.
 _PIPE_GLOBS = (
     "*pre-commit*", "*pytest*", "*ruff*", "*mypy*", "*pyright*", "*git*commit*", "*npm*", "*pnpm*", "*yarn*",
@@ -55,7 +57,7 @@ _HEAVY_GLOBS = ("*uv*sync*", "*docker*build*")
 """Heavy jobs the pipe globs miss; only the Mac's gate has them, since a host's own load is not the Mac's."""
 _PYTHON_GLOBS = (
     *_LABEL_GLOBS, *_PR_ISSUE_GLOBS, *_PR_ANSWER_GLOBS, *_KILL_GLOBS, *_CLUSTER_GLOBS, *_LOGIN_PROBE_GLOBS,
-    *_PIPE_GLOBS, *_HEAVY_GLOBS,
+    *_ADMIN_GLOBS, *_PIPE_GLOBS, *_HEAVY_GLOBS,
 )  # fmt: skip
 # A publish to claude.ai, matched by the tool's own field so a command that names the tool does not start Python; not a
 # host glob, since gbridge sends every Artifact call to the Mac.
@@ -145,8 +147,8 @@ def convert_event_to_command(executable: str, event: str) -> str:
 
 def list_guard_globs() -> list[str]:
     """The shell guard's gate: a command matching none of these cannot push, merge, set a robot-prefixed title, change
-    a label, open or edit a PR, comment on one, kill processes by name, reach a Kubernetes cluster, touch Claude's login
-    or probe AWS permissions."""
+    a label, open or edit a PR, comment on one, kill processes by name, reach a Kubernetes cluster, touch Claude's
+    login, probe AWS permissions or use admin rights on GitHub."""
     # The host's gate matches a literal pipe, so a checker run without one is not sent to the Mac.
     plain = [glob for glob in _PYTHON_GLOBS if glob not in _PIPE_GLOBS and glob not in _HEAVY_GLOBS]
     return [
