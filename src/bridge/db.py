@@ -992,6 +992,9 @@ MIGRATIONS: tuple[str, ...] = (
     ALTER TABLE user_items ADD COLUMN command TEXT;
     ALTER TABLE user_items ADD COLUMN command_run_at INTEGER;
     """,
+    # The session that asked for a card's command, which a lead or the assistant may have carded from its draft: only
+    # it may run the command once approved.
+    "ALTER TABLE user_items ADD COLUMN command_conversation TEXT;",
 )
 
 HOOK_BUSY_TIMEOUT_MS = 200

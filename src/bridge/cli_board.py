@@ -32,6 +32,7 @@ from bridge.db import now_ms, transaction
 from bridge.errors import UsageError
 from bridge.feed import (
     ANSWER_KINDS,
+    COMMAND_FIELD,
     COMMAND_OPTIONS,
     FEED_KINDS,
     LEAD_TO_WORKER,
@@ -43,6 +44,7 @@ from bridge.feed import (
     add_post,
     batch_grace_ms,
     build_decision_body,
+    convert_command_to_waiver_text,
     find_leads_to_wake,
     is_batch_ripe,
     map_arg_to_link,
@@ -129,7 +131,7 @@ def add_board_commands(sub: "argparse._SubParsersAction[argparse.ArgumentParser]
         "--command",
         default="",
         help="blocked/decision: an exact production command the guard refuses; the card's options become Run it and "
-        "Don't run, and the owner choosing Run it lets the posting session run that text once, within 15 minutes",
+        "Don't run, and the owner choosing Run it lets the asking session run that text once, within 15 minutes",
     )
     p.add_argument("--ask", type=lambda s: int(s.lstrip("#")), metavar="N", help="done/insight: the ask it answers")
     p.add_argument(
@@ -360,7 +362,7 @@ def cmd_post(args: argparse.Namespace, conn: sqlite3.Connection, config: Config)
         flags = [*(["urgent"] if args.urgent else []), *(["pin its link"] if args.pin else [])]
         fields = [
             *(f"Answer {n}: {option}" for n, option in enumerate(args.option, 1)),
-            *([f"Command: {args.command}"] if args.command else []),
+            *([f"{COMMAND_FIELD}{convert_command_to_waiver_text(args.command)}"] if args.command else []),
             *(f"Link: {link.label}={link.url}" if link.label else f"Link: {link.url}" for link in links),
             *([f"Answers ask #{args.ask}"] if args.ask is not None else []),
         ]

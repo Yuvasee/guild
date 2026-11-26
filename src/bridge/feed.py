@@ -210,8 +210,8 @@ def add_post(
     cursor = conn.execute(
         """
         INSERT INTO user_items (created_at, from_conversation, from_handle, severity, text, source, kind, body, links,
-                                options, urgent, ask_id, command)
-        VALUES (?, ?, ?, ?, ?, 'agent', ?, ?, ?, ?, ?, ?, ?)
+                                options, urgent, ask_id, command, command_conversation)
+        VALUES (?, ?, ?, ?, ?, 'agent', ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             at_ms,
@@ -226,19 +226,41 @@ def add_post(
             int(urgent),
             ask_id,
             command or None,
+            find_command_asker(conn, sender.conversation_id, command) if command else None,
         ),
     )
     return int(cursor.lastrowid or 0)
 
 
+def find_command_asker(conn: sqlite3.Connection, poster: str, command: str) -> str:
+    """Follows the drafts carrying this exact command back from the poster: a worker's goes to its lead, the lead's to
+    the assistant, who cards it. The first sender is the asker; with no such draft the poster asked."""
+    asker = poster
+    for _ in range(3):
+        row = conn.execute(
+            """
+            SELECT m.from_conversation FROM messages m JOIN message_recipients r ON r.message_id = m.id
+            WHERE r.conversation_id = ? AND m.post_type IN (?, ?) AND instr(char(10) || m.body || char(10), ?) > 0
+            ORDER BY m.id DESC LIMIT 1
+            """,
+            (asker, WORKER_REPORT, TO_ASSISTANT, f"\n{COMMAND_FIELD}{command}\n"),
+        ).fetchone()
+        if row is None:
+            break
+        asker = str(row[0])
+    return asker
+
+
 WAIVER_MS = 15 * 60_000
 COMMAND_OPTIONS = ("Run it", "Don't run")
+COMMAND_FIELD = "Command: "
+"""How a draft names the command its card should carry."""
 """A card carrying a command has these options, and only the first, the owner's own click, lets the command run."""
 # ?1 is the spend time, which only the UPDATE uses.
 _WAIVER_SQL = """
     SELECT id FROM user_items
     WHERE command = ?2 AND command_run_at IS NULL AND answered_by IS NULL AND answered_at > ?3 AND answer = ?4
-        AND from_conversation = ?5
+        AND command_conversation = ?5
     ORDER BY answered_at DESC LIMIT 1
 """
 
@@ -248,7 +270,7 @@ def convert_command_to_waiver_text(command: str) -> str:
 
 
 def find_command_waiver(conn: sqlite3.Connection, command: str, conversation_id: str, at_ms: int) -> bool:
-    """An unused waiver under WAIVER_MS old for this exact command on a card this conversation posted; a relayed
+    """An unused waiver under WAIVER_MS old for this exact command on a card this conversation asked for; a relayed
     answer is an agent's and gives none."""
     params = (at_ms, convert_command_to_waiver_text(command), at_ms - WAIVER_MS, COMMAND_OPTIONS[0], conversation_id)
     return conn.execute(_WAIVER_SQL, params).fetchone() is not None

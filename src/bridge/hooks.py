@@ -567,7 +567,7 @@ _CHAINED_APPLY = (
 _PROD_VERB = (
     "bridge: {context} is a production context, and {program} {verb} there is refused for every session. Read it "
     "with get, describe, logs or top.{writable} For anything else, send {assistant} the exact command for a card: "
-    "once {owner} approves the card, the session that posted it may run the same command once, within 15 minutes. "
+    "once {owner} approves the card, the session that asked for it may run the same command once, within 15 minutes. "
     "Typing it into a tab is refused too."
 )
 _PROD_WRITABLE = (

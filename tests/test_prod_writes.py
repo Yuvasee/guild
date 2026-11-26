@@ -4,11 +4,21 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from conftest import BridgeEnv, SpawnProcess
+from test_leads import Team
 
-from bridge.board import MessageStateError, Party
+from bridge.board import MessageStateError, Party, Recipient, send_message
 from bridge.config import Config, map_toml_to_config
 from bridge.db import connect, transaction
-from bridge.feed import COMMAND_OPTIONS, WAIVER_MS, add_post, answer_post, reply_on_card
+from bridge.feed import (
+    COMMAND_OPTIONS,
+    TO_ASSISTANT,
+    WAIVER_MS,
+    WORKER_REPORT,
+    add_post,
+    answer_post,
+    reply_on_card,
+)
 from bridge.gbridge import may_need_guard
 from bridge.hooks import find_rule_refusal, handle_pre_tool_use
 from bridge.install import convert_event_to_command, list_guard_globs
@@ -309,3 +319,42 @@ def test_a_wrapped_production_write_or_unnamed_context_is_refused(tmp_path: Path
 )
 def test_a_wrapped_read_or_non_production_write_passes(tmp_path: Path, command: str) -> None:
     assert _decide(connect(tmp_path / "b.db"), command) == "allow"
+
+
+def test_a_command_drafted_by_a_lead_and_carded_by_the_assistant_runs_only_in_the_leads_session(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess, clock: list[int]
+) -> None:
+    team = Team(bridge_env, spawn_process)
+    assert team.enroll().returncode == 0
+    assert bridge_env.cli("handle", "aide", pid=team.b).returncode == 0
+    drafted = bridge_env.cli("post", "decision", "Deploy web?", "--body", "v2", "--command", DEPLOY, pid=team.a)
+    assert "sent to aide as draft message" in drafted.stdout, drafted.stderr
+    carded = bridge_env.cli("post", "decision", "Deploy web for a?", "--command", f" {DEPLOY} ", pid=team.b)
+    assert "is in the user's feed" in carded.stdout, carded.stderr
+    conn = bridge_env.connect()
+    with transaction(conn):
+        reply_on_card(conn, 1, "Run it", "sam", clock[0])
+
+    assert _decide(conn, DEPLOY, session="conv-b") == "deny", "the assistant only carded it"
+    assert _decide(conn, DEPLOY, session="conv-a") == "allow"
+
+
+def test_a_workers_command_is_traced_through_its_lead_to_the_worker(tmp_path: Path, clock: list[int]) -> None:
+    conn = connect(tmp_path / "b.db")
+    hops = [
+        ("conv-w", "w", "conv-lead", "lead", WORKER_REPORT),
+        ("conv-lead", "lead", "conv-aide", "aide", TO_ASSISTANT),
+    ]
+    with transaction(conn):
+        for sender, handle, to, to_handle, post_type in hops:
+            recipient = Recipient(to_handle, to, 1, "idle", None, False)
+            body = f"Draft decision post, not shown to the owner: Deploy web?\nAnswer 1: Run it\nCommand: {DEPLOY}"
+            sent = send_message(conn, Party(sender, handle), [recipient], "info", body, 1000)
+            conn.execute("UPDATE messages SET post_type = ? WHERE id = ?", (post_type, sent.message_id))
+    item = _post(conn)
+    with transaction(conn):
+        reply_on_card(conn, item, "Run it", "sam", clock[0])
+
+    assert _decide(conn, DEPLOY, session="conv-aide") == "deny"
+    assert _decide(conn, DEPLOY, session="conv-lead") == "deny"
+    assert _decide(conn, DEPLOY, session="conv-w") == "allow"
