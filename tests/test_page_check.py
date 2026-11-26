@@ -62,6 +62,14 @@ def test_time_estimates_are_found_and_sizes_in_kloc_are_not() -> None:
         ("No blockers, implementation takes 3 engineer-days.", "3 engineer-days"),
         ("The feature needs 1 kLOC and 3 engineer-days.", "3 engineer-days"),
         ("The old approach was slow, the rewrite needs 3 engineer-days.", "3 engineer-days"),
+        ("Estimate: 3 engineering days", "3 engineering days"),
+        ("~7.5-10 eng-weeks", "7.5-10 eng-weeks"),
+        ("5 weeks for one person", "5 weeks for one person"),
+        ("It is 5 weeks for one person.", "5 weeks for one person"),
+        ("It needs one person for 2 weeks.", "one person for 2 weeks"),
+        ("one engineer for two weeks", "one engineer for two weeks"),
+        ("It takes a sprint.", "takes a sprint"),
+        ("Estimate: 3 days", "Estimate: 3 days"),
     ]:
         assert find_day_estimates(text) == [found], text
     for text in (
@@ -77,6 +85,12 @@ def test_time_estimates_are_found_and_sizes_in_kloc_are_not() -> None:
         "Use kLOC, never engineer-days.",
         "We spent 4 engineer-days on it last sprint.",
         "2 weeks per person",
+        "We saw it 3 days ago.",
+        "The 5-day retention applies.",
+        "Fix it within 2 weeks of release.",
+        "A sprint planning meeting is on Monday.",
+        "It took a sprint to ship.",
+        "The Estimate column lists the issues.",
     ):
         assert find_day_estimates(text) == [], text
 

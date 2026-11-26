@@ -1354,7 +1354,9 @@ _NUMBER = r"(?:\d+(?:[.,]\d+)?|an?|one|two|three|four|five|six|a few|a couple of
 _SPAN = rf"{_NUMBER}(?:\s*(?:[-\u2013]|to|or)\s*{_NUMBER})?"
 _UNIT = r"(?:hours?|days?|weeks?|months?|sprints?)"
 _PEOPLE = r"(?:engineers?|devs?|developers?|persons?|people|man|men|programmers?)"
-_LABOR_RE = re.compile(rf"\b(?:{_SPAN}\s+)?(?:engineer|person|man|dev|developer|people|staff)[- ]?{_UNIT}\b", re.I)
+_LABOR_RE = re.compile(
+    rf"\b(?:{_SPAN}\s+)?(?:engineer|engineering|eng|person|man|dev|developer|people|staff)[- ]?{_UNIT}\b", re.I
+)
 """A unit of someone's time: always a size, unless the sentence names the rule or tells what happened."""
 _TIME_RE = re.compile(
     rf"\b{_SPAN}[- ]?{_UNIT}\s+(?:of\s+(?:\w+\s+)?(?:work|effort)\s+)?(?:for|per)\s+(?:{_NUMBER}|each|a single)?\s*"
@@ -1363,6 +1365,24 @@ _TIME_RE = re.compile(
     re.I,
 )
 """Time for people, which is a size only when the sentence estimates work to do; else a schedule or a fact."""
+_ONE = r"(?:an?|one|1|a single)"
+_STAFFED_RE = re.compile(
+    rf"\b{_SPAN}[- ]?{_UNIT}\s+for\s+{_ONE}\s+(?:\w+\s+)?{_PEOPLE}\b"
+    rf"|\b{_ONE}\s+(?:\w+\s+)?{_PEOPLE}\s+for\s+{_SPAN}[- ]?{_UNIT}\b",
+    re.I,
+)
+"""'5 weeks for one person', 'one engineer for two weeks': a size without any estimate word, unless it is a schedule."""
+_LABELED_RE = re.compile(
+    rf"\b(?:estimates?|estimated|est\.?|eta|effort|sizing|scope)\b\s*(?::|=|is|of)?\s*~?\s*{_SPAN}[- ]?{_UNIT}\b", re.I
+)
+"""'Estimate: 3 days': the estimate word names what the time is."""
+_SPRINT_RE = re.compile(
+    rf"\b(?:takes?|needs?|requires?)\s+(?:about\s+|roughly\s+)?{_SPAN}\s+sprints?\b"
+    r"(?!\s+(?:planning|review|retro\w*|demo|meeting|ceremon\w+|board|goal))",
+    re.I,
+)
+_SCHEDULE_RE = re.compile(r"\b(?:on[- ]?call|coverage|rota|rotation|shift|leave|vacation|seconded|loaned)\b", re.I)
+"""Words that make a person's time a schedule, not a size of work."""
 _ESTIMATE_CUE_RE = re.compile(
     r"(?:~|\b(?:estimates?|estimated|est\.|sizing|size|takes?|needs?|requires?|effort|scope|"
     r"budget|eta|roughly|about|around|approx(?:imately)?|to (?:build|implement|ship|finish|deliver|do|write|fix|port|"
@@ -1388,8 +1408,15 @@ def find_day_estimates(text: str) -> list[str]:
     itself ('in kLOC, never engineer-days')."""
     found: list[str] = []
     for sentence in _CLAUSE_END_RE.split(text):
-        for pattern, needs_cue in ((_LABOR_RE, False), (_TIME_RE, True)):
+        spans: list[tuple[int, int]] = []
+        for pattern, needs_cue in (
+            (_LABOR_RE, False), (_TIME_RE, True), (_STAFFED_RE, False), (_LABELED_RE, False), (_SPRINT_RE, False)
+        ):  # fmt: skip
+            if pattern is _STAFFED_RE and _SCHEDULE_RE.search(sentence):
+                continue
             for match in pattern.finditer(sentence):
+                if any(match.start() < end and start < match.end() for start, end in spans):
+                    continue
                 if _RULE_WORDS_RE.search(sentence[: match.start()]):
                     continue
                 starts = [m.end() for m in _PART_RE.finditer(sentence, 0, match.start())]
@@ -1399,6 +1426,7 @@ def find_day_estimates(text: str) -> list[str]:
                     continue
                 if needs_cue and not _ESTIMATE_CUE_RE.search(sentence):
                     continue
+                spans.append(match.span())
                 found.append(" ".join(match.group(0).split()))
     return list(dict.fromkeys(found))
 
