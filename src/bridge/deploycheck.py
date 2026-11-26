@@ -21,7 +21,7 @@ from bridge.feed import convert_user_message_to_typed_text
 from bridge.install import map_waiter_to_hook_groups
 from bridge.procinfo import process_args
 from bridge.rewake_marks import install_waiter_script
-from bridge.tabinput import AGTERM_SLOW_S, ENTER, is_tab_selected, run_agterm, type_when_idle
+from bridge.tabinput import AGTERM_SLOW_S, ENTER, run_agterm, type_when_idle
 
 CHECK_TAB_NAME = "bridge deploy check"
 LANDS_WITHIN_S = 10.0
@@ -349,7 +349,8 @@ def _type_long_and_see(config: Config, session: str, work: Path, state: Path) ->
     typed_at = time.monotonic()
     result = type_when_idle(
         config, session, pane, text, lambda: True, wait_s=int(READY_WITHIN_S),
-        may_probe_box=lambda: not is_tab_selected(config, session),
+        # The check's own tab: nobody types there, and a slow agterm must not read as the owner looking at it.
+        may_probe_box=lambda: True,
     )  # fmt: skip
     if result != "typed":
         screen = run_agterm(config, ["session", "text", "--target", session, "--pane-id", pane]) or ""
