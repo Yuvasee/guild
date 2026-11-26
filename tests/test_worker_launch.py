@@ -29,6 +29,10 @@ def _worker_argv(name: str, cwd: Path, model: str = "opus") -> list[str]:
     return [str(VENV_BIN / "guild"), "worker", name, "--cwd", str(cwd), "--prompt", "Fix the thing", "--model", model]
 
 
+def _read_settings_arg(argv: list[str]) -> dict[str, Any]:
+    return json.loads(Path(argv[argv.index("--settings") + 1]).read_text())
+
+
 def _write_mcp(directory: Path, *names: str) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     servers = {name: {"command": "true"} for name in names}
@@ -117,8 +121,21 @@ def test_worker_claude_keeps_claude_ai_connectors_and_has_no_chrome(tmp_path: Pa
     assert argv[:3] == ["claude", "--dangerously-skip-permissions", "--no-chrome"]
     assert "--strict-mcp-config" not in argv
     assert "--mcp-config" not in argv
-    assert json.loads(argv[argv.index("--settings") + 1])["disabledMcpjsonServers"] == ["it's-quoted"]
+    assert _read_settings_arg(argv)["disabledMcpjsonServers"] == ["it's-quoted"]
     assert argv[-1] == "Your brief is in x"
+
+
+def test_worker_settings_with_many_skill_switches_go_in_a_file_and_the_command_stays_short(tmp_path: Path) -> None:
+    skills = {f"skill-{n:02}": "off" for n in range(60)}
+    _write_claude_settings(tmp_path, "settings.json", {"skillOverrides": skills})
+
+    command = build_worker_claude_command(tmp_path, "Your brief is in x", "claude-opus-5-5")
+
+    assert len(command.encode()) <= 1024
+    argv = shlex.split(command)
+    assert argv[argv.index("--settings") + 1].endswith(".json")
+    assert _read_settings_arg(argv)["skillOverrides"] == skills
+    assert build_worker_claude_command(tmp_path, "Your brief is in x", "claude-opus-5-5") == command
 
 
 def test_worker_resume_line_keeps_its_settings_model_and_no_chrome(tmp_path: Path) -> None:
@@ -130,7 +147,7 @@ def test_worker_resume_line_keeps_its_settings_model_and_no_chrome(tmp_path: Pat
 
     assert resumed[:3] == ["/bin/claude", "--dangerously-skip-permissions", "--no-chrome"]
     assert resumed[resumed.index("--model") + 1] == "claude-haiku-5-5"
-    assert json.loads(resumed[resumed.index("--settings") + 1])["disabledMcpjsonServers"] == ["linear-server"]
+    assert _read_settings_arg(resumed)["disabledMcpjsonServers"] == ["linear-server"]
     assert resumed[-2:] == ["--resume", "conv"]
     assert "Your brief is in x" not in resumed
 
@@ -168,7 +185,9 @@ def test_guild_worker_starts_claude_without_chrome_and_briefs_it_on_the_browser(
     assert f"--model {model} " in launch and "claude-other" not in launch, "--model wins over config worker_model"
     assert "--no-chrome" in launch
     assert "--strict-mcp-config" not in launch
-    assert "disabledMcpjsonServers" in launch
+    settings_path = re.search(r"--settings (\S+\.json)", launch)
+    assert settings_path is not None
+    assert "disabledMcpjsonServers" in Path(settings_path.group(1)).read_text()
     brief_path = re.search(r"Your brief is in (\S+\.md)", launch)
     assert brief_path is not None
     brief = Path(brief_path.group(1)).read_text()

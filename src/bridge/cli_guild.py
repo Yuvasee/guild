@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -1026,9 +1027,22 @@ def _await_host_worker_start(conn: sqlite3.Connection, config: Config, session_i
 
 
 def build_worker_claude_command(cwd: Path, first_prompt: str, model: str = "") -> str:
-    settings = map_cwd_to_worker_settings(cwd)
+    settings = write_worker_settings_file(map_cwd_to_worker_settings(cwd))
     flags = f"{WORKER_CLAUDE_FLAGS} --model {shlex.quote(model)}" if model else WORKER_CLAUDE_FLAGS
     return f"claude {flags} --settings {shlex.quote(settings)} {shlex.quote(first_prompt)}"
+
+
+def write_worker_settings_file(settings_json: str) -> str:
+    """Inline, many skill switches pass agterm's 1024-byte limit on a restore pin; named by content, so a rewrite is
+    harmless and workers with equal settings share one file."""
+    digest = hashlib.sha256(settings_json.encode()).hexdigest()[:16]
+    path = state_dir() / "worker-settings" / f"{digest}.json"
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(settings_json, encoding="utf-8")
+        tmp.replace(path)
+    return str(path)
 
 
 def map_cwd_to_worker_settings(cwd: Path) -> str:
