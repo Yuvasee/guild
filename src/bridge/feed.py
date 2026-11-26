@@ -478,6 +478,7 @@ def post_to_board(
     thread_key: str | None = None,
     link: str | None = None,
     goes_now: bool = False,
+    prod_alarm: str | None = None,
 ) -> SendResult:
     """A post everyone can read; it reaches the sessions it mentions or whose PRs and issues it names."""
     if post_type is not None and post_type not in POST_TYPES:
@@ -496,7 +497,9 @@ def post_to_board(
             "SELECT thread_id FROM messages WHERE thread_key = ? AND board = 1 ORDER BY id LIMIT 1", (thread_key,)
         ).fetchone()
         thread_id = int(root["thread_id"]) if root else None
-    result = send_message(conn, sender, recipients, "info", text, at_ms, thread_id=thread_id, goes_now=goes_now)
+    result = send_message(
+        conn, sender, recipients, "info", text, at_ms, thread_id=thread_id, goes_now=goes_now, prod_alarm=prod_alarm
+    )
     conn.execute(
         "UPDATE messages SET board = 1, topic = ?, post_type = ?, thread_key = ?, link = ? WHERE id = ?",
         (topic, post_type, thread_key, link, result.message_id),

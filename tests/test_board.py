@@ -3,6 +3,7 @@ import subprocess
 import time
 from pathlib import Path
 
+import pytest
 from conftest import VENV_BIN, BridgeEnv, SpawnProcess
 
 from bridge.install import convert_event_to_command
@@ -197,3 +198,31 @@ def _context(stdout: str) -> str:
     if not stdout:
         return ""
     return str(json.loads(stdout)["hookSpecificOutput"]["additionalContext"])
+
+
+@pytest.mark.parametrize("command", [("send", "b", "hello"), ("reply", "1", "hello"), ("board", "hello")])
+def test_an_agent_cannot_send_now_without_naming_what_is_down(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess, command: tuple[str, ...]
+) -> None:
+    pair = Pair(bridge_env, spawn_process)
+    bridge_env.cli("send", "b", "first", pid=pair.a)
+
+    refused = bridge_env.cli(*command, "--now", pid=pair.a)
+    stray = bridge_env.cli(*command, "--prod-alarm", "api is down", pid=pair.a)
+
+    assert refused.returncode != 0 and "--prod-alarm" in refused.stderr
+    assert stray.returncode != 0 and "goes with --now" in stray.stderr
+    with bridge_env.connect() as conn:
+        assert conn.execute("SELECT count(*) FROM messages").fetchone()[0] == 1
+
+
+def test_send_now_with_a_prod_alarm_is_stored_with_it(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:
+    pair = Pair(bridge_env, spawn_process)
+
+    sent = bridge_env.cli("send", "b", "api is down", "--now", "--prod-alarm", "api 500s", pid=pair.a)
+    plain = bridge_env.cli("send", "b", "fyi", pid=pair.a)
+
+    assert sent.returncode == 0 and plain.returncode == 0, sent.stderr + plain.stderr
+    with bridge_env.connect() as conn:
+        rows = conn.execute("SELECT goes_now, prod_alarm FROM messages ORDER BY id").fetchall()
+    assert [tuple(r) for r in rows] == [(1, "api 500s"), (0, None)]

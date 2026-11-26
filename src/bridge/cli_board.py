@@ -69,9 +69,8 @@ from bridge.watcher import (
 
 USER_TARGET = "user"
 POST_RESOLVE = "resolve"
-NOW_HELP = (
-    "wake an idle recipient at once instead of with its next batch: urgent only (a prod alarm, or the user said so)"
-)
+NOW_HELP = "send at once instead of with the next batch: only for a prod alarm, and it needs --prod-alarm"
+PROD_ALARM_HELP = "what is down in prod; required by --now, and read by the owner"
 NO_LINK_HELP = "the words page, analysis, explainer, write-up or doc here name no page; post without a --link"
 
 
@@ -82,6 +81,7 @@ def add_board_commands(sub: "argparse._SubParsersAction[argparse.ArgumentParser]
     p.add_argument("--request", action="store_true", help="expects a response (ack/reply/done/decline)")
     p.add_argument("--respond-within", type=convert_duration_to_seconds, default=DEFAULT_RESPOND_WITHIN_S)
     p.add_argument("--now", action="store_true", help=NOW_HELP)
+    p.add_argument("--prod-alarm", metavar="WHAT_IS_DOWN", help=PROD_ALARM_HELP)
     p.set_defaults(func=cmd_send)
 
     p = sub.add_parser("reply", help="reply to a message")
@@ -89,6 +89,7 @@ def add_board_commands(sub: "argparse._SubParsersAction[argparse.ArgumentParser]
     p.add_argument("text")
     p.add_argument("--done", action="store_true", help="also close the request")
     p.add_argument("--now", action="store_true", help=NOW_HELP)
+    p.add_argument("--prod-alarm", metavar="WHAT_IS_DOWN", help=PROD_ALARM_HELP)
     p.set_defaults(func=cmd_reply)
 
     for action, text in (
@@ -155,6 +156,7 @@ def add_board_commands(sub: "argparse._SubParsersAction[argparse.ArgumentParser]
     p.add_argument("--thread", help="an issue or PR id; posts with the same id form a thread")
     p.add_argument("--link", help="the PR, issue or doc this post points to")
     p.add_argument("--now", action="store_true", help=NOW_HELP)
+    p.add_argument("--prod-alarm", metavar="WHAT_IS_DOWN", help=PROD_ALARM_HELP)
     p.set_defaults(func=cmd_board)
 
 
@@ -179,12 +181,23 @@ class _CostAction(argparse.Action):
         setattr(namespace, self.dest, costs)
 
 
+def read_prod_alarm(args: argparse.Namespace) -> str | None:
+    """An agent never sends --now without saying what is down; the owner's dashboard does not come through here."""
+    alarm = str(args.prod_alarm or "").strip()
+    if args.now and not alarm:
+        raise UsageError('--now is for a prod alarm only: say what is down with --prod-alarm "<what is down>"')
+    if alarm and not args.now:
+        raise UsageError("--prod-alarm goes with --now")
+    return alarm or None
+
+
 def reject_locked_sender(conn: sqlite3.Connection, config: Config, me: Party) -> None:
     if is_conversation_locked(conn, config, me.conversation_id):
         raise MessageStateError("this tab is locked, and locked tabs are left out of the team")
 
 
 def cmd_send(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
+    prod_alarm = read_prod_alarm(args)
     me = current_party(conn)
     handles = [h.strip() for h in str(args.to).split(",") if h.strip()]
     if handles == [USER_TARGET]:
@@ -202,7 +215,15 @@ def cmd_send(args: argparse.Namespace, conn: sqlite3.Connection, config: Config)
                 raise MessageStateError("you cannot message yourself")
             flag_overdue(conn, at, batch_grace_ms(config))
             result = send_message(
-                conn, me, recipients, kind, str(args.text), at, int(args.respond_within), goes_now=bool(args.now)
+                conn,
+                me,
+                recipients,
+                kind,
+                str(args.text),
+                at,
+                int(args.respond_within),
+                goes_now=bool(args.now),
+                prod_alarm=prod_alarm,
             )
     except (MessageStateError, AddressError) as exc:
         raise UsageError(str(exc)) from exc
@@ -222,6 +243,7 @@ def sync_tabs_on_handle_miss(conn: sqlite3.Connection, config: Config, handles: 
 
 
 def cmd_reply(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
+    prod_alarm = read_prod_alarm(args)
     me = current_party(conn)
     at = now_ms()
     row = conn.execute(
@@ -235,7 +257,15 @@ def cmd_reply(args: argparse.Namespace, conn: sqlite3.Connection, config: Config
             if args.done:
                 respond(conn, me, int(args.id), "done", at)
             result = send_message(
-                conn, me, [original_sender], "reply", str(args.text), at, reply_to=int(args.id), goes_now=bool(args.now)
+                conn,
+                me,
+                [original_sender],
+                "reply",
+                str(args.text),
+                at,
+                reply_to=int(args.id),
+                goes_now=bool(args.now),
+                prod_alarm=prod_alarm,
             )
     except MessageStateError as exc:
         raise UsageError(str(exc)) from exc
@@ -505,6 +535,7 @@ def cmd_tell_user(args: argparse.Namespace, conn: sqlite3.Connection, config: Co
 
 
 def cmd_board(args: argparse.Namespace, conn: sqlite3.Connection, config: Config) -> int:
+    prod_alarm = read_prod_alarm(args)
     me = current_party(conn)
     at = now_ms()
     if args.text:
@@ -512,7 +543,17 @@ def cmd_board(args: argparse.Namespace, conn: sqlite3.Connection, config: Config
             with transaction(conn):
                 reject_locked_sender(conn, config, me)
                 result = post_to_board(
-                    conn, me, str(args.text), args.topic, at, config, args.type, args.thread, args.link, bool(args.now)
+                    conn,
+                    me,
+                    str(args.text),
+                    args.topic,
+                    at,
+                    config,
+                    args.type,
+                    args.thread,
+                    args.link,
+                    bool(args.now),
+                    prod_alarm,
                 )
                 wake = [] if result.paused else find_leads_to_wake(conn, config, str(args.text), me)
         except MessageStateError as exc:

@@ -995,6 +995,10 @@ MIGRATIONS: tuple[str, ...] = (
     # The session that asked for a card's command, which a lead or the assistant may have carded from its draft: only
     # it may run the command once approved.
     "ALTER TABLE user_items ADD COLUMN command_conversation TEXT;",
+    # What a sender said is down when it sent --now: an agent's --now needs it.
+    """
+    ALTER TABLE messages ADD COLUMN prod_alarm TEXT;
+    """,
 )
 
 HOOK_BUSY_TIMEOUT_MS = 200

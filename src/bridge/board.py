@@ -123,6 +123,7 @@ def send_message(
     reply_to: int | None = None,
     thread_id: int | None = None,
     goes_now: bool = False,
+    prod_alarm: str | None = None,
 ) -> SendResult:
     if not body.strip():
         raise MessageStateError("empty message")
@@ -151,10 +152,21 @@ def send_message(
     cursor = conn.execute(
         """
         INSERT INTO messages (created_at, from_conversation, from_handle, kind, thread_id, reply_to, body, respond_by,
-                              goes_now)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                              goes_now, prod_alarm)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (at_ms, sender.conversation_id, sender.handle, kind, thread_id, reply_to, body, respond_by, int(goes_now)),
+        (
+            at_ms,
+            sender.conversation_id,
+            sender.handle,
+            kind,
+            thread_id,
+            reply_to,
+            body,
+            respond_by,
+            int(goes_now),
+            prod_alarm,
+        ),
     )
     message_id = int(cursor.lastrowid or 0)
     if reply_to is not None:
