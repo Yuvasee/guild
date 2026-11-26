@@ -7,7 +7,7 @@
   var ctx = canvas.getContext("2d", { willReadFrequently: true });
   var OURS = "#bridge-doc-nav,#ds-theme,#bdv-pop,#bridge-probe-out";
   var TEXTISH = /^(text|tspan|textPath|line|polyline|g|defs|marker|title|desc)$/;
-  var MAX_TEXTS = 400, MIN_CONTRAST = window.bridgeProbeMinContrast || 3;
+  var MAX_TEXTS = 400, MIN_CONTRAST = window.bridgeProbeMinContrast || 3, MIN_TEXT_PX = window.bridgeProbeMinTextPx || 14;
   // A stroke this wide on screen, and at least this share of the font size, rings each glyph: 2 px at 13 px.
   var HALO_MIN_PX = 2, HALO_FONT_SHARE = 0.15;
 
@@ -128,7 +128,7 @@
           if (ratio(c, page) >= 3) { off++; at = at || c; }
         });
       });
-      var item = { label: label(el), heading: heading(el), samples: seen, off: off, bg: at ? hex(at) : "", texts: [] };
+      var item = { label: label(el), heading: heading(el), samples: seen, off: off, bg: at ? hex(at) : "", texts: [], small: [] };
       texts(el, item);
       found.push(item);
     });
@@ -157,7 +157,15 @@
       counted++;
       var r = el.getBoundingClientRect();
       if (r.top < 0 || r.bottom > innerHeight) { el.scrollIntoView({ block: "center" }); r = el.getBoundingClientRect(); }
-      var cs = getComputedStyle(el), fg = rgba(svg ? cs.fill : cs.color);
+      var cs = getComputedStyle(el);
+      if (svg) {
+        // The size on screen: the computed font size (class rules, inheritance and units resolved) times the svg's scale.
+        var m = el.getScreenCTM(), px = parseFloat(cs.fontSize) * (m ? Math.sqrt(Math.abs(m.a * m.d - m.b * m.c)) : 1);
+        if (px < MIN_TEXT_PX - 0.5) {
+          item.small.push({ text: el.textContent.replace(/\s+/g, " ").trim().slice(0, 40), px: Math.round(px * 10) / 10 });
+        }
+      }
+      var fg = rgba(svg ? cs.fill : cs.color);
       if (!fg) return;
       if (svg) fg[3] *= parseFloat(cs.fillOpacity);
       var bg = backgroundAt(r.left + r.width / 2, r.top + r.height / 2, svg ? function (n) {

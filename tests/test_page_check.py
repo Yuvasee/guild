@@ -182,7 +182,7 @@ def haloed_label(stroke_width: float) -> bytes:
         '<h2>Trend</h2><svg viewBox="0 0 600 200" width="600" height="200" aria-label="Weight">'
         '<rect x="0" y="0" width="600" height="200" fill="#ffffff"/>'
         '<rect x="200" y="40" width="160" height="160" fill="#0b8a6e"/>'
-        '<text x="280" y="80" text-anchor="middle" font-size="13" font-weight="600" fill="#c34f33" stroke="#ffffff" '
+        '<text x="280" y="80" text-anchor="middle" font-size="14" font-weight="600" fill="#c34f33" stroke="#ffffff" '
         f'stroke-width="{stroke_width}" paint-order="stroke">94,0</text></svg>'
     )
 
@@ -356,6 +356,49 @@ def test_a_widened_table_reaches_the_text_columns_edges_when_the_body_fills_the_
     raw = page(f"<h2>Fields</h2><p>{LONG}</p><h2>Rows</h2>{table}")
     got = render_reading(convert_served_page_to_styled(raw), None, browser, MEASURE_WIDE, (window, 900))
     assert got["left"] == 16 and got["right"] == window - 16, got
+
+
+def test_a_widened_table_beside_the_contents_bar_reaches_the_columns_right_edge_at_900(browser: str) -> None:
+    table = '<table><tr><td style="padding:0"><div style="width:1500px;height:10px"></div></td></tr></table>'
+    raw = page(f"<h2>Fields</h2><p>{LONG}</p><h2>Rows</h2>{table}")
+    doc = render_reading(convert_doc_to_viewable(raw), None, browser, MEASURE_WIDE + MEASURE_BAR, (900, 900))
+    assert doc["right"] == 900 - 16 and doc["left"] >= doc["bar"] + 24, doc
+
+
+def small_text_svg(css: str, text: str) -> bytes:
+    return page(
+        f'<h2>Flow</h2><svg viewBox="0 0 600 200" width="600" height="200" aria-label="Flow">{css}'
+        f'<rect width="600" height="200" style="fill:var(--ds-tint)"/>{text}</svg>'
+    )
+
+
+@pytest.mark.parametrize(
+    ("body", "small"),
+    [
+        ('<style>.t{font-size:10px}</style><text class="t" x="20" y="100">a</text>', True),
+        ('<style>svg{font-size:9px}</style><text x="20" y="100">a</text>', True),
+        ('<g font-size="8"><text x="20" y="100">a</text></g>', True),
+        ('<text x="20" y="100" style="font-size:9pt">a</text>', True),
+        ('<text x="20" y="100" style="font-size:var(--s,10px)">a</text>', True),
+        ('<text x="20" y="100" font-size="14">a</text>', False),
+        ('<text x="20" y="100" style="font-size:12pt">a</text>', False),
+    ],
+)
+def test_diagram_text_drawn_under_14px_on_screen_is_flagged_whatever_sets_its_size(
+    browser: str, body: str, small: bool
+) -> None:
+    problems = find_render_problems(read(small_text_svg("", body), browser), "light")
+    assert [("drawn under 14px" in p) for p in problems] == ([True] if small else []), problems
+
+
+def test_diagram_text_scaled_down_by_its_viewbox_is_flagged(browser: str) -> None:
+    raw = page(
+        '<h2>Flow</h2><svg viewBox="0 0 2400 800" width="600" height="200" aria-label="Flow">'
+        '<rect width="2400" height="800" style="fill:var(--ds-tint)"/>'
+        '<text x="20" y="100" font-size="20">a</text></svg>'
+    )
+    problems = find_render_problems(read(raw, browser), "light")
+    assert len(problems) == 1 and "'a' 5px" in problems[0], problems
 
 
 def test_a_layout_fault_only_the_dark_page_shows_is_told_as_dark(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -26,6 +26,8 @@ from bridge.review_doc_check import find_day_estimates, find_small_svg_text_prob
 BROWSER_ENV = "BRIDGE_BROWSER"
 """A headless-capable Chrome or Chromium to render with; set and empty, no page is rendered."""
 WINDOW = (1600, 1000)
+MIN_TEXT_PX = 14
+"""Diagram text drawn smaller than this on screen is refused; the same floor as the static check's."""
 MAX_COLUMN_SHARE = 0.85
 """A main column wider than this share of the window spans it: the shared style keeps one to 1100 px."""
 MIN_CONTRAST = 2.5
@@ -150,7 +152,12 @@ def _dead_port() -> Generator[int]:
 def render_probe(page: bytes, assets: Path | None, browser: str) -> dict[str, Any]:
     """The probe's reading of the page as a browser draws it; {"error": …} when it could not be rendered."""
     probe = files("bridge").joinpath("web/page-probe.js").read_text(encoding="utf-8")
-    return render_reading(page, assets, browser, f"window.bridgeProbeMinContrast={MIN_CONTRAST};{probe}")
+    return render_reading(
+        page,
+        assets,
+        browser,
+        f"window.bridgeProbeMinContrast={MIN_CONTRAST};window.bridgeProbeMinTextPx={MIN_TEXT_PX};{probe}",
+    )
 
 
 def render_reading(
@@ -270,6 +277,14 @@ def find_render_problems(reading: dict[str, Any], theme: str) -> list[str]:
             problems.append(
                 f"rendered {theme}: {where} has its own background ({area.get('bg')}) on a {page} page; colour it "
                 "with the page's theme (var(--ds-tint) or a transparent fill), not a fixed colour"
+            )
+        small = cast("list[dict[str, Any]]", area.get("small") or [])
+        if small:
+            shown = "; ".join(f"'{t['text']}' {t['px']:g}px" for t in small[:SHOWN_TEXTS])
+            more = f" and {len(small) - SHOWN_TEXTS} more" if len(small) > SHOWN_TEXTS else ""
+            problems.append(
+                f"rendered {theme}: text in {where} is drawn under {MIN_TEXT_PX}px on screen: {shown}{more}; "
+                f"set it to {MIN_TEXT_PX}px or more as drawn (a viewBox wider than the diagram's width shrinks it)"
             )
         texts = cast("list[dict[str, Any]]", area.get("texts") or [])
         if texts:

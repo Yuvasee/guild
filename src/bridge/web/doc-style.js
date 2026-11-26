@@ -205,10 +205,12 @@
     [box, t].forEach(unwiden);
     var over = outside(t, box);
     if (over <= 1 || getComputedStyle(box).direction === "rtl") return;
-    // A body that fills the window has the column's edge at its padding; a centred one leaves the window's gutter.
-    var pad = parseFloat(getComputedStyle(document.body).paddingLeft) || GUTTER;
-    var edge = document.body.getBoundingClientRect().width >= root.clientWidth - 1 ? Math.min(GUTTER, pad) : GUTTER;
-    var r = box.getBoundingClientRect(), lo = edge, hi = root.clientWidth - edge;
+    // A body that reaches a window edge has the column's edge at its padding there; a centred one leaves the gutter.
+    var bs = getComputedStyle(document.body), bb = document.body.getBoundingClientRect();
+    var padL = parseFloat(bs.paddingLeft) || GUTTER, padR = parseFloat(bs.paddingRight) || GUTTER;
+    var r = box.getBoundingClientRect();
+    var lo = bb.left <= 1 ? Math.min(GUTTER, padL) : GUTTER;
+    var hi = root.clientWidth - (bb.right >= root.clientWidth - 1 ? Math.min(GUTTER, padR) : GUTTER);
     var nav = document.getElementById("bridge-doc-nav");
     if (nav && nav.classList.contains("bdn-side")) lo = Math.max(lo, nav.getBoundingClientRect().right + GUTTER);
     // Never past an ancestor that clips or scrolls: the table would be cut off or scroll twice.
