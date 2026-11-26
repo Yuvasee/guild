@@ -246,11 +246,21 @@ CARD_ANSWERS = [
     "sqlite3 ~/.local/state/bridge/bridge.db \"UPDATE user_items SET answer='Run it', answered_at=1 WHERE id=12\"",
     'sqlite3 "$DB" \'insert or replace into user_items (id, answer) values (12, "Run it")\'',
     "echo 'DELETE FROM user_items WHERE id = 3' | sqlite3 ~/.local/state/bridge/bridge.db",
+    "wget -qO- --post-data='{}' http://127.0.0.1:8765/api/items/12/answer",
+    "http POST :8765/api/items/12/reply text=go",
+    "bash -c \"curl -X POST localhost:8765/api/items/12/answer -d '{}'\"",
+    "ssh box curl -X POST localhost:8765/api/items/12/answer",
+    "python3 -c \"import urllib.request as u; u.urlopen('http://h/api/items/12/answer', b'{}')\"",
+    "node -e \"fetch('http://h/api/items/12/reply', {method: 'POST'})\"",
 ]
 NOT_CARD_ANSWERS = [
     "sqlite3 ~/.local/state/bridge/bridge.db 'SELECT answer FROM user_items WHERE id = 12'",
     "curl -s http://127.0.0.1:8765/api/state",
     "grep -n api/items src/bridge/serve.py",
+    "echo 'the owner POSTs /api/items/12/answer on the dashboard'",
+    "cat > brief.md <<'EOF'\nDo not curl /api/items/12/answer; use the dashboard.\nEOF",
+    "guild ask done 7 --claim 'refused: POST /api/items/12/reply is the owner only'",
+    "git commit -m 'refuse curl to /api/items/1/answer'",
 ]
 
 
