@@ -238,6 +238,7 @@ COMMAND_OPTIONS = ("Run it", "Don't run")
 _WAIVER_SQL = """
     SELECT id FROM user_items
     WHERE command = ?2 AND command_run_at IS NULL AND answered_by IS NULL AND answered_at > ?3 AND answer = ?4
+        AND from_conversation = ?5
     ORDER BY answered_at DESC LIMIT 1
 """
 
@@ -246,15 +247,16 @@ def convert_command_to_waiver_text(command: str) -> str:
     return " ".join(command.split())
 
 
-def find_command_waiver(conn: sqlite3.Connection, command: str, at_ms: int) -> bool:
-    """An unused waiver under WAIVER_MS old for this exact command; a relayed answer is an agent's and gives none."""
-    params = (at_ms, convert_command_to_waiver_text(command), at_ms - WAIVER_MS, COMMAND_OPTIONS[0])
+def find_command_waiver(conn: sqlite3.Connection, command: str, conversation_id: str, at_ms: int) -> bool:
+    """An unused waiver under WAIVER_MS old for this exact command on a card this conversation posted; a relayed
+    answer is an agent's and gives none."""
+    params = (at_ms, convert_command_to_waiver_text(command), at_ms - WAIVER_MS, COMMAND_OPTIONS[0], conversation_id)
     return conn.execute(_WAIVER_SQL, params).fetchone() is not None
 
 
-def take_command_waiver(conn: sqlite3.Connection, command: str, at_ms: int) -> bool:
-    """Spends that waiver in one statement, so two sessions cannot both spend it."""
-    params = (at_ms, convert_command_to_waiver_text(command), at_ms - WAIVER_MS, COMMAND_OPTIONS[0])
+def take_command_waiver(conn: sqlite3.Connection, command: str, conversation_id: str, at_ms: int) -> bool:
+    """Spends that waiver in one statement, so two runs cannot both spend it."""
+    params = (at_ms, convert_command_to_waiver_text(command), at_ms - WAIVER_MS, COMMAND_OPTIONS[0], conversation_id)
     try:
         cursor = conn.execute(
             f"UPDATE user_items SET command_run_at = ?1 WHERE command_run_at IS NULL AND id = ({_WAIVER_SQL})", params

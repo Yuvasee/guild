@@ -129,7 +129,7 @@ def add_board_commands(sub: "argparse._SubParsersAction[argparse.ArgumentParser]
         "--command",
         default="",
         help="blocked/decision: an exact production command the guard refuses; the card's options become Run it and "
-        "Don't run, and the owner choosing Run it lets that text run once, from any session, within 15 minutes",
+        "Don't run, and the owner choosing Run it lets the posting session run that text once, within 15 minutes",
     )
     p.add_argument("--ask", type=lambda s: int(s.lstrip("#")), metavar="N", help="done/insight: the ask it answers")
     p.add_argument(

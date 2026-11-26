@@ -808,7 +808,7 @@ function renderNeedCard(need) {
   title.append(...withUrls(need.text, need.refs));
   card.append(title);
   if (need.command) {
-    const approve = "Choosing \u201c" + need.options[0] + "\u201d lets this exact command run once, from any session, ";
+    const approve = "Choosing \u201c" + need.options[0] + "\u201d lets the session that posted this card run this exact command once, ";
     card.append(el("div", "body", approve + "within 15 minutes:"));
     card.append(el("pre", "body", need.command));
   }

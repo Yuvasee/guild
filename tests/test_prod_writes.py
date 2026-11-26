@@ -124,9 +124,9 @@ def _post(conn: sqlite3.Connection, command: str = DEPLOY) -> int:
         )  # fmt: skip
 
 
-def _decide(conn: sqlite3.Connection, command: str) -> str:
+def _decide(conn: sqlite3.Connection, command: str, session: str = "conv-aide") -> str:
     payload: dict[str, object] = {
-        "session_id": "c",
+        "session_id": session,
         "cwd": "/w",
         "tool_name": "Bash",
         "tool_input": {"command": command},
@@ -142,7 +142,7 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     return now
 
 
-def test_an_approved_command_runs_once_from_any_session_and_only_with_its_exact_text(
+def test_an_approved_command_runs_once_only_in_the_posting_session_and_only_with_its_exact_text(
     tmp_path: Path, clock: list[int]
 ) -> None:
     conn = connect(tmp_path / "b.db")
@@ -151,6 +151,7 @@ def test_an_approved_command_runs_once_from_any_session_and_only_with_its_exact_
     with transaction(conn):
         reply_on_card(conn, item, "Run it", "sam", clock[0])
 
+    assert _decide(conn, DEPLOY, session="conv-b") == "deny", "another session's exact match"
     assert _decide(conn, DEPLOY + " --wait") == "deny"
     assert _decide(conn, DEPLOY.replace("shop", "billing")) == "deny"
     assert _decide(conn, "  " + DEPLOY.replace(" -n", "   -n")) == "allow"
@@ -215,7 +216,7 @@ def test_a_waiver_is_spent_only_when_no_other_check_refuses_the_command(tmp_path
         reply_on_card(conn, item, "Run it", "sam", clock[0])
 
     decision = handle_pre_tool_use(
-        conn, {"session_id": "c", "cwd": "/w", "tool_name": "Bash", "tool_input": {"command": unnamed}}, PROD
+        conn, {"session_id": "conv-aide", "cwd": "/w", "tool_name": "Bash", "tool_input": {"command": unnamed}}, PROD
     )
 
     assert "names no cluster" in json.loads(decision)["hookSpecificOutput"]["permissionDecisionReason"]

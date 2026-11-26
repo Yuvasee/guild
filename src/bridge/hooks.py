@@ -563,8 +563,8 @@ _CHAINED_APPLY = (
 _PROD_VERB = (
     "bridge: {context} is a production context, and {program} {verb} there is refused for every session. Read it "
     "with get, describe, logs or top.{writable} For anything else, send {assistant} the exact command for a card: "
-    "once {owner} approves the card, the same command runs once, from any session, within 15 minutes. Typing it into "
-    "a tab is refused too."
+    "once {owner} approves the card, the session that posted it may run the same command once, within 15 minutes. "
+    "Typing it into a tab is refused too."
 )
 _PROD_WRITABLE = (
     " In a namespace named literally with -n that matches {namespaces}, a deploy passes: kubectl apply -f without "
@@ -1420,11 +1420,12 @@ def _check_pre_tool_use(
         return _deny(CARD_ANSWER_REFUSAL)
     if rule := find_rule_refusal(command, config):
         unprotected = replace(config, prod_kube_contexts=())
-        if find_rule_refusal(command, unprotected) or not find_command_waiver(conn, command, now_ms()):
+        session = _str(payload, "session_id") or ""
+        if find_rule_refusal(command, unprotected) or not find_command_waiver(conn, command, session, now_ms()):
             return _deny(rule)
         # Waived: every other check still runs, and the waiver is spent only if none refuses.
         decision = _check_pre_tool_use(conn, payload, unprotected, host_checkout, env)
-        if _is_denial(decision) or not take_command_waiver(conn, command, now_ms()):
+        if _is_denial(decision) or not take_command_waiver(conn, command, session, now_ms()):
             return decision if _is_denial(decision) else _deny(rule)
         return decision
     if unnamed_cluster := find_unnamed_cluster_refusal(command):

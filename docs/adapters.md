@@ -161,8 +161,8 @@ group), or `helm upgrade|install|rollback`. With no namespace, `-A`, a namespace
 any other verb or kind, it is still refused. A manifest file or chart is not read, so a cluster-wide object inside one
 is not seen. For one other write, an agent posts a card with
 the exact command (`bridge post decision "…" --command "<exact command>"`), whose options are then Run it and Don't
-run; the owner's own click on Run it lets that whole text (spaces normalised) run once, from any session, within 15
-minutes, if no other check refuses it. An answer the assistant relays gives no such waiver, and no other rule is ever
+run; the owner's own click on Run it lets the session that posted the card run that whole text (spaces normalised)
+once, within 15 minutes, if no other check refuses it. An answer the assistant relays gives no such waiver, and no other rule is ever
 waived. Whatever the config, the guard also refuses printing secret values (kubectl get secret
 -o json, yaml, jsonpath, go-template, custom-columns), logging Claude out or touching its keychain entry, typing
 /logout into a tab, `aws iam simulate-*`, and a kubectl apply, kubectl create secret, helm upgrade or install chained
