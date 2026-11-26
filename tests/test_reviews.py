@@ -2519,9 +2519,7 @@ def test_a_ci_stop_by_github_reaches_the_lead_in_its_own_words_and_each_flip_at_
     tmp_path: Path,
 ) -> None:
     conn = setup_shared_issue_pr(tmp_path)
-    text = (
-        "app#7 T: CI didn't run: GitHub billing, not a code failure: rerun the failed jobs once GitHub runs them again."
-    )
+    text = "app#7 T: CI didn't run: GitHub didn't start the jobs, not a code failure: rerun the failed jobs."
     stopped: dict[str, object] = {
         "key": f"{REF}:ci stopped:a1", "kind": "ci stopped", "text": text, "url": "https://x/7", "surface": "s-worker",
     }  # fmt: skip
@@ -3517,3 +3515,31 @@ def test_long_paths_and_titles_keep_the_overlap_notice_under_the_message_limit(t
         told = tell_overlaps(conn, CONFIG, 1000)
     body = conn.execute("SELECT body FROM messages").fetchone()[0]
     assert len(told) == 1 and len(body) <= BODY_MAX_CHARS and "d/0.py, …d" in body and "(tt" in body
+
+
+def test_a_github_billing_stop_reaches_each_lead_and_the_assistant_once_for_the_org_until_a_job_runs_again(
+    tmp_path: Path,
+) -> None:
+    conn = setup_shared_issue_pr(tmp_path)
+    with transaction(conn):
+        add_session(conn, "aide-c", CONFIG.assistant_handle)
+
+    def stopped(number: int) -> dict[str, object]:
+        ref = f"pr:Acme/Web#{number}"
+        return {
+            "key": f"{ref}:ci stopped:a1", "kind": "ci stopped", "url": "https://x/7", "surface": "s-worker",
+            "text": f"web#{number} T: CI didn't run: GitHub billing, not a code failure: rerun the failed jobs.",
+        }  # fmt: skip
+
+    def post(at: int, *signals: dict[str, object]) -> list[str]:
+        with transaction(conn):
+            return [r.handle for r in post_signals_to_leads(conn, CONFIG, list(signals), at)]
+
+    first = post(1000, stopped(7))
+    other_pr = post(2000, stopped(7), stopped(8))
+    over = post(3000)
+    again = post(4000, stopped(9))
+    bodies = [r[0] for r in conn.execute("SELECT body FROM messages ORDER BY id")]
+    assert sorted(first) == ["aide", "alex"] and other_pr == [] and over == []
+    assert sorted(again) == ["aide", "alex"], "once Actions ran a job again, a new stop is news"
+    assert len(bodies) == 4 and all(b.startswith("GitHub Actions is blocked for acme") for b in bodies)

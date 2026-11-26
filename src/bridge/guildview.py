@@ -41,6 +41,7 @@ from bridge.pages import find_bare_page_refs, list_pages, map_url_to_page_slug
 from bridge.refs import find_ref_spans, map_ref_to_label
 from bridge.registry import find_lead_tab_title, list_sessions
 from bridge.remote import REMOTE_STALE_AFTER_MS
+from bridge.review_github import CI_BLOCKED_BY_BILLING
 from bridge.reviews import find_lead_of
 from bridge.signals import CI_STOPPED, STALL, map_enrichment_to_status
 from bridge.status_watchers import find_owner_needs
@@ -59,6 +60,7 @@ REMOTE_LINK_MS = 7 * 24 * 3_600_000
 # The command that starts a run is logged just before it starts, and the two hosts' clocks differ a little.
 REMOTE_LINK_BEFORE_START_MS = 10 * 60_000
 RED_CI_ESCALATE_MS = 2 * 3_600_000
+BILLING_KEY = "billing:"
 WORKER_HOLDS_KINDS = ("pr", "gh-issue", "issue")
 _MESSAGE_POST_TYPES = (None, "report", "question", "handoff")
 _SIGNATURE_RE = re.compile(r"\s*([^:()\n]{1,60}?)\s*(?:\(([^:()\n]{1,60})\))?\s*:\s*")
@@ -520,12 +522,15 @@ def post_signals_to_leads(
     once to the assistant, and red CI on a PR in the owner's queue once more to the assistant when it is still red
     two hours after its lead was told. One that fails is logged and undone alone, so it never holds back the rest."""
     posted: list[Recipient] = []
+    _forget_billing_stops_that_ended(conn, signals)
     for signal in signals:
         conn.execute("SAVEPOINT signal_post")
         try:
             recipients = [_post_signal_to_lead(conn, config, signal, now)]
             if signal.get("kind") == STALL:
                 recipients.append(_post_signal_to_assistant(conn, config, signal, now))
+            elif (org := _find_billing_org(signal)) is not None:
+                recipients.append(_post_signal_to_assistant(conn, config, _map_signal_to_org_billing(signal, org), now))
             elif is_red_ci_still_unfixed(conn, signal, now):
                 hours = RED_CI_ESCALATE_MS // 3_600_000
                 late = {**signal, "text": f"{signal['text']}: CI still red {hours} h after its lead was told"}
@@ -538,6 +543,29 @@ def post_signals_to_leads(
         conn.execute("RELEASE signal_post")
         posted += [r for r in recipients if r is not None]
     return posted
+
+
+def _find_billing_org(signal: dict[str, object]) -> str | None:
+    if signal.get("kind") != CI_STOPPED or CI_BLOCKED_BY_BILLING not in str(signal["text"]):
+        return None
+    ref = str(signal["key"]).partition(f":{CI_STOPPED}:")[0]
+    return ref.partition(":")[2].partition("/")[0].lower()
+
+
+def _map_signal_to_org_billing(signal: dict[str, object], org: str) -> dict[str, object]:
+    text = (
+        f"GitHub Actions is blocked for {org}: {CI_BLOCKED_BY_BILLING}, not a code failure. No PR there is told of it "
+        "again until Actions runs a job; then rerun the failed jobs."
+    )
+    return {**signal, "key": f"{BILLING_KEY}{org}", "text": text}
+
+
+def _forget_billing_stops_that_ended(conn: sqlite3.Connection, signals: list[dict[str, object]]) -> None:
+    """Billing stays reported while any PR of the org is still stopped by it; once none is, a new stop is news."""
+    still = {org for s in signals if (org := _find_billing_org(s)) is not None}
+    for row in conn.execute("SELECT key FROM signal_posts WHERE key LIKE ?", (f"{BILLING_KEY}%",)).fetchall():
+        if str(row["key"]).removeprefix(BILLING_KEY).partition(":")[0] not in still:
+            conn.execute("DELETE FROM signal_posts WHERE key = ?", (row["key"],))
 
 
 def is_red_ci_still_unfixed(conn: sqlite3.Connection, signal: dict[str, object], now: int) -> bool:
@@ -569,6 +597,12 @@ def _post_signal_to_lead(
     lead = find_lead_on_surface(conn, find_lead_of(conn, surface if isinstance(surface, str) else None)[1])
     if lead is None or _is_signal_posted(conn, key):
         return None
+    if (org := _find_billing_org(signal)) is not None:
+        conn.execute("DELETE FROM signal_posts WHERE key = ?", (key.replace(f":{CI_STOPPED}:", ":ci:", 1),))
+        signal = _map_signal_to_org_billing(signal, org)
+        key = f"{signal['key']}:{lead.name}"
+        if _is_signal_posted(conn, key):
+            return None
     row = conn.execute(
         "SELECT conversation_id FROM instances WHERE surface = ? AND ended_at IS NULL "
         "AND conversation_id IS NOT NULL ORDER BY proc_start_ms DESC LIMIT 1",
@@ -615,7 +649,7 @@ def _send_signal(
     # A head can flip between a real failure and a GitHub stop as jobs are rerun; each flip is news again.
     kind = str(signal.get("kind"))
     other = {"ci": CI_STOPPED, CI_STOPPED: "ci"}.get(kind)
-    if other:
+    if other and not key.startswith(BILLING_KEY):
         conn.execute("DELETE FROM signal_posts WHERE key = ?", (key.replace(f":{kind}:", f":{other}:", 1),))
     return recipient
 
