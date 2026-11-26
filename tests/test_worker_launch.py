@@ -185,6 +185,10 @@ def test_guild_worker_starts_claude_without_chrome_and_briefs_it_on_the_browser(
     )
     assert "A PR that changes UI ships its review doc with screenshots of the changed screens.\n" in brief
     assert "Stage files by path; never git add -A or git add ." in brief
+    assert (
+        "Open a PR as a draft while you work; mark it ready only when the work is complete (review and sandbox runs "
+        "start then). Push when a piece of work is complete, not after every small fix.\n" in brief
+    )
     assert BROWSER_RULE in brief
     assert "a part headed Reviews" in brief
     assert "Sizes are in kLOC" in brief
