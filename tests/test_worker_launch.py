@@ -179,6 +179,10 @@ def test_guild_worker_starts_claude_without_chrome_and_briefs_it_on_the_browser(
         "simplest implementation that keeps the gain; this also guards against scope creep. Tell your lead which way "
         "you went and why.\n" in brief
     )
+    assert (
+        "Before stating a fact about your own past work (merged, deployed, checked, done), read the record (gh for "
+        "PRs, guild ask show for asks), not notes or memory.\n" in brief
+    )
     assert "Stage files by path; never git add -A or git add ." in brief
     assert BROWSER_RULE in brief
     assert "a part headed Reviews" in brief
