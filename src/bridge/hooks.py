@@ -672,23 +672,26 @@ _RUN_WATCH = (
 )
 
 
+# Options of gh, gh pr merge and gh run watch that take a value: the value is not read as a flag or a subcommand.
+_GH_VALUE_OPTIONS = frozenset({
+    "-R", "--repo", "-t", "--subject", "-b", "--body", "-F", "--body-file", "--match-head-commit", "-A",
+    "--author-email", "-c", "--comment", "-i", "--interval",
+})  # fmt: skip
+_GH_VALUE_LETTERS = frozenset("RtbFAci")
+
+
 def _map_gh_to_refusal(args: list[str], config: Config) -> str | None:
     """gh pr merge --admin, a merge through the API (which an admin token gets past the rules with, as --admin does),
     a ruleset or branch protection write, and gh run watch polling faster than once a minute."""
-    positional: list[tuple[int, str]] = []
-    at = 0
-    while at < len(args) and len(positional) < 2:
-        if args[at] in ("-R", "--repo"):
-            at += 1
-        elif not args[at].startswith("-"):
-            positional.append((at, args[at]))
-        at += 1
-    words = [word for _, word in positional]
+    positional, options = _split_gh_args(args)
+    words = [word for _, word in positional[:2]]
     if words == ["run", "watch"]:
-        interval = _read_interval(args[positional[1][0] + 1 :])
-        return None if interval is not None and interval >= 60 else _RUN_WATCH
+        values = [value for name, value in options if name in ("-i", "--interval")]
+        interval = values[-1] if values else None
+        return None if interval is not None and interval.isdigit() and int(interval) >= 60 else _RUN_WATCH
     what = None
-    if words == ["pr", "merge"] and any(_is_admin_flag(a) for a in args[positional[1][0] + 1 :]):
+    admin = [value for name, value in options if name == "--admin"]
+    if words == ["pr", "merge"] and admin and (admin[-1] is None or admin[-1].lower() not in ("false", "f", "0")):
         what = "gh pr merge --admin"
     elif words[:1] == ["api"]:
         method, fields, path, _ = parse_gh_api_args(args[positional[0][0] + 1 :])
@@ -701,22 +704,30 @@ def _map_gh_to_refusal(args: list[str], config: Config) -> str | None:
     return _ADMIN_RIGHTS.format(what=what, assistant=config.assistant_handle) if what else None
 
 
-def _read_interval(args: list[str]) -> int | None:
-    """gh run watch's -i or --interval, as gh reads it; None when absent or not a number."""
-    found: str | None = None
-    for at, arg in enumerate(args):
+def _split_gh_args(args: list[str]) -> tuple[list[tuple[int, str]], list[tuple[str, str | None]]]:
+    """Positional words with their index, and options with their value (None for a bare flag), as pflag reads them;
+    everything after -- is positional."""
+    positional: list[tuple[int, str]] = []
+    options: list[tuple[str, str | None]] = []
+    at = 0
+    while at < len(args):
+        arg = args[at]
         name, eq, value = arg.partition("=")
-        letter, attached = read_short_cluster(arg, frozenset("i"))
-        if name == "--interval":
-            found = value if eq else (args[at + 1] if at + 1 < len(args) else "")
+        letter, attached = read_short_cluster(arg, _GH_VALUE_LETTERS)
+        if arg == "--":
+            positional += [(rest, args[rest]) for rest in range(at + 1, len(args))]
+            break
+        if arg in _GH_VALUE_OPTIONS or (letter is not None and attached is None):
+            options.append((arg if letter is None else "-" + letter, args[at + 1] if at + 1 < len(args) else ""))
+            at += 1
         elif letter is not None:
-            found = attached if attached is not None else (args[at + 1] if at + 1 < len(args) else "")
-    return int(found) if found is not None and found.isdigit() else None
-
-
-def _is_admin_flag(arg: str) -> bool:
-    name, eq, value = arg.partition("=")
-    return name == "--admin" and (not eq or value.lower() not in ("false", "f", "0"))
+            options.append(("-" + letter, attached))
+        elif arg.startswith("-") and len(arg) > 1:
+            options.append((name, value if eq else None))
+        else:
+            positional.append((at, arg))
+        at += 1
+    return positional, options
 
 
 def _list_aws_positionals(args: list[str]) -> list[str]:

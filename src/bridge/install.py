@@ -47,7 +47,7 @@ _LOGIN_PROBE_GLOBS = (
     "*agtermctl*!*", "*tmux*send*!*",
 )  # fmt: skip
 # So is admin use on GitHub: gh pr merge --admin, a merge through the API, a ruleset or branch protection write.
-_ADMIN_GLOBS = ("*gh*merge*admin*", "*gh*api*merge*", "*gh*api*uleset*", "*gh*api*rotection*")
+_ADMIN_GLOBS = ("*gh*merge*admin*", "*gh*admin*merge*", "*gh*api*merge*", "*gh*api*uleset*", "*gh*api*rotection*")
 # And gh run watch polling faster than once a minute: the account's API limit is shared.
 _RUN_WATCH_GLOBS = ("*gh*run*watch*",)
 # A checker piped into a filter loses its exit code; the hook adds a note, it never refuses.

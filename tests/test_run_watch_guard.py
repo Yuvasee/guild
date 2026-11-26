@@ -20,6 +20,8 @@ FAST = [
     "gh run watch 123456 -i",
     "sleep 60; gh run watch 123456",
     "bash -c 'gh run watch 123456 --compact'",
+    "gh run watch 123456 -- --interval=60",
+    "gh run watch 123456 --interval 90 -i 5",
 ]
 SLOW_OR_OTHER = [
     "gh run watch 123456 --interval 60",
@@ -27,6 +29,9 @@ SLOW_OR_OTHER = [
     "gh run watch 123456 -i=120",
     "gh run watch 123456 --interval=90 --compact",
     "gh run watch --help",
+    "gh run --interval=60 watch 123456",
+    "gh run -i 60 watch 123456",
+    "gh -R acme/web run watch 123456 -i60",
     "gh run view 123456 --log-failed",
     "gh pr checks 42",
     "git commit -m 'stop using gh run watch'",
