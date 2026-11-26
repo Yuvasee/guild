@@ -883,28 +883,40 @@ def find_decision_problems(page: str, blocks: "list[_Block]", owner: str) -> lis
     return problems
 
 
-_IMAGE_RE = re.compile(r"<img\b[^>]*\bsrc\s*=\s*[\"']?[^\s\"'>]", re.I)
 _TEST_PATH_RE = re.compile(
     r"(?:^|/)(?:tests?|__tests__|e2e|__snapshots__)/|(?:^|/)test_[^/]*$|[._]tests?\.\w+$|\.spec\.\w+$"
 )
 
 
-def find_screenshot_problems(page: str, changed: list[str] | None, ui_paths: tuple[str, ...]) -> list[str]:
-    """A PR that changes UI code (a file under a configured glob that is not a test) ships a doc with a screenshot.
-    `changed` is the PR's changed files; None when they cannot be read, so nothing is checked."""
-    if not changed:
+RASTER_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
+
+
+def find_screenshot_problems(
+    page: str, changed: list[str] | None, ui_paths: tuple[str, ...], shots: list[str]
+) -> list[str]:
+    """A PR that changes UI code (a file under a configured glob that is not a test) ships a doc with a screenshot: a
+    raster image (`shots`, the doc's png/jpg/jpeg/webp files that exist beside it). `changed` is the PR's changed
+    files; None or empty when they cannot be read, which refuses, as UI code cannot be ruled out."""
+    if not ui_paths:
         return []
+    if not changed:
+        return [
+            "the PR's changed files cannot be read (it has no review worktree yet, or the worktree lacks its commits), "
+            "so the doc cannot be checked for the screenshots a UI change needs: register it again once the PR has "
+            "its review worktree"
+        ]
     ui = [
         path
         for path in changed
         if not _TEST_PATH_RE.search(path) and any(fnmatch.fnmatchcase(path, glob) for glob in ui_paths)
     ]
-    if not ui or _IMAGE_RE.search(page):
+    if not ui or shots:
         return []
     return [
         f"the PR changes UI code ({ui[0]}{f' and {len(ui) - 1} more' if len(ui) > 1 else ''}) but the doc has no "
         "screenshot: take them of the changed screens, today and after, on the sandbox or locally with Playwright in "
-        "a hidden window, and embed them as images in the doc"
+        "a hidden window, save them as png, jpg or webp files beside the doc and show them with "
+        '<img src="name.png"> (an svg, a data: image or a missing file does not count)'
     ]
 
 

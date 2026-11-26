@@ -749,25 +749,32 @@ def test_registration_reads_the_rounds_beside_the_source_doc(tmp_path: Path, mon
 
 
 UI = ("web/**", "admin/src/**")
-SHOT = '<p><img src="data:image/png;base64,iVBOR" alt="the new button"></p>'
+SHOT = '<p><img src="shot.png" alt="the new button"></p>'
 
 
-def test_a_pr_that_changes_ui_code_needs_a_screenshot_in_its_doc() -> None:
+def test_a_pr_that_changes_ui_code_needs_a_raster_screenshot_that_exists_beside_the_doc() -> None:
     page = make_doc().decode()
-    (refused,) = review_doc_check.find_screenshot_problems(page, ["web/app/Button.tsx", "web/a.css"], UI)
+    find = review_doc_check.find_screenshot_problems
+    (refused,) = find(page, ["web/app/Button.tsx", "web/a.css"], UI, [])
     assert refused.startswith("the PR changes UI code (web/app/Button.tsx and 1 more) but the doc has no screenshot")
-    assert "Playwright in a hidden window" in refused
-    shot = page.replace("</body>", f"{SHOT}</body>")
-    assert review_doc_check.find_screenshot_problems(shot, ["web/app/Button.tsx"], UI) == []
-    empty = page.replace("</body>", "<img alt='x'></body>")
-    assert len(review_doc_check.find_screenshot_problems(empty, ["web/app/Button.tsx"], UI)) == 1
+    assert "Playwright in a hidden window" in refused and "an svg, a data: image or a missing file" in refused
+    assert find(page.replace("</body>", f"{SHOT}</body>"), ["web/app/Button.tsx"], UI, ["shot.png"]) == []
 
 
-def test_changes_outside_the_ui_paths_tests_and_unreadable_changes_need_no_screenshot() -> None:
+def test_changes_outside_the_ui_paths_and_tests_need_no_screenshot() -> None:
     page = make_doc().decode()
-    for changed in (["src/app/run.py"], ["web/Button.test.tsx", "web/__tests__/a.tsx", "web/tests/b.ts"], [], None):
-        assert review_doc_check.find_screenshot_problems(page, changed, UI) == [], changed
-    assert review_doc_check.find_screenshot_problems(page, ["web/Button.tsx"], ()) == []
+    for changed in (["src/app/run.py"], ["web/Button.test.tsx", "web/__tests__/a.tsx", "web/tests/b.ts"]):
+        assert review_doc_check.find_screenshot_problems(page, changed, UI, []) == [], changed
+    assert review_doc_check.find_screenshot_problems(page, ["web/Button.tsx"], (), []) == []
+    assert review_doc_check.find_screenshot_problems(page, None, (), []) == []
+
+
+def test_changed_files_that_cannot_be_read_refuse_the_doc_when_ui_paths_are_set() -> None:
+    page = make_doc().decode()
+    unreadable: list[list[str] | None] = [None, []]
+    for changed in unreadable:
+        (refused,) = review_doc_check.find_screenshot_problems(page, changed, UI, ["shot.png"])
+        assert "changed files cannot be read" in refused and "once the PR has its review worktree" in refused
 
 
 def test_the_files_a_pr_changes_come_from_the_review_worktree(tmp_path: Path) -> None:
@@ -796,8 +803,19 @@ def test_registration_refuses_a_doc_without_a_screenshot_when_the_pr_changes_ui(
     source.write_bytes(make_doc())
     with pytest.raises(DocError, match=r"changes UI code \(src/app/run.py\)"), transaction(conn):
         register_doc(conn, config, REF, source, NOW)
+    for bad in ("shot.svg", "shot.gif", "missing.png"):
+        source.write_bytes(make_doc().replace(b"</body>", SHOT.replace("shot.png", bad).encode() + b"</body>"))
+        (tmp_path / "shot.svg").write_text("<svg/>")
+        (tmp_path / "shot.gif").write_bytes(b"GIF89a")
+        with pytest.raises(DocError, match="has no screenshot"), transaction(conn):
+            register_doc(conn, config, REF, source, NOW)
     source.write_bytes(make_doc().replace(b"</body>", SHOT.encode() + b"</body>"))
+    (tmp_path / "shot.png").write_bytes(b"\x89PNG-bytes")
     with transaction(conn):
+        register_doc(conn, config, REF, source, NOW)
+    with transaction(conn):
+        conn.execute("UPDATE review_prs SET wt_path = ''")
+    with pytest.raises(DocError, match="changed files cannot be read"), transaction(conn):
         register_doc(conn, config, REF, source, NOW)
 
 

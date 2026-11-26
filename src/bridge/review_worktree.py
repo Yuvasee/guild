@@ -20,6 +20,7 @@ from bridge.db import now_ms, transaction
 from bridge.doc_nav import ADDED, BEHIND_BANNER_STYLE, convert_doc_to_viewable, remove_injected_parts
 from bridge.leads import REVIEW_DOC_SPEC
 from bridge.review_doc_check import (
+    RASTER_SUFFIXES,
     PlainLimits,
     find_doc_problems,
     find_screenshot_problems,
@@ -988,17 +989,23 @@ def doc_images_dir(doc: Path) -> Path:
     return doc.with_suffix(".files")
 
 
-def store_doc_images(text: str, source_dir: Path, doc: Path) -> None:
-    """The images the doc names by a bare file name are copied from beside its source, so the page serves them."""
+def list_doc_images(text: str, source_dir: Path) -> list[str]:
+    """The image files the doc names by a bare file name that exist beside its source."""
+    found: list[str] = []
     for name in dict.fromkeys(_DOC_IMAGE_SRC_RE.findall(text)):
         origin = source_dir / name
-        if Path(name).suffix.lower() not in DOC_IMAGE_TYPES or not origin.is_file() or origin.is_symlink():
-            continue
-        if origin.stat().st_size > DOC_MAX_BYTES:
-            continue
+        listed = Path(name).suffix.lower() in DOC_IMAGE_TYPES and origin.is_file() and not origin.is_symlink()
+        if listed and 0 < origin.stat().st_size <= DOC_MAX_BYTES:
+            found.append(name)
+    return found
+
+
+def store_doc_images(images: list[str], source_dir: Path, doc: Path) -> None:
+    """The doc's images are copied from beside its source, so the page serves them."""
+    for name in images:
         target = doc_images_dir(doc) / name
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(origin, target)
+        shutil.copyfile(source_dir / name, target)
 
 
 def register_doc(conn: sqlite3.Connection, config: Config, ref: str, source: Path, now: int) -> bytes:
@@ -1032,7 +1039,9 @@ def register_doc(conn: sqlite3.Connection, config: Config, ref: str, source: Pat
     )
     wt = Path(str(row["wt_path"])) if row["wt_path"] else None
     changed = list_changed_files(wt, str(row["base"]), commit) if wt else None
-    problems.extend(find_screenshot_problems(text, changed, config.review_ui_paths))
+    images = list_doc_images(text, source.parent)
+    shots = [name for name in images if Path(name).suffix.lower() in RASTER_SUFFIXES]
+    problems.extend(find_screenshot_problems(text, changed, config.review_ui_paths, shots))
     if problems:
         listed = "".join(f"\n- {problem}" for problem in problems)
         raise DocError(f"{ref}: the doc was not registered, as {REVIEW_DOC_SPEC} asks:{listed}")
@@ -1042,7 +1051,7 @@ def register_doc(conn: sqlite3.Connection, config: Config, ref: str, source: Pat
     temporary = target.with_suffix(".tmp")
     temporary.write_bytes(page)
     temporary.replace(target)
-    store_doc_images(text, source.parent, target)
+    store_doc_images(images, source.parent, target)
     conn.execute(
         """
         UPDATE review_prs SET doc_file = ?, doc_oid = ?, doc_at = ?, doc_head = ?, doc_reviews = ?,
