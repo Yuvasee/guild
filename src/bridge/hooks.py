@@ -290,6 +290,20 @@ _SUDO_VALUE_OPTIONS = frozenset({"-u", "-g", "-U", "-C", "-D", "-h", "-p", "-r",
 _XARGS_VALUE_OPTIONS = frozenset({"-n", "-L", "-I", "-P", "-s", "-d", "-E", "-a"})
 
 
+CARD_ANSWER_REFUSAL = "bridge: only the owner answers his cards, on the dashboard."
+# Read from the raw text: a mistake-stopper for the plain routes, not a parser a deliberate dodge cannot get past.
+_CARD_ANSWER_URL_RE = re.compile(r"/api/items/[^/\s]+/(?:answer|reply)\b")
+_CARD_WRITE_SQL_RE = re.compile(r"\b(?:update|into|delete\s+from)\s+user_items\b", re.I)
+
+
+def is_card_answer(command: str) -> bool:
+    """A post to a card's answer or reply route, or a hand write of the cards' table, would arm a production waiver
+    the owner never gave."""
+    return bool(_CARD_ANSWER_URL_RE.search(command)) or (
+        "sqlite3" in command and bool(_CARD_WRITE_SQL_RE.search(command))
+    )
+
+
 def find_kill_by_name_refusal(command: str, depth: int = 0) -> str | None:
     """A name or pattern also matches other sessions' processes, the owner's own and shared ones: kill by PID. Read
     with the guard's lexer, so quoted text, heredoc bodies and comments are data; a command run through ssh or a
@@ -1402,6 +1416,8 @@ def _check_pre_tool_use(
         return ""
     if kill := find_kill_by_name_refusal(command):
         return _deny(kill)
+    if is_card_answer(command):
+        return _deny(CARD_ANSWER_REFUSAL)
     if rule := find_rule_refusal(command, config):
         unprotected = replace(config, prod_kube_contexts=())
         if find_rule_refusal(command, unprotected) or not find_command_waiver(conn, command, now_ms()):

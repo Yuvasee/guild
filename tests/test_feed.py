@@ -1,6 +1,8 @@
 import json
 import subprocess
 import time
+import urllib.error
+import urllib.request
 from typing import cast
 
 import pytest
@@ -351,6 +353,29 @@ def test_malformed_dashboard_requests_are_refused(dashboard: str) -> None:
     http_request(dashboard + "/api/messages", post=True, data={"to": [], "text": "x", "reply_to": "1"}, expect=400)
     http_request(dashboard + "/api/items/1/answer", post=True, data={"answer": 3}, expect=400)
     http_request(dashboard + "/api/items/99999999999999999999/answer", post=True, data={"answer": "x"}, expect=404)
+
+
+def test_only_the_dashboard_page_answers_a_card_not_a_shell_with_the_header(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess, dashboard: str
+) -> None:
+    pids = start(bridge_env, spawn_process, agterm_tabs=False)
+    bridge_env.cli("post", "decision", "Ship v2?", "--option", "Ship", "--option", "Wait", pid=pids["a"])
+    [item] = items(dashboard)
+    answer, reply = f"/api/items/{item['id']}/answer", f"/api/items/{item['id']}/reply"
+    page = {"Origin": dashboard, "Sec-Fetch-Site": "same-origin"}
+
+    for path, data in ((answer, {"answer": "Ship"}), (reply, {"text": "go"})):
+        body = json.dumps(data).encode()
+        curl = {"X-Bridge": "1", "Content-Type": "application/json"}
+        for headers in (curl, {**curl, "Origin": dashboard}, {**curl, **page, "Sec-Fetch-Site": "same-site"}):
+            request = urllib.request.Request(dashboard + path, data=body, method="POST", headers=headers)
+            with pytest.raises(urllib.error.HTTPError) as refused:
+                urllib.request.urlopen(request, timeout=5)
+            assert refused.value.code == 403, (path, headers)
+    assert items(dashboard)[0]["answered_at"] is None
+
+    http_request(dashboard + answer, post=True, headers=page, data={"answer": "Ship"})
+    assert items(dashboard)[0]["answer"] == "Ship"
 
 
 def test_a_team_post_is_typed_only_where_it_concerns_the_session(

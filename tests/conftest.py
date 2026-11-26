@@ -8,6 +8,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable, Generator, Mapping
 from dataclasses import dataclass
@@ -318,7 +319,8 @@ def http_request(
     expect: int = 200,
     data: dict[str, object] | None = None,
 ) -> str:
-    all_headers = {"X-Bridge": "1"} if post else {}
+    origin = "{0.scheme}://{0.netloc}".format(urllib.parse.urlsplit(url))
+    all_headers = {"X-Bridge": "1", "Origin": origin, "Sec-Fetch-Site": "same-origin"} if post else {}
     all_headers.update(headers or {})
     body = json.dumps(data).encode() if data is not None else None
     if body is not None:

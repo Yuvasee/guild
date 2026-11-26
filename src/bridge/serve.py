@@ -1705,8 +1705,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if self.path == "/theme":
             self._set_theme()
             return
-        # The custom header forces a CORS preflight, so other web pages cannot trigger actions.
-        if not self._trusted_request() or self.headers.get("X-Bridge") != "1":
+        if not self._trusted_request():
+            return
+        # The custom header forces a CORS preflight, so other web pages cannot trigger actions; the fetch headers, which
+        # a browser sets and curl does not, keep an agent's shell from answering the owner's cards.
+        if (
+            self.headers.get("X-Bridge") != "1"
+            or self.headers.get("Sec-Fetch-Site") != "same-origin"
+            or self.headers.get("Origin") != f"http://{self.headers.get('Host')}"
+        ):
             self._send(403, "text/plain", b"forbidden")
             return
         length = self.headers.get("Content-Length") or ""

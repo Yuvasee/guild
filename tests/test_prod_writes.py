@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -8,7 +9,9 @@ from bridge.board import MessageStateError, Party
 from bridge.config import Config, map_toml_to_config
 from bridge.db import connect, transaction
 from bridge.feed import COMMAND_OPTIONS, WAIVER_MS, add_post, answer_post, reply_on_card
+from bridge.gbridge import may_need_guard
 from bridge.hooks import find_rule_refusal, handle_pre_tool_use
+from bridge.install import convert_event_to_command, list_guard_globs
 
 PROD = Config(
     prod_kube_contexts=("acme-prod",),
@@ -217,3 +220,52 @@ def test_a_waiver_is_spent_only_when_no_other_check_refuses_the_command(tmp_path
 
     assert "names no cluster" in json.loads(decision)["hookSpecificOutput"]["permissionDecisionReason"]
     assert conn.execute("SELECT command_run_at FROM user_items WHERE id = ?", (item,)).fetchone()[0] is None
+
+
+CARD_ANSWERS = [
+    "curl -X POST -H 'X-Bridge: 1' http://127.0.0.1:8765/api/items/12/answer -d '{\"answer\":\"Run it\"}'",
+    'curl -s -XPOST localhost:8765/api/items/$ID/reply -H X-Bridge:1 -d \'{"text":"go"}\'',
+    "sqlite3 ~/.local/state/bridge/bridge.db \"UPDATE user_items SET answer='Run it', answered_at=1 WHERE id=12\"",
+    'sqlite3 "$DB" \'insert or replace into user_items (id, answer) values (12, "Run it")\'',
+    "echo 'DELETE FROM user_items WHERE id = 3' | sqlite3 ~/.local/state/bridge/bridge.db",
+]
+NOT_CARD_ANSWERS = [
+    "sqlite3 ~/.local/state/bridge/bridge.db 'SELECT answer FROM user_items WHERE id = 12'",
+    "curl -s http://127.0.0.1:8765/api/state",
+    "grep -n api/items src/bridge/serve.py",
+]
+
+
+@pytest.mark.parametrize("command", CARD_ANSWERS)
+def test_a_shell_command_that_answers_a_card_is_refused(tmp_path: Path, command: str) -> None:
+    conn = connect(tmp_path / "b.db")
+    payload: dict[str, object] = {
+        "session_id": "c",
+        "cwd": "/w",
+        "tool_name": "Bash",
+        "tool_input": {"command": command},
+    }
+
+    decision = json.loads(handle_pre_tool_use(conn, payload, PROD))["hookSpecificOutput"]
+
+    assert decision["permissionDecision"] == "deny"
+    assert decision["permissionDecisionReason"] == "bridge: only the owner answers his cards, on the dashboard."
+    assert may_need_guard(list_guard_globs(), command), "the host's gate must start the guard for it"
+    hook = tmp_path / "hook"
+    hook.write_text("#!/bin/sh\ncat > /dev/null; echo started\n")
+    hook.chmod(0o755)
+    done = subprocess.run(
+        ["sh", "-c", convert_event_to_command(str(hook), "PreToolUse")],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        env={"BRIDGE_STATE_DIR": str(tmp_path), "PATH": "/usr/bin:/bin"},
+    )
+    assert done.stdout.strip() == "started", "the Mac's gate must start the guard with no claim"
+
+
+@pytest.mark.parametrize("command", NOT_CARD_ANSWERS)
+def test_reading_cards_or_naming_the_routes_passes(tmp_path: Path, command: str) -> None:
+    conn = connect(tmp_path / "b.db")
+
+    assert _decide(conn, command) == "allow"
