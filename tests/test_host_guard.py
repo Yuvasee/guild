@@ -34,7 +34,7 @@ from bridge.hooks import handle_pre_tool_use, map_unreadable_to_line
 from bridge.host_workers import HostWorker, find_mapped_root, hash_token, list_readable_roots, write_record
 from bridge.install import list_guard_globs
 from bridge.procinfo import process_start_ms
-from bridge.worker_api import handle_host_hook, start_worker_api
+from bridge.worker_api import handle_host_hook, map_json_to_host_checkouts, start_worker_api
 from bridge.workers import TabSession, map_host_tab_to_closed_records
 
 CONV = "0b5c2f4e-1d2a-4c3b-9e8f-7a6b5c4d3e2f"
@@ -1404,3 +1404,40 @@ def test_a_host_reply_showing_code_is_refused_with_the_body_file_way_and_that_wa
     other: list[Unreadable] = []
     _keys("git push origin $(cat branch)", "/home/dev/web", other)
     assert "--body-file" not in map_unreadable_to_line(other[0], ("/home/dev",))
+
+
+def _host_push_verdict(bridge_env: BridgeEnv, monkeypatch: pytest.MonkeyPatch, home: Path, checkout: Path) -> str:
+    for key, value in bridge_env.env.items():
+        monkeypatch.setenv(key, value)
+    command = "git push origin feat/x"
+    reported = gbridge.read_guard_checkouts(home, command, str(checkout))
+    reader = make_host_repo_reader(
+        map_json_to_host_checkouts(reported, None, str(checkout)), (str(checkout.parent),), str(home)
+    )
+    payload: dict[str, object] = {
+        "session_id": CONV, "cwd": str(checkout), "tool_name": "Bash", "tool_input": {"command": command},
+    }  # fmt: skip
+    return handle_pre_tool_use(connect(bridge_env.db), payload, load_config(), reader)
+
+
+def test_a_host_push_adding_an_empty_file_is_refused_naming_it_and_a_gitkeep_goes(
+    bridge_env: BridgeEnv, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = tmp_path / "gbridge"
+    home.mkdir()
+    checkout = _repo(tmp_path / "web")
+    _git(checkout, "checkout", "-q", "-b", "feat/x")
+    _git(checkout, "update-ref", "refs/remotes/origin/main", "HEAD")
+    (checkout / "data").mkdir()
+    (checkout / "data" / ".gitkeep").write_text("")
+    (checkout / "app.py").write_text("print(1)\n")
+    _git(checkout, "add", "--", "data/.gitkeep", "app.py")
+    _git(checkout, "commit", "-q", "-m", "scaffold")
+    kept = _host_push_verdict(bridge_env, monkeypatch, home, checkout)
+    (checkout / "0").write_text("")
+    _git(checkout, "add", "--", "0")
+    _git(checkout, "commit", "-q", "-m", "stray")
+    refused = _host_push_verdict(bridge_env, monkeypatch, home, checkout)
+
+    assert kept == ""
+    assert "this push adds empty files: 0." in json.loads(refused)["hookSpecificOutput"]["permissionDecisionReason"]

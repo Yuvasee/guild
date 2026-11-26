@@ -1,7 +1,8 @@
+import os
 import subprocess
 from pathlib import PurePosixPath
 
-from bridge.guard import Target
+from bridge.guard import HostCheckout, Target
 
 EMPTY_BLOB = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
 EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
@@ -22,17 +23,44 @@ def find_new_empty_files(targets: list[Target]) -> list[str]:
             continue
         # Each remote commit the pushed ones build on; none when no remote has any of its history.
         bases = [line[1:] for line in listed.splitlines() if line.startswith("-")] or [EMPTY_TREE]
-        new: set[str] | None = None
+        diffs: list[str] = []
         for base in bases:
             diff = _run_git(
                 directory, "diff", "--raw", "-z", "--no-abbrev", "--no-renames", "--diff-filter=AD", base, revision
             )
             if diff is None:
-                new = set()
+                diffs = []
                 break
-            added = set(map_raw_diff_to_new_empty_files(diff))
-            new = added if new is None else new & added
-        found.extend(path for path in sorted(new or ()) if path not in found)
+            diffs.append(diff)
+        new = set(map_raw_diffs_to_new_empty_files(diffs))
+        found.extend(path for path in sorted(new) if path not in found)
+    return found
+
+
+def map_raw_diffs_to_new_empty_files(diffs: list[str]) -> list[str]:
+    """The empty files every one of the diffs adds: one diff per remote commit the push builds on."""
+    if not diffs:
+        return []
+    common = set(map_raw_diff_to_new_empty_files(diffs[0]))
+    for diff in diffs[1:]:
+        common &= set(map_raw_diff_to_new_empty_files(diff))
+    return sorted(common)
+
+
+def find_host_new_empty_files(targets: list[Target], checkouts: tuple[HostCheckout, ...]) -> list[str]:
+    """The same for a host push, from the diffs gbridge sent for each checkout's current branch; a push of another
+    branch, or from a gbridge that sends none, is not checked."""
+    found: list[str] = []
+    for target in targets:
+        if target.action != "git push" or target.pushed is None:
+            continue
+        directory, revision = target.pushed
+        for checkout in checkouts:
+            if (
+                os.path.normpath(checkout.directory) == os.path.normpath(directory)
+                and checkout.facts.branch == revision
+            ):
+                found.extend(p for p in map_raw_diffs_to_new_empty_files(list(checkout.empty_diffs)) if p not in found)
     return found
 
 

@@ -197,6 +197,8 @@ class HostCheckout:
     facts: RepoFacts
     real_root: str
     """facts.repo_root with symlinks resolved on the host."""
+    empty_diffs: tuple[str, ...] = ()
+    """For a push command: raw diffs of the empty files the checkout's branch adds, per remote commit it builds on."""
 
 
 @dataclass(frozen=True)

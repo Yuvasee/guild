@@ -62,6 +62,10 @@ _FORCED_SWITCH_RE = re.compile(
 _OTHER_WORKTREES_RE = re.compile(r"\bgit\b[^;&|\n]*?\b(?:checkout|switch)\b[^;&|\n]*?\s--ignore-other-worktrees\b")
 _COMMIT_RE = re.compile(r"\bgit\b[^;&|\n]*?\scommit\b")
 LOCAL_GIT_TIMEOUT_S = 3
+# bridge.empty_files: the Mac decides which added empty files a push refuses; this side only runs git.
+EMPTY_BLOB = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+_PUSH_RE = re.compile(r"\bpush\b")
 
 
 class GuardDeadline(Exception):
@@ -360,8 +364,37 @@ def read_guard_checkouts(
         # Without the Mac's roots yet only cwd, Claude's own working directory, is reported, as before roots existed.
         inside = any(is_within(real_root, r) for r in real_roots)
         if inside or (roots is None and directory == cwd):
-            found.append({**facts, "dir": directory, "real_root": real_root})
+            entry = {**facts, "dir": directory, "real_root": real_root}
+            if facts["branch"] and _PUSH_RE.search(command):
+                entry["empty_diffs"] = read_empty_diffs(directory, facts["branch"])
+            found.append(entry)
     return found
+
+
+def read_empty_diffs(directory: str, branch: str) -> list[str]:
+    """Per remote commit the branch builds on, its raw diff to the branch cut to the empty files added or deleted;
+    none if git fails."""
+    listed = run_local_git(directory, "rev-list", "--boundary", branch, "--not", "--remotes")
+    if listed is None or listed.returncode != 0 or not listed.stdout:
+        return []
+    bases = [line[1:] for line in listed.stdout.splitlines() if line.startswith("-")] or [EMPTY_TREE]
+    diffs: list[str] = []
+    for base in bases:
+        done = run_local_git(
+            directory, "diff", "--raw", "-z", "--no-abbrev", "--no-renames", "--diff-filter=AD", base, branch
+        )
+        if done is None or done.returncode != 0:
+            return []
+        fields = done.stdout.split("\0")
+        kept: list[str] = []
+        for meta, path in zip(fields[::2], fields[1::2], strict=False):
+            parts = meta.split()
+            if len(parts) >= 5 and (
+                (parts[4] == "A" and parts[3] == EMPTY_BLOB) or (parts[4] == "D" and parts[2] == EMPTY_BLOB)
+            ):
+                kept.append(f"{meta}\0{path}\0")
+        diffs.append("".join(kept))
+    return diffs
 
 
 def read_real_roots(home: Path) -> dict[str, str]:

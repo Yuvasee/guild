@@ -106,7 +106,9 @@ def map_json_to_host_checkouts(raw: object, git: object, cwd: str) -> list[HostC
         data = cast(dict[str, object], item)
         directory, real_root = data.get("dir"), data.get("real_root")
         if isinstance(directory, str) and isinstance(real_root, str) and directory and real_root:
-            found.append(HostCheckout(directory, facts, real_root))
+            diffs = data.get("empty_diffs")
+            empty = tuple(d for d in cast(list[object], diffs) if isinstance(d, str)) if isinstance(diffs, list) else ()
+            found.append(HostCheckout(directory, facts, real_root, empty))
     return found
 
 
