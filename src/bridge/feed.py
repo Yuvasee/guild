@@ -689,9 +689,11 @@ def is_batch_ripe(conn: sqlite3.Connection, config: Config, conversation_id: str
     )
 
 
-def find_oldest_typable(conn: sqlite3.Connection, message_id: int, conversation_id: str) -> int:
+def take_oldest_typable(conn: sqlite3.Connection, config: Config, message_id: int, conversation_id: str) -> int:
     """The tab's oldest waiting message bridge would type, when this message is one of them: its typer types that one
-    first, and that turn's hooks bring the rest in order. Any other message is its own."""
+    first, and that turn's hooks bring the rest in order. Any other message is its own. A message passed over in a
+    ripe batch is marked meant to be typed, as its own typer would have, so the undelivered alert counts it by its own
+    time."""
     row = conn.execute(
         f"""
         SELECT min(r.message_id) AS oldest, max(r.message_id = ?) AS mine
@@ -700,7 +702,15 @@ def find_oldest_typable(conn: sqlite3.Connection, message_id: int, conversation_
         """,
         (message_id, conversation_id),
     ).fetchone()
-    return int(row["oldest"]) if row["mine"] else message_id
+    if not row["mine"] or row["oldest"] == message_id:
+        return message_id
+    if is_batch_ripe(conn, config, conversation_id, now_ms()):
+        conn.execute(
+            "UPDATE message_recipients SET typing_wanted_at = coalesce(typing_wanted_at, ?)"
+            " WHERE message_id = ? AND conversation_id = ?",
+            (now_ms(), message_id, conversation_id),
+        )
+    return int(row["oldest"])
 
 
 def take_ripe_batches(

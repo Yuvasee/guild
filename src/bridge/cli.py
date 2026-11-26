@@ -57,13 +57,13 @@ from bridge.feed import (
     StillLockedError,
     claim_failure_log,
     deliver_typed,
-    find_oldest_typable,
     hold_typer_lock,
     queue_retry_without_db,
     record_failed_delivery,
     record_stuck_delivery,
     retry_when_locked,
     spawn_typed_delivery,
+    take_oldest_typable,
     tell_assistant_of_draft,
 )
 from bridge.host_workers import HOST_KIND_PREFIX, run_tab_loop, sync_rules_to_remotes
@@ -681,7 +681,7 @@ def cmd_deliver(args: argparse.Namespace, conn: sqlite3.Connection, config: Conf
             conversation_id = str(args.conversation_id)
             args.message_id = retry_when_locked(
                 f"#{args.message_id} to {conversation_id}: find the oldest",
-                lambda: find_oldest_typable(conn, int(args.message_id), conversation_id),
+                lambda: take_oldest_typable(conn, config, int(args.message_id), conversation_id),
                 LOCKED_PATIENT_DELAYS_S,
             )
         with hold_typer_lock(int(args.message_id), str(args.conversation_id)) as only_typer:

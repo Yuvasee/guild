@@ -72,11 +72,13 @@ def _spawned(conn: sqlite3.Connection, config: Config, message_id: int, at: int)
     return [c.args[0] for c in spawn.call_args_list]
 
 
-def _typer_goes_for(conn: sqlite3.Connection, config: Config, message_id: int, at: int) -> list[int]:
-    """The messages this message's typer goes for, whoever spawned it: there is no agterm tab here, so it types
-    nothing, but it marks a message it went for."""
+def _typer_goes_for(
+    conn: sqlite3.Connection, config: Config, message_id: int, at: int, conversation_id: str = "conv-ana"
+) -> list[int]:
+    """The messages marked meant to be typed once this message's typer ran, whoever spawned it: there is no agterm tab
+    here, so it types nothing, but it marks the message it went for and any it passed over."""
     with mock.patch("bridge.feed.now_ms", return_value=at):
-        cmd_deliver(argparse.Namespace(message_id=message_id, conversation_id="conv-ana"), conn, config)
+        cmd_deliver(argparse.Namespace(message_id=message_id, conversation_id=conversation_id), conn, config)
     rows = conn.execute("SELECT message_id FROM message_recipients WHERE typing_wanted_at IS NOT NULL ORDER BY 1")
     return [int(r[0]) for r in rows]
 
@@ -94,7 +96,7 @@ def test_nine_waiting_messages_wake_nothing_and_the_tenths_typer_types_the_first
 
     assert _wakes(conn, BATCHED, T + 10)
     assert _spawned(conn, BATCHED, tenth, T + 10) == [tenth]
-    assert _typer_goes_for(conn, BATCHED, tenth, T + 10) == [sent[0]]
+    assert _typer_goes_for(conn, BATCHED, tenth, T + 10) == [sent[0], tenth], "the first, and the tenth still counted"
 
 
 def test_a_lone_message_is_woken_for_by_maintenance_at_five_minutes_and_only_once(conn: sqlite3.Connection) -> None:
@@ -131,13 +133,35 @@ def test_a_typer_refused_by_a_lock_leaves_the_batch_to_maintenance_once_the_tab_
     assert [m for m, _ in take_ripe_batches(conn, BATCHED, T + 6 * MIN, {})] == [message]
 
 
-def test_a_relayed_answer_a_typer_went_for_does_not_hold_back_a_workers_later_batch(conn: sqlite3.Connection) -> None:
+def _add_worker(conn: sqlite3.Connection) -> Recipient:
     conn.execute("INSERT INTO surfaces (surface, handle, updated_at) VALUES ('s-wk', 'fix-login', 0)")
     conn.execute(
         "INSERT INTO instances (instance_id, pid, proc_start_ms, conversation_id, surface, first_seen_at,"
         " last_observed_at) VALUES ('77@wk', 77, 1, 'conv-worker', 's-wk', 0, 0)"
     )
-    worker = Recipient("fix-login", "conv-worker", 77, "idle", None, False)
+    return Recipient("fix-login", "conv-worker", 77, "idle", None, False)
+
+
+@pytest.mark.parametrize(("to_worker", "urgent"), [(False, TURN_CUT), (True, TURN_CUT), (False, "now")])
+def test_mail_that_goes_now_behind_older_mail_is_told_of_as_undelivered_by_its_own_time(
+    conn: sqlite3.Connection, to_worker: bool, urgent: str
+) -> None:
+    tab = _add_worker(conn) if to_worker else ANA
+    send_message(conn, OWNER, [tab], "info", "look at the logs", T)
+    body = "Your last turn was cut by Mac sleep at 09:50: go on."
+    resume = send_message(conn, Party("system", "bridge"), [tab], "info", body, T + MIN, goes_now=urgent == "now")
+    if urgent == TURN_CUT:
+        conn.execute("UPDATE messages SET post_type = ? WHERE id = ?", (TURN_CUT, resume.message_id))
+
+    _typer_goes_for(conn, BATCHED, resume.message_id, T + MIN, tab.conversation_id)
+
+    assert take_new_undelivered_tabs(conn, BATCHED, T + 6 * MIN - 1) == []
+    [told] = take_new_undelivered_tabs(conn, BATCHED, T + 6 * MIN)
+    assert (told.conversation_id, told.cut is not None) == (tab.conversation_id, urgent == TURN_CUT)
+
+
+def test_a_relayed_answer_a_typer_went_for_does_not_hold_back_a_workers_later_batch(conn: sqlite3.Connection) -> None:
+    worker = _add_worker(conn)
     relayed = send_message(conn, Party("conv-ben", "ben"), [worker], "info", "the owner said: yes", T).message_id
     conn.execute("UPDATE messages SET post_type = ? WHERE id = ?", (RELAYED_ANSWER, relayed))
     with mock.patch("bridge.feed.now_ms", return_value=T):  # its typer ran before batching, which left it marked
