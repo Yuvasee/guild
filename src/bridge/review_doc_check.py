@@ -3,6 +3,7 @@ as it is, `python3 review_doc_check.py <doc.html>`, from the copy bridge puts in
 
 import argparse
 import fnmatch
+import html
 import json
 import re
 import subprocess
@@ -963,43 +964,61 @@ def find_small_svg_text_problems(page: str) -> list[str]:
 
 
 ROUNDS_SUFFIX = ".reader-rounds"
-"""A review doc's first-reader rounds sit beside it, one JSON line per round: {"round": 2, "terms": ["..."]}."""
+"""A review doc's first-reader rounds sit beside it, one JSON line per round:
+{"round": 2, "terms": ["..."], "explained": "right"}."""
 
 
-def read_reader_rounds(doc: str) -> list[tuple[int, list[str]]]:
+def read_reader_rounds(doc: str) -> list[tuple[int, list[str], str]]:
     """The recorded rounds of the first reader for the doc at this path, oldest first; none when nothing is recorded."""
     try:
         with open(doc + ROUNDS_SUFFIX, encoding="utf-8") as f:
             lines = f.read().splitlines()
     except OSError:
         return []
-    rounds: list[tuple[int, list[str]]] = []
+    rounds: list[tuple[int, list[str], str]] = []
     for line in lines:
         try:
             entry = json.loads(line)
-            rounds.append((int(entry["round"]), [str(term) for term in entry["terms"]]))
+            rounds.append(
+                (int(entry["round"]), [str(term) for term in entry["terms"]], str(entry.get("explained", "")))
+            )
         except (ValueError, KeyError, TypeError):
             continue
     return rounds
 
 
-def record_reader_round(doc: str, number: int, terms: list[str]) -> None:
+def record_reader_round(doc: str, number: int, terms: list[str], explained: str) -> None:
     with open(doc + ROUNDS_SUFFIX, "a", encoding="utf-8") as f:
-        f.write(json.dumps({"round": number, "terms": terms}) + "\n")
+        f.write(json.dumps({"round": number, "terms": terms, "explained": explained}) + "\n")
 
 
-def find_first_reader_problems(verified: str, rounds: list[tuple[int, list[str]]]) -> list[str]:
+_CLICK_TERM_RE = re.compile(r"<ins\b[^>]*>.*?</ins>", re.I | re.S)
+_TAG_RE = re.compile(r"<[^>]*>")
+
+
+def find_bare_terms(text: str, terms: list[str]) -> list[str]:
+    """The terms the doc still has outside a click term (<ins title=...>)."""
+    plain = html.unescape(_TAG_RE.sub(" ", _CLICK_TERM_RE.sub(" ", text))).casefold()
+    return [term for term in terms if term.casefold() in plain]
+
+
+def find_first_reader_problems(verified: str, rounds: list[tuple[int, list[str], str]], text: str) -> list[str]:
     if _FIRST_READER_PASSED_RE.search(verified):
         if not rounds:
             return [
                 f"{CHECKS} says the first reader passed, but no round is recorded: after each reader, run "
                 "review_doc_check.py <doc> --reader-round N [--term T ...] with every term it flagged"
             ]
-        number, terms = rounds[-1]
-        if terms:
+        number, terms, explained = rounds[-1]
+        if explained != "right":
             return [
-                f"{CHECKS} says the first reader passed, but round {number} still has {len(terms)} flagged "
-                f"terms ({', '.join(terms[:3])}): explain or drop them, ask a new reader and record its round"
+                f"{CHECKS} says the first reader passed, but round {number} is not recorded as explained right "
+                "(--explained right): rewrite, ask a new reader and record its round"
+            ]
+        if bare := find_bare_terms(text, terms):
+            return [
+                f"{CHECKS} says the first reader passed, but round {number} flagged terms the doc still uses bare "
+                f"({', '.join(bare[:3])}): wrap each as <ins title=...>term</ins> or drop it"
             ]
         return []
     return [
@@ -1356,7 +1375,7 @@ def find_doc_problems(
     files: frozenset[str] | None,
     limits: PlainLimits,
     base: str,
-    rounds: list[tuple[int, list[str]]],
+    rounds: list[tuple[int, list[str], str]],
 ) -> list[str]:
     """What breaks the spec's order, plainness and Where to look rules, one plain line each. `files` holds every file
     and directory of the commit the doc describes; None when that commit cannot be read, so paths are not looked up."""
@@ -1381,7 +1400,7 @@ def find_doc_problems(
     problems.extend(find_section_problems(body, headings))
     top, verified = read_visible_top(page)
     problems.extend(find_story_problems(headings, top.story_steps))
-    problems.extend(find_first_reader_problems(verified, rounds))
+    problems.extend(find_first_reader_problems(verified, rounds, text))
     problems.extend(find_field_table_problems(text))
     problems.extend(find_small_svg_text_problems(text))
     blocks = read_blocks(text)
@@ -1461,9 +1480,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--reader-round", type=int, metavar="N", help="record first reader round N and exit")
     parser.add_argument("--term", action="append", default=[], help="a term that round flagged (repeat per term)")
+    parser.add_argument(
+        "--explained",
+        choices=("right", "wrong"),
+        help="whether that round's explain-back was right (with --reader-round)",
+    )
     args = parser.parse_args(argv)
     if args.reader_round is not None:
-        record_reader_round(args.file, args.reader_round, args.term)
+        if args.explained is None:
+            parser.error("--reader-round needs --explained right|wrong")
+        record_reader_round(args.file, args.reader_round, args.term, args.explained)
         print(f"recorded round {args.reader_round}: {len(args.term)} flagged terms")
         return 0
     try:

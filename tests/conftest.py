@@ -108,8 +108,8 @@ def _no_claude_config_dir(monkeypatch: pytest.MonkeyPatch) -> None:
 def _first_reader_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
     """Registering a doc reads the first reader's recorded rounds; tests of other things have one clean round."""
 
-    def one_clean_round(doc: str) -> list[tuple[int, list[str]]]:
-        return [(1, [])]
+    def one_clean_round(doc: str) -> list[tuple[int, list[str], str]]:
+        return [(1, [], "right")]
 
     monkeypatch.setattr("bridge.review_worktree.read_reader_rounds", one_clean_round)
 

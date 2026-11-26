@@ -57,7 +57,7 @@ def make_doc(where: str = WHERE, first: str = "In short", last: str = "", kind: 
     return f"<html><body>{strip(kind)}{body}{CLOSE}{where}{CHECKS}{last}</body></html>".encode()
 
 
-CLEAN_ROUND: list[tuple[int, list[str]]] = [(1, [])]
+CLEAN_ROUND: list[tuple[int, list[str], str]] = [(1, [], "right")]
 DEFAULTS = Config()
 LIMITS = PlainLimits(
     DEFAULTS.doc_in_short_max_bullets,
@@ -172,7 +172,7 @@ def register(conn: sqlite3.Connection, tmp_path: Path, page: bytes) -> None:
     source = tmp_path / "doc.html"
     source.write_bytes(page)
     if not source.with_name("doc.html" + review_doc_check.ROUNDS_SUFFIX).exists():
-        record_reader_round(str(source), 1, [])
+        record_reader_round(str(source), 1, [], "right")
     with transaction(conn):
         register_doc(conn, REVIEWS_CONFIG, REF, source, NOW)
 
@@ -624,7 +624,7 @@ def run_standalone(tmp_path: Path, page: bytes, *args: str) -> subprocess.Comple
     if "--no-rounds" in args:
         args = tuple(arg for arg in args if arg != "--no-rounds")
     else:
-        record_reader_round(str(doc), 1, [])
+        record_reader_round(str(doc), 1, [], "right")
     return subprocess.run(
         [sys.executable, "-I", "-S", str(checker), str(doc), *args],
         cwd=tmp_path, capture_output=True, text=True, timeout=60, check=False,
@@ -699,35 +699,23 @@ def test_a_product_decisions_line_without_the_owners_words_is_refused_unless_it_
     assert line("Product decisions: none.") == []
 
 
-def test_passed_in_the_checks_line_needs_a_recorded_round_whose_term_list_is_empty() -> None:
-    page = make_doc()
+def test_passed_in_the_checks_line_needs_a_last_round_explained_right_with_every_flagged_term_wrapped_or_gone() -> None:
+    def refused(rounds: list[tuple[int, list[str], str]], body: str = "") -> list[str]:
+        return find_doc_problems(make_doc(last=body), False, "Sam", None, LIMITS, "main", rounds)
 
-    def refused(rounds: list[tuple[int, list[str]]]) -> list[str]:
-        return find_doc_problems(page, False, "Sam", None, LIMITS, "main", rounds)
-
-    assert refused([(3, [])]) == []
-    assert refused([(1, ["term"]), (2, [])]) == []
+    wrapped = '<p>a <ins title="one that holds one">Singleton</ins> here</p>'
+    assert refused([(3, [], "right")]) == []
+    assert refused([(1, ["term"], "wrong"), (2, [], "right")]) == []
+    assert refused([(7, ["Singleton"], "right")], wrapped) == []
+    assert refused([(7, ["Singleton"], "right")]) == []
     (none,) = refused([])
     assert "says the first reader passed, but no round is recorded" in none
-    (open_terms,) = refused([(1, []), (3, ["Singleton", "fold", "mark", "strip"])])
-    assert "round 3 still has 4 flagged terms (Singleton, fold, mark)" in open_terms
-
-
-def test_a_round_is_recorded_beside_the_doc_by_the_lone_script_and_the_last_one_counts(tmp_path: Path) -> None:
-    doc = tmp_path / "doc.html"
-    assert read_reader_rounds(str(doc)) == []
-    record_reader_round(str(doc), 1, ["Singleton"])
-    record_reader_round(str(doc), 2, [])
-    with (tmp_path / "doc.html.reader-rounds").open("a") as f:
-        f.write("not json\n")
-    assert read_reader_rounds(str(doc)) == [(1, ["Singleton"]), (2, [])]
-    (tmp_path / "doc.html.reader-rounds").unlink()
-    page = make_doc()
-    done = run_standalone(tmp_path, page, "--no-rounds")
-    assert done.returncode == 1 and "no round is recorded" in done.stdout
-    said = run_standalone(tmp_path, page, "--no-rounds", "--reader-round", "1", "--term", "fold")
-    assert said.stdout.strip() == "recorded round 1: 1 flagged terms"
-    assert "round 1 still has 1 flagged terms (fold)" in run_standalone(tmp_path, page, "--no-rounds").stdout
+    (bare,) = refused([(3, ["Singleton", "fold"], "right")], "<p>a Singleton and a <ins title='x'>fold</ins></p>")
+    assert "round 3 flagged terms the doc still uses bare (Singleton)" in bare
+    (wrong,) = refused([(1, [], "right"), (4, [], "wrong")])
+    assert "round 4 is not recorded as explained right" in wrong
+    (unrecorded,) = refused([(2, [], "")])
+    assert "round 2 is not recorded as explained right" in unrecorded
 
 
 def test_registration_reads_the_rounds_beside_the_source_doc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -737,7 +725,7 @@ def test_registration_reads_the_rounds_beside_the_source_doc(tmp_path: Path, mon
     source.write_bytes(make_doc())
     with pytest.raises(DocError, match="no round is recorded"), transaction(conn):
         register_doc(conn, REVIEWS_CONFIG, REF, source, NOW)
-    record_reader_round(str(source), 1, [])
+    record_reader_round(str(source), 1, [], "right")
     with transaction(conn):
         register_doc(conn, REVIEWS_CONFIG, REF, source, NOW)
 
