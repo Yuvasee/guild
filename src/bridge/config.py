@@ -116,7 +116,7 @@ class Config:
     laptop_agent_cap: int = 0
     """Agents working at once on this Mac, leads and workers alike; 0 = no cap. Over it, guild worker queues."""
     worker_model: str = ""
-    """The model every worker's Claude starts on (--model), here or on the host; empty: the user settings' model."""
+    """The model a reopened host worker starts on when its record names none; `guild worker --model` names it now."""
     worker_host: str = ""
     """A [[remotes]] name where `guild worker` runs Claude by default, in tmux; empty runs workers on this Mac."""
     worker_path_map: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))

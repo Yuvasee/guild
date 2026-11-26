@@ -1301,7 +1301,8 @@ def test_guild_worker_stores_the_parent_link_before_any_reconcile(
     env = dict(bridge_env.env, CLAUDE_PID=str(team.a), AGTERM_SESSION_ID="TAB-A")
 
     done = subprocess.run(
-        [str(VENV_BIN / "guild"), "worker", "Task", "--cwd", str(bridge_env.root), "--prompt", "Fix the export retry"],
+        [str(VENV_BIN / "guild"), "worker", "Task", "--cwd", str(bridge_env.root), "--prompt", "Fix the export retry",
+         "--model", "opus"],
         env=env, capture_output=True, text=True, timeout=30, check=False,
     )  # fmt: skip
 
@@ -1425,7 +1426,7 @@ def test_worker_refuses_a_non_english_name(bridge_env: BridgeEnv, spawn_process:
     team = Team(bridge_env, spawn_process)
     env = dict(bridge_env.env, CLAUDE_PID=str(team.a), AGTERM_SESSION_ID="TAB-A")
     done = subprocess.run(
-        [str(VENV_BIN / "guild"), "worker", "Εργασία", "--prompt", "x"],
+        [str(VENV_BIN / "guild"), "worker", "Εργασία", "--prompt", "x", "--model", "opus"],
         env=env, capture_output=True, text=True, timeout=30, check=False,
     )  # fmt: skip
 
@@ -1444,7 +1445,7 @@ def test_worker_refuses_a_typo_name_or_prompt(
     team = Team(bridge_env, spawn_process)
     env = dict(bridge_env.env, CLAUDE_PID=str(team.a), AGTERM_SESSION_ID="TAB-A")
     done = subprocess.run(
-        [str(VENV_BIN / "guild"), "worker", name, "--prompt", prompt],
+        [str(VENV_BIN / "guild"), "worker", name, "--prompt", prompt, "--model", "opus"],
         env=env, capture_output=True, text=True, timeout=30, check=False,
     )  # fmt: skip
     assert done.returncode == 2 and says in done.stderr

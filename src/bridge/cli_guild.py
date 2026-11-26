@@ -130,12 +130,14 @@ from bridge.page_check import check_review_doc
 from bridge.project_owner import find_domain_overlaps, warn_on_taken_issues
 from bridge.refs import map_text_to_ref
 from bridge.registry import (
+    WORKER_MODELS,
     HandleTakenError,
     find_assistant_surface,
     find_lead_tab_title,
     is_english_name,
     list_sessions,
     map_config_to_assistant_title,
+    map_task_name_to_worker_tab_name,
     reconcile,
     set_handle,
 )
@@ -329,8 +331,11 @@ def build_parser(config: Config) -> argparse.ArgumentParser:
         "`guild worker close <tab>` closes one, `guild worker closed` lists them, `guild worker reopen <id>` "
         "resumes one",
     )
-    p.add_argument("name", help="the task, in English; the tab's name")
+    p.add_argument("name", help="the task, in English; the worker's handle, and its tab's name after the model letter")
     p.add_argument("--prompt", required=True, help="the brief; - reads stdin")
+    p.add_argument(
+        "--model", required=True, choices=list(WORKER_MODELS), help="its Claude model; the tab shows O, S or H"
+    )
     p.add_argument("--cwd", help="default: this directory")
     p.add_argument("--local", action="store_true", help="run Claude on this Mac even when a worker host is configured")
     p.set_defaults(func=cmd_worker)
@@ -810,10 +815,12 @@ def cmd_worker(args: argparse.Namespace, conn: sqlite3.Connection, config: Confi
     if len(live) >= WORKER_CAP:
         raise UsageError(map_workers_to_cap_refusal(live, WORKER_CAP, now_ms()))
     cwd = Path(os.path.abspath(os.path.expanduser(args.cwd or os.getcwd())))
+    model = WORKER_MODELS[args.model]
+    tab_name = map_task_name_to_worker_tab_name(name, args.model)
     if config.worker_host and not args.local:
         down = find_down_worker_host(config, now_ms())
         if down is None:
-            return _start_host_worker(conn, config, me.handle, parent, name, prompt, cwd)
+            return _start_host_worker(conn, config, me.handle, parent, name, tab_name, model, prompt, cwd)
         print(f"starting {name!r} on this Mac: {down}")
     if marked := ensure_worker_folder_trusted(cwd, config.worker_trust_roots):
         print(marked)
@@ -821,18 +828,18 @@ def cmd_worker(args: argparse.Namespace, conn: sqlite3.Connection, config: Confi
     brief.parent.mkdir(parents=True, exist_ok=True)
     brief.write_text(build_worker_brief(conn, config, prompt, f"bridge send {me.handle}"))
     first_prompt = f"Your brief is in {brief}. Read it and do it."
-    command = "zsh -lc " + shlex.quote(build_worker_claude_command(cwd, first_prompt, config.worker_model))
+    command = "zsh -lc " + shlex.quote(build_worker_claude_command(cwd, first_prompt, model))
     busy = count_busy_agents(conn)
     if config.laptop_agent_cap and busy >= config.laptop_agent_cap:
-        launch = {"parent": parent, "name": name, "cwd": str(cwd), "command": command, "requested_by": me.handle}
+        launch = {"parent": parent, "name": tab_name, "cwd": str(cwd), "command": command, "requested_by": me.handle}
         place = queue_worker_launch(launch)
         print(
             f"queued {name!r} (place {place}): {busy} agents are working, the laptop cap is "
             f"{config.laptop_agent_cap}. bridge starts it when a slot frees and tells you."
         )
         return 0
-    session_id = start_worker_tab(conn, config, parent, name, cwd, command)
-    print(f"tab {session_id}: {name}")
+    session_id = start_worker_tab(conn, config, parent, tab_name, cwd, command)
+    print(f"tab {session_id}: {tab_name}")
     return _await_worker_start(config, session_id)
 
 
@@ -863,7 +870,15 @@ def build_worker_brief(
 
 
 def _start_host_worker(
-    conn: sqlite3.Connection, config: Config, lead: str, parent: str, name: str, prompt: str, cwd: Path
+    conn: sqlite3.Connection,
+    config: Config,
+    lead: str,
+    parent: str,
+    name: str,
+    tab_name: str,
+    model: str,
+    prompt: str,
+    cwd: Path,
 ) -> int:
     """Claude runs on the host in tmux; the tab here only reattaches, so closing it or a lost link never ends it."""
     remote = find_remote(config, config.worker_host)
@@ -879,14 +894,14 @@ def _start_host_worker(
     note = build_host_brief_note(config, remote.name, worker, lead, mapped_root)
     brief = build_worker_brief(conn, config, prompt, f"gbridge send {lead}", note)
     record = HostWorker(
-        worker=worker, name=name, host=remote.name, ssh=remote.ssh, cwd=str(cwd), remote_cwd=remote_cwd, remote_dir="",
-        lead=lead, parent=parent, token_sha256=hash_token(token), created_at=now_ms(),
-        model_flags=read_local_model_flags(model_override=config.worker_model),
+        worker=worker, name=tab_name, host=remote.name, ssh=remote.ssh, cwd=str(cwd), remote_cwd=remote_cwd,
+        remote_dir="", lead=lead, parent=parent, token_sha256=hash_token(token), created_at=now_ms(),
+        model_flags=read_local_model_flags(model_override=model),
     )  # fmt: skip
     session_id = _launch_host_worker(
         conn, config, remote, record, {"token": token, "cwd": remote_cwd, "brief": brief, "mapped_root": mapped_root}
     )
-    print(f"tab {session_id}: {name} (Claude on {remote.name}, tmux -L gbridge session {worker})")
+    print(f"tab {session_id}: {tab_name} (Claude on {remote.name}, tmux -L gbridge session {worker})")
     return _await_host_worker_start(conn, config, session_id)
 
 

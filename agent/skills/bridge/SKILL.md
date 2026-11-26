@@ -145,8 +145,11 @@ A tab enrolled with `guild lead add` is a named team lead. Its role, scope and n
   inline or goes to a native subagent.
 
   ```bash
-  guild worker "<short task name in English>" --cwd <dir> --prompt "<brief>"   # or --prompt - for stdin
+  guild worker "<short task name in English>" --model opus|sonnet|haiku --cwd <dir> --prompt "<brief>"   # or --prompt - for stdin
   ```
+
+  `--model` is required. The tab shows the model's letter (`S <name>`); its handle,
+  `bridge send`, `guild worker close` and `reopen` take the bare name, and a reopen keeps the model.
 
   At most 5 workers run under one lead, resting ones included: a sixth is refused with each
   live one's age and last state, so close one first.

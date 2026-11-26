@@ -103,6 +103,25 @@ def test_reopen_resumes_the_worker_under_my_tab_with_its_old_name(worker: Worker
     assert again.returncode == 2 and "already reopened in tab Task one (TAB-W)" in again.stderr
 
 
+def test_a_worker_closed_and_reopened_by_its_bare_name_keeps_its_model_and_tab_letter(worker: Worker) -> None:
+    worker.write_tree(name="S Task one")
+    closed_id = _close(worker)
+    _end_worker_run(worker)
+    # The line close records for a worker started with --model sonnet, as build_restore_command keeps it.
+    resume = f"cd {worker.env.root} && claude --no-chrome --model claude-sonnet-5-5 --resume {WORKER_CONV}"
+    conn = worker.env.connect()
+    conn.execute("UPDATE closed_workers SET resume_command = ? WHERE id = ?", (resume, closed_id))
+    worker.write_tabs(LEAD, {**REOPENED, "name": "S Task one"})
+
+    done = _reopen(worker, "Task one")
+
+    assert done.returncode == 0, done.stderr
+    [launch] = _launches(worker)
+    assert "--name S Task one --cwd" in launch
+    assert "--model claude-sonnet-5-5 --resume" in launch
+    assert conn.execute("SELECT tab_name FROM closed_workers").fetchone()[0] == "S Task one"
+
+
 def test_only_its_lead_or_the_assistant_reopens_it(worker: Worker) -> None:
     closed_id = _close(worker)
     _end_worker_run(worker)

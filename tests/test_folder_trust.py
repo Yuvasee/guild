@@ -125,6 +125,7 @@ def test_guild_worker_refuses_an_untrusted_folder_and_starts_in_one_under_a_root
     clone.mkdir(parents=True)
     env = dict(bridge_env.env, CLAUDE_PID=str(team.a), AGTERM_SESSION_ID="TAB-A")
     argv = [str(VENV_BIN / "guild"), "worker", "Task", "--cwd", str(clone), "--prompt", "Fix the thing"]
+    argv += ["--model", "opus"]
 
     refused = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=30, check=False)
 

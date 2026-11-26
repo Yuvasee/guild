@@ -823,16 +823,18 @@ options:
 start a task in its own tab nested under yours, and check that it started; `guild worker close <tab>` closes one, `guild worker closed` lists them, `guild worker reopen <id>` resumes one
 
 ```text
-usage: guild worker [-h] --prompt PROMPT [--cwd CWD] [--local] name
+usage: guild worker [-h] --prompt PROMPT --model {opus,sonnet,haiku} [--cwd CWD] [--local] name
 
 positional arguments:
-  name             the task, in English; the tab's name
+  name                  the task, in English; the worker's handle, and its tab's name after the model letter
 
 options:
-  -h, --help       show this help message and exit
-  --prompt PROMPT  the brief; - reads stdin
-  --cwd CWD        default: this directory
-  --local          run Claude on this Mac even when a worker host is configured
+  -h, --help            show this help message and exit
+  --prompt PROMPT       the brief; - reads stdin
+  --model {opus,sonnet,haiku}
+                        its Claude model; the tab shows O, S or H
+  --cwd CWD             default: this directory
+  --local               run Claude on this Mac even when a worker host is configured
 ```
 
 ### guild worker close

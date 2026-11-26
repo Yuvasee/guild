@@ -544,7 +544,7 @@ def test_a_tab_with_no_known_session_closes_with_nothing_to_resume(worker: Worke
 
 
 def test_a_task_name_with_close_in_it_still_starts_a_worker() -> None:
-    args = parse_args(["worker", "close the old issue", "--prompt", "x"])
+    args = parse_args(["worker", "close the old issue", "--prompt", "x", "--model", "haiku"])
 
     assert args.name == "close the old issue"
     assert parse_args(["worker", "close", "Task"]).tab == "Task"

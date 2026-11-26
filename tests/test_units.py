@@ -164,6 +164,13 @@ def test_agterm_tree_maps_panes_to_tab_names() -> None:
     assert convert_tab_name_to_handle("✨") == "session"
 
 
+def test_a_workers_model_letter_stays_out_of_its_handle() -> None:
+    assert [convert_tab_name_to_handle(f"{letter} Fix export") for letter in "OSH"] == ["fix-export"] * 3
+    assert convert_tab_name_to_handle("A Fix export") == "a-fix-export"
+    assert convert_tab_name_to_handle("Ops board") == "ops-board"
+    assert convert_tab_name_to_handle("S  spaced") == "s-spaced"
+
+
 def _git(cwd: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
 

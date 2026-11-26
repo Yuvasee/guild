@@ -11,8 +11,10 @@ import pytest
 from conftest import VENV_BIN, BridgeEnv, SpawnProcess
 from test_leads import Team
 
+from bridge import cli_guild
 from bridge.cli_guild import build_worker_claude_command, list_project_mcp_servers, map_cwd_to_worker_settings
 from bridge.config import load_config
+from bridge.host_workers import HostWorker
 from bridge.leads import ROLE_TEMPLATE
 from bridge.restore import build_restore_command
 from bridge.serve import DashboardState
@@ -21,6 +23,10 @@ BROWSER_RULE = (
     "No browser use (Claude in Chrome, Playwright) unless the task says so, and then only in a hidden tab group"
 )
 SKILL = Path(__file__).resolve().parents[1] / "agent" / "skills" / "bridge" / "SKILL.md"
+
+
+def _worker_argv(name: str, cwd: Path, model: str = "opus") -> list[str]:
+    return [str(VENV_BIN / "guild"), "worker", name, "--cwd", str(cwd), "--prompt", "Fix the thing", "--model", model]
 
 
 def _write_mcp(directory: Path, *names: str) -> None:
@@ -115,36 +121,51 @@ def test_worker_claude_keeps_claude_ai_connectors_and_has_no_chrome(tmp_path: Pa
     assert argv[-1] == "Your brief is in x"
 
 
-def test_worker_resume_line_keeps_its_settings_and_no_chrome(tmp_path: Path) -> None:
+def test_worker_resume_line_keeps_its_settings_model_and_no_chrome(tmp_path: Path) -> None:
     _write_mcp(tmp_path, "linear-server")
-    argv = ["/bin/claude", *shlex.split(build_worker_claude_command(tmp_path, "Your brief is in x"))[1:]]
+    command = build_worker_claude_command(tmp_path, "Your brief is in x", "claude-haiku-5-5")
+    argv = ["/bin/claude", *shlex.split(command)[1:]]
 
     resumed = shlex.split(build_restore_command(argv, "conv"))
 
     assert resumed[:3] == ["/bin/claude", "--dangerously-skip-permissions", "--no-chrome"]
+    assert resumed[resumed.index("--model") + 1] == "claude-haiku-5-5"
     assert json.loads(resumed[resumed.index("--settings") + 1])["disabledMcpjsonServers"] == ["linear-server"]
     assert resumed[-2:] == ["--resume", "conv"]
     assert "Your brief is in x" not in resumed
 
 
+@pytest.mark.parametrize(
+    ("alias", "model", "tab"),
+    [
+        ("opus", "claude-opus-5-5", "O Task"),
+        ("sonnet", "claude-sonnet-5-5", "S Task"),
+        ("haiku", "claude-haiku-5-5", "H Task"),
+    ],
+)
 def test_guild_worker_starts_claude_without_chrome_and_briefs_it_on_the_browser(
-    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess, alias: str, model: str, tab: str
 ) -> None:
     team = Team(bridge_env, spawn_process)
     raw = json.loads(bridge_env.stub_tree.read_text())
-    raw["result"]["tree"]["workspaces"][0]["sessions"].append({"id": "TAB-W", "name": "Task", "status": "active"})
+    raw["result"]["tree"]["workspaces"][0]["sessions"].append({"id": "TAB-W", "name": tab, "status": "active"})
     bridge_env.stub_tree.write_text(json.dumps(raw))
     cwd = bridge_env.root / "repo"
     _write_mcp(cwd, "linear-server")
     env = dict(bridge_env.env, CLAUDE_PID=str(team.a), AGTERM_SESSION_ID="TAB-A")
+    bridge_config = Path(bridge_env.env["BRIDGE_CONFIG"])
+    bridge_config.write_text('worker_model = "claude-other"\n' + bridge_config.read_text())
 
     done = subprocess.run(
-        [str(VENV_BIN / "guild"), "worker", "Task", "--cwd", str(cwd), "--prompt", "Fix the thing"],
+        _worker_argv("Task", cwd, alias),
         env=env, capture_output=True, text=True, timeout=30, check=False,
     )  # fmt: skip
 
     assert done.returncode == 0, done.stderr
+    assert f"tab TAB-W: {tab}" in done.stdout
     [launch] = [line for line in bridge_env.stub_log.read_text().splitlines() if line.startswith("session new")]
+    assert f"--name {tab} --cwd" in launch
+    assert f"--model {model} " in launch and "claude-other" not in launch, "--model wins over config worker_model"
     assert "--no-chrome" in launch
     assert "--strict-mcp-config" not in launch
     assert "disabledMcpjsonServers" in launch
@@ -184,7 +205,7 @@ def test_a_worker_starts_on_this_mac_while_the_hosts_claude_watcher_reads_failed
     env = dict(bridge_env.env, CLAUDE_PID=str(team.a), AGTERM_SESSION_ID="TAB-A")
 
     done = subprocess.run(
-        [str(VENV_BIN / "guild"), "worker", "Task", "--cwd", str(bridge_env.root), "--prompt", "Fix the thing"],
+        _worker_argv("Task", bridge_env.root),
         env=env, capture_output=True, text=True, timeout=30, check=False,
     )  # fmt: skip
 
@@ -194,6 +215,58 @@ def test_a_worker_starts_on_this_mac_while_the_hosts_claude_watcher_reads_failed
         assert "session new" in bridge_env.stub_log.read_text()
     else:
         assert "'devbox' is not a [[remotes]] name" in done.stderr, "it went for the host"
+
+
+@pytest.mark.parametrize("model", [None, "gpt", "claude-opus-5-5"])
+def test_a_worker_without_one_of_the_three_models_is_refused_and_told_them(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess, model: str | None
+) -> None:
+    team = Team(bridge_env, spawn_process)
+    env = dict(bridge_env.env, CLAUDE_PID=str(team.a), AGTERM_SESSION_ID="TAB-A")
+    argv = _worker_argv("Task", bridge_env.root, model or "")
+    argv = argv if model else argv[:-2]
+
+    done = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=30, check=False)
+
+    assert done.returncode == 2
+    assert "--model {opus,sonnet,haiku}" in done.stderr
+    assert "required: --model" in done.stderr if model is None else "choose from opus, sonnet, haiku" in done.stderr
+    assert not bridge_env.stub_log.exists() or "session new" not in bridge_env.stub_log.read_text()
+
+
+@pytest.mark.parametrize(
+    ("alias", "model"), [("opus", "claude-opus-5-5"), ("sonnet", "claude-sonnet-5-5"), ("haiku", "claude-haiku-5-5")]
+)
+def test_a_host_worker_runs_on_the_chosen_model_under_a_prefixed_tab_and_a_bare_name(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess, monkeypatch: pytest.MonkeyPatch, alias: str, model: str
+) -> None:
+    team = Team(bridge_env, spawn_process)
+    config_path = Path(bridge_env.env["BRIDGE_CONFIG"])
+    config_path.write_text(
+        f'worker_host = "devbox"\nworker_model = "claude-other"\n'
+        f'worker_path_map = {{ "{bridge_env.root}" = "/home/dev/app" }}\n'
+        + config_path.read_text()
+        + '\n[[remotes]]\nname = "devbox"\nssh = "devbox-alt"\n'
+    )
+    for key, value in {**bridge_env.env, "CLAUDE_PID": str(team.a), "AGTERM_SESSION_ID": "TAB-A"}.items():
+        monkeypatch.setenv(key, value)
+    launched: list[HostWorker] = []
+
+    def launch(_conn: object, _config: object, _remote: object, record: HostWorker, _payload: object) -> str:
+        launched.append(record)
+        return "TAB-W"
+
+    monkeypatch.setattr(cli_guild, "_launch_host_worker", launch)
+    monkeypatch.setattr(cli_guild, "_await_host_worker_start", lambda *_args: 0)  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+
+    argv = ["worker", "Fix export", "--cwd", str(bridge_env.root), "--prompt", "Fix the thing", "--model", alias]
+
+    assert cli_guild.main(argv) == 0
+
+    [record] = launched
+    assert record.name == f"{alias[0].upper()} Fix export"
+    assert record.worker.startswith("g-fix-export-")
+    assert shlex.split(record.model_flags)[:2] == ["--model", model]
 
 
 def test_lead_role_and_skill_say_no_browser_unless_the_task_says_so() -> None:
@@ -224,7 +297,7 @@ def test_a_sixth_worker_under_one_lead_is_refused_and_the_five_are_named_oldest_
     env = dict(bridge_env.env, CLAUDE_PID=str(team.a), AGTERM_SESSION_ID="TAB-A")
 
     done = subprocess.run(
-        [str(VENV_BIN / "guild"), "worker", "Task 6", "--cwd", str(bridge_env.root), "--prompt", "Fix the thing"],
+        _worker_argv("Task 6", bridge_env.root),
         env=env, capture_output=True, text=True, timeout=30, check=False,
     )  # fmt: skip
 
@@ -239,7 +312,7 @@ def test_a_sixth_worker_under_one_lead_is_refused_and_the_five_are_named_oldest_
     sessions.append({"id": "TAB-W", "name": "Task 6", "status": "active"})
     bridge_env.stub_tree.write_text(json.dumps(raw))
     done = subprocess.run(
-        [str(VENV_BIN / "guild"), "worker", "Task 6", "--cwd", str(bridge_env.root), "--prompt", "Fix the thing"],
+        _worker_argv("Task 6", bridge_env.root),
         env=env, capture_output=True, text=True, timeout=30, check=False,
     )  # fmt: skip
     assert "workers already run" not in done.stderr
@@ -271,7 +344,7 @@ def test_laptop_cap_queues_a_worker_and_serve_starts_it_when_a_slot_frees(
     env = dict(bridge_env.env, CLAUDE_PID=str(team.a), AGTERM_SESSION_ID="TAB-A")
 
     queued = subprocess.run(
-        [str(VENV_BIN / "guild"), "worker", "Task", "--cwd", str(bridge_env.root), "--prompt", "Fix the thing"],
+        _worker_argv("Task", bridge_env.root),
         env=env, capture_output=True, text=True, timeout=30, check=False,
     )  # fmt: skip
 
@@ -294,7 +367,7 @@ def test_laptop_cap_queues_a_worker_and_serve_starts_it_when_a_slot_frees(
     assert list((bridge_env.state_dir / "worker-queue").glob("*.json")) == []
     with bridge_env.connect() as conn:
         text = conn.execute("SELECT body FROM messages ORDER BY id DESC LIMIT 1").fetchone()[0]
-    assert "Your queued worker 'Task' has started" in text
+    assert "Your queued worker 'O Task' has started" in text
 
 
 def test_a_local_worker_starts_on_the_pinned_model(tmp_path: Path) -> None:

@@ -42,6 +42,8 @@ def current_ref_sql(min_turn: str, *, for_polling: bool = False) -> str:
 
 _FILE_STATUS = {"idle": "idle", "busy": "active"}
 _PASTE_TAG_RE = re.compile(r"</?pasted_content[^>]*>")
+WORKER_MODELS = {"opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5", "haiku": "claude-haiku-5-5"}
+_WORKER_MODEL_PREFIX_RE = re.compile(r"^[OSH] (?=\S)")
 
 
 @dataclass(frozen=True)
@@ -964,8 +966,17 @@ def convert_text_to_snippet(text: str) -> str:
     return collapsed if len(collapsed) <= SNIPPET_MAX_CHARS else collapsed[: SNIPPET_MAX_CHARS - 1] + "…"
 
 
+def map_task_name_to_worker_tab_name(name: str, model_alias: str) -> str:
+    return f"{model_alias[0].upper()} {name}"
+
+
+def map_worker_tab_name_to_task_name(tab_name: str) -> str:
+    """A worker's tab shows its model as 'O ', 'S ' or 'H '; its handle and lookups by name stay the bare name."""
+    return _WORKER_MODEL_PREFIX_RE.sub("", tab_name, count=1)
+
+
 def convert_tab_name_to_handle(tab_name: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", tab_name.lower()).strip("-")
+    slug = re.sub(r"[^a-z0-9]+", "-", map_worker_tab_name_to_task_name(tab_name).lower()).strip("-")
     return slug or "session"
 
 

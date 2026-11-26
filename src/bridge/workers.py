@@ -24,7 +24,13 @@ from bridge.drivers import (
 from bridge.errors import UsageError
 from bridge.host_workers import HOST_KIND_PREFIX, HOST_WORKER_RE, HostWorker, run_on_host
 from bridge.procinfo import ProcessRow, process_args, read_process_table
-from bridge.registry import format_age, record_tab_parent
+from bridge.registry import (
+    WORKER_MODELS,
+    format_age,
+    map_task_name_to_worker_tab_name,
+    map_worker_tab_name_to_task_name,
+    record_tab_parent,
+)
 from bridge.remote import read_tmux_sessions
 from bridge.restore import build_restore_command
 from bridge.rewake_marks import WAITER_SCRIPT
@@ -125,6 +131,9 @@ def map_tree_to_child_tab(tree: dict[str, object], parent: str, wanted: str) -> 
     children = [(tab, ws) for tab, ws in nodes if tab.get("parent") == parent]
     matches = [(tab, ws) for tab, ws in children if tab.get("id") == wanted]
     matches = matches or [(tab, ws) for tab, ws in children if tab.get("name") == wanted]
+    matches = matches or [
+        (tab, ws) for tab, ws in children if map_worker_tab_name_to_task_name(str(tab.get("name"))) == wanted
+    ]
     if not matches:
         raise UsageError(f"{wanted!r} is not a tab nested under yours")
     if len(matches) > 1:
@@ -440,8 +449,11 @@ def find_closed_worker(conn: sqlite3.Connection, wanted: str) -> ClosedWorker:
     if wanted.isdigit():
         row = conn.execute("SELECT * FROM closed_workers WHERE id = ?", (int(wanted),)).fetchone()
     if row is None:
+        names = [wanted, *(map_task_name_to_worker_tab_name(wanted, alias) for alias in WORKER_MODELS)]
         rows = conn.execute(
-            "SELECT * FROM closed_workers WHERE tab_name = ? ORDER BY closed_at DESC, id DESC", (wanted,)
+            f"SELECT * FROM closed_workers WHERE tab_name IN ({','.join('?' * len(names))}) "
+            "ORDER BY closed_at DESC, id DESC",
+            names,
         ).fetchall()
         if not rows:
             raise UsageError(f"no closed worker {wanted!r}; guild worker closed lists them")
