@@ -256,6 +256,20 @@ def test_merging_a_queued_pr_into_the_held_branch_is_refused(tmp_path: Path, com
     assert reason is not None and reason.startswith("bridge: dev/x is the branch of Org/app#7")
 
 
+def test_merge_async_of_a_held_pr_is_refused_as_gh_pr_merge_is_and_an_unheld_one_passes(tmp_path: Path) -> None:
+    conn = setup_pr(tmp_path, approved_by=("mira",))
+    repo = _git_repo(tmp_path / "app")
+    api = "gh api -X PUT repos/Org/app/pulls/7/merge-async -f sha=a1 -f merge_method=squash"
+    plain = "gh pr merge 7 -R Org/app"
+    unheld = (_verdict(conn, api, repo), _verdict(conn, plain, repo))
+    hold(conn)
+
+    held = _verdict(conn, api, repo)
+
+    assert held is not None and held == _verdict(conn, plain, repo)
+    assert unheld[0] == unheld[1] and not (unheld[0] or "").startswith("bridge: gh api"), unheld
+
+
 def test_merging_a_pr_known_only_to_the_enrichment_cache_into_the_held_branch_is_refused(tmp_path: Path) -> None:
     conn = setup_pr(tmp_path, approved_by=("mira",))
     hold(conn)

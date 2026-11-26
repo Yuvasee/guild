@@ -742,7 +742,8 @@ _ADMIN_RIGHTS = (
     "rule is that no one uses them until the owner asks. Merge with a plain `gh pr merge <number>` once the PR meets "
     "the rules; if it cannot, send {assistant} the exact command for a card, and the owner runs it by hand."
 )
-_API_MERGE_RE = re.compile(r"(?:^|/)repos/[^/\s]+/[^/\s]+/pulls/[^/\s]+/merge")
+# merge-async, the only way GitHub merges a stacked PR, is judged by the merge rules like `gh pr merge`.
+_API_MERGE_RE = re.compile(r"(?:^|/)repos/[^/\s]+/[^/\s]+/pulls/[^/\s]+/merge(?!-async)")
 _API_RULES_RE = re.compile(
     r"(?:^|/)(?:repos/[^/\s]+/[^/\s]+|orgs/[^/\s]+)/(?:rulesets|branches/\S+/protection)(?:[/?]|$)"
 )

@@ -252,6 +252,8 @@ def test_a_merge_through_the_api_maps_to_its_pr_and_a_read_does_not(tmp_path: Pa
     assert keys("gh api -X PUT repos/Acme/Web/pulls/12/merge -f merge_method=squash", web) == ["pr:acme/web#12"]
     assert keys("gh api --method PUT /repos/Acme/Web/pulls/12/merge", web) == ["pr:acme/web#12"]
     assert keys("gh api repos/Acme/Web/pulls/12/merge", web) == []
+    assert keys("gh api -X PUT repos/Acme/Web/pulls/12/merge-async -f sha=a1", web) == ["pr:acme/web#12"]
+    assert keys("gh api repos/Acme/Web/pulls/12/merge-async/u-1", web) == []
 
 
 def test_a_merge_waits_for_approval_owners_comments_and_green_ci_by_number_and_by_branch(

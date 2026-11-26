@@ -948,7 +948,7 @@ def _gh_api_targets(args: list[str]) -> tuple[list[Target], str | None, bool]:
         known = number.isdigit() and not any(c in f"{owner}/{name}" for c in "{}$`")
         pr = f"pr:{owner.lower()}/{name.lower()}#{number}"
         suffix = (suffix or "").rstrip("/")
-        if group == "pulls" and suffix == "/merge":
+        if group == "pulls" and suffix in ("/merge", "/merge-async"):
             return ([Target(pr, "gh pr merge")] if known and method == "PUT" else []), MERGE, not known
         if not suffix:
             states = [v for _, v in fields if v.startswith("state=")]
@@ -958,7 +958,7 @@ def _gh_api_targets(args: list[str]) -> tuple[list[Target], str | None, bool]:
         if group == "pulls" and suffix == "/update-branch":
             return ([Target(pr, "gh pr update-branch")] if known else []), COMMAND, True
         return [], None, False
-    if method == "PUT" and re.search(r"/pulls/[^/\s]+/merge/?$", path):
+    if method == "PUT" and re.search(r"/pulls/[^/\s]+/merge(?:-async)?/?$", path):
         return [], MERGE, True
     if _API_BRANCH_WRITE_RE.search(path):
         return _map_api_branch_write_to_targets(path, fields, has_input), COMMAND, True
