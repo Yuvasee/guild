@@ -2,7 +2,7 @@ import json
 import re
 import sqlite3
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from bridge.claude import ClaudeSessionFile, list_session_files
@@ -113,10 +113,13 @@ def map_env_to_surface(env: Mapping[str, str]) -> Surface | None:
     )
 
 
-def is_nested_agent(pid: int, proc_env: Mapping[str, str]) -> bool:
-    """A claude started from inside another agent's shell inherits that agent's tab ids but does not own the tab."""
+def is_nested_agent(pid: int, proc_env: Mapping[str, str], argv: Sequence[str] = ()) -> bool:
+    """A claude started from inside another agent's shell inherits that agent's tab ids but does not own the tab; a
+    non-interactive one (-p) owns none even when its environment lost the marks of the agent that ran it."""
     parent = proc_env.get("CLAUDE_PID")
-    return (parent is not None and parent != str(pid)) or "CLAUDECODE" in proc_env
+    return (
+        (parent is not None and parent != str(pid)) or "CLAUDECODE" in proc_env or bool({"-p", "--print"} & set(argv))
+    )
 
 
 @dataclass(frozen=True)

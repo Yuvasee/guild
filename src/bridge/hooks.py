@@ -1481,7 +1481,7 @@ def handle_hook(
         # Everything that touches the filesystem happens before the write lock is taken.
         session_file = read_session_file(pid)
         proc = process_args(pid)
-        nested = proc is not None and is_nested_agent(pid, proc.env)
+        nested = proc is not None and is_nested_agent(pid, proc.env, proc.argv)
         git = read_git_info(cwd) if cwd else None
         surface_seen = None if nested else map_env_to_surface(env)
         transcript_path = _str(payload, "transcript_path")
@@ -1844,7 +1844,7 @@ def handle_failed_start(
     pid = int(pid_text)
     instance_id = make_instance_id(pid, proc_start)
     proc = process_args(pid)
-    nested = proc is not None and is_nested_agent(pid, proc.env)
+    nested = proc is not None and is_nested_agent(pid, proc.env, proc.argv)
     observed_surface = None if nested else map_env_to_surface(env)
     surface = observed_surface.surface if observed_surface else None
     source = _str(payload, "source") or "startup"

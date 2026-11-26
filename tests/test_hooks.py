@@ -333,6 +333,19 @@ def test_nested_claude_neither_pins_nor_claims_the_tab(bridge_env: BridgeEnv, sp
         assert conn.execute("SELECT surface FROM instances").fetchone()["surface"] is None
 
 
+def test_a_print_mode_claude_with_the_tab_ids_but_no_agent_marks_does_not_claim_the_tab(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    agterm = {"AGTERM_SESSION_ID": "TAB-1", "AGTERM_PANE_ID": "PANE-9"}
+    pid = spawn_process(sys.executable, "-c", "import time; time.sleep(300)", "-p", "say ok", env=agterm)
+    bridge_env.write_session_file(pid, "conv-print")
+
+    bridge_env.hook("SessionStart", {"session_id": "conv-print", "source": "startup"}, pid, agterm)
+
+    with bridge_env.connect() as conn:
+        assert conn.execute("SELECT surface FROM instances").fetchone()["surface"] is None
+
+
 def test_older_event_cannot_reattach_previous_conversation(bridge_env: BridgeEnv, spawn_process: SpawnProcess) -> None:
     pid = spawn_process()
     config = load_config()

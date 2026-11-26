@@ -741,7 +741,7 @@ def cmd_pin_restore(args: argparse.Namespace, conn: sqlite3.Connection, config: 
     if proc is None:
         log_error("pin-restore", f"cannot read argv of pid {pid}")
         return 1
-    if is_nested_agent(pid, proc.env) or {"-p", "--print"} & set(proc.argv):
+    if is_nested_agent(pid, proc.env, proc.argv):
         return 0
     # Platform binaries hide their environment; the hook that spawned us inherited the same agterm ids.
     env = {**{k: v for k, v in os.environ.items() if k.startswith("AGTERM_")}, **proc.env}
