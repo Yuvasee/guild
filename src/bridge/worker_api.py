@@ -198,7 +198,7 @@ def handle_host_pre_tool_use(
             ]  # fmt: skip
             roots = (worktree,)
         reader = make_host_repo_reader(found, roots, home, real_roots)
-        output = handle_pre_tool_use(conn, payload, config, reader)
+        output = handle_pre_tool_use(conn, payload, config, reader, {"AGTERM_PANE_ID": record.pane})
     finally:
         conn.close()
     globs = list_guard_globs()

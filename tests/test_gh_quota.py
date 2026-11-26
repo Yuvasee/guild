@@ -31,7 +31,23 @@ def conn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[sqlite3.C
         "VALUES ('boris', 'Boris', 'scope', '[]', 'blue', 'lead', 0, '[]')"
     )
     c.execute("INSERT INTO tab_parents (agterm_session, parent_session) VALUES ('TAB-wrk', 'TAB-lead')")
-    for conversation, surface in (("conv-lead", "lead"), ("conv-wrk", "wrk")):
+    c.execute(
+        "INSERT INTO surfaces (surface, agterm_session, handle, updated_at) VALUES ('aide', 'TAB-aide', 'aide', 0)"
+    )
+    c.execute("INSERT INTO surfaces (surface, agterm_session, handle, updated_at) VALUES ('aw', 'TAB-aw', 'aw', 0)")
+    c.execute(
+        "INSERT INTO surfaces (surface, agterm_session, tab_name, handle, updated_at) "
+        "VALUES ('lk', 'TAB-lk', '🔒 mine', 'lk', 0)"
+    )
+    c.execute("INSERT INTO tab_parents (agterm_session, parent_session) VALUES ('TAB-aide', 'TAB-lead')")
+    c.execute("INSERT INTO tab_parents (agterm_session, parent_session) VALUES ('TAB-aw', 'TAB-aide')")
+    for conversation, surface in (
+        ("conv-lead", "lead"),
+        ("conv-wrk", "wrk"),
+        ("conv-aide", "aide"),
+        ("conv-aw", "aw"),
+        ("conv-lk", "lk"),
+    ):
         c.execute(
             "INSERT INTO instances (instance_id, pid, proc_start_ms, conversation_id, surface, status, first_seen_at, "
             "last_observed_at, last_activity_at) VALUES (?, 1, 0, ?, ?, 'idle', 0, 0, 0)",
@@ -167,3 +183,70 @@ def test_the_shell_gate_starts_the_guard_for_gh_commands() -> None:
 
 def test_is_quota_spending_ignores_the_free_read() -> None:
     assert is_quota_spending(["gh", "pr", "list"]) and not is_quota_spending(["gh", "api", "rate_limit"])
+
+
+def test_the_assistant_is_exempt_even_under_a_lead_and_its_worker_is_gated(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(subprocess, "run", Reads(0))
+
+    assert run(conn, "conv-aide") == ""
+    assert "gh guard" in run(conn, "conv-aw")
+
+
+def test_a_locked_host_worker_is_not_refused(conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(subprocess, "run", Reads(0))
+    payload: dict[str, object] = {
+        "session_id": "conv-lk", "cwd": "/w", "tool_name": "Bash", "tool_input": {"command": "gh pr list"},
+    }  # fmt: skip
+
+    out = handle_pre_tool_use(
+        conn, payload, CONFIG, make_host_repo_reader([], ("/home/dev",)), {"AGTERM_PANE_ID": "lk"}
+    )
+
+    assert out == ""
+
+
+@pytest.mark.parametrize("command", ["gh -R o/r pr list", "gh --repo o/r issue list", "gh -R o/r -H x run list"])
+def test_leading_options_keep_their_values(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    monkeypatch.setattr(subprocess, "run", Reads(0))
+
+    assert "gh guard" in run(conn, "conv-wrk", command)
+
+
+def test_the_free_read_with_a_header_is_not_spending() -> None:
+    assert not is_quota_spending(["gh", "api", "-H", "Accept: application/json", "/rate_limit"])
+    assert is_quota_spending(["gh", "-R", "o/r", "pr", "list"])
+
+
+def test_a_slower_read_does_not_overwrite_a_lower_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BRIDGE_STATE_DIR", str(tmp_path))
+
+    def slow() -> CoreQuota:
+        (tmp_path / "gh-quota.json").write_text(
+            json.dumps({"at": 1000, "remaining": 100, "limit": 5000, "reset": RESET})
+        )
+        return CoreQuota(1600, 5000, RESET)
+
+    assert gh_quota.find_quota_refusal(1500, slow, now=1000) is not None
+    assert gh_quota.find_quota_refusal(1500, lambda: CoreQuota(9999, 5000, RESET), now=1001) is not None
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_a_newer_window_replaces_the_older_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BRIDGE_STATE_DIR", str(tmp_path))
+    (tmp_path / "gh-quota.json").write_text(
+        json.dumps({"at": 1, "remaining": 100, "limit": 5000, "reset": RESET - 3600})
+    )
+
+    assert gh_quota.find_quota_refusal(1500, lambda: CoreQuota(4000, 5000, RESET), now=1000) is None
+
+
+def test_a_low_result_is_refreshed_once_its_reset_has_passed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BRIDGE_STATE_DIR", str(tmp_path))
+    low = CoreQuota(10, 5000, 1001)
+
+    assert gh_quota.find_quota_refusal(1500, lambda: low, now=1000) is not None
+    assert gh_quota.find_quota_refusal(1500, lambda: CoreQuota(5000, 5000, 9999), now=1002) is None

@@ -1331,19 +1331,31 @@ def _is_worker(
     host_checkout: HostRepoReader | None,
     env: Mapping[str, str] | None,
 ) -> bool:
-    """A host worker, or a tab with a lead above it that is not the lead's own and not locked: leads, the assistant and
-    the owner's own sessions are not."""
-    if host_checkout is not None:
-        return True
+    """A host worker, or a tab under a lead or under the assistant that is neither of theirs nor locked: leads, the
+    assistant itself (wherever it is nested) and the owner's own sessions are not."""
     row = conn.execute(
         "SELECT surface FROM instances WHERE conversation_id = ? AND ended_at IS NULL ORDER BY first_seen_at DESC",
         (conversation_id,),
     ).fetchone()
     surface = (row["surface"] if row else None) or (env or {}).get("AGTERM_PANE_ID")
-    if surface is None or is_surface_locked(conn, config, surface):
+    if surface is None:
+        return host_checkout is not None
+    if is_surface_locked(conn, config, surface):
         return False
+    own = conn.execute("SELECT handle FROM surfaces WHERE surface = ?", (surface,)).fetchone()
+    if own is not None and own["handle"] == config.assistant_handle:
+        return False
+    if host_checkout is not None:
+        return True
     lead_surface = find_lead_of(conn, surface)[1]
-    return lead_surface is not None and lead_surface != surface
+    if lead_surface is not None:
+        return lead_surface != surface
+    return any(
+        conn.execute(
+            "SELECT 1 FROM surfaces WHERE agterm_session = ? AND handle = ?", (tab, config.assistant_handle)
+        ).fetchone()
+        for tab in list_tab_lineage(conn, surface)[1:]
+    )
 
 
 def _check_pre_tool_use(
