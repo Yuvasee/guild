@@ -907,6 +907,61 @@ def find_screenshot_problems(page: str, changed: list[str] | None, ui_paths: tup
     ]
 
 
+MIN_SVG_TEXT_PX = 14
+_CSS_RULE_RE = re.compile(r"([^{}]+)\{([^{}]*)\}")
+_SVG_TEXT_SELECTOR_RE = re.compile(r"(?:^|[\s>+~])(?:text|tspan)(?![\w-])", re.I)
+_FONT_PX_RE = re.compile(r"(?<![\w-])font(?:-size)?\s*:\s*(?:[^;]*?\s)?(\d+(?:\.\d+)?)px", re.I)
+_FONT_SIZE_ATTR_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)(?:px)?\s*$")
+
+
+class _SvgTextSizes(HTMLParser):
+    """Every px size a doc gives its SVG text, from its own style rules and from <text> elements' attributes."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.sized: list[tuple[str, float]] = []
+        self._in_style = False
+        self._svg_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "svg":
+            self._svg_depth += 1
+        elif tag == "style":
+            self._in_style = True
+        elif tag in ("text", "tspan") and self._svg_depth:
+            given = {name: value or "" for name, value in attrs}
+            if (m := _FONT_SIZE_ATTR_RE.match(given.get("font-size", ""))) or (
+                m := _FONT_PX_RE.search(given.get("style", ""))
+            ):
+                self.sized.append((f"<{tag}> with font-size {m.group(1)}px", float(m.group(1))))
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "svg":
+            self._svg_depth = max(0, self._svg_depth - 1)
+        elif tag == "style":
+            self._in_style = False
+
+    def handle_data(self, data: str) -> None:
+        if not self._in_style:
+            return
+        for selector, declarations in _CSS_RULE_RE.findall(data):
+            parts = [p.strip() for p in selector.split(",") if _SVG_TEXT_SELECTOR_RE.search(p.strip())]
+            if parts and (m := _FONT_PX_RE.search(declarations)):
+                self.sized.append((f"the rule '{parts[0]}' sets {m.group(1)}px", float(m.group(1))))
+
+
+def find_small_svg_text_problems(page: str) -> list[str]:
+    """Diagram labels under MIN_SVG_TEXT_PX: the shared style keeps a page's own px sizes, so a doc that sets its SVG
+    text small stays small however big the rest of the page is."""
+    reader = _SvgTextSizes()
+    reader.feed(page)
+    small = list(dict.fromkeys(where for where, px in reader.sized if px < MIN_SVG_TEXT_PX))
+    return [
+        f"SVG text is under {MIN_SVG_TEXT_PX}px: {where}; set it to {MIN_SVG_TEXT_PX}px or more and widen the diagram"
+        for where in small
+    ]
+
+
 ROUNDS_SUFFIX = ".reader-rounds"
 """A review doc's first-reader rounds sit beside it, one JSON line per round: {"round": 2, "terms": ["..."]}."""
 
@@ -1330,6 +1385,7 @@ def find_doc_problems(
     problems.extend(find_story_problems(headings, top.story_steps))
     problems.extend(find_first_reader_problems(verified, rounds))
     problems.extend(find_field_table_problems(text))
+    problems.extend(find_small_svg_text_problems(text))
     blocks = read_blocks(text)
     problems.extend(find_baseline_problems(blocks, base))
     problems.extend(find_decision_problems(text, blocks.blocks, owner))

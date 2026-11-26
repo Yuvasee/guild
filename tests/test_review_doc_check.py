@@ -791,3 +791,19 @@ def test_registration_refuses_a_doc_without_a_screenshot_when_the_pr_changes_ui(
     source.write_bytes(make_doc().replace(b"</body>", SHOT.encode() + b"</body>"))
     with transaction(conn):
         register_doc(conn, config, REF, source, NOW)
+
+
+def test_svg_text_under_14px_is_flagged_by_the_rule_or_element_that_sets_it_and_14px_passes() -> None:
+    style = "<style>svg text{font:12px sans-serif} .text{font-size:9px} p{font-size:12px}</style>"
+    diagram = "<svg><text x='1'>a</text></svg>"
+    (rule,) = review_doc_check.find_small_svg_text_problems(f"{style}{diagram}")
+    assert "the rule 'svg text' sets 12px" in rule and "14px or more" in rule
+    (attribute,) = review_doc_check.find_small_svg_text_problems("<svg><text font-size='11'>a</text></svg>")
+    assert "<text> with font-size 11px" in attribute
+    (inline,) = review_doc_check.find_small_svg_text_problems("<svg><tspan style='font-size: 10px'>a</tspan></svg>")
+    assert "<tspan> with font-size 10px" in inline
+    assert review_doc_check.find_small_svg_text_problems(style.replace("12px sans", "14px sans") + diagram) == []
+    assert (
+        review_doc_check.find_small_svg_text_problems("<p style='font-size:12px'>x</p><text font-size='9'>t</text>")
+        == []
+    )

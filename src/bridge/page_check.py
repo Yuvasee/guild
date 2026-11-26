@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from bridge.doc_nav import convert_doc_to_viewable, convert_page_to_themed, convert_served_page_to_styled
-from bridge.review_doc_check import find_day_estimates, map_estimates_to_problem
+from bridge.review_doc_check import find_day_estimates, find_small_svg_text_problems, map_estimates_to_problem
 
 BROWSER_ENV = "BRIDGE_BROWSER"
 """A headless-capable Chrome or Chromium to render with; set and empty, no page is rendered."""
@@ -99,8 +99,9 @@ def read_visible_text(page: str) -> str:
 
 def find_text_problems(page: bytes) -> list[str]:
     """What the page's words break, read without rendering it."""
-    found = find_day_estimates(read_visible_text(page.decode("utf-8", "replace")))
-    return [map_estimates_to_problem(found)] if found else []
+    source = page.decode("utf-8", "replace")
+    found = find_day_estimates(read_visible_text(source))
+    return [*([map_estimates_to_problem(found)] if found else []), *find_small_svg_text_problems(source)]
 
 
 @contextmanager
