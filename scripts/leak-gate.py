@@ -5,6 +5,7 @@
     scripts/leak-gate.py --tree DIR          any directory
     scripts/leak-gate.py --pre-push          the pushed commits' trees and metadata, refs on stdin (pre-push)
     scripts/leak-gate.py --commits A..B      those commits' trees and metadata
+    scripts/leak-gate.py --commit-msg FILE   a commit message as it is written, before the commit exists (commit-msg)
     add --all to also print the hits allow.txt accepts
 
 The lists never live in this repo. They are read from GUILD_LEAK_DIR, else `git config guild.leakDir`:
@@ -304,6 +305,7 @@ def main() -> int:
     mode.add_argument("--tree", type=Path)
     mode.add_argument("--pre-push", action="store_true")
     mode.add_argument("--commits")
+    mode.add_argument("--commit-msg", type=Path)
     parser.add_argument("--all", action="store_true")
     args = parser.parse_args()
     lists = Lists(find_list_dir())
@@ -311,7 +313,11 @@ def main() -> int:
     repo = Path(git("rev-parse", "--show-toplevel", check=False).strip() or ".")
     git_dir = git("rev-parse", "--absolute-git-dir", check=False).strip()
     cache = Path(git_dir) / "leak-gate-ocr" if git_dir else None
-    if args.tree:
+    if args.commit_msg:
+        # Lines git strips before it stores the message (status, paths) are not the message.
+        lines = [line for line in args.commit_msg.read_text().splitlines() if not line.startswith("#")]
+        report.check_text(lists, "commit message", "\n".join(lines))
+    elif args.tree:
         check_tree(lists, args.tree.resolve(), report, cache)
     elif args.staged:
         with tempfile.TemporaryDirectory(prefix="leak-gate-index-") as raw:

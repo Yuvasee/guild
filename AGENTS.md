@@ -9,5 +9,5 @@
   user's screen; run them on Linux, or set `BRIDGE_RENDER_TESTS=1`.
 - Writing an adapter (task tracker, chat, code host): [docs/adapters.md](docs/adapters.md).
 - `scripts/leak-gate.py` refuses a commit or push that names what an install keeps private; its lists live outside
-  the repo (`GUILD_LEAK_DIR` or `git config guild.leakDir`). Install it as `pre-commit` (`--staged`) and `pre-push`
-  (`--pre-push`) hooks in a clone that must not leak.
+  the repo (`GUILD_LEAK_DIR` or `git config guild.leakDir`). Install it as `pre-commit` (`--staged`), `commit-msg`
+  (`--commit-msg "$1"`) and `pre-push` (`--pre-push`) hooks in a clone that must not leak.
