@@ -174,6 +174,11 @@ def test_guild_worker_starts_claude_without_chrome_and_briefs_it_on_the_browser(
     brief = Path(brief_path.group(1)).read_text()
     assert brief.startswith("# The Guild constitution") and "# Your task\n\nFix the thing\n" in brief
     assert "codex exec ... </dev/null" in brief
+    assert (
+        "After three review rounds in a row that each found a P1, stop patching and consider rolling back to the "
+        "simplest implementation that keeps the gain; this also guards against scope creep. Tell your lead which way "
+        "you went and why.\n" in brief
+    )
     assert "Stage files by path; never git add -A or git add ." in brief
     assert BROWSER_RULE in brief
     assert "a part headed Reviews" in brief
