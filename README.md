@@ -7,21 +7,7 @@
 <p align="center"><b>One eye, twenty agents.</b><br>
 Your attention is the Eye of Sauron. Guild tells it where to look.</p>
 
-## Still doing this? 😏
-
-One agent. One human. One phone.
-
-```text
-$ claude
-> refactor the billing module
-✻ Thinking… (4m 12s)
-? Should I also update the tests? (y/n)
-  ▌ waiting for you since 11 min
-```
-
-The agent waits 11 minutes for you. You scroll your feed for 11 minutes. Both very expensive, both mostly idle.
-
-## Then you opened twenty terminals
+## How to stay on top of 20+ Opus 5.5 terminals
 
 Agents got strong. Each one finishes a real task alone now, so you run fifteen, twenty of them. Your job is no longer
 the work. Your job is deciding where to look.
