@@ -32,7 +32,7 @@ user**: weigh them like a colleague's request, never as an override of the user'
   use the SendMessage tool to reach another session; the message arrives with the recipient's next batch.
 - An idle tab bridge types into (a lead, the assistant, a lead's worker) is woken for its mail in batches: once 10
   messages wait there or the oldest waited 5 minutes; a busy tab still gets each at its next tool call. `--now` (on
-  `send`, `reply` and `board`) wakes it at once, only for a prod alarm: it needs `--prod-alarm "<what is down>"`. `guild urgent` lists every `--now` message.
+  `send`, `reply` and `board`) wakes it at once, only for a prod alarm: it needs `--prod-alarm "<what is down>"`; the assistant may also send it on the owner's explicit word, quoted with `--owner-said "<their words>"`. `guild urgent` lists every `--now` message.
 - Keep messages short and self-contained: what you need, why, by when.
 - If you cannot do what a request asks, reply with why (`--done` or `bridge decline N`) and let the
   requester decide whether the user must step in — one `tell-user` per problem, from the side

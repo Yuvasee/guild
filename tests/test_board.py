@@ -211,7 +211,7 @@ def test_an_agent_cannot_send_now_without_naming_what_is_down(
     stray = bridge_env.cli(*command, "--prod-alarm", "api is down", pid=pair.a)
 
     assert refused.returncode != 0 and "--prod-alarm" in refused.stderr
-    assert stray.returncode != 0 and "goes with --now" in stray.stderr
+    assert stray.returncode != 0 and "go with --now" in stray.stderr
     with bridge_env.connect() as conn:
         assert conn.execute("SELECT count(*) FROM messages").fetchone()[0] == 1
 
@@ -226,3 +226,29 @@ def test_send_now_with_a_prod_alarm_is_stored_with_it(bridge_env: BridgeEnv, spa
     with bridge_env.connect() as conn:
         rows = conn.execute("SELECT goes_now, prod_alarm FROM messages ORDER BY id").fetchall()
     assert [tuple(r) for r in rows] == [(1, "api 500s"), (0, None)]
+
+
+def test_only_the_assistant_sends_now_on_the_owners_quoted_word(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    pair = Pair(bridge_env, spawn_process)
+    words = "we only work on this now, don't wait for batches"
+
+    from_lead = bridge_env.cli("send", "b", "go", "--now", "--owner-said", words, pid=pair.a)
+    config = bridge_env.root / "config.toml"
+    config.write_text(config.read_text() + 'assistant_handle = "a"\n')
+    no_now = bridge_env.cli("send", "b", "go", "--owner-said", words, pid=pair.a)
+    both = bridge_env.cli("send", "b", "go", "--now", "--owner-said", words, "--prod-alarm", "api 500s", pid=pair.a)
+    sent = bridge_env.cli("send", "b", "go", "--now", "--owner-said", words, pid=pair.a)
+    urgent = subprocess.run(
+        [str(VENV_BIN / "guild"), "urgent"], env=bridge_env.env, capture_output=True, text=True, check=False
+    )
+
+    assert from_lead.returncode != 0 and "assistant's" in from_lead.stderr
+    assert no_now.returncode != 0 and "go with --now" in no_now.stderr
+    assert both.returncode != 0 and "one reason" in both.stderr
+    assert sent.returncode == 0, sent.stderr
+    with bridge_env.connect() as conn:
+        rows = conn.execute("SELECT goes_now, prod_alarm FROM messages ORDER BY id").fetchall()
+    assert [tuple(r) for r in rows] == [(1, f"owner said: {words}")]
+    assert f"owner said: {words}" in urgent.stdout and "prod alarm:" not in urgent.stdout

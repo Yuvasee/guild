@@ -41,7 +41,7 @@ from bridge.capacity import (
     record_owner_on,
 )
 from bridge.cli_asks import add_ask_commands, map_local_time_arg_to_ms
-from bridge.cli_board import nudge_recipients, spawn_when_ripe
+from bridge.cli_board import OWNER_SAID_PREFIX, nudge_recipients, spawn_when_ripe
 from bridge.colleague_comments import (
     list_open_calls,
     map_arg_to_comment_key,
@@ -1837,7 +1837,8 @@ def cmd_urgent(args: argparse.Namespace, conn: sqlite3.Connection, config: Confi
         stamp = time.strftime("%m-%d %H:%M", time.localtime(int(row["created_at"]) / 1000))
         print(f"message #{row['id']} {stamp} {row['from_handle']} → {row['recipients'] or 'nobody'} (sent --now)")
         if row["prod_alarm"]:
-            print(f"  prod alarm: {row['prod_alarm']}")
+            reason = str(row["prod_alarm"])
+            print(f"  {reason}" if reason.startswith(OWNER_SAID_PREFIX) else f"  prod alarm: {reason}")
         print("  " + str(row["body"]).replace("\n", "\n  "))
     return 0
 
