@@ -107,6 +107,7 @@ from bridge.issue_sync import LinearError, run_issue_sync
 from bridge.leads import is_conversation_locked
 from bridge.notify import release_urgent_notice, show_notification, take_next_urgent_notice
 from bridge.outage import FailureSpell, LoopStalls, OutageNotices
+from bridge.owner_stats import PR_CACHE_FILE, PromptReader, PrStore, map_db_to_stats
 from bridge.pages import (
     Page,
     find_html_file,
@@ -338,6 +339,7 @@ LOOP_STALLED = (
     "bridge: serve's loop {loop} has not finished a round for {minutes} min (last: {last}), so what it does waits. "
     "serve.log has its stack as it was then. bridge says once when it finishes again."
 )
+STATS_PLACEHOLDER = "/*STATS*/null"
 LOOP_LOOK_EVERY_MS = 60_000
 """Loops rest every few seconds; a notice nobody could take is tried again at this pace, not at each rest."""
 LOOP_BACK = "bridge: serve's loop {loop} finishes rounds again, after {minutes} min without one."
@@ -368,6 +370,8 @@ class DashboardState:
         self._inspected_transcripts: Inspected = {}
         self._weekly_failure: str | None = None
         self._github: Callable[[list[str]], str] = run_gh
+        self._prompts = PromptReader()
+        self._prs = PrStore(state_dir() / PR_CACHE_FILE)
 
     def snapshot(self) -> dict[str, object]:
         with self._connection() as conn:
@@ -385,6 +389,20 @@ class DashboardState:
     def dreams_page(self) -> str:
         with self._connection() as conn:
             return map_dreamers_to_page(resolve_dreamers(conn, self.config, [ALL]))
+
+    def stats_page(self) -> str:
+        now = now_ms()
+        with self._connection() as conn:
+            stats = map_db_to_stats(
+                conn,
+                self.config,
+                now,
+                self._prompts.read,
+                lambda since: self._prs.view(self.config, since, now),
+            )
+        stats["skipped_records"] = self._prompts.skipped
+        template = files("bridge").joinpath("web/stats.html").read_text()
+        return template.replace(STATS_PLACEHOLDER, json.dumps(stats).replace("</", "<\\/"), 1)
 
     def page_response(self, path: str) -> tuple[int, str | None, str, bytes]:
         """Status, redirect target, content type and body for /p/<slug>: the page's own local files, never a hosted
@@ -1688,6 +1706,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     self._send(200, "text/html; charset=utf-8", self.state.pinned_page(request).encode())
         elif self.path == "/dreams":
             self._send(200, "text/html; charset=utf-8", self.state.dreams_page().encode())
+        elif self.path == "/stats":
+            self._send(200, "text/html; charset=utf-8", self.state.stats_page().encode())
         elif self.path == "/p" or self.path.startswith(("/p/", "/p?")):
             status, target, content_type, body = self.state.page_response(self.path)
             if target is not None:

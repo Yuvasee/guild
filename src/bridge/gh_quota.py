@@ -43,12 +43,17 @@ def is_quota_spending(words: list[str]) -> bool:
 
 
 def read_core_quota() -> CoreQuota | None:
+    return read_quota("core")
+
+
+def read_quota(bucket: str) -> CoreQuota | None:
+    """bucket: a key of rate_limit's resources, "core" for REST, "graphql" for GraphQL points."""
     try:
         done = subprocess.run(
             ["gh", "api", "rate_limit"], capture_output=True, text=True, timeout=FETCH_TIMEOUT_S, check=False
         )
-        core = json.loads(done.stdout)["resources"]["core"]
-        return CoreQuota(int(core["remaining"]), int(core["limit"]), int(core["reset"]))
+        found = json.loads(done.stdout)["resources"][bucket]
+        return CoreQuota(int(found["remaining"]), int(found["limit"]), int(found["reset"]))
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
         return None
 

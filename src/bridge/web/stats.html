@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stats</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #fbfbf9; --raise: #ffffff; --ink: #1c1c1a; --soft: #6e6e68; --faint: #a6a69f; --line: #ecebe6;
+  --row: #f3f2ed; --link: #2456d6;
+  --g1: #257de0; --g2: #f47230; --g3: #00b894; --g4: #f2a600; --g5: #ee7fac; --g6: #008a17;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #141413; --raise: #1b1b1a; --ink: #ecece8; --soft: #9d9d97; --faint: #65655f; --line: #282826;
+    --row: #1e1e1c; --link: #86a8ff;
+    --g1: #338ced; --g2: #e76624; --g3: #00a888; --g4: #d28e05; --g5: #e24d8b; --g6: #0aac23;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 64px; }
+#top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; }
+h1 { margin: 0; font-size: 21px; font-weight: 700; }
+#top a { font-size: 13px; color: var(--soft); text-decoration-color: var(--faint); text-underline-offset: 2px; }
+.sub { margin: 4px 0 14px; font-size: 13px; color: var(--soft); }
+.sub .err { color: var(--ink); }
+#range { display: flex; gap: 6px; margin-bottom: 10px; font-size: 13px; }
+button { font: inherit; font-size: 13px; color: var(--soft); background: var(--raise); border: 1px solid var(--line); border-radius: 6px; padding: 3px 9px; cursor: pointer; }
+button:hover { border-color: var(--faint); color: var(--ink); }
+button[aria-pressed="true"] { color: var(--ink); border-color: var(--faint); }
+#legend { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+.group { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
+.group > button:first-child { min-width: 112px; text-align: left; font-weight: 600; }
+.chip { display: inline-flex; align-items: center; gap: 6px; }
+.chip[aria-pressed="false"], .group > button[aria-pressed="false"] { color: var(--faint); }
+.chip[aria-pressed="false"] svg { opacity: .3; }
+.chip svg { width: 22px; height: 8px; flex: none; }
+#chart { position: relative; background: var(--raise); border: 1px solid var(--line); border-radius: 10px; padding: 8px 4px 4px; }
+#chart svg { display: block; width: 100%; height: 360px; }
+#chart text { fill: var(--soft); font-size: 11px; }
+#chart .grid { stroke: var(--line); }
+#chart .hair { stroke: var(--faint); }
+#tip { position: absolute; pointer-events: none; background: var(--raise); border: 1px solid var(--line); border-radius: 8px; padding: 6px 9px; font-size: 12px; box-shadow: 0 2px 10px rgba(0,0,0,.12); display: none; min-width: 170px; }
+#tip .day { color: var(--soft); margin-bottom: 3px; }
+#tip .r { display: flex; align-items: center; gap: 6px; }
+#tip .r b { min-width: 34px; text-align: right; }
+#tip .r span { color: var(--soft); }
+#tip svg { width: 14px; height: 6px; flex: none; }
+.empty { color: var(--soft); padding: 40px; text-align: center; }
+details { margin-top: 14px; }
+summary { cursor: pointer; color: var(--soft); font-size: 13px; }
+.wrap { overflow-x: auto; margin-top: 8px; }
+table { border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+th, td { padding: 3px 7px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
+th { color: var(--soft); font-weight: 600; position: sticky; top: 0; background: var(--bg); }
+th:first-child, td:first-child { text-align: left; position: sticky; left: 0; background: var(--bg); }
+tr:hover td { background: var(--row); }
+.notes { font-size: 13px; color: var(--soft); margin: 8px 0 0; padding-left: 18px; }
+.notes b { color: var(--ink); font-weight: 600; }
+</style>
+</head>
+<body>
+<main>
+  <div id="top"><h1>Stats</h1><a href="/">← Guild</a></div>
+  <p class="sub" id="sub"></p>
+  <div id="range"></div>
+  <div id="legend"></div>
+  <div id="chart"><svg id="plot" role="img" aria-label="Daily counts"></svg><div id="tip"></div></div>
+  <details><summary>Numbers by day</summary><div class="wrap"><table id="table"></table></div></details>
+  <details><summary>What each line counts</summary>
+    <ul class="notes">
+      <li><b>Messages</b>: prompts you typed into a tab (bridge's mail, worker briefs, slash commands, tool results and headless runs left out; a paste counts), plus your dashboard messages, once under each agent they went to. A worker counts under its lead. Locked tabs and workers on another host are not read.</li>
+      <li><b>Questions</b>: blocked and decision posts by the day you answered: by a button, of those the one the post recommended (My pick), in your own words, or settled in chat with the assistant. Withdrawn or dismissed: closed with no answer. Median hours: from the post to your answer, for the questions answered that day.</li>
+      <li><b>Answers opened</b>: done and insight posts you opened on the page; recorded since that feature shipped.</li>
+      <li><b>Asks</b>: asks recorded from your words, verified, and reopened, by the day it happened.</li>
+      <li><b>PRs</b>: published for review is the review channel's post of one of your PRs, by when it was posted. Opened, merged and closed unmerged are PRs by the GitHub account in any repo, agents' included, read from GitHub at most hourly.</li>
+      <li><b>Lines of code</b>: additions plus deletions, lockfiles and generated files left out as in the review queue; written is the PRs opened that day at their size now, merged the PRs merged that day.</li>
+      <li><b>Comments</b>: PR comments the review queue judged yours (not an agent's under the shared account), on PRs it tracks.</li>
+      <li>A line starts on the first day its source has a record; before that it is blank, not zero.</li>
+    </ul>
+  </details>
+</main>
+<script>
+const DATA = /*STATS*/null;
+const GROUP_COLORS = { "Messages": "--g1", "Questions": "--g2", "Asks": "--g3", "PRs": "--g4", "Lines of code": "--g5", "Comments": "--g6" };
+const DASHES = ["", "6 3", "2 3", "9 3 2 3", "12 4", "2 6", "6 2 2 2", "1 2", "14 3 3 3"];
+const UNITS = { count: "per day", kloc: "kLOC", hours: "hours" };
+const SHOWN_BY_DEFAULT = new Set(["msg_all", "q_button", "q_typed", "q_chat", "pr_published", "pr_merged", "loc_merged", "comments"]);
+const STORE = "guild-stats-hidden";
+const svgNS = "http://www.w3.org/2000/svg";
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+let hidden;
+try { hidden = new Set(JSON.parse(localStorage.getItem(STORE))); } catch { hidden = null; }
+if (!(hidden instanceof Set) || !localStorage.getItem(STORE)) hidden = new Set(DATA.lines.filter(l => !SHOWN_BY_DEFAULT.has(l.key)).map(l => l.key));
+let span = Number(localStorage.getItem(STORE + "-span")) || 0;
+
+const groups = [...new Set(DATA.lines.map(l => l.group))];
+DATA.lines.forEach(l => {
+  const inGroup = DATA.lines.filter(o => o.group === l.group);
+  l.color = GROUP_COLORS[l.group] || "--g1";
+  l.dash = DASHES[inGroup.indexOf(l) % DASHES.length];
+});
+
+function el(tag, attrs = {}, parent) {
+  const node = document.createElementNS(svgNS, tag);
+  for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+  if (parent) parent.appendChild(node);
+  return node;
+}
+function key(line) {
+  const s = el("svg", { viewBox: "0 0 22 8" });
+  el("line", { x1: 1, y1: 4, x2: 21, y2: 4, stroke: css(line.color), "stroke-width": 2, "stroke-dasharray": line.dash, "stroke-linecap": "round" }, s);
+  return s;
+}
+function save() { localStorage.setItem(STORE, JSON.stringify([...hidden])); }
+
+function drawSub() {
+  const sub = document.getElementById("sub");
+  sub.textContent = "What you did each day: daily counts, not running totals. ";
+  const gh = DATA.github;
+  if (gh.fetched_at) sub.append(`GitHub (${DATA.author}, ${gh.prs} PRs) read ${ago(gh.fetched_at)} ago. `);
+  const problems = [];
+  if (gh.loading) problems.push(gh.fetched_at ? "Reading GitHub again." : "Loading GitHub: the PR and code lines fill in on reload.");
+  if (gh.error) problems.push(`GitHub not read: ${gh.error}.`);
+  if (gh.incomplete) problems.push(`History incomplete: ${gh.incomplete}.`);
+  if (gh.write_error) problems.push(`GitHub ${gh.write_error}.`);
+  if (DATA.skipped_records) problems.push(`Messages undercounted: ${DATA.skipped_records} transcript lines over 64 MB skipped unread.`);
+  if (problems.length) { const e = document.createElement("span"); e.className = "err"; e.textContent = problems.join(" "); sub.append(e); }
+}
+function ago(ms) {
+  const m = Math.round((Date.now() - ms) / 60000);
+  return m < 60 ? `${m} min` : `${Math.round(m / 60)} h`;
+}
+
+function drawRange() {
+  const box = document.getElementById("range");
+  box.textContent = "";
+  for (const [label, days] of [["14 days", 14], ["30 days", 30], ["60 days", 60], ["All", 0]]) {
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.setAttribute("aria-pressed", String(span === days));
+    b.onclick = () => { span = days; localStorage.setItem(STORE + "-span", String(days)); drawAll(); };
+    box.appendChild(b);
+  }
+}
+
+function drawLegend() {
+  const box = document.getElementById("legend");
+  box.textContent = "";
+  for (const group of groups) {
+    const lines = DATA.lines.filter(l => l.group === group);
+    const row = document.createElement("div");
+    row.className = "group";
+    const g = document.createElement("button");
+    const anyShown = lines.some(l => !hidden.has(l.key));
+    g.textContent = group;
+    g.setAttribute("aria-pressed", String(anyShown));
+    g.onclick = () => { lines.forEach(l => anyShown ? hidden.add(l.key) : hidden.delete(l.key)); save(); drawAll(); };
+    row.appendChild(g);
+    for (const line of lines) {
+      const b = document.createElement("button");
+      b.className = "chip";
+      b.setAttribute("aria-pressed", String(!hidden.has(line.key)));
+      b.append(key(line), line.label);
+      b.onclick = () => { hidden.has(line.key) ? hidden.delete(line.key) : hidden.add(line.key); save(); drawAll(); };
+      row.appendChild(b);
+    }
+    box.appendChild(row);
+  }
+}
+
+function niceMax(v) {
+  if (!(v > 0)) return 1;
+  const p = Math.pow(10, Math.floor(Math.log10(v)));
+  for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= v) return m * p;
+  return 10 * p;
+}
+const tick = (v) => String(Math.round(v * 100) / 100);
+function fmt(v, unit) {
+  if (v === null || v === undefined) return "–";
+  return unit === "count" ? String(Math.round(v)) : (Math.round(v * 10) / 10).toString();
+}
+
+function drawChart() {
+  const svg = document.getElementById("plot");
+  svg.textContent = "";
+  const start = span ? Math.max(0, DATA.days.length - span) : 0;
+  const days = DATA.days.slice(start);
+  const shown = DATA.lines.filter(l => !hidden.has(l.key));
+  const W = svg.clientWidth || 900, H = 360;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  if (!shown.length || !days.length) {
+    const t = el("text", { x: W / 2, y: H / 2, "text-anchor": "middle" }, svg);
+    t.textContent = "No line shown: turn one on above.";
+    return;
+  }
+  const units = ["count", "kloc", "hours"].filter(u => shown.some(l => l.unit === u));
+  const leftUnit = units.includes("count") ? "count" : units[0];
+  const rightUnits = units.filter(u => u !== leftUnit);
+  const M = { l: 44, r: 16 + rightUnits.length * 46, t: 22, b: 28 };
+  const iw = W - M.l - M.r, ih = H - M.t - M.b;
+  const x = (i) => M.l + (days.length === 1 ? iw / 2 : (i * iw) / (days.length - 1));
+  const scales = {};
+  for (const u of units) {
+    const max = Math.max(0, ...shown.filter(l => l.unit === u).flatMap(l => l.values.slice(start).filter(v => v !== null)));
+    scales[u] = u === "count" ? Math.max(4, niceMax(max)) : niceMax(max);
+  }
+  const y = (v, u) => M.t + ih - (v / scales[u]) * ih;
+  for (let k = 0; k <= 4; k++) {
+    const yy = M.t + ih - (k * ih) / 4;
+    el("line", { x1: M.l, x2: M.l + iw, y1: yy, y2: yy, class: "grid" }, svg);
+    const lt = el("text", { x: M.l - 6, y: yy + 4, "text-anchor": "end" }, svg);
+    lt.textContent = tick((scales[leftUnit] * k) / 4);
+    rightUnits.forEach((u, n) => {
+      const rt = el("text", { x: M.l + iw + 8 + n * 46, y: yy + 4 }, svg);
+      rt.textContent = tick((scales[u] * k) / 4);
+    });
+  }
+  const unitLabel = (u, xx, anchor) => { const t = el("text", { x: xx, y: 12, "text-anchor": anchor }, svg); t.textContent = UNITS[u]; };
+  unitLabel(leftUnit, 2, "start");
+  rightUnits.forEach((u, n) => unitLabel(u, M.l + iw + 8 + n * 46, "start"));
+  const every = Math.max(1, Math.ceil(days.length / Math.max(2, Math.floor(iw / 70))));
+  days.forEach((d, i) => {
+    const last = i === days.length - 1;
+    if (last ? i % every && i % every < every / 2 : i % every) return;
+    const t = el("text", { x: x(i), y: H - 8, "text-anchor": "middle" }, svg);
+    t.textContent = d.slice(5);
+  });
+  for (const line of shown) {
+    const vals = line.values.slice(start);
+    let path = "", pen = false;
+    vals.forEach((v, i) => {
+      if (v === null) { pen = false; return; }
+      path += `${pen ? "L" : "M"}${x(i).toFixed(1)},${y(v, line.unit).toFixed(1)}`;
+      pen = true;
+    });
+    if (!path) continue;
+    el("path", { d: path, fill: "none", stroke: css(line.color), "stroke-width": 2, "stroke-dasharray": line.dash, "stroke-linejoin": "round", "stroke-linecap": "round" }, svg);
+    if (days.length <= 31) vals.forEach((v, i) => { if (v !== null) el("circle", { cx: x(i), cy: y(v, line.unit), r: 2.5, fill: css(line.color) }, svg); });
+  }
+  const hair = el("line", { y1: M.t, y2: M.t + ih, class: "hair", visibility: "hidden" }, svg);
+  const tip = document.getElementById("tip");
+  const hit = el("rect", { x: M.l, y: M.t, width: iw, height: ih, fill: "transparent" }, svg);
+  hit.addEventListener("pointermove", (ev) => {
+    const box = svg.getBoundingClientRect();
+    const px = ((ev.clientX - box.left) / box.width) * W;
+    const i = Math.max(0, Math.min(days.length - 1, Math.round(((px - M.l) / iw) * (days.length - 1))));
+    hair.setAttribute("x1", x(i)); hair.setAttribute("x2", x(i)); hair.setAttribute("visibility", "visible");
+    tip.textContent = "";
+    const head = document.createElement("div"); head.className = "day"; head.textContent = days[i]; tip.appendChild(head);
+    for (const line of shown) {
+      const r = document.createElement("div"); r.className = "r";
+      const b = document.createElement("b"); b.textContent = fmt(line.values[start + i], line.unit);
+      const s = document.createElement("span"); s.textContent = `${line.group} · ${line.label}`;
+      r.append(key(line), b, s); tip.appendChild(r);
+    }
+    tip.style.display = "block";
+    const left = (x(i) / W) * box.width;
+    tip.style.left = `${left + 14 + tip.offsetWidth > box.width ? left - 14 - tip.offsetWidth : left + 14}px`;
+    tip.style.top = "16px";
+  });
+  hit.addEventListener("pointerleave", () => { hair.setAttribute("visibility", "hidden"); tip.style.display = "none"; });
+}
+
+function drawTable() {
+  const table = document.getElementById("table");
+  table.textContent = "";
+  const head = table.insertRow();
+  const corner = document.createElement("th"); corner.textContent = "Day"; head.appendChild(corner);
+  for (const line of DATA.lines) {
+    const th = document.createElement("th");
+    th.textContent = `${line.group}: ${line.label}${line.unit === "count" ? "" : ` (${UNITS[line.unit]})`}`;
+    head.appendChild(th);
+  }
+  for (let i = DATA.days.length - 1; i >= 0; i--) {
+    const row = table.insertRow();
+    row.insertCell().textContent = DATA.days[i];
+    for (const line of DATA.lines) row.insertCell().textContent = fmt(line.values[i], line.unit);
+  }
+}
+
+function drawAll() { drawRange(); drawLegend(); drawChart(); }
+drawSub();
+drawAll();
+drawTable();
+addEventListener("resize", drawChart);
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", drawAll);
+</script>
+</body>
+</html>

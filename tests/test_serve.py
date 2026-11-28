@@ -152,3 +152,12 @@ def test_the_theme_choice_is_kept_from_a_sandboxed_doc_and_nowhere_else(bridge_e
     assert kept.read_text() == "dark\n"
     assert post_theme(dashboard, b"auto", {"Origin": dashboard}) == 204
     assert kept.read_text() == "auto\n"
+
+
+def test_the_stats_page_carries_its_numbers_and_the_guild_page_links_it(dashboard: str) -> None:
+    page = http_request(f"{dashboard}/stats")
+    data = json.loads(page.split("const DATA = ", 1)[1].split(";\n", 1)[0])
+    assert {line["group"] for line in data["lines"]} >= {"Messages", "Questions", "PRs"}
+    assert data["github"]["error"] == "review_author is not set", "no account configured: GitHub is not read"
+    assert data["skipped_records"] == 0
+    assert 'href="/stats"' in http_request(f"{dashboard}/")
