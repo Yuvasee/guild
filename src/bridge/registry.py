@@ -373,14 +373,20 @@ def set_focus(conn: sqlite3.Connection, conversation_id: str, focus: str | None,
     )
 
 
-def take_focus_nudge(conn: sqlite3.Connection, conversation_id: str, at_ms: int, lead: bool = False) -> str | None:
+def take_focus_nudge(
+    conn: sqlite3.Connection,
+    conversation_id: str,
+    at_ms: int,
+    lead: bool = False,
+    min_turns: int = FOCUS_NUDGE_MIN_TURNS,
+) -> str | None:
     """Returns a reminder to refresh focus when it is missing or old, at most once per nudge interval. A lead's goes
     sooner, once its last turns are about refs its focus line does not name: its card is where the owner looks."""
     row = conn.execute(
         "SELECT focus, focus_at, focus_nudged_at, turns FROM conversations WHERE conversation_id = ?",
         (conversation_id,),
     ).fetchone()
-    if row is None or int(row["turns"]) < FOCUS_NUDGE_MIN_TURNS:
+    if row is None or int(row["turns"]) < min_turns:
         return None
     nudged_at = row["focus_nudged_at"]
     if nudged_at is not None and at_ms - int(nudged_at) < FOCUS_NUDGE_EVERY_S * 1000:

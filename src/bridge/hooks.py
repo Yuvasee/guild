@@ -1834,6 +1834,12 @@ def handle_hook(
             if (text or "").lstrip().startswith(TASK_NOTIFICATION):
                 # Mail or a finished task started a turn after compaction: it goes on without a typed "continue".
                 take_phase(conn, conversation_id, PHASE_CONTINUE, None)
+            # A lead turns mostly on mail and task notifications, rarely on typed prompts: its card's focus line
+            # would otherwise go stale unnoticed while it works.
+            if observed.current and conversation_id in find_lead_conversations(conn):
+                nudge = take_focus_nudge(conn, conversation_id, at_ms, lead=True, min_turns=0)
+                if nudge:
+                    contexts.append(nudge)
         elif event == "UserPromptSubmit" and conversation_id:
             fresh = record_prompt(conn, conversation_id, text or "", prompt_id, at_ms)
             # The user picked the conversation up again; a typed "continue" would now land on top of their work.

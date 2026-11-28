@@ -89,6 +89,33 @@ def test_focus_nudge_after_min_turns_then_throttled(bridge_env: BridgeEnv, spawn
         assert conn.execute("SELECT focus FROM conversations").fetchone()["focus"] == "bridge phase 1"
 
 
+def test_a_lead_woken_by_mail_or_a_task_notification_is_nudged_about_a_stale_focus(
+    bridge_env: BridgeEnv, spawn_process: SpawnProcess
+) -> None:
+    pid = spawn_process()
+    typed = {"session_id": "conv-l", "cwd": str(bridge_env.root), "prompt": "start"}
+    bridge_env.hook("UserPromptSubmit", typed, pid)
+    old = int(time.time() * 1000) - 7 * 3_600_000
+    with bridge_env.connect() as conn:
+        conn.execute("UPDATE conversations SET focus = 'yesterday', focus_at = ?", (old,))
+        conn.execute("INSERT INTO surfaces (surface, handle, updated_at) VALUES ('PANE-L', 'ana', 0)")
+        conn.execute("UPDATE instances SET surface = 'PANE-L'")
+    harness = {**typed, "prompt": "<task-notification>\n<summary>bridge mail</summary>\n</task-notification>"}
+
+    as_tab = bridge_env.hook("UserPromptSubmit", harness, pid).stdout
+    with bridge_env.connect() as conn:
+        conn.execute(
+            "INSERT INTO leads (name, display_name, scope, linear_refs, tint, surface, created_at, domains)"
+            " VALUES ('ana', 'Ana', 'scope', '[]', 'blue', 'PANE-L', 0, '[]')"
+        )
+    as_lead = bridge_env.hook("UserPromptSubmit", harness, pid).stdout
+    again = bridge_env.hook("UserPromptSubmit", harness, pid).stdout
+
+    assert as_tab == "", "a tab that is not a lead is nudged on typed prompts only"
+    assert 'focus line is 7.0h old: "yesterday"' in json.loads(as_lead)["hookSpecificOutput"]["additionalContext"]
+    assert again == ""
+
+
 def test_a_leads_half_hour_old_focus_is_nudged_once_its_last_turns_name_refs_it_does_not(
     bridge_env: BridgeEnv,
 ) -> None:
