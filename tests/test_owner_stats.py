@@ -134,6 +134,14 @@ def test_a_runaway_transcript_line_is_skipped_to_its_end_and_counted(
     assert ([u for u, _ in reader.read(path)], reader.skipped) == (["a"], 1)
     path.write_bytes(head + b"y" * 300 + b"\n" + entry("two", uuid="b") + b"\n")
     assert ([u for u, _ in reader.read(path)], reader.skipped) == (["a", "b"], 1), "one line, skipped once"
+    whole, parts = tmp_path / "whole.jsonl", tmp_path / "parts.jsonl"
+    big = entry("x" * 300, uuid="big")
+    whole.write_bytes(big + b"\n")
+    parts.write_bytes(big)
+    reader = PromptReader()
+    reader.read(parts)
+    parts.write_bytes(big + b"\n")
+    assert (reader.read(whole), reader.read(parts), reader.skipped) == ([], [], 2), "the same either way it was read"
 
 
 def test_a_conversation_counts_for_its_lead_its_workers_lead_or_the_assistant_and_a_locked_tab_for_nobody(
@@ -631,3 +639,27 @@ def test_the_page_data_has_every_line_over_every_day(conn: sqlite3.Connection, t
     assert by_key["loc_merged"]["unit"] == "kloc"
     assert by_key["q_hours"]["unit"] == "hours"
     assert {line["group"] for line in lines} == {"Messages", "Questions", "Asks", "PRs", "Lines of code", "Comments"}
+
+
+def test_messages_are_blank_on_days_whose_transcripts_claude_code_has_deleted(
+    conn: sqlite3.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(owner_stats, "TRANSCRIPT_KEEP_DAYS", 1)
+    with transaction(conn):
+        conn.execute(
+            "INSERT INTO messages (id, created_at, from_conversation, from_handle, kind, body) "
+            "VALUES (1, ?, ?, 'sam', 'info', 'x')",
+            (T0 + HOUR, USER_CONVERSATION),
+        )
+        add_tab(conn, "aide", "t-aide")
+        conn.execute(
+            "INSERT INTO message_recipients (message_id, conversation_id, handle) VALUES (1, 'c-aide', 'aide')"
+        )
+        add_item(conn, answer="mine", answered_at=T0 + HOUR)
+    stats = map_db_to_stats(
+        conn, CONFIG, T0 + 2 * DAY + HOUR, PromptReader().read, lambda _: read_pr_cache(tmp_path / "none")
+    )
+    lines: Any = stats["lines"]
+    by_key = {line["key"]: line for line in lines}
+    assert by_key["msg_all"]["values"] == [None, 0, 0]
+    assert by_key["q_typed"]["values"] == [1, 0, 0], "other sources keep their history"

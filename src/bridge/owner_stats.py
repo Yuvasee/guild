@@ -45,6 +45,8 @@ READ_CHUNK = 4 << 20
 MAX_RECORD = 64 << 20
 """A transcript line longer than this is skipped unread, so one runaway record cannot fill memory."""
 OTHER = "other tabs"
+TRANSCRIPT_KEEP_DAYS = 180
+"""Claude Code's cleanupPeriodDays here: older transcripts are deleted, so their days have no Messages count."""
 # Text bridge or Claude Code types into a tab: mail (and its older form), worker briefs, a lead's wake-up, another
 # session's message, an Esc note.
 _NOT_OWNER_PREFIXES = (
@@ -145,7 +147,7 @@ def list_owner_prompts(lines: Iterable[bytes]) -> list[tuple[str, int]]:
 class PromptReader:
     """Transcripts only grow: each read parses the bytes added since the last one, so the page stays quick after
     its first load, and reads in bounded blocks, a half-written last line left for the next read. A line over
-    MAX_RECORD is skipped to its end and counted in `skipped`."""
+    MAX_RECORD is skipped and counted in `skipped`, whether it arrived whole or in parts."""
 
     def __init__(self) -> None:
         self._seen: dict[Path, tuple[int, bool, list[tuple[str, int]]]] = {}
@@ -173,7 +175,10 @@ class PromptReader:
                         pending += block
                         cut = pending.rfind(b"\n") + 1
                         if cut:
-                            prompts += list_owner_prompts(bytes(pending[:cut]).splitlines())
+                            lines = bytes(pending[:cut]).splitlines()
+                            kept = [line for line in lines if len(line) <= MAX_RECORD]
+                            self.skipped += len(lines) - len(kept)
+                            prompts += list_owner_prompts(kept)
                             offset += cut
                             del pending[:cut]
                         if len(pending) > MAX_RECORD:
@@ -736,9 +741,12 @@ def map_db_to_stats(
     typed = count_tab_prompts(transcripts, agents, read, since, zone)
     posted, posted_total = count_dashboard_messages(conn, config, agents, since, zone)
     lines: list[dict[str, object]] = []
+    kept_from = convert_ms_to_day(now - TRANSCRIPT_KEEP_DAYS * 24 * 3_600_000, zone)
 
     def add(group: str, key: str, label: str, counts: dict[str, float], unit: str = "count", scale: float = 1) -> None:
         values = map_counts_to_values(counts, days, scale)
+        if group == "Messages":
+            values = [None if day < kept_from else value for day, value in zip(days, values, strict=True)]
         lines.append({"key": key, "group": group, "label": label, "unit": unit, "values": values})
 
     names = [(config.assistant_handle, config.assistant_handle.capitalize())]
